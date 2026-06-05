@@ -5,7 +5,12 @@ BUILD_DIR := build/$(MODE)
 TEST_BINARY := $(BUILD_DIR)/local_gguf_engine_tests
 
 ENGINE_SOURCES := \
-	src/model_format/gguf_reader.cpp
+	src/model_format/gguf_reader.cpp \
+	src/model_format/gguf_tensor_bridge.cpp \
+	src/tensor/dtype.cpp \
+	src/tensor/shape.cpp \
+	src/tensor/tensor.cpp \
+	src/tensor/tensor_error.cpp
 
 TEST_SOURCES := \
 	tests/test_main.cpp

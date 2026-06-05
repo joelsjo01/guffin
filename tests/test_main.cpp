@@ -1,6 +1,9 @@
 #include "local_gguf_engine/model_format/gguf_header.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
+#include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
+#include "local_gguf_engine/tensor/shape.hpp"
+#include "local_gguf_engine/tensor/tensor.hpp"
 
 #include <array>
 #include <cstdint>
@@ -9,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <sstream>
 #include <string>
@@ -24,10 +28,22 @@ using local_gguf_engine::model_format::GGUFMetadataValue;
 using local_gguf_engine::model_format::GGUFMetadataValueType;
 using local_gguf_engine::model_format::GGUFReadError;
 using local_gguf_engine::model_format::GGUFReadErrorCode;
+using local_gguf_engine::model_format::GGUFTensorInfo;
+using local_gguf_engine::model_format::GGUFTensorPayloadView;
+using local_gguf_engine::model_format::load_gguf_tensor_payload;
+using local_gguf_engine::model_format::load_gguf_tensor_payloads;
 using local_gguf_engine::model_format::read_gguf_header;
 using local_gguf_engine::model_format::read_gguf_metadata_section;
 using local_gguf_engine::model_format::read_gguf_model_view;
 using local_gguf_engine::model_format::read_gguf_tensor_directory;
+using local_gguf_engine::tensor::byte_size;
+using local_gguf_engine::tensor::DType;
+using local_gguf_engine::tensor::element_count;
+using local_gguf_engine::tensor::Shape;
+using local_gguf_engine::tensor::TensorError;
+using local_gguf_engine::tensor::TensorErrorCode;
+using local_gguf_engine::tensor::TensorDescriptor;
+using local_gguf_engine::tensor::TensorStorage;
 
 class TestFailure final : public std::exception {
 public:
@@ -87,6 +103,276 @@ void test_default_backend_starts_on_cpu() {
             == local_gguf_engine::runtime::BackendKind::cpu,
         "default backend should start on CPU"
     );
+}
+
+void test_tensor_shape_accepts_valid_shapes() {
+    const auto vector = Shape::from({128});
+    expect(vector.rank() == 1, "1D tensor shape rank mismatch");
+    expect(vector.dimension(0) == 128, "1D tensor dimension mismatch");
+    expect(element_count(vector) == 128, "1D tensor element count mismatch");
+
+    const auto matrix = Shape::from({2, 3});
+    expect(matrix.rank() == 2, "2D tensor shape rank mismatch");
+    expect(matrix.dimensions().size() == 2, "2D tensor dimensions span size mismatch");
+    expect(matrix.dimensions()[0] == 2, "2D tensor dimension 0 mismatch");
+    expect(matrix.dimensions()[1] == 3, "2D tensor dimension 1 mismatch");
+    expect(element_count(matrix) == 6, "2D tensor element count mismatch");
+
+    const auto rank_four = Shape::from({2, 3, 4, 5});
+    expect(rank_four.rank() == Shape::max_rank, "4D tensor shape rank mismatch");
+    expect(rank_four.dimension(3) == 5, "4D tensor final dimension mismatch");
+    expect(element_count(rank_four) == 120, "4D tensor element count mismatch");
+    expect(sizeof(Shape) <= 40, "tensor shape should stay compact");
+}
+
+void test_rejects_tensor_shape_rank_over_four() {
+    const std::array<std::uint64_t, 5> dimensions {1, 2, 3, 4, 5};
+
+    try {
+        (void)Shape::from(std::span<const std::uint64_t>(dimensions));
+        throw TestFailure("rank above 4 should throw");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_shape_rank, "error code should be invalid_shape_rank");
+        expect(error.expected_value() == Shape::max_rank, "expected shape rank mismatch");
+        expect(error.actual_value() == 5, "actual shape rank mismatch");
+    }
+}
+
+void test_rejects_tensor_shape_element_count_overflow() {
+    const auto shape = Shape::from({std::numeric_limits<std::uint64_t>::max(), 2});
+
+    try {
+        (void)element_count(shape);
+        throw TestFailure("element count overflow should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::element_count_overflow,
+            "error code should be element_count_overflow"
+        );
+    }
+}
+
+void test_calculates_tensor_byte_sizes() {
+    expect(byte_size(Shape::from({2, 3}), DType::f32) == 24, "F32 tensor byte size mismatch");
+    expect(byte_size(Shape::from({2, 3}), DType::f16) == 12, "F16 tensor byte size mismatch");
+    expect(byte_size(Shape::from({32}), DType::q8_0) == 34, "Q8_0 single-block byte size mismatch");
+    expect(byte_size(Shape::from({2, 32}), DType::q8_0) == 68, "Q8_0 multi-block byte size mismatch");
+}
+
+void test_rejects_unsupported_tensor_dtype() {
+    try {
+        (void)byte_size(Shape::from({1}), static_cast<DType>(255));
+        throw TestFailure("unsupported dtype should throw");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::unsupported_dtype, "error code should be unsupported_dtype");
+        expect(error.actual_value() == 255, "unsupported dtype value mismatch");
+    }
+}
+
+void test_rejects_invalid_quantized_tensor_element_count() {
+    try {
+        (void)byte_size(Shape::from({31}), DType::q8_0);
+        throw TestFailure("invalid Q8_0 element count should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_quantized_element_count,
+            "error code should be invalid_quantized_element_count"
+        );
+        expect(error.expected_value() == 32, "expected Q8_0 block element count mismatch");
+        expect(error.actual_value() == 31, "actual Q8_0 element count mismatch");
+    }
+}
+
+void test_rejects_tensor_byte_size_overflow() {
+    const auto shape = Shape::from({std::numeric_limits<std::uint64_t>::max() / 4 + 1});
+
+    try {
+        (void)byte_size(shape, DType::f32);
+        throw TestFailure("byte size overflow should throw");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::byte_size_overflow, "error code should be byte_size_overflow");
+    }
+}
+
+void test_creates_tensor_descriptor_from_shape_and_dtype() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({2, 3}), DType::f16);
+
+    expect(descriptor.shape == Shape::from({2, 3}), "tensor descriptor shape mismatch");
+    expect(descriptor.dtype == DType::f16, "tensor descriptor dtype mismatch");
+    expect(descriptor.element_count == 6, "tensor descriptor element count mismatch");
+    expect(descriptor.byte_count == 12, "tensor descriptor byte count mismatch");
+}
+
+void test_allocates_zero_initialized_tensor_storage() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({4}), DType::f32);
+    auto storage = TensorStorage::allocate(descriptor);
+
+    expect(storage.descriptor() == descriptor, "allocated tensor descriptor mismatch");
+    expect(storage.bytes().size() == 16, "allocated tensor byte count mismatch");
+
+    for (const auto byte : storage.bytes()) {
+        expect(byte == 0, "allocated tensor storage should be zero initialized");
+    }
+
+    storage.mutable_bytes()[0] = 0x7F;
+    expect(storage.bytes()[0] == 0x7F, "mutable tensor storage byte should be visible through const view");
+}
+
+void test_copies_tensor_storage_from_bytes() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({32}), DType::q8_0);
+    const std::array<std::uint8_t, 34> bytes {
+        0x00, 0x3C, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+        0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+        0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+        0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+        0x1F, 0x20,
+    };
+
+    const auto storage = TensorStorage::from_bytes(descriptor, std::span<const std::uint8_t>(bytes));
+
+    expect(storage.descriptor() == descriptor, "copied tensor descriptor mismatch");
+    expect(storage.bytes().size() == bytes.size(), "copied tensor byte count mismatch");
+    expect(storage.bytes().data() != bytes.data(), "tensor storage should own a byte copy");
+    expect(storage.bytes()[0] == 0x00, "copied tensor byte 0 mismatch");
+    expect(storage.bytes()[1] == 0x3C, "copied tensor byte 1 mismatch");
+    expect(storage.bytes()[33] == 0x20, "copied tensor final byte mismatch");
+}
+
+void test_rejects_tensor_storage_byte_count_mismatch() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({2, 3}), DType::f32);
+    const std::array<std::uint8_t, 23> bytes {};
+
+    try {
+        (void)TensorStorage::from_bytes(descriptor, std::span<const std::uint8_t>(bytes));
+        throw TestFailure("storage byte count mismatch should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_storage_byte_count,
+            "error code should be invalid_storage_byte_count"
+        );
+        expect(error.expected_value() == 24, "expected storage byte count mismatch");
+        expect(error.actual_value() == 23, "actual storage byte count mismatch");
+    }
+}
+
+void test_rejects_tensor_descriptor_with_invalid_shape_dtype_combination() {
+    try {
+        (void)TensorDescriptor::from(Shape::from({2, 15}), DType::q8_0);
+        throw TestFailure("invalid Q8_0 descriptor shape should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_quantized_element_count,
+            "error code should be invalid_quantized_element_count"
+        );
+        expect(error.expected_value() == 32, "expected Q8_0 descriptor block size mismatch");
+        expect(error.actual_value() == 30, "actual Q8_0 descriptor element count mismatch");
+    }
+}
+
+void test_converts_gguf_payload_view_to_tensor_storage() {
+    const auto bytes = fixture("valid-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+    const auto loaded = load_gguf_tensor_payload(model.tensor_payloads[0]);
+
+    expect(loaded.name == "ab", "loaded GGUF tensor name mismatch");
+    expect(loaded.storage.descriptor().shape == Shape::from({2}), "loaded GGUF tensor shape mismatch");
+    expect(loaded.storage.descriptor().dtype == DType::f32, "loaded GGUF tensor dtype mismatch");
+    expect(loaded.storage.descriptor().element_count == 2, "loaded GGUF tensor element count mismatch");
+    expect(loaded.storage.descriptor().byte_count == 8, "loaded GGUF tensor byte count mismatch");
+    expect(loaded.storage.bytes().size() == 8, "loaded GGUF tensor storage byte count mismatch");
+    expect(
+        loaded.storage.bytes().data() != model.tensor_payloads[0].bytes.data(),
+        "loaded GGUF tensor storage should own a byte copy"
+    );
+    expect(loaded.storage.bytes()[0] == 0x00, "loaded GGUF tensor byte 0 mismatch");
+    expect(loaded.storage.bytes()[7] == 0x40, "loaded GGUF tensor byte 7 mismatch");
+}
+
+void test_converts_q8_0_gguf_payload_view_to_tensor_storage() {
+    const auto bytes = fixture("valid-q8-0-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+    const auto loaded_tensors = load_gguf_tensor_payloads(model);
+
+    expect(loaded_tensors.size() == 1, "loaded Q8_0 GGUF tensor count mismatch");
+    expect(loaded_tensors[0].name == "q8", "loaded Q8_0 GGUF tensor name mismatch");
+    expect(loaded_tensors[0].storage.descriptor().shape == Shape::from({32}), "loaded Q8_0 shape mismatch");
+    expect(loaded_tensors[0].storage.descriptor().dtype == DType::q8_0, "loaded Q8_0 dtype mismatch");
+    expect(loaded_tensors[0].storage.descriptor().element_count == 32, "loaded Q8_0 element count mismatch");
+    expect(loaded_tensors[0].storage.descriptor().byte_count == 34, "loaded Q8_0 byte count mismatch");
+    expect(loaded_tensors[0].storage.bytes()[33] == 0x21, "loaded Q8_0 final byte mismatch");
+}
+
+void test_rejects_unsupported_gguf_tensor_type_in_bridge() {
+    const GGUFTensorPayloadView payload {
+        .tensor = GGUFTensorInfo {
+            .name = "bad",
+            .dimensions = std::vector<std::uint64_t> {1},
+            .type_id = 255,
+            .offset = 0,
+            .file_offset = 0,
+        },
+        .bytes = {},
+    };
+
+    try {
+        (void)load_gguf_tensor_payload(payload);
+        throw TestFailure("unsupported GGUF tensor bridge type should throw");
+    } catch (const GGUFReadError& error) {
+        expect(error.code() == GGUFReadErrorCode::unsupported_tensor_type, "error code should be unsupported_tensor_type");
+        expect(error.actual_byte_count() == 255, "unsupported GGUF tensor type id mismatch");
+    }
+}
+
+void test_rejects_invalid_quantized_gguf_tensor_shape_in_bridge() {
+    const std::array<std::uint8_t, 34> bytes {};
+    const GGUFTensorPayloadView payload {
+        .tensor = GGUFTensorInfo {
+            .name = "q8_bad",
+            .dimensions = std::vector<std::uint64_t> {31},
+            .type_id = 8,
+            .offset = 0,
+            .file_offset = 0,
+        },
+        .bytes = std::span<const std::uint8_t>(bytes),
+    };
+
+    try {
+        (void)load_gguf_tensor_payload(payload);
+        throw TestFailure("invalid Q8_0 GGUF bridge shape should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_quantized_element_count,
+            "error code should be invalid_quantized_element_count"
+        );
+        expect(error.expected_value() == 32, "expected Q8_0 bridge block size mismatch");
+        expect(error.actual_value() == 31, "actual Q8_0 bridge element count mismatch");
+    }
+}
+
+void test_rejects_gguf_tensor_payload_size_mismatch_in_bridge() {
+    const std::array<std::uint8_t, 7> bytes {};
+    const GGUFTensorPayloadView payload {
+        .tensor = GGUFTensorInfo {
+            .name = "short",
+            .dimensions = std::vector<std::uint64_t> {2},
+            .type_id = 0,
+            .offset = 0,
+            .file_offset = 0,
+        },
+        .bytes = std::span<const std::uint8_t>(bytes),
+    };
+
+    try {
+        (void)load_gguf_tensor_payload(payload);
+        throw TestFailure("GGUF bridge payload size mismatch should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_storage_byte_count,
+            "error code should be invalid_storage_byte_count"
+        );
+        expect(error.expected_value() == 8, "expected GGUF bridge storage byte count mismatch");
+        expect(error.actual_value() == 7, "actual GGUF bridge storage byte count mismatch");
+    }
 }
 
 void test_reads_valid_gguf_fixed_header_fixture() {
@@ -640,6 +926,35 @@ struct TestCase {
 int main() {
     const TestCase tests[] = {
         {"default backend starts on CPU", test_default_backend_starts_on_cpu},
+        {"tensor shape accepts valid shapes", test_tensor_shape_accepts_valid_shapes},
+        {"rejects tensor shape rank over four", test_rejects_tensor_shape_rank_over_four},
+        {"rejects tensor shape element count overflow", test_rejects_tensor_shape_element_count_overflow},
+        {"calculates tensor byte sizes", test_calculates_tensor_byte_sizes},
+        {"rejects unsupported tensor dtype", test_rejects_unsupported_tensor_dtype},
+        {"rejects invalid quantized tensor element count", test_rejects_invalid_quantized_tensor_element_count},
+        {"rejects tensor byte size overflow", test_rejects_tensor_byte_size_overflow},
+        {"creates tensor descriptor from shape and dtype", test_creates_tensor_descriptor_from_shape_and_dtype},
+        {"allocates zero initialized tensor storage", test_allocates_zero_initialized_tensor_storage},
+        {"copies tensor storage from bytes", test_copies_tensor_storage_from_bytes},
+        {"rejects tensor storage byte count mismatch", test_rejects_tensor_storage_byte_count_mismatch},
+        {
+            "rejects tensor descriptor with invalid shape dtype combination",
+            test_rejects_tensor_descriptor_with_invalid_shape_dtype_combination,
+        },
+        {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
+        {
+            "converts Q8_0 GGUF payload view to tensor storage",
+            test_converts_q8_0_gguf_payload_view_to_tensor_storage,
+        },
+        {"rejects unsupported GGUF tensor type in bridge", test_rejects_unsupported_gguf_tensor_type_in_bridge},
+        {
+            "rejects invalid quantized GGUF tensor shape in bridge",
+            test_rejects_invalid_quantized_gguf_tensor_shape_in_bridge,
+        },
+        {
+            "rejects GGUF tensor payload size mismatch in bridge",
+            test_rejects_gguf_tensor_payload_size_mismatch_in_bridge,
+        },
         {"reads valid GGUF fixed header fixture", test_reads_valid_gguf_fixed_header_fixture},
         {"reads little-endian GGUF header counts", test_reads_little_endian_header_counts},
         {"rejects invalid GGUF magic", test_rejects_invalid_gguf_magic},
