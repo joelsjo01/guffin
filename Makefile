@@ -3,6 +3,8 @@ MODE ?= debug
 
 BUILD_DIR := build/$(MODE)
 TEST_BINARY := $(BUILD_DIR)/local_gguf_engine_tests
+GGUF_INSPECT_BINARY := $(BUILD_DIR)/gguf-inspect
+BENCHMARK_BINARY := $(BUILD_DIR)/local-gguf-bench
 
 ENGINE_SOURCES := \
 	src/model_format/gguf_reader.cpp \
@@ -18,6 +20,18 @@ ENGINE_SOURCES := \
 	src/tensor/tensor_error.cpp \
 	src/tensor/typed_access.cpp
 
+FRONTEND_CLI_SOURCES := \
+	src/frontends/cli/gguf_inspect.cpp
+
+GGUF_INSPECT_SOURCES := \
+	src/frontends/cli/gguf_inspect_main.cpp
+
+BENCHMARK_SOURCES := \
+	benchmarks/benchmark_harness.cpp
+
+BENCHMARK_MAIN_SOURCES := \
+	benchmarks/benchmark_main.cpp
+
 TEST_SOURCES := \
 	tests/test_main.cpp
 
@@ -31,17 +45,32 @@ else
 	CXXFLAGS := $(COMMON_FLAGS) $(DEBUG_FLAGS)
 endif
 
-.PHONY: test release-test clean
+.PHONY: test release-test gguf-inspect benchmark run-benchmark clean
 
-test: $(TEST_BINARY)
+test: $(TEST_BINARY) $(GGUF_INSPECT_BINARY) $(BENCHMARK_BINARY)
 	./$(TEST_BINARY)
 
 release-test:
 	$(MAKE) MODE=release test
 
-$(TEST_BINARY): $(ENGINE_SOURCES) $(TEST_SOURCES)
+gguf-inspect: $(GGUF_INSPECT_BINARY)
+
+benchmark: $(BENCHMARK_BINARY)
+
+run-benchmark: $(BENCHMARK_BINARY)
+	./$(BENCHMARK_BINARY)
+
+$(TEST_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(BENCHMARK_SOURCES) $(TEST_SOURCES)
 	mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(TEST_SOURCES) -o $(TEST_BINARY)
+	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(BENCHMARK_SOURCES) $(TEST_SOURCES) -o $(TEST_BINARY)
+
+$(GGUF_INSPECT_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GGUF_INSPECT_SOURCES)
+	mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GGUF_INSPECT_SOURCES) -o $(GGUF_INSPECT_BINARY)
+
+$(BENCHMARK_BINARY): $(ENGINE_SOURCES) $(BENCHMARK_SOURCES) $(BENCHMARK_MAIN_SOURCES)
+	mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(BENCHMARK_SOURCES) $(BENCHMARK_MAIN_SOURCES) -o $(BENCHMARK_BINARY)
 
 clean:
 	rm -rf build

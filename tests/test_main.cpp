@@ -1,3 +1,5 @@
+#include "local_gguf_engine/benchmarks/benchmark_harness.hpp"
+#include "local_gguf_engine/frontends/cli/gguf_inspect.hpp"
 #include "local_gguf_engine/model_format/gguf_header.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
@@ -27,6 +29,13 @@
 
 namespace {
 
+using local_gguf_engine::benchmarks::BenchmarkConfig;
+using local_gguf_engine::benchmarks::BenchmarkMeasurement;
+using local_gguf_engine::benchmarks::BenchmarkReport;
+using local_gguf_engine::benchmarks::benchmark_output_path_is_under_results;
+using local_gguf_engine::benchmarks::default_benchmark_output_path;
+using local_gguf_engine::benchmarks::format_benchmark_report;
+using local_gguf_engine::benchmarks::parse_benchmark_args;
 using local_gguf_engine::model_format::GGUFHeader;
 using local_gguf_engine::model_format::GGUFMetadataArray;
 using local_gguf_engine::model_format::GGUFMetadataValue;
@@ -41,6 +50,9 @@ using local_gguf_engine::model_format::read_gguf_header;
 using local_gguf_engine::model_format::read_gguf_metadata_section;
 using local_gguf_engine::model_format::read_gguf_model_view;
 using local_gguf_engine::model_format::read_gguf_tensor_directory;
+using local_gguf_engine::frontends::cli::inspect_gguf_bytes;
+using local_gguf_engine::frontends::cli::run_gguf_inspect;
+using local_gguf_engine::frontends::cli::write_gguf_inspection_summary;
 using local_gguf_engine::tensor::byte_size;
 using local_gguf_engine::tensor::DType;
 using local_gguf_engine::tensor::element_byte_offset;
@@ -108,6 +120,49 @@ std::vector<std::uint8_t> load_hex_fixture(const std::filesystem::path& path) {
 
 std::vector<std::uint8_t> fixture(std::string_view name) {
     return load_hex_fixture(std::filesystem::path("tests") / "fixtures" / (std::string(name) + ".hex"));
+}
+
+class TempBinaryFixture final {
+public:
+    explicit TempBinaryFixture(std::string_view name)
+        : path_(std::filesystem::temp_directory_path() / ("local-gguf-engine-" + std::string(name) + ".gguf")) {
+        const auto bytes = fixture(name);
+        std::ofstream output(path_, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            throw TestFailure("could not create temp binary fixture: " + path_.string());
+        }
+
+        output.write(
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size())
+        );
+        if (!output) {
+            throw TestFailure("could not write temp binary fixture: " + path_.string());
+        }
+    }
+
+    ~TempBinaryFixture() {
+        std::error_code ignored;
+        std::filesystem::remove(path_, ignored);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+int run_gguf_inspect_for_path(
+    const std::filesystem::path& path,
+    std::ostringstream& output,
+    std::ostringstream& error
+) {
+    const std::string program = "gguf-inspect";
+    const std::string path_string = path.string();
+    const char* argv[] = {program.c_str(), path_string.c_str()};
+    return run_gguf_inspect(2, argv, output, error);
 }
 
 template <typename Value>
@@ -1522,6 +1577,256 @@ void test_rejects_invalid_quantized_tensor_payload_size() {
     }
 }
 
+void test_inspects_gguf_summary_from_f16_payload() {
+    const auto bytes = fixture("valid-f16-tensor-payload-view");
+    const auto summary = inspect_gguf_bytes(std::span<const std::uint8_t>(bytes), 3);
+
+    expect(summary.version == 3, "GGUF inspect version mismatch");
+    expect(summary.tensor_count == 1, "GGUF inspect tensor count mismatch");
+    expect(summary.metadata_kv_count == 0, "GGUF inspect metadata count mismatch");
+    expect(!summary.architecture.has_value(), "GGUF inspect architecture should be absent");
+    expect(summary.alignment == 32, "GGUF inspect alignment mismatch");
+    expect(summary.tensor_data_start_offset == 64, "GGUF inspect tensor data start mismatch");
+    expect(summary.dtype_counts.f32 == 0, "GGUF inspect F32 count mismatch");
+    expect(summary.dtype_counts.f16 == 1, "GGUF inspect F16 count mismatch");
+    expect(summary.dtype_counts.q8_0 == 0, "GGUF inspect Q8_0 count mismatch");
+    expect(summary.dtype_counts.unsupported == 0, "GGUF inspect unsupported count mismatch");
+    expect(summary.total_supported_payload_bytes == 4, "GGUF inspect supported payload byte mismatch");
+    expect(summary.first_tensors.size() == 1, "GGUF inspect first tensor count mismatch");
+    expect(summary.first_tensors[0].name == "h2", "GGUF inspect first tensor name mismatch");
+    expect(summary.first_tensors[0].shape == std::vector<std::uint64_t> {2}, "GGUF inspect shape mismatch");
+    expect(summary.first_tensors[0].dtype == "F16", "GGUF inspect first tensor dtype mismatch");
+}
+
+void test_formats_gguf_inspection_summary() {
+    const auto bytes = fixture("valid-f16-tensor-payload-view");
+    const auto summary = inspect_gguf_bytes(std::span<const std::uint8_t>(bytes), 1);
+
+    std::ostringstream output;
+    write_gguf_inspection_summary(summary, "fixture.gguf", output);
+    const auto text = output.str();
+
+    expect(text.find("GGUF summary\n") == 0, "GGUF inspect formatted heading mismatch");
+    expect(text.find("version: 3\n") != std::string::npos, "GGUF inspect formatted version missing");
+    expect(text.find("tensor count: 1\n") != std::string::npos, "GGUF inspect formatted tensor count missing");
+    expect(text.find("metadata kv count: 0\n") != std::string::npos, "GGUF inspect formatted metadata count missing");
+    expect(text.find("architecture: <absent>\n") != std::string::npos, "GGUF inspect formatted architecture missing");
+    expect(text.find("alignment: 32\n") != std::string::npos, "GGUF inspect formatted alignment missing");
+    expect(
+        text.find("tensor data start offset: 64\n") != std::string::npos,
+        "GGUF inspect formatted tensor data start missing"
+    );
+    expect(text.find("  F16: 1\n") != std::string::npos, "GGUF inspect formatted F16 count missing");
+    expect(
+        text.find("total supported payload bytes: 4\n") != std::string::npos,
+        "GGUF inspect formatted payload byte count missing"
+    );
+    expect(
+        text.find("  - h2 shape=[2] dtype=F16\n") != std::string::npos,
+        "GGUF inspect formatted tensor line missing"
+    );
+}
+
+void test_runs_gguf_inspect_success() {
+    const TempBinaryFixture model("valid-f16-tensor-payload-view");
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_gguf_inspect_for_path(model.path(), output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "gguf-inspect success exit code mismatch");
+    expect(error.str().empty(), "gguf-inspect success should not write stderr");
+    expect(output.str().find("GGUF summary\n") == 0, "gguf-inspect success output missing summary");
+    expect(
+        output.str().find("total supported payload bytes: 4\n") != std::string::npos,
+        "gguf-inspect success output missing payload byte count"
+    );
+}
+
+void test_rejects_gguf_inspect_missing_path() {
+    const char* argv[] = {"gguf-inspect"};
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_gguf_inspect(1, argv, output, error);
+
+    expect(exit_code == EXIT_FAILURE, "gguf-inspect missing path exit code mismatch");
+    expect(output.str().empty(), "gguf-inspect missing path should not write stdout");
+    expect(error.str().find("usage: gguf-inspect <model.gguf>") != std::string::npos, "gguf-inspect usage missing");
+    expect(error.str().find("missing GGUF path") != std::string::npos, "gguf-inspect missing path error missing");
+}
+
+void test_rejects_gguf_inspect_unreadable_path() {
+    const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-missing-inspect.gguf";
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_gguf_inspect_for_path(path, output, error);
+
+    expect(exit_code == EXIT_FAILURE, "gguf-inspect unreadable path exit code mismatch");
+    expect(output.str().empty(), "gguf-inspect unreadable path should not write stdout");
+    expect(error.str().find("could not read") != std::string::npos, "gguf-inspect unreadable path error missing");
+}
+
+void test_reports_invalid_gguf_in_gguf_inspect() {
+    const TempBinaryFixture model("invalid-magic");
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_gguf_inspect_for_path(model.path(), output, error);
+
+    expect(exit_code == EXIT_FAILURE, "gguf-inspect invalid GGUF exit code mismatch");
+    expect(output.str().empty(), "gguf-inspect invalid GGUF should not write stdout");
+    expect(
+        error.str().find("invalid GGUF: invalid GGUF magic") != std::string::npos,
+        "gguf-inspect invalid GGUF error missing"
+    );
+}
+
+void test_reports_unsupported_tensor_type_in_gguf_inspect() {
+    const TempBinaryFixture model("unsupported-tensor-payload-type");
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_gguf_inspect_for_path(model.path(), output, error);
+
+    expect(exit_code == EXIT_FAILURE, "gguf-inspect unsupported tensor exit code mismatch");
+    expect(output.str().empty(), "gguf-inspect unsupported tensor should not write stdout");
+    expect(
+        error.str().find("unsupported tensor type during payload conversion") != std::string::npos,
+        "gguf-inspect unsupported tensor error missing"
+    );
+    expect(error.str().find("GGUF tensor type 39") != std::string::npos, "gguf-inspect unsupported type id missing");
+}
+
+void test_reports_malformed_tensor_payload_in_gguf_inspect() {
+    const TempBinaryFixture model("truncated-tensor-payload");
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_gguf_inspect_for_path(model.path(), output, error);
+
+    expect(exit_code == EXIT_FAILURE, "gguf-inspect malformed payload exit code mismatch");
+    expect(output.str().empty(), "gguf-inspect malformed payload should not write stdout");
+    expect(
+        error.str().find("malformed tensor payload: truncated GGUF tensor payload") != std::string::npos,
+        "gguf-inspect malformed payload error missing"
+    );
+}
+
+void test_parses_default_benchmark_args() {
+    const char* argv[] = {"local-gguf-bench"};
+    const auto parsed = parse_benchmark_args(1, argv);
+
+    expect(!parsed.should_exit, "benchmark default args should not exit");
+    expect(parsed.config.output_path == default_benchmark_output_path(), "benchmark default output path mismatch");
+    expect(!parsed.config.model_path.has_value(), "benchmark default model path should be absent");
+    expect(parsed.config.iterations == 10, "benchmark default iteration count mismatch");
+}
+
+void test_parses_benchmark_model_output_and_iterations() {
+    const char* argv[] = {
+        "local-gguf-bench",
+        "--model",
+        "models/example.gguf",
+        "--output",
+        "benchmarks/results/example.txt",
+        "--iterations",
+        "3",
+    };
+    const auto parsed = parse_benchmark_args(7, argv);
+
+    expect(!parsed.should_exit, "benchmark explicit args should not exit");
+    expect(parsed.config.model_path.has_value(), "benchmark model path should be present");
+    expect(*parsed.config.model_path == std::filesystem::path("models/example.gguf"), "benchmark model path mismatch");
+    expect(
+        parsed.config.output_path == std::filesystem::path("benchmarks/results/example.txt"),
+        "benchmark output path mismatch"
+    );
+    expect(parsed.config.iterations == 3, "benchmark explicit iteration count mismatch");
+}
+
+void test_rejects_benchmark_output_outside_results() {
+    const char* argv[] = {"local-gguf-bench", "--output", "benchmark-output.txt"};
+    const auto parsed = parse_benchmark_args(3, argv);
+
+    expect(parsed.should_exit, "benchmark output outside results should exit");
+    expect(parsed.exit_code == EXIT_FAILURE, "benchmark output outside results exit code mismatch");
+    expect(
+        parsed.message.find("benchmarks/results") != std::string::npos,
+        "benchmark output outside results error missing"
+    );
+}
+
+void test_rejects_invalid_benchmark_iterations() {
+    const char* argv[] = {"local-gguf-bench", "--iterations", "0"};
+    const auto parsed = parse_benchmark_args(3, argv);
+
+    expect(parsed.should_exit, "benchmark zero iterations should exit");
+    expect(parsed.exit_code == EXIT_FAILURE, "benchmark zero iterations exit code mismatch");
+    expect(
+        parsed.message.find("--iterations requires a positive count") != std::string::npos,
+        "benchmark zero iterations error missing"
+    );
+}
+
+void test_checks_benchmark_output_path_scope() {
+    expect(
+        benchmark_output_path_is_under_results("benchmarks/results/latest.txt"),
+        "benchmark output path under results should be accepted"
+    );
+    expect(
+        benchmark_output_path_is_under_results("benchmarks/results/nested/run.txt"),
+        "benchmark nested output path under results should be accepted"
+    );
+    expect(
+        !benchmark_output_path_is_under_results("benchmarks/results/../latest.txt"),
+        "benchmark normalized path outside results should be rejected"
+    );
+    expect(
+        !benchmark_output_path_is_under_results("/tmp/local-gguf-bench.txt"),
+        "benchmark absolute output path should be rejected"
+    );
+}
+
+void test_formats_benchmark_report() {
+    BenchmarkReport report {
+        .config = BenchmarkConfig {
+            .output_path = std::filesystem::path("benchmarks/results/test.txt"),
+            .model_path = std::filesystem::path("models/example.gguf"),
+            .iterations = 2,
+        },
+        .measurements = {
+            BenchmarkMeasurement {
+                .name = "tensor.add_f32",
+                .iterations = 2,
+                .total_ms = 3.0,
+                .min_ms = 1.0,
+                .max_ms = 2.0,
+                .bytes_processed = 96,
+                .checksum = 42,
+                .detail = "shape=[8] dtype=F32",
+            },
+        },
+    };
+
+    const auto text = format_benchmark_report(report);
+
+    expect(text.find("local GGUF benchmark report\n") == 0, "benchmark report heading mismatch");
+    expect(text.find("iterations: 2\n") != std::string::npos, "benchmark report iterations missing");
+    expect(
+        text.find("output: benchmarks/results/test.txt\n") != std::string::npos,
+        "benchmark report output path missing"
+    );
+    expect(text.find("model: models/example.gguf\n") != std::string::npos, "benchmark report model missing");
+    expect(text.find("- tensor.add_f32\n") != std::string::npos, "benchmark report measurement missing");
+    expect(text.find("  avg_ms: 1.500\n") != std::string::npos, "benchmark report average missing");
+    expect(text.find("  bytes_processed: 96\n") != std::string::npos, "benchmark report bytes missing");
+    expect(text.find("  checksum: 42\n") != std::string::npos, "benchmark report checksum missing");
+}
+
 struct TestCase {
     std::string_view name;
     void (*run)();
@@ -1625,6 +1930,26 @@ int main() {
         {"rejects truncated GGUF tensor payload", test_rejects_truncated_tensor_payload},
         {"rejects unsupported GGUF tensor payload type", test_rejects_unsupported_tensor_payload_type},
         {"rejects invalid quantized GGUF tensor payload size", test_rejects_invalid_quantized_tensor_payload_size},
+        {"inspects GGUF summary from F16 payload", test_inspects_gguf_summary_from_f16_payload},
+        {"formats GGUF inspection summary", test_formats_gguf_inspection_summary},
+        {"runs gguf-inspect success path", test_runs_gguf_inspect_success},
+        {"rejects gguf-inspect missing path", test_rejects_gguf_inspect_missing_path},
+        {"rejects gguf-inspect unreadable path", test_rejects_gguf_inspect_unreadable_path},
+        {"reports invalid GGUF in gguf-inspect", test_reports_invalid_gguf_in_gguf_inspect},
+        {
+            "reports unsupported tensor type in gguf-inspect",
+            test_reports_unsupported_tensor_type_in_gguf_inspect,
+        },
+        {"reports malformed tensor payload in gguf-inspect", test_reports_malformed_tensor_payload_in_gguf_inspect},
+        {"parses default benchmark args", test_parses_default_benchmark_args},
+        {
+            "parses benchmark model output and iterations",
+            test_parses_benchmark_model_output_and_iterations,
+        },
+        {"rejects benchmark output outside results", test_rejects_benchmark_output_outside_results},
+        {"rejects invalid benchmark iterations", test_rejects_invalid_benchmark_iterations},
+        {"checks benchmark output path scope", test_checks_benchmark_output_path_scope},
+        {"formats benchmark report", test_formats_benchmark_report},
     };
 
     int failures = 0;
