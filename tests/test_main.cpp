@@ -2,8 +2,10 @@
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
+#include "local_gguf_engine/tensor/layout.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
+#include "local_gguf_engine/tensor/typed_access.hpp"
 
 #include <array>
 #include <cstdint>
@@ -38,12 +40,18 @@ using local_gguf_engine::model_format::read_gguf_model_view;
 using local_gguf_engine::model_format::read_gguf_tensor_directory;
 using local_gguf_engine::tensor::byte_size;
 using local_gguf_engine::tensor::DType;
+using local_gguf_engine::tensor::element_byte_offset;
+using local_gguf_engine::tensor::element_bytes;
 using local_gguf_engine::tensor::element_count;
+using local_gguf_engine::tensor::linear_index;
+using local_gguf_engine::tensor::mutable_element_bytes;
+using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorError;
 using local_gguf_engine::tensor::TensorErrorCode;
 using local_gguf_engine::tensor::TensorDescriptor;
 using local_gguf_engine::tensor::TensorStorage;
+using local_gguf_engine::tensor::write_f32;
 
 class TestFailure final : public std::exception {
 public:
@@ -266,6 +274,185 @@ void test_rejects_tensor_descriptor_with_invalid_shape_dtype_combination() {
         );
         expect(error.expected_value() == 32, "expected Q8_0 descriptor block size mismatch");
         expect(error.actual_value() == 30, "actual Q8_0 descriptor element count mismatch");
+    }
+}
+
+void test_calculates_row_major_linear_indices() {
+    const auto matrix = Shape::from({2, 3});
+    const std::array<std::uint64_t, 2> matrix_index {1, 2};
+    expect(
+        linear_index(matrix, std::span<const std::uint64_t>(matrix_index)) == 5,
+        "2D row-major linear index mismatch"
+    );
+
+    const auto rank_three = Shape::from({2, 3, 4});
+    const std::array<std::uint64_t, 3> rank_three_index {1, 2, 3};
+    expect(
+        linear_index(rank_three, std::span<const std::uint64_t>(rank_three_index)) == 23,
+        "3D row-major linear index mismatch"
+    );
+}
+
+void test_calculates_unquantized_element_byte_offsets() {
+    const auto f32_descriptor = TensorDescriptor::from(Shape::from({2, 3}), DType::f32);
+    const std::array<std::uint64_t, 2> f32_index {1, 2};
+    expect(
+        element_byte_offset(f32_descriptor, std::span<const std::uint64_t>(f32_index)) == 20,
+        "F32 element byte offset mismatch"
+    );
+
+    const auto f16_descriptor = TensorDescriptor::from(Shape::from({2, 3, 4}), DType::f16);
+    const std::array<std::uint64_t, 3> f16_index {1, 0, 2};
+    expect(
+        element_byte_offset(f16_descriptor, std::span<const std::uint64_t>(f16_index)) == 28,
+        "F16 element byte offset mismatch"
+    );
+}
+
+void test_reads_and_mutates_unquantized_element_bytes() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({2, 2}), DType::f32);
+    const std::array<std::uint8_t, 16> bytes {
+        0x00, 0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B,
+        0x0C, 0x0D, 0x0E, 0x0F,
+    };
+    auto storage = TensorStorage::from_bytes(descriptor, std::span<const std::uint8_t>(bytes));
+
+    const std::array<std::uint64_t, 2> read_index {1, 0};
+    const auto read_bytes = element_bytes(storage, std::span<const std::uint64_t>(read_index));
+    expect(read_bytes.size() == 4, "F32 element byte view size mismatch");
+    expect(read_bytes[0] == 0x08, "F32 element byte view byte 0 mismatch");
+    expect(read_bytes[3] == 0x0B, "F32 element byte view byte 3 mismatch");
+
+    const std::array<std::uint64_t, 2> write_index {0, 1};
+    auto write_bytes = mutable_element_bytes(storage, std::span<const std::uint64_t>(write_index));
+    write_bytes[0] = 0xAA;
+    write_bytes[3] = 0xDD;
+    expect(storage.bytes()[4] == 0xAA, "mutable F32 element byte 0 mismatch");
+    expect(storage.bytes()[7] == 0xDD, "mutable F32 element byte 3 mismatch");
+}
+
+void test_rejects_tensor_index_rank_mismatch() {
+    const auto shape = Shape::from({2, 3});
+    const std::array<std::uint64_t, 1> index {1};
+
+    try {
+        (void)linear_index(shape, std::span<const std::uint64_t>(index));
+        throw TestFailure("tensor index rank mismatch should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_tensor_index_rank,
+            "error code should be invalid_tensor_index_rank"
+        );
+        expect(error.expected_value() == 2, "expected tensor index rank mismatch");
+        expect(error.actual_value() == 1, "actual tensor index rank mismatch");
+    }
+}
+
+void test_rejects_tensor_index_out_of_range() {
+    const auto shape = Shape::from({2, 3});
+    const std::array<std::uint64_t, 2> index {2, 0};
+
+    try {
+        (void)linear_index(shape, std::span<const std::uint64_t>(index));
+        throw TestFailure("tensor index out of range should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::tensor_index_out_of_range,
+            "error code should be tensor_index_out_of_range"
+        );
+        expect(error.expected_value() == 2, "expected tensor index dimension size mismatch");
+        expect(error.actual_value() == 2, "actual tensor index mismatch");
+    }
+}
+
+void test_rejects_quantized_tensor_element_indexing() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({32}), DType::q8_0);
+    const std::array<std::uint64_t, 1> index {0};
+
+    try {
+        (void)element_byte_offset(descriptor, std::span<const std::uint64_t>(index));
+        throw TestFailure("quantized tensor element indexing should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_indexed_dtype,
+            "error code should be unsupported_indexed_dtype"
+        );
+        expect(error.actual_value() == 8, "unsupported indexed dtype value mismatch");
+    }
+}
+
+void test_reads_and_writes_f32_scalars_by_index() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({2, 2}), DType::f32);
+    auto storage = TensorStorage::allocate(descriptor);
+
+    const std::array<std::uint64_t, 2> first_index {0, 1};
+    const std::array<std::uint64_t, 2> second_index {1, 0};
+    write_f32(storage, std::span<const std::uint64_t>(first_index), 1.5F);
+    write_f32(storage, std::span<const std::uint64_t>(second_index), -2.25F);
+
+    expect(read_f32(storage, std::span<const std::uint64_t>(first_index)) == 1.5F, "F32 read/write value mismatch");
+    expect(read_f32(storage, std::span<const std::uint64_t>(second_index)) == -2.25F, "F32 read/write negative value mismatch");
+
+    const auto first_bytes = element_bytes(storage, std::span<const std::uint64_t>(first_index));
+    expect(first_bytes.size() == sizeof(float), "F32 typed accessor byte size mismatch");
+}
+
+void test_reads_f32_scalars_from_loaded_gguf_payload() {
+    const auto bytes = fixture("valid-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+    const auto loaded = load_gguf_tensor_payload(model.tensor_payloads[0]);
+
+    const std::array<std::uint64_t, 1> first_index {0};
+    const std::array<std::uint64_t, 1> second_index {1};
+    expect(read_f32(loaded.storage, std::span<const std::uint64_t>(first_index)) == 1.0F, "loaded GGUF F32 scalar 0 mismatch");
+    expect(read_f32(loaded.storage, std::span<const std::uint64_t>(second_index)) == 2.0F, "loaded GGUF F32 scalar 1 mismatch");
+}
+
+void test_rejects_f32_accessor_dtype_mismatch() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({2}), DType::f16);
+    auto storage = TensorStorage::allocate(descriptor);
+    const std::array<std::uint64_t, 1> index {0};
+
+    try {
+        (void)read_f32(storage, std::span<const std::uint64_t>(index));
+        throw TestFailure("F32 read accessor should reject F16 storage");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_typed_accessor_dtype,
+            "error code should be unsupported_typed_accessor_dtype"
+        );
+        expect(error.expected_value() == 0, "expected F32 dtype id mismatch");
+        expect(error.actual_value() == 1, "actual F16 dtype id mismatch");
+    }
+
+    try {
+        write_f32(storage, std::span<const std::uint64_t>(index), 1.0F);
+        throw TestFailure("F32 write accessor should reject F16 storage");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_typed_accessor_dtype,
+            "write error code should be unsupported_typed_accessor_dtype"
+        );
+    }
+}
+
+void test_rejects_f32_accessor_invalid_index() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({2}), DType::f32);
+    const auto storage = TensorStorage::allocate(descriptor);
+    const std::array<std::uint64_t, 1> index {2};
+
+    try {
+        (void)read_f32(storage, std::span<const std::uint64_t>(index));
+        throw TestFailure("F32 accessor invalid index should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::tensor_index_out_of_range,
+            "error code should be tensor_index_out_of_range"
+        );
+        expect(error.expected_value() == 2, "expected F32 accessor dimension size mismatch");
+        expect(error.actual_value() == 2, "actual F32 accessor index mismatch");
     }
 }
 
@@ -941,6 +1128,16 @@ int main() {
             "rejects tensor descriptor with invalid shape dtype combination",
             test_rejects_tensor_descriptor_with_invalid_shape_dtype_combination,
         },
+        {"calculates row-major linear indices", test_calculates_row_major_linear_indices},
+        {"calculates unquantized element byte offsets", test_calculates_unquantized_element_byte_offsets},
+        {"reads and mutates unquantized element bytes", test_reads_and_mutates_unquantized_element_bytes},
+        {"rejects tensor index rank mismatch", test_rejects_tensor_index_rank_mismatch},
+        {"rejects tensor index out of range", test_rejects_tensor_index_out_of_range},
+        {"rejects quantized tensor element indexing", test_rejects_quantized_tensor_element_indexing},
+        {"reads and writes F32 scalars by index", test_reads_and_writes_f32_scalars_by_index},
+        {"reads F32 scalars from loaded GGUF payload", test_reads_f32_scalars_from_loaded_gguf_payload},
+        {"rejects F32 accessor dtype mismatch", test_rejects_f32_accessor_dtype_mismatch},
+        {"rejects F32 accessor invalid index", test_rejects_f32_accessor_invalid_index},
         {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
         {
             "converts Q8_0 GGUF payload view to tensor storage",

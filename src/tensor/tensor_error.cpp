@@ -24,6 +24,14 @@ namespace {
             return "tensor byte size overflow";
         case TensorErrorCode::invalid_storage_byte_count:
             return "invalid tensor storage byte count";
+        case TensorErrorCode::invalid_tensor_index_rank:
+            return "invalid tensor index rank";
+        case TensorErrorCode::tensor_index_out_of_range:
+            return "tensor index out of range";
+        case TensorErrorCode::unsupported_indexed_dtype:
+            return "unsupported tensor dtype for element indexing";
+        case TensorErrorCode::unsupported_typed_accessor_dtype:
+            return "unsupported tensor dtype for typed accessor";
     }
 }
 

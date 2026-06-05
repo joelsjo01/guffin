@@ -14,6 +14,10 @@ enum class TensorErrorCode {
     invalid_quantized_element_count,
     byte_size_overflow,
     invalid_storage_byte_count,
+    invalid_tensor_index_rank,
+    tensor_index_out_of_range,
+    unsupported_indexed_dtype,
+    unsupported_typed_accessor_dtype,
 };
 
 class TensorError final : public std::runtime_error {

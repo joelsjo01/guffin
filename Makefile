@@ -8,9 +8,11 @@ ENGINE_SOURCES := \
 	src/model_format/gguf_reader.cpp \
 	src/model_format/gguf_tensor_bridge.cpp \
 	src/tensor/dtype.cpp \
+	src/tensor/layout.cpp \
 	src/tensor/shape.cpp \
 	src/tensor/tensor.cpp \
-	src/tensor/tensor_error.cpp
+	src/tensor/tensor_error.cpp \
+	src/tensor/typed_access.cpp
 
 TEST_SOURCES := \
 	tests/test_main.cpp
