@@ -22,6 +22,12 @@ enum class GGUFReadErrorCode {
     truncated_tensor_directory,
     invalid_tensor_dimension_count,
     invalid_tensor_name,
+    invalid_alignment,
+    invalid_tensor_offset,
+    invalid_tensor_padding,
+    truncated_tensor_payload,
+    unsupported_tensor_type,
+    invalid_tensor_size,
 };
 
 class GGUFReadError final : public std::runtime_error {
@@ -52,5 +58,6 @@ private:
 [[nodiscard]] GGUFHeader read_gguf_header(std::span<const std::uint8_t> bytes);
 [[nodiscard]] GGUFMetadataSection read_gguf_metadata_section(std::span<const std::uint8_t> bytes);
 [[nodiscard]] GGUFTensorDirectory read_gguf_tensor_directory(std::span<const std::uint8_t> bytes);
+[[nodiscard]] GGUFModelView read_gguf_model_view(std::span<const std::uint8_t> bytes);
 
 }  // namespace local_gguf_engine::model_format

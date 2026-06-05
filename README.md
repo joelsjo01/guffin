@@ -33,5 +33,6 @@ bash scripts/ci.sh
 
 ## Status
 
-This project is in the early implementation stage. The current scaffold is a
-minimal C++ library/test executable with the first GGUF header parsing slice.
+This project is in the early implementation stage. Milestone 1, the GGUF
+reader, can parse tiny synthetic GGUF fixtures through bounded raw tensor
+payload views. The next work is Milestone 2: the internal tensor core.

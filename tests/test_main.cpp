@@ -26,6 +26,7 @@ using local_gguf_engine::model_format::GGUFReadError;
 using local_gguf_engine::model_format::GGUFReadErrorCode;
 using local_gguf_engine::model_format::read_gguf_header;
 using local_gguf_engine::model_format::read_gguf_metadata_section;
+using local_gguf_engine::model_format::read_gguf_model_view;
 using local_gguf_engine::model_format::read_gguf_tensor_directory;
 
 class TestFailure final : public std::exception {
@@ -407,7 +408,11 @@ void test_reads_tensor_directory_entries() {
     );
 
     expect(directory.tensors.size() == 2, "tensor directory entry count mismatch");
-    expect(directory.encoded_byte_count == bytes.size(), "tensor directory byte count should end after tensor infos");
+    expect(directory.alignment == 32, "tensor directory alignment mismatch");
+    expect(directory.tensor_infos_end_offset == 171, "tensor info end offset mismatch");
+    expect(directory.padding_byte_count == 21, "tensor padding byte count mismatch");
+    expect(directory.tensor_data_start_offset == 192, "tensor data start offset mismatch");
+    expect(directory.encoded_byte_count == bytes.size(), "tensor directory byte count should include padding");
 
     expect(directory.tensors[0].name == "tok_embeddings.weight", "tensor 0 name mismatch");
     expect(
@@ -416,6 +421,7 @@ void test_reads_tensor_directory_entries() {
     );
     expect(directory.tensors[0].type_id == 0, "tensor 0 type id mismatch");
     expect(directory.tensors[0].offset == 0, "tensor 0 data-relative offset mismatch");
+    expect(directory.tensors[0].file_offset == 192, "tensor 0 file-relative offset mismatch");
 
     expect(directory.tensors[1].name == "output.weight", "tensor 1 name mismatch");
     expect(
@@ -424,6 +430,27 @@ void test_reads_tensor_directory_entries() {
     );
     expect(directory.tensors[1].type_id == 8, "tensor 1 type id mismatch");
     expect(directory.tensors[1].offset == 128, "tensor 1 data-relative offset mismatch");
+    expect(directory.tensors[1].file_offset == 320, "tensor 1 file-relative offset mismatch");
+}
+
+void test_reads_unpadded_tensor_directory_with_default_alignment() {
+    const auto bytes = fixture("valid-tensor-directory-default-alignment");
+    const auto directory = read_gguf_tensor_directory(std::span<const std::uint8_t>(bytes));
+
+    expect(
+        directory.metadata.header == GGUFHeader {.version = 3, .tensor_count = 1, .metadata_kv_count = 0},
+        "default alignment tensor directory header mismatch"
+    );
+    expect(directory.alignment == 32, "default tensor directory alignment mismatch");
+    expect(directory.tensor_infos_end_offset == 64, "default tensor info end offset mismatch");
+    expect(directory.padding_byte_count == 0, "default tensor padding byte count mismatch");
+    expect(directory.tensor_data_start_offset == 64, "default tensor data start offset mismatch");
+    expect(directory.encoded_byte_count == bytes.size(), "default tensor directory byte count mismatch");
+    expect(directory.tensors.size() == 1, "default alignment tensor count mismatch");
+    expect(directory.tensors[0].name == "abcdefgh", "default alignment tensor name mismatch");
+    expect(directory.tensors[0].dimensions == std::vector<std::uint64_t> {8}, "default tensor dimensions mismatch");
+    expect(directory.tensors[0].offset == 0, "default tensor data-relative offset mismatch");
+    expect(directory.tensors[0].file_offset == 64, "default tensor file-relative offset mismatch");
 }
 
 void test_rejects_invalid_tensor_dimension_count() {
@@ -455,6 +482,54 @@ void test_rejects_invalid_tensor_name() {
     }
 }
 
+void test_rejects_invalid_alignment_value() {
+    const auto bytes = fixture("invalid-alignment-value");
+
+    try {
+        (void)read_gguf_tensor_directory(std::span<const std::uint8_t>(bytes));
+        throw TestFailure("invalid alignment value should throw");
+    } catch (const GGUFReadError& error) {
+        expect(error.code() == GGUFReadErrorCode::invalid_alignment, "error code should be invalid_alignment");
+        expect(error.expected_byte_count() == 8, "expected alignment byte count mismatch");
+        expect(error.actual_byte_count() == 12, "actual alignment value mismatch");
+    }
+}
+
+void test_rejects_invalid_alignment_type() {
+    const auto bytes = fixture("invalid-alignment-type");
+
+    try {
+        (void)read_gguf_tensor_directory(std::span<const std::uint8_t>(bytes));
+        throw TestFailure("invalid alignment type should throw");
+    } catch (const GGUFReadError& error) {
+        expect(error.code() == GGUFReadErrorCode::invalid_alignment, "error code should be invalid_alignment");
+    }
+}
+
+void test_rejects_misaligned_tensor_offset() {
+    const auto bytes = fixture("invalid-tensor-offset-alignment");
+
+    try {
+        (void)read_gguf_tensor_directory(std::span<const std::uint8_t>(bytes));
+        throw TestFailure("misaligned tensor offset should throw");
+    } catch (const GGUFReadError& error) {
+        expect(error.code() == GGUFReadErrorCode::invalid_tensor_offset, "error code should be invalid_tensor_offset");
+        expect(error.expected_byte_count() == 32, "expected tensor offset alignment mismatch");
+        expect(error.actual_byte_count() == 16, "actual tensor offset mismatch");
+    }
+}
+
+void test_rejects_invalid_tensor_padding() {
+    const auto bytes = fixture("invalid-tensor-padding");
+
+    try {
+        (void)read_gguf_tensor_directory(std::span<const std::uint8_t>(bytes));
+        throw TestFailure("invalid tensor padding should throw");
+    } catch (const GGUFReadError& error) {
+        expect(error.code() == GGUFReadErrorCode::invalid_tensor_padding, "error code should be invalid_tensor_padding");
+    }
+}
+
 void test_rejects_truncated_tensor_directory() {
     const auto bytes = fixture("truncated-tensor-directory");
 
@@ -466,6 +541,92 @@ void test_rejects_truncated_tensor_directory() {
             error.code() == GGUFReadErrorCode::truncated_tensor_directory,
             "error code should be truncated_tensor_directory"
         );
+    }
+}
+
+void test_reads_tensor_payload_views_without_copying() {
+    const auto bytes = fixture("valid-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+
+    expect(model.directory.tensors.size() == 1, "payload view tensor count mismatch");
+    expect(model.directory.tensor_data_start_offset == 64, "payload view tensor data start mismatch");
+    expect(model.tensor_payloads.size() == 1, "payload view count mismatch");
+    expect(model.tensor_payloads[0].tensor.name == "ab", "payload view tensor name mismatch");
+    expect(model.tensor_payloads[0].tensor.type_id == 0, "payload view tensor type mismatch");
+    expect(model.tensor_payloads[0].tensor.file_offset == 64, "payload view tensor file offset mismatch");
+    expect(model.tensor_payloads[0].bytes.size() == 8, "payload view byte count mismatch");
+    expect(model.tensor_payloads[0].bytes.data() == bytes.data() + 64, "payload view should point into input bytes");
+    expect(model.tensor_payloads[0].bytes[0] == 0x00, "payload byte 0 mismatch");
+    expect(model.tensor_payloads[0].bytes[2] == 0x80, "payload byte 2 mismatch");
+    expect(model.tensor_payloads[0].bytes[6] == 0x00, "payload byte 6 mismatch");
+    expect(model.tensor_payloads[0].bytes[7] == 0x40, "payload byte 7 mismatch");
+}
+
+void test_reads_q8_0_tensor_payload_view() {
+    const auto bytes = fixture("valid-q8-0-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+
+    expect(model.directory.tensors.size() == 1, "Q8_0 payload view tensor count mismatch");
+    expect(model.directory.tensors[0].name == "q8", "Q8_0 payload tensor name mismatch");
+    expect(model.directory.tensors[0].dimensions == std::vector<std::uint64_t> {32}, "Q8_0 dimensions mismatch");
+    expect(model.directory.tensors[0].type_id == 8, "Q8_0 tensor type mismatch");
+    expect(model.directory.tensors[0].file_offset == 64, "Q8_0 file offset mismatch");
+    expect(model.tensor_payloads.size() == 1, "Q8_0 payload view count mismatch");
+    expect(model.tensor_payloads[0].bytes.size() == 34, "Q8_0 payload byte count mismatch");
+    expect(model.tensor_payloads[0].bytes.data() == bytes.data() + 64, "Q8_0 payload should point into input bytes");
+    expect(model.tensor_payloads[0].bytes[0] == 0x00, "Q8_0 payload byte 0 mismatch");
+    expect(model.tensor_payloads[0].bytes[33] == 0x21, "Q8_0 payload byte 33 mismatch");
+}
+
+void test_reads_f16_tensor_payload_view() {
+    const auto bytes = fixture("valid-f16-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+
+    expect(model.directory.tensors.size() == 1, "F16 payload view tensor count mismatch");
+    expect(model.directory.tensors[0].name == "h2", "F16 payload tensor name mismatch");
+    expect(model.directory.tensors[0].dimensions == std::vector<std::uint64_t> {2}, "F16 dimensions mismatch");
+    expect(model.directory.tensors[0].type_id == 1, "F16 tensor type mismatch");
+    expect(model.directory.tensors[0].file_offset == 64, "F16 file offset mismatch");
+    expect(model.tensor_payloads.size() == 1, "F16 payload view count mismatch");
+    expect(model.tensor_payloads[0].bytes.size() == 4, "F16 payload byte count mismatch");
+    expect(model.tensor_payloads[0].bytes.data() == bytes.data() + 64, "F16 payload should point into input bytes");
+    expect(model.tensor_payloads[0].bytes[0] == 0x00, "F16 payload byte 0 mismatch");
+    expect(model.tensor_payloads[0].bytes[3] == 0x40, "F16 payload byte 3 mismatch");
+}
+
+void test_rejects_truncated_tensor_payload() {
+    const auto bytes = fixture("truncated-tensor-payload");
+
+    try {
+        (void)read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+        throw TestFailure("truncated tensor payload should throw");
+    } catch (const GGUFReadError& error) {
+        expect(
+            error.code() == GGUFReadErrorCode::truncated_tensor_payload,
+            "error code should be truncated_tensor_payload"
+        );
+    }
+}
+
+void test_rejects_unsupported_tensor_payload_type() {
+    const auto bytes = fixture("unsupported-tensor-payload-type");
+
+    try {
+        (void)read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+        throw TestFailure("unsupported tensor type should throw");
+    } catch (const GGUFReadError& error) {
+        expect(error.code() == GGUFReadErrorCode::unsupported_tensor_type, "error code should be unsupported_tensor_type");
+    }
+}
+
+void test_rejects_invalid_quantized_tensor_payload_size() {
+    const auto bytes = fixture("invalid-quantized-tensor-payload-size");
+
+    try {
+        (void)read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+        throw TestFailure("invalid quantized tensor payload size should throw");
+    } catch (const GGUFReadError& error) {
+        expect(error.code() == GGUFReadErrorCode::invalid_tensor_size, "error code should be invalid_tensor_size");
     }
 }
 
@@ -492,9 +653,20 @@ int main() {
         {"rejects nested GGUF metadata array", test_rejects_nested_metadata_array},
         {"rejects truncated GGUF metadata value", test_rejects_truncated_metadata_value},
         {"reads GGUF tensor directory entries", test_reads_tensor_directory_entries},
+        {"reads unpadded GGUF tensor directory with default alignment", test_reads_unpadded_tensor_directory_with_default_alignment},
         {"rejects invalid GGUF tensor dimension count", test_rejects_invalid_tensor_dimension_count},
         {"rejects invalid GGUF tensor name", test_rejects_invalid_tensor_name},
+        {"rejects invalid GGUF alignment value", test_rejects_invalid_alignment_value},
+        {"rejects invalid GGUF alignment type", test_rejects_invalid_alignment_type},
+        {"rejects misaligned GGUF tensor offset", test_rejects_misaligned_tensor_offset},
+        {"rejects invalid GGUF tensor padding", test_rejects_invalid_tensor_padding},
         {"rejects truncated GGUF tensor directory", test_rejects_truncated_tensor_directory},
+        {"reads GGUF tensor payload views without copying", test_reads_tensor_payload_views_without_copying},
+        {"reads Q8_0 GGUF tensor payload view", test_reads_q8_0_tensor_payload_view},
+        {"reads F16 GGUF tensor payload view", test_reads_f16_tensor_payload_view},
+        {"rejects truncated GGUF tensor payload", test_rejects_truncated_tensor_payload},
+        {"rejects unsupported GGUF tensor payload type", test_rejects_unsupported_tensor_payload_type},
+        {"rejects invalid quantized GGUF tensor payload size", test_rejects_invalid_quantized_tensor_payload_size},
     };
 
     int failures = 0;

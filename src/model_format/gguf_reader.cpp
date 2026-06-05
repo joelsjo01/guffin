@@ -4,7 +4,9 @@
 #include <bit>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <variant>
 
 namespace local_gguf_engine::model_format {
 
@@ -83,6 +85,26 @@ void require_available(
     std::size_t offset
 ) {
     return checked_size(std::min(requested_count, static_cast<std::uint64_t>(remaining_byte_count(bytes, offset))));
+}
+
+[[nodiscard]] std::uint64_t checked_u64_add(std::uint64_t left, std::uint64_t right) {
+    if (right > std::numeric_limits<std::uint64_t>::max() - left) {
+        throw GGUFReadError(GGUFReadErrorCode::invalid_tensor_offset, 0, 0);
+    }
+
+    return left + right;
+}
+
+[[nodiscard]] std::uint64_t checked_u64_multiply(
+    std::uint64_t left,
+    std::uint64_t right,
+    GGUFReadErrorCode error_code
+) {
+    if (left != 0 && right > std::numeric_limits<std::uint64_t>::max() / left) {
+        throw GGUFReadError(error_code, 0, 0);
+    }
+
+    return left * right;
 }
 
 [[nodiscard]] std::string read_gguf_string(
@@ -395,6 +417,154 @@ template <typename Element, typename Reader>
     }
 }
 
+[[nodiscard]] bool metadata_entry_is_uint32(
+    const GGUFMetadataEntry& entry,
+    std::string_view key
+) {
+    return entry.key == key && entry.value.type == GGUFMetadataValueType::uint32;
+}
+
+[[nodiscard]] std::uint32_t read_alignment(const GGUFMetadataSection& metadata) {
+    constexpr std::uint32_t default_alignment = 32;
+
+    for (const auto& entry : metadata.entries) {
+        if (entry.key != "general.alignment") {
+            continue;
+        }
+
+        if (!metadata_entry_is_uint32(entry, "general.alignment")) {
+            throw GGUFReadError(GGUFReadErrorCode::invalid_alignment, 4, 0);
+        }
+
+        const auto alignment = std::get<std::uint32_t>(entry.value.data);
+        if (alignment == 0 || alignment % 8 != 0) {
+            throw GGUFReadError(GGUFReadErrorCode::invalid_alignment, 8, alignment);
+        }
+
+        return alignment;
+    }
+
+    return default_alignment;
+}
+
+[[nodiscard]] std::size_t align_offset(std::size_t offset, std::uint32_t alignment) {
+    const auto remainder = offset % alignment;
+    if (remainder == 0) {
+        return offset;
+    }
+
+    const auto padding_byte_count = static_cast<std::size_t>(alignment - remainder);
+    if (padding_byte_count > std::numeric_limits<std::size_t>::max() - offset) {
+        throw GGUFReadError(GGUFReadErrorCode::invalid_alignment, alignment, 0);
+    }
+
+    return offset + padding_byte_count;
+}
+
+void validate_tensor_padding(
+    std::span<const std::uint8_t> bytes,
+    std::size_t tensor_infos_end_offset,
+    std::size_t padding_byte_count
+) {
+    require_available(
+        bytes,
+        tensor_infos_end_offset,
+        padding_byte_count,
+        GGUFReadErrorCode::truncated_tensor_directory
+    );
+
+    for (std::size_t index = 0; index < padding_byte_count; ++index) {
+        if (bytes[tensor_infos_end_offset + index] != 0) {
+            throw GGUFReadError(GGUFReadErrorCode::invalid_tensor_padding, 0, bytes[tensor_infos_end_offset + index]);
+        }
+    }
+}
+
+void resolve_tensor_file_offsets(
+    std::vector<GGUFTensorInfo>& tensors,
+    std::uint32_t alignment,
+    std::size_t tensor_data_start_offset
+) {
+    const auto tensor_data_start = static_cast<std::uint64_t>(tensor_data_start_offset);
+
+    for (auto& tensor : tensors) {
+        if (tensor.offset % alignment != 0) {
+            throw GGUFReadError(GGUFReadErrorCode::invalid_tensor_offset, alignment, tensor.offset);
+        }
+
+        tensor.file_offset = checked_u64_add(tensor_data_start, tensor.offset);
+    }
+}
+
+struct TensorTypeLayout {
+    std::uint64_t block_element_count;
+    std::uint64_t block_byte_count;
+};
+
+[[nodiscard]] TensorTypeLayout tensor_type_layout(std::uint32_t type_id) {
+    switch (type_id) {
+        case 0:
+            return TensorTypeLayout {.block_element_count = 1, .block_byte_count = 4};
+        case 1:
+            return TensorTypeLayout {.block_element_count = 1, .block_byte_count = 2};
+        case 8:
+            return TensorTypeLayout {.block_element_count = 32, .block_byte_count = 34};
+        default:
+            throw GGUFReadError(GGUFReadErrorCode::unsupported_tensor_type, 0, type_id);
+    }
+}
+
+[[nodiscard]] std::uint64_t tensor_element_count(const GGUFTensorInfo& tensor) {
+    std::uint64_t element_count = 1;
+    for (const auto dimension : tensor.dimensions) {
+        element_count = checked_u64_multiply(element_count, dimension, GGUFReadErrorCode::invalid_tensor_size);
+    }
+
+    return element_count;
+}
+
+[[nodiscard]] std::size_t tensor_payload_byte_count(const GGUFTensorInfo& tensor) {
+    const auto layout = tensor_type_layout(tensor.type_id);
+    const auto element_count = tensor_element_count(tensor);
+    if (element_count % layout.block_element_count != 0) {
+        throw GGUFReadError(GGUFReadErrorCode::invalid_tensor_size, layout.block_element_count, element_count);
+    }
+
+    const auto block_count = element_count / layout.block_element_count;
+    const auto byte_count = checked_u64_multiply(
+        block_count,
+        layout.block_byte_count,
+        GGUFReadErrorCode::invalid_tensor_size
+    );
+    if (byte_count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        throw GGUFReadError(GGUFReadErrorCode::invalid_tensor_size, 0, 0);
+    }
+
+    return static_cast<std::size_t>(byte_count);
+}
+
+[[nodiscard]] std::size_t tensor_file_offset(const GGUFTensorInfo& tensor) {
+    if (tensor.file_offset > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        throw GGUFReadError(GGUFReadErrorCode::truncated_tensor_payload, 0, 0);
+    }
+
+    return static_cast<std::size_t>(tensor.file_offset);
+}
+
+[[nodiscard]] GGUFTensorPayloadView read_tensor_payload_view(
+    std::span<const std::uint8_t> bytes,
+    const GGUFTensorInfo& tensor
+) {
+    const auto file_offset = tensor_file_offset(tensor);
+    const auto byte_count = tensor_payload_byte_count(tensor);
+    require_available(bytes, file_offset, byte_count, GGUFReadErrorCode::truncated_tensor_payload);
+
+    return GGUFTensorPayloadView {
+        .tensor = tensor,
+        .bytes = bytes.subspan(file_offset, byte_count),
+    };
+}
+
 [[nodiscard]] std::string error_message(GGUFReadErrorCode code) {
     switch (code) {
         case GGUFReadErrorCode::truncated_header:
@@ -415,6 +585,18 @@ template <typename Element, typename Reader>
             return "invalid GGUF tensor dimension count";
         case GGUFReadErrorCode::invalid_tensor_name:
             return "invalid GGUF tensor name";
+        case GGUFReadErrorCode::invalid_alignment:
+            return "invalid GGUF alignment";
+        case GGUFReadErrorCode::invalid_tensor_offset:
+            return "invalid GGUF tensor offset";
+        case GGUFReadErrorCode::invalid_tensor_padding:
+            return "invalid GGUF tensor padding";
+        case GGUFReadErrorCode::truncated_tensor_payload:
+            return "truncated GGUF tensor payload";
+        case GGUFReadErrorCode::unsupported_tensor_type:
+            return "unsupported GGUF tensor type";
+        case GGUFReadErrorCode::invalid_tensor_size:
+            return "invalid GGUF tensor size";
     }
 }
 
@@ -508,10 +690,37 @@ GGUFTensorDirectory read_gguf_tensor_directory(std::span<const std::uint8_t> byt
         tensors.push_back(read_tensor_info(bytes, offset));
     }
 
+    const auto alignment = read_alignment(metadata);
+    const auto tensor_infos_end_offset = offset;
+    const auto tensor_data_start_offset = align_offset(tensor_infos_end_offset, alignment);
+    const auto padding_byte_count = tensor_data_start_offset - tensor_infos_end_offset;
+
+    validate_tensor_padding(bytes, tensor_infos_end_offset, padding_byte_count);
+    resolve_tensor_file_offsets(tensors, alignment, tensor_data_start_offset);
+
     return GGUFTensorDirectory {
         .metadata = std::move(metadata),
         .tensors = std::move(tensors),
-        .encoded_byte_count = offset,
+        .alignment = alignment,
+        .tensor_infos_end_offset = tensor_infos_end_offset,
+        .padding_byte_count = padding_byte_count,
+        .tensor_data_start_offset = tensor_data_start_offset,
+        .encoded_byte_count = tensor_data_start_offset,
+    };
+}
+
+GGUFModelView read_gguf_model_view(std::span<const std::uint8_t> bytes) {
+    auto directory = read_gguf_tensor_directory(bytes);
+
+    std::vector<GGUFTensorPayloadView> tensor_payloads;
+    tensor_payloads.reserve(directory.tensors.size());
+    for (const auto& tensor : directory.tensors) {
+        tensor_payloads.push_back(read_tensor_payload_view(bytes, tensor));
+    }
+
+    return GGUFModelView {
+        .directory = std::move(directory),
+        .tensor_payloads = std::move(tensor_payloads),
     };
 }
 
