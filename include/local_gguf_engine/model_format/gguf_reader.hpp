@@ -1,6 +1,8 @@
 #pragma once
 
 #include "local_gguf_engine/model_format/gguf_header.hpp"
+#include "local_gguf_engine/model_format/gguf_metadata.hpp"
+#include "local_gguf_engine/model_format/gguf_tensor.hpp"
 
 #include <array>
 #include <cstddef>
@@ -13,6 +15,13 @@ namespace local_gguf_engine::model_format {
 enum class GGUFReadErrorCode {
     truncated_header,
     invalid_magic,
+    truncated_metadata,
+    invalid_metadata_value_type,
+    invalid_metadata_value,
+    unsupported_metadata_value_type,
+    truncated_tensor_directory,
+    invalid_tensor_dimension_count,
+    invalid_tensor_name,
 };
 
 class GGUFReadError final : public std::runtime_error {
@@ -41,5 +50,7 @@ private:
 }
 
 [[nodiscard]] GGUFHeader read_gguf_header(std::span<const std::uint8_t> bytes);
+[[nodiscard]] GGUFMetadataSection read_gguf_metadata_section(std::span<const std::uint8_t> bytes);
+[[nodiscard]] GGUFTensorDirectory read_gguf_tensor_directory(std::span<const std::uint8_t> bytes);
 
 }  // namespace local_gguf_engine::model_format
