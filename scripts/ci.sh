@@ -13,7 +13,9 @@ if git ls-files | grep -E '\.(gguf|ggml|safetensors|pt|pth|onnx|bin)$' >/dev/nul
   exit 1
 fi
 
-if [[ -f Cargo.toml ]]; then
+if [[ -f Package.swift ]]; then
+  swift test
+elif [[ -f Cargo.toml ]]; then
   cargo test
 elif [[ -f CMakeLists.txt ]]; then
   cmake -S . -B build

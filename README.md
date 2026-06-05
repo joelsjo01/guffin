@@ -18,6 +18,17 @@ Apple Silicon acceleration.
 - Tests should be added alongside new behavior.
 - The engine should be built iteratively, starting from small verifiable pieces.
 
+## Development
+
+This project uses Swift and Swift Package Manager.
+
+Run local checks with:
+
+```bash
+bash scripts/ci.sh
+```
+
 ## Status
 
-This project is in the early planning and scaffolding stage.
+This project is in the early implementation stage. The current scaffold is a
+minimal Swift library with a CPU-first test baseline.
