@@ -18,7 +18,6 @@ models/*
 
 build/
 .build/
-.swiftpm/
 dist/
 target/
 cmake-build-*/
