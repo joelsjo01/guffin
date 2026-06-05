@@ -8,7 +8,11 @@ ENGINE_SOURCES := \
 	src/model_format/gguf_reader.cpp \
 	src/model_format/gguf_tensor_bridge.cpp \
 	src/tensor/dtype.cpp \
+	src/tensor/f16.cpp \
 	src/tensor/layout.cpp \
+	src/tensor/ops/elementwise.cpp \
+	src/tensor/ops/reduction.cpp \
+	src/tensor/quantization.cpp \
 	src/tensor/shape.cpp \
 	src/tensor/tensor.cpp \
 	src/tensor/tensor_error.cpp \

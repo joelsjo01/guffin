@@ -32,6 +32,16 @@ namespace {
             return "unsupported tensor dtype for element indexing";
         case TensorErrorCode::unsupported_typed_accessor_dtype:
             return "unsupported tensor dtype for typed accessor";
+        case TensorErrorCode::unsupported_operator_dtype:
+            return "unsupported tensor dtype for operator";
+        case TensorErrorCode::tensor_shape_mismatch:
+            return "tensor shape mismatch";
+        case TensorErrorCode::unsupported_quantized_dtype:
+            return "unsupported tensor dtype for quantized block access";
+        case TensorErrorCode::quantized_block_index_out_of_range:
+            return "quantized tensor block index out of range";
+        case TensorErrorCode::quantized_block_element_index_out_of_range:
+            return "quantized tensor block element index out of range";
     }
 }
 

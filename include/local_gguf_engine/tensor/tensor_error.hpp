@@ -18,6 +18,11 @@ enum class TensorErrorCode {
     tensor_index_out_of_range,
     unsupported_indexed_dtype,
     unsupported_typed_accessor_dtype,
+    unsupported_operator_dtype,
+    tensor_shape_mismatch,
+    unsupported_quantized_dtype,
+    quantized_block_index_out_of_range,
+    quantized_block_element_index_out_of_range,
 };
 
 class TensorError final : public std::runtime_error {
