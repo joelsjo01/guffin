@@ -4,6 +4,8 @@
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
+#include "local_gguf_engine/tensor/ops/matmul.hpp"
+#include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/reduction.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
@@ -37,8 +39,12 @@ using tensor::DType;
 using tensor::Shape;
 using tensor::TensorDescriptor;
 using tensor::TensorStorage;
+using tensor::write_f16_from_f32;
 using tensor::write_f32;
 using tensor::ops::add_f32;
+using tensor::ops::matmul_f32;
+using tensor::ops::matmul_f32_f16;
+using tensor::ops::rms_norm_f32;
 using tensor::ops::sum_f32;
 
 struct IterationMeasurement {
@@ -108,6 +114,32 @@ template <typename Callable>
     return storage;
 }
 
+[[nodiscard]] TensorStorage make_f32_matrix(std::uint64_t rows, std::uint64_t columns, float scale) {
+    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f32));
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            const auto value = scale * static_cast<float>((row + 1) + (column % 7));
+            write_f32(storage, std::span<const std::uint64_t>(index), value);
+        }
+    }
+
+    return storage;
+}
+
+[[nodiscard]] TensorStorage make_f16_matrix(std::uint64_t rows, std::uint64_t columns, float scale) {
+    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f16));
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            const auto value = scale * static_cast<float>((row + 1) + (column % 7));
+            write_f16_from_f32(storage, std::span<const std::uint64_t>(index), value);
+        }
+    }
+
+    return storage;
+}
+
 [[nodiscard]] std::vector<std::uint8_t> make_repeated_payload(std::size_t byte_count) {
     std::vector<std::uint8_t> bytes(byte_count);
     for (std::size_t index = 0; index < bytes.size(); ++index) {
@@ -120,12 +152,17 @@ template <typename Callable>
 void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     constexpr std::uint64_t add_element_count = 4096;
     constexpr std::uint64_t copy_element_count = 16 * 1024;
+    constexpr std::uint64_t matmul_size = 64;
 
     const auto add_descriptor = TensorDescriptor::from(Shape::from({add_element_count}), DType::f32);
     const auto copy_descriptor = TensorDescriptor::from(Shape::from({copy_element_count}), DType::f32);
     const auto copy_payload = make_repeated_payload(copy_descriptor.byte_count);
     const auto add_left = make_f32_storage(add_element_count, 1.0F);
     const auto add_right = make_f32_storage(add_element_count, -0.5F);
+    const auto matmul_left = make_f32_matrix(matmul_size, matmul_size, 0.01F);
+    const auto matmul_right = make_f32_matrix(matmul_size, matmul_size, 0.02F);
+    const auto matmul_right_f16 = make_f16_matrix(matmul_size, matmul_size, 0.02F);
+    const auto rms_norm_weight = make_f32_storage(matmul_size, 1.0F);
 
     report.measurements.push_back(measure(
         "tensor.allocate_f32",
@@ -161,6 +198,45 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
             const auto output = add_f32(add_left, add_right);
             return IterationMeasurement {
                 .bytes_processed = add_left.bytes().size() + add_right.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tensor.matmul_f32",
+        report.config.iterations,
+        "left=[64,64] right=[64,64] dtype=F32",
+        [&matmul_left, &matmul_right]() {
+            const auto output = matmul_f32(matmul_left, matmul_right);
+            return IterationMeasurement {
+                .bytes_processed = matmul_left.bytes().size() + matmul_right.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tensor.matmul_f32_f16",
+        report.config.iterations,
+        "left=[64,64] dtype=F32 right=[64,64] dtype=F16",
+        [&matmul_left, &matmul_right_f16]() {
+            const auto output = matmul_f32_f16(matmul_left, matmul_right_f16);
+            return IterationMeasurement {
+                .bytes_processed = matmul_left.bytes().size() + matmul_right_f16.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tensor.rms_norm_f32",
+        report.config.iterations,
+        "input=[64,64] weight=[64] dtype=F32 epsilon=1e-5",
+        [&matmul_left, &rms_norm_weight]() {
+            const auto output = rms_norm_f32(matmul_left, rms_norm_weight, 0.00001F);
+            return IterationMeasurement {
+                .bytes_processed = matmul_left.bytes().size() + rms_norm_weight.bytes().size() + output.bytes().size(),
                 .checksum = checksum_f32(sum_f32(output)),
             };
         }

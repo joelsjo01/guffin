@@ -7,6 +7,8 @@
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
+#include "local_gguf_engine/tensor/ops/matmul.hpp"
+#include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/reduction.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
@@ -23,6 +25,7 @@
 #include <limits>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -86,7 +89,10 @@ using local_gguf_engine::tensor::write_f32;
 using local_gguf_engine::tensor::ops::add_f32;
 using local_gguf_engine::tensor::ops::copy_f32;
 using local_gguf_engine::tensor::ops::fill_f32;
+using local_gguf_engine::tensor::ops::matmul_f32;
+using local_gguf_engine::tensor::ops::matmul_f32_f16;
 using local_gguf_engine::tensor::ops::mean_square_f32;
+using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rms_f32;
 using local_gguf_engine::tensor::ops::sum_f32;
 using local_gguf_engine::tensor::ops::sum_squares_f32;
@@ -1032,6 +1038,290 @@ void test_rejects_f32_rms_helpers_dtype_mismatch() {
             error.code() == TensorErrorCode::unsupported_operator_dtype,
             "RMS error code should be unsupported_operator_dtype"
         );
+    }
+}
+
+void test_applies_f32_rms_norm_to_vector() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+    auto weight = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+
+    const std::array<std::uint64_t, 1> index_0 {0};
+    const std::array<std::uint64_t, 1> index_1 {1};
+    write_f32(input, std::span<const std::uint64_t>(index_0), 3.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_1), 4.0F);
+    write_f32(weight, std::span<const std::uint64_t>(index_0), 1.0F);
+    write_f32(weight, std::span<const std::uint64_t>(index_1), 2.0F);
+
+    const auto output = rms_norm_f32(input, weight, 3.5F);
+
+    expect(output.descriptor() == input.descriptor(), "F32 RMSNorm vector output descriptor mismatch");
+    expect(output.bytes().data() != input.bytes().data(), "F32 RMSNorm vector output should not alias input");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_0)) == 0.75F, "F32 RMSNorm vector value 0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_1)) == 2.0F, "F32 RMSNorm vector value 1 mismatch");
+}
+
+void test_applies_f32_rms_norm_to_batched_rows() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+    auto weight = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+
+    const std::array<std::uint64_t, 2> row0_col0 {0, 0};
+    const std::array<std::uint64_t, 2> row0_col1 {0, 1};
+    const std::array<std::uint64_t, 2> row1_col0 {1, 0};
+    const std::array<std::uint64_t, 2> row1_col1 {1, 1};
+    write_f32(input, std::span<const std::uint64_t>(row0_col0), 3.0F);
+    write_f32(input, std::span<const std::uint64_t>(row0_col1), 4.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col0), -3.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col1), 4.0F);
+
+    const std::array<std::uint64_t, 1> weight0 {0};
+    const std::array<std::uint64_t, 1> weight1 {1};
+    write_f32(weight, std::span<const std::uint64_t>(weight0), 1.0F);
+    write_f32(weight, std::span<const std::uint64_t>(weight1), 2.0F);
+
+    const auto output = rms_norm_f32(input, weight, 3.5F);
+
+    expect(output.descriptor() == input.descriptor(), "F32 RMSNorm batched output descriptor mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(row0_col0)) == 0.75F, "F32 RMSNorm batch value 0,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(row0_col1)) == 2.0F, "F32 RMSNorm batch value 0,1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(row1_col0)) == -0.75F, "F32 RMSNorm batch value 1,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(row1_col1)) == 2.0F, "F32 RMSNorm batch value 1,1 mismatch");
+}
+
+void test_rejects_f32_rms_norm_dtype_mismatch() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+    const auto weight = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f16));
+
+    try {
+        (void)rms_norm_f32(input, weight, 0.00001F);
+        throw TestFailure("F32 RMSNorm should reject F16 weight");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_operator_dtype,
+            "F32 RMSNorm dtype error code mismatch"
+        );
+        expect(error.expected_value() == 0, "F32 RMSNorm expected dtype mismatch");
+        expect(error.actual_value() == 1, "F32 RMSNorm actual dtype mismatch");
+    }
+}
+
+void test_rejects_f32_rms_norm_input_rank_above_two() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2, 2}), DType::f32));
+    const auto weight = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+
+    try {
+        (void)rms_norm_f32(input, weight, 0.00001F);
+        throw TestFailure("F32 RMSNorm should reject rank-three input");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_shape_rank, "F32 RMSNorm input rank error mismatch");
+        expect(error.expected_value() == 2, "F32 RMSNorm expected input rank mismatch");
+        expect(error.actual_value() == 3, "F32 RMSNorm actual input rank mismatch");
+    }
+}
+
+void test_rejects_f32_rms_norm_weight_rank_mismatch() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+    const auto weight = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+
+    try {
+        (void)rms_norm_f32(input, weight, 0.00001F);
+        throw TestFailure("F32 RMSNorm should reject rank-two weight");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_shape_rank, "F32 RMSNorm weight rank error mismatch");
+        expect(error.expected_value() == 1, "F32 RMSNorm expected weight rank mismatch");
+        expect(error.actual_value() == 2, "F32 RMSNorm actual weight rank mismatch");
+    }
+}
+
+void test_rejects_f32_rms_norm_hidden_dimension_mismatch() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 3}), DType::f32));
+    const auto weight = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+
+    try {
+        (void)rms_norm_f32(input, weight, 0.00001F);
+        throw TestFailure("F32 RMSNorm should reject hidden dimension mismatch");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 RMSNorm hidden shape error mismatch");
+        expect(error.expected_value() == 3, "F32 RMSNorm expected hidden dimension mismatch");
+        expect(error.actual_value() == 2, "F32 RMSNorm actual hidden dimension mismatch");
+    }
+}
+
+void test_rejects_f32_rms_norm_nonpositive_epsilon() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+    const auto weight = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+
+    try {
+        (void)rms_norm_f32(input, weight, 0.0F);
+        throw TestFailure("F32 RMSNorm should reject nonpositive epsilon");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "RMSNorm epsilon must be positive",
+            "F32 RMSNorm epsilon error mismatch"
+        );
+    }
+
+    try {
+        (void)rms_norm_f32(input, weight, std::numeric_limits<float>::quiet_NaN());
+        throw TestFailure("F32 RMSNorm should reject NaN epsilon");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "RMSNorm epsilon must be positive",
+            "F32 RMSNorm NaN epsilon error mismatch"
+        );
+    }
+}
+
+void test_multiplies_f32_matrices() {
+    const auto left_descriptor = TensorDescriptor::from(Shape::from({2, 3}), DType::f32);
+    const auto right_descriptor = TensorDescriptor::from(Shape::from({3, 2}), DType::f32);
+    auto left = TensorStorage::allocate(left_descriptor);
+    auto right = TensorStorage::allocate(right_descriptor);
+
+    const float left_values[2][3] {
+        {1.0F, 2.0F, 3.0F},
+        {4.0F, 5.0F, 6.0F},
+    };
+    const float right_values[3][2] {
+        {7.0F, 8.0F},
+        {9.0F, 10.0F},
+        {11.0F, 12.0F},
+    };
+
+    for (std::uint64_t row = 0; row < 2; ++row) {
+        for (std::uint64_t column = 0; column < 3; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            write_f32(left, std::span<const std::uint64_t>(index), left_values[row][column]);
+        }
+    }
+
+    for (std::uint64_t row = 0; row < 3; ++row) {
+        for (std::uint64_t column = 0; column < 2; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            write_f32(right, std::span<const std::uint64_t>(index), right_values[row][column]);
+        }
+    }
+
+    const auto output = matmul_f32(left, right);
+
+    expect(output.descriptor().shape == Shape::from({2, 2}), "F32 matmul output shape mismatch");
+    expect(output.descriptor().dtype == DType::f32, "F32 matmul output dtype mismatch");
+    expect(output.bytes().data() != left.bytes().data(), "F32 matmul output should not alias left");
+    expect(output.bytes().data() != right.bytes().data(), "F32 matmul output should not alias right");
+
+    const std::array<std::uint64_t, 2> index_00 {0, 0};
+    const std::array<std::uint64_t, 2> index_01 {0, 1};
+    const std::array<std::uint64_t, 2> index_10 {1, 0};
+    const std::array<std::uint64_t, 2> index_11 {1, 1};
+    expect(read_f32(output, std::span<const std::uint64_t>(index_00)) == 58.0F, "F32 matmul value 0,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_01)) == 64.0F, "F32 matmul value 0,1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_10)) == 139.0F, "F32 matmul value 1,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 154.0F, "F32 matmul value 1,1 mismatch");
+}
+
+void test_rejects_f32_matmul_dtype_mismatch() {
+    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f16));
+
+    try {
+        (void)matmul_f32(left, right);
+        throw TestFailure("F32 matmul should reject F16 right operand");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_operator_dtype,
+            "F32 matmul dtype error code mismatch"
+        );
+        expect(error.expected_value() == 0, "F32 matmul expected dtype mismatch");
+        expect(error.actual_value() == 1, "F32 matmul actual dtype mismatch");
+    }
+}
+
+void test_rejects_f32_matmul_non_matrix_rank() {
+    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+
+    try {
+        (void)matmul_f32(left, right);
+        throw TestFailure("F32 matmul should reject rank-one operands");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_shape_rank, "F32 matmul rank error code mismatch");
+        expect(error.expected_value() == 2, "F32 matmul expected rank mismatch");
+        expect(error.actual_value() == 1, "F32 matmul actual rank mismatch");
+    }
+}
+
+void test_rejects_f32_matmul_inner_dimension_mismatch() {
+    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 3}), DType::f32));
+    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+
+    try {
+        (void)matmul_f32(left, right);
+        throw TestFailure("F32 matmul should reject mismatched inner dimensions");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 matmul shape error code mismatch");
+        expect(error.expected_value() == 3, "F32 matmul expected inner dimension mismatch");
+        expect(error.actual_value() == 2, "F32 matmul actual inner dimension mismatch");
+    }
+}
+
+void test_multiplies_f32_by_f16_matrices_into_f32() {
+    const auto left_descriptor = TensorDescriptor::from(Shape::from({2, 3}), DType::f32);
+    const auto right_descriptor = TensorDescriptor::from(Shape::from({3, 2}), DType::f16);
+    auto left = TensorStorage::allocate(left_descriptor);
+    auto right = TensorStorage::allocate(right_descriptor);
+
+    const float left_values[2][3] {
+        {1.0F, 2.0F, 3.0F},
+        {4.0F, 5.0F, 6.0F},
+    };
+    const float right_values[3][2] {
+        {7.0F, 8.0F},
+        {9.0F, 10.0F},
+        {11.0F, 12.0F},
+    };
+
+    for (std::uint64_t row = 0; row < 2; ++row) {
+        for (std::uint64_t column = 0; column < 3; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            write_f32(left, std::span<const std::uint64_t>(index), left_values[row][column]);
+        }
+    }
+
+    for (std::uint64_t row = 0; row < 3; ++row) {
+        for (std::uint64_t column = 0; column < 2; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            write_f16_from_f32(right, std::span<const std::uint64_t>(index), right_values[row][column]);
+        }
+    }
+
+    const auto output = matmul_f32_f16(left, right);
+
+    expect(output.descriptor().shape == Shape::from({2, 2}), "F32xF16 matmul output shape mismatch");
+    expect(output.descriptor().dtype == DType::f32, "F32xF16 matmul output dtype mismatch");
+
+    const std::array<std::uint64_t, 2> index_00 {0, 0};
+    const std::array<std::uint64_t, 2> index_01 {0, 1};
+    const std::array<std::uint64_t, 2> index_10 {1, 0};
+    const std::array<std::uint64_t, 2> index_11 {1, 1};
+    expect(read_f32(output, std::span<const std::uint64_t>(index_00)) == 58.0F, "F32xF16 matmul value 0,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_01)) == 64.0F, "F32xF16 matmul value 0,1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_10)) == 139.0F, "F32xF16 matmul value 1,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 154.0F, "F32xF16 matmul value 1,1 mismatch");
+}
+
+void test_rejects_f32_f16_matmul_right_dtype_mismatch() {
+    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+
+    try {
+        (void)matmul_f32_f16(left, right);
+        throw TestFailure("F32xF16 matmul should reject F32 right operand");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_operator_dtype,
+            "F32xF16 matmul dtype error code mismatch"
+        );
+        expect(error.expected_value() == 1, "F32xF16 matmul expected dtype mismatch");
+        expect(error.actual_value() == 0, "F32xF16 matmul actual dtype mismatch");
     }
 }
 
@@ -2128,6 +2418,22 @@ int main() {
         {"rejects F32 reduction dtype mismatch", test_rejects_f32_reduction_dtype_mismatch},
         {"calculates F32 mean square and RMS", test_calculates_f32_mean_square_and_rms},
         {"rejects F32 RMS helpers dtype mismatch", test_rejects_f32_rms_helpers_dtype_mismatch},
+        {"applies F32 RMSNorm to vector", test_applies_f32_rms_norm_to_vector},
+        {"applies F32 RMSNorm to batched rows", test_applies_f32_rms_norm_to_batched_rows},
+        {"rejects F32 RMSNorm dtype mismatch", test_rejects_f32_rms_norm_dtype_mismatch},
+        {"rejects F32 RMSNorm input rank above two", test_rejects_f32_rms_norm_input_rank_above_two},
+        {"rejects F32 RMSNorm weight rank mismatch", test_rejects_f32_rms_norm_weight_rank_mismatch},
+        {
+            "rejects F32 RMSNorm hidden dimension mismatch",
+            test_rejects_f32_rms_norm_hidden_dimension_mismatch,
+        },
+        {"rejects F32 RMSNorm nonpositive epsilon", test_rejects_f32_rms_norm_nonpositive_epsilon},
+        {"multiplies F32 matrices", test_multiplies_f32_matrices},
+        {"rejects F32 matmul dtype mismatch", test_rejects_f32_matmul_dtype_mismatch},
+        {"rejects F32 matmul non-matrix rank", test_rejects_f32_matmul_non_matrix_rank},
+        {"rejects F32 matmul inner dimension mismatch", test_rejects_f32_matmul_inner_dimension_mismatch},
+        {"multiplies F32 by F16 matrices into F32", test_multiplies_f32_by_f16_matrices_into_f32},
+        {"rejects F32xF16 matmul right dtype mismatch", test_rejects_f32_f16_matmul_right_dtype_mismatch},
         {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
         {
             "converts Q8_0 GGUF payload view to tensor storage",

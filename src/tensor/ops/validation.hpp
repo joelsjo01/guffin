@@ -18,6 +18,20 @@ inline void require_f32_operand(const TensorStorage& storage) {
     require_f32_descriptor(storage.descriptor());
 }
 
+inline void require_f16_descriptor(const TensorDescriptor& descriptor) {
+    if (descriptor.dtype != DType::f16) {
+        throw TensorError(
+            TensorErrorCode::unsupported_operator_dtype,
+            static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::f16)),
+            static_cast<std::uint64_t>(static_cast<std::uint8_t>(descriptor.dtype))
+        );
+    }
+}
+
+inline void require_f16_operand(const TensorStorage& storage) {
+    require_f16_descriptor(storage.descriptor());
+}
+
 inline void require_same_shape(const TensorDescriptor& left, const TensorDescriptor& right) {
     if (left.shape.rank() != right.shape.rank()) {
         throw TensorError(

@@ -14,6 +14,8 @@ ENGINE_SOURCES := \
 	src/tensor/f16.cpp \
 	src/tensor/layout.cpp \
 	src/tensor/ops/elementwise.cpp \
+	src/tensor/ops/matmul.cpp \
+	src/tensor/ops/normalization.cpp \
 	src/tensor/ops/reduction.cpp \
 	src/tensor/quantization.cpp \
 	src/tensor/shape.cpp \
