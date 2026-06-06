@@ -10,12 +10,15 @@
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/reduction.hpp"
+#include "local_gguf_engine/tensor/ops/rope.hpp"
+#include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -94,6 +97,8 @@ using local_gguf_engine::tensor::ops::matmul_f32_f16;
 using local_gguf_engine::tensor::ops::mean_square_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rms_f32;
+using local_gguf_engine::tensor::ops::rope_f32;
+using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::sum_f32;
 using local_gguf_engine::tensor::ops::sum_squares_f32;
 
@@ -112,6 +117,14 @@ private:
 void expect(bool condition, std::string_view message) {
     if (!condition) {
         throw TestFailure(std::string(message));
+    }
+}
+
+void expect_close(float actual, float expected, float tolerance, std::string_view message) {
+    if (std::fabs(actual - expected) > tolerance) {
+        std::ostringstream stream;
+        stream << message << ": expected " << expected << ", got " << actual;
+        throw TestFailure(stream.str());
     }
 }
 
@@ -1168,6 +1181,295 @@ void test_rejects_f32_rms_norm_nonpositive_epsilon() {
             std::string_view(error.what()) == "RMSNorm epsilon must be positive",
             "F32 RMSNorm NaN epsilon error mismatch"
         );
+    }
+}
+
+void test_applies_f32_rope_to_vector() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({5}), DType::f32));
+    const std::array<std::uint64_t, 1> index_0 {0};
+    const std::array<std::uint64_t, 1> index_1 {1};
+    const std::array<std::uint64_t, 1> index_2 {2};
+    const std::array<std::uint64_t, 1> index_3 {3};
+    const std::array<std::uint64_t, 1> index_4 {4};
+    write_f32(input, std::span<const std::uint64_t>(index_0), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_1), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_2), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_3), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_4), 9.0F);
+
+    const auto output = rope_f32(input, 1, 4, 1.0F);
+    const auto cosine = static_cast<float>(std::cos(1.0));
+    const auto sine = static_cast<float>(std::sin(1.0));
+
+    expect(output.descriptor() == input.descriptor(), "F32 RoPE vector output descriptor mismatch");
+    expect(output.bytes().data() != input.bytes().data(), "F32 RoPE vector output should not alias input");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(index_0)), cosine, 0.000001F, "F32 RoPE vector value 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(index_1)), sine, 0.000001F, "F32 RoPE vector value 1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(index_2)), -sine, 0.000001F, "F32 RoPE vector value 2 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(index_3)), cosine, 0.000001F, "F32 RoPE vector value 3 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_4)) == 9.0F, "F32 RoPE trailing value mismatch");
+}
+
+void test_applies_f32_rope_to_batched_rows() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 4}), DType::f32));
+    const std::array<std::uint64_t, 2> row0_col0 {0, 0};
+    const std::array<std::uint64_t, 2> row0_col1 {0, 1};
+    const std::array<std::uint64_t, 2> row0_col2 {0, 2};
+    const std::array<std::uint64_t, 2> row0_col3 {0, 3};
+    const std::array<std::uint64_t, 2> row1_col0 {1, 0};
+    const std::array<std::uint64_t, 2> row1_col1 {1, 1};
+    const std::array<std::uint64_t, 2> row1_col2 {1, 2};
+    const std::array<std::uint64_t, 2> row1_col3 {1, 3};
+    write_f32(input, std::span<const std::uint64_t>(row0_col0), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(row0_col1), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row0_col2), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row0_col3), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col0), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col1), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col2), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col3), 0.0F);
+
+    const auto output = rope_f32(input, 1, 4, 1.0F);
+    const auto cosine = static_cast<float>(std::cos(1.0));
+    const auto sine = static_cast<float>(std::sin(1.0));
+
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col0)), cosine, 0.000001F, "F32 RoPE batch value 0,0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col1)), sine, 0.000001F, "F32 RoPE batch value 0,1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col2)), -sine, 0.000001F, "F32 RoPE batch value 0,2 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col3)), cosine, 0.000001F, "F32 RoPE batch value 0,3 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_col0)), -sine, 0.000001F, "F32 RoPE batch value 1,0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_col1)), cosine, 0.000001F, "F32 RoPE batch value 1,1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_col2)), cosine, 0.000001F, "F32 RoPE batch value 1,2 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_col3)), sine, 0.000001F, "F32 RoPE batch value 1,3 mismatch");
+}
+
+void test_applies_f32_rope_frequency_base_by_pair() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({4}), DType::f32));
+    const std::array<std::uint64_t, 1> index_0 {0};
+    const std::array<std::uint64_t, 1> index_1 {1};
+    const std::array<std::uint64_t, 1> index_2 {2};
+    const std::array<std::uint64_t, 1> index_3 {3};
+    write_f32(input, std::span<const std::uint64_t>(index_0), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_1), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_2), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_3), 0.0F);
+
+    const auto output = rope_f32(input, 1, 4, 10000.0F);
+    const auto first_angle = 1.0;
+    const auto second_angle = 0.01;
+
+    expect_close(read_f32(output, std::span<const std::uint64_t>(index_0)), static_cast<float>(std::cos(first_angle)), 0.000001F, "F32 RoPE first pair cosine mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(index_1)), static_cast<float>(std::sin(first_angle)), 0.000001F, "F32 RoPE first pair sine mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(index_2)), static_cast<float>(std::cos(second_angle)), 0.000001F, "F32 RoPE second pair cosine mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(index_3)), static_cast<float>(std::sin(second_angle)), 0.000001F, "F32 RoPE second pair sine mismatch");
+}
+
+void test_rejects_f32_rope_dtype_mismatch() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({4}), DType::f16));
+
+    try {
+        (void)rope_f32(input, 1, 4, 10000.0F);
+        throw TestFailure("F32 RoPE should reject F16 input");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::unsupported_operator_dtype, "F32 RoPE dtype error code mismatch");
+        expect(error.expected_value() == 0, "F32 RoPE expected dtype mismatch");
+        expect(error.actual_value() == 1, "F32 RoPE actual dtype mismatch");
+    }
+}
+
+void test_rejects_f32_rope_input_rank_above_two() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2, 2}), DType::f32));
+
+    try {
+        (void)rope_f32(input, 1, 2, 10000.0F);
+        throw TestFailure("F32 RoPE should reject rank-three input");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_shape_rank, "F32 RoPE rank error code mismatch");
+        expect(error.expected_value() == 2, "F32 RoPE expected rank mismatch");
+        expect(error.actual_value() == 3, "F32 RoPE actual rank mismatch");
+    }
+}
+
+void test_rejects_f32_rope_invalid_dimension_count() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({4}), DType::f32));
+
+    try {
+        (void)rope_f32(input, 1, 3, 10000.0F);
+        throw TestFailure("F32 RoPE should reject odd dimension count");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_shape_dimension, "F32 RoPE odd dimension error mismatch");
+        expect(error.expected_value() == 2, "F32 RoPE expected dimension multiple mismatch");
+        expect(error.actual_value() == 3, "F32 RoPE actual odd dimension mismatch");
+    }
+}
+
+void test_rejects_f32_rope_dimension_count_above_hidden() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({4}), DType::f32));
+
+    try {
+        (void)rope_f32(input, 1, 6, 10000.0F);
+        throw TestFailure("F32 RoPE should reject dimension count above hidden size");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 RoPE dimension shape error mismatch");
+        expect(error.expected_value() == 4, "F32 RoPE expected hidden dimension mismatch");
+        expect(error.actual_value() == 6, "F32 RoPE actual rope dimension mismatch");
+    }
+}
+
+void test_rejects_f32_rope_nonpositive_frequency_base() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({4}), DType::f32));
+
+    try {
+        (void)rope_f32(input, 1, 4, 0.0F);
+        throw TestFailure("F32 RoPE should reject nonpositive frequency base");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "RoPE frequency base must be positive",
+            "F32 RoPE frequency base error mismatch"
+        );
+    }
+
+    try {
+        (void)rope_f32(input, 1, 4, std::numeric_limits<float>::quiet_NaN());
+        throw TestFailure("F32 RoPE should reject NaN frequency base");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "RoPE frequency base must be positive",
+            "F32 RoPE NaN frequency base error mismatch"
+        );
+    }
+}
+
+void test_applies_f32_softmax_to_vector() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({3}), DType::f32));
+    const std::array<std::uint64_t, 1> index_0 {0};
+    const std::array<std::uint64_t, 1> index_1 {1};
+    const std::array<std::uint64_t, 1> index_2 {2};
+    write_f32(input, std::span<const std::uint64_t>(index_0), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_1), 2.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_2), 3.0F);
+
+    const auto output = softmax_f32(input);
+    const auto denominator = std::exp(-2.0) + std::exp(-1.0) + 1.0;
+
+    expect(output.descriptor() == input.descriptor(), "F32 softmax vector output descriptor mismatch");
+    expect(output.bytes().data() != input.bytes().data(), "F32 softmax vector output should not alias input");
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_0)),
+        static_cast<float>(std::exp(-2.0) / denominator),
+        0.000001F,
+        "F32 softmax vector value 0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_1)),
+        static_cast<float>(std::exp(-1.0) / denominator),
+        0.000001F,
+        "F32 softmax vector value 1 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_2)),
+        static_cast<float>(1.0 / denominator),
+        0.000001F,
+        "F32 softmax vector value 2 mismatch"
+    );
+}
+
+void test_applies_f32_softmax_to_batched_rows() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 3}), DType::f32));
+    const std::array<std::uint64_t, 2> row0_col0 {0, 0};
+    const std::array<std::uint64_t, 2> row0_col1 {0, 1};
+    const std::array<std::uint64_t, 2> row0_col2 {0, 2};
+    const std::array<std::uint64_t, 2> row1_col0 {1, 0};
+    const std::array<std::uint64_t, 2> row1_col1 {1, 1};
+    const std::array<std::uint64_t, 2> row1_col2 {1, 2};
+    write_f32(input, std::span<const std::uint64_t>(row0_col0), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row0_col1), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row0_col2), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col0), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col1), 3.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col2), 3.0F);
+
+    const auto output = softmax_f32(input);
+    const auto row1_denominator = std::exp(-2.0) + 2.0;
+
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col0)), 1.0F / 3.0F, 0.000001F, "F32 softmax row 0,0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col1)), 1.0F / 3.0F, 0.000001F, "F32 softmax row 0,1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col2)), 1.0F / 3.0F, 0.000001F, "F32 softmax row 0,2 mismatch");
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row1_col0)),
+        static_cast<float>(std::exp(-2.0) / row1_denominator),
+        0.000001F,
+        "F32 softmax row 1,0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row1_col1)),
+        static_cast<float>(1.0 / row1_denominator),
+        0.000001F,
+        "F32 softmax row 1,1 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row1_col2)),
+        static_cast<float>(1.0 / row1_denominator),
+        0.000001F,
+        "F32 softmax row 1,2 mismatch"
+    );
+}
+
+void test_applies_f32_softmax_to_large_values() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({3}), DType::f32));
+    const std::array<std::uint64_t, 1> index_0 {0};
+    const std::array<std::uint64_t, 1> index_1 {1};
+    const std::array<std::uint64_t, 1> index_2 {2};
+    write_f32(input, std::span<const std::uint64_t>(index_0), 1000.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_1), 1001.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_2), 1002.0F);
+
+    const auto output = softmax_f32(input);
+    const auto denominator = std::exp(-2.0) + std::exp(-1.0) + 1.0;
+
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_0)),
+        static_cast<float>(std::exp(-2.0) / denominator),
+        0.000001F,
+        "F32 softmax stable value 0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_1)),
+        static_cast<float>(std::exp(-1.0) / denominator),
+        0.000001F,
+        "F32 softmax stable value 1 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_2)),
+        static_cast<float>(1.0 / denominator),
+        0.000001F,
+        "F32 softmax stable value 2 mismatch"
+    );
+}
+
+void test_rejects_f32_softmax_dtype_mismatch() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({3}), DType::f16));
+
+    try {
+        (void)softmax_f32(input);
+        throw TestFailure("F32 softmax should reject F16 input");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::unsupported_operator_dtype, "F32 softmax dtype error code mismatch");
+        expect(error.expected_value() == 0, "F32 softmax expected dtype mismatch");
+        expect(error.actual_value() == 1, "F32 softmax actual dtype mismatch");
+    }
+}
+
+void test_rejects_f32_softmax_input_rank_above_two() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2, 2}), DType::f32));
+
+    try {
+        (void)softmax_f32(input);
+        throw TestFailure("F32 softmax should reject rank-three input");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_shape_rank, "F32 softmax rank error code mismatch");
+        expect(error.expected_value() == 2, "F32 softmax expected rank mismatch");
+        expect(error.actual_value() == 3, "F32 softmax actual rank mismatch");
     }
 }
 
@@ -2428,6 +2730,19 @@ int main() {
             test_rejects_f32_rms_norm_hidden_dimension_mismatch,
         },
         {"rejects F32 RMSNorm nonpositive epsilon", test_rejects_f32_rms_norm_nonpositive_epsilon},
+        {"applies F32 RoPE to vector", test_applies_f32_rope_to_vector},
+        {"applies F32 RoPE to batched rows", test_applies_f32_rope_to_batched_rows},
+        {"applies F32 RoPE frequency base by pair", test_applies_f32_rope_frequency_base_by_pair},
+        {"rejects F32 RoPE dtype mismatch", test_rejects_f32_rope_dtype_mismatch},
+        {"rejects F32 RoPE input rank above two", test_rejects_f32_rope_input_rank_above_two},
+        {"rejects F32 RoPE invalid dimension count", test_rejects_f32_rope_invalid_dimension_count},
+        {"rejects F32 RoPE dimension count above hidden", test_rejects_f32_rope_dimension_count_above_hidden},
+        {"rejects F32 RoPE nonpositive frequency base", test_rejects_f32_rope_nonpositive_frequency_base},
+        {"applies F32 softmax to vector", test_applies_f32_softmax_to_vector},
+        {"applies F32 softmax to batched rows", test_applies_f32_softmax_to_batched_rows},
+        {"applies F32 softmax to large values", test_applies_f32_softmax_to_large_values},
+        {"rejects F32 softmax dtype mismatch", test_rejects_f32_softmax_dtype_mismatch},
+        {"rejects F32 softmax input rank above two", test_rejects_f32_softmax_input_rank_above_two},
         {"multiplies F32 matrices", test_multiplies_f32_matrices},
         {"rejects F32 matmul dtype mismatch", test_rejects_f32_matmul_dtype_mismatch},
         {"rejects F32 matmul non-matrix rank", test_rejects_f32_matmul_non_matrix_rank},

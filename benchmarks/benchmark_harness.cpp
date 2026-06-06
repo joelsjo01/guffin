@@ -7,6 +7,8 @@
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/reduction.hpp"
+#include "local_gguf_engine/tensor/ops/rope.hpp"
+#include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
@@ -45,6 +47,8 @@ using tensor::ops::add_f32;
 using tensor::ops::matmul_f32;
 using tensor::ops::matmul_f32_f16;
 using tensor::ops::rms_norm_f32;
+using tensor::ops::rope_f32;
+using tensor::ops::softmax_f32;
 using tensor::ops::sum_f32;
 
 struct IterationMeasurement {
@@ -237,6 +241,32 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
             const auto output = rms_norm_f32(matmul_left, rms_norm_weight, 0.00001F);
             return IterationMeasurement {
                 .bytes_processed = matmul_left.bytes().size() + rms_norm_weight.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tensor.rope_f32",
+        report.config.iterations,
+        "input=[64,64] position=1 rope_dim=64 freq_base=10000 dtype=F32",
+        [&matmul_left]() {
+            const auto output = rope_f32(matmul_left, 1, 64, 10000.0F);
+            return IterationMeasurement {
+                .bytes_processed = matmul_left.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tensor.softmax_f32",
+        report.config.iterations,
+        "input=[64,64] dtype=F32 rowwise",
+        [&matmul_left]() {
+            const auto output = softmax_f32(matmul_left);
+            return IterationMeasurement {
+                .bytes_processed = matmul_left.bytes().size() + output.bytes().size(),
                 .checksum = checksum_f32(sum_f32(output)),
             };
         }

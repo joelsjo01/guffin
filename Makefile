@@ -17,6 +17,8 @@ ENGINE_SOURCES := \
 	src/tensor/ops/matmul.cpp \
 	src/tensor/ops/normalization.cpp \
 	src/tensor/ops/reduction.cpp \
+	src/tensor/ops/rope.cpp \
+	src/tensor/ops/softmax.cpp \
 	src/tensor/quantization.cpp \
 	src/tensor/shape.cpp \
 	src/tensor/tensor.cpp \
