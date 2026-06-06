@@ -1,5 +1,6 @@
 #include "local_gguf_engine/benchmarks/benchmark_harness.hpp"
 
+#include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
@@ -29,6 +30,7 @@ namespace local_gguf_engine::benchmarks {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using engine::load_engine_model_from_gguf;
 using model_format::load_gguf_tensor_payloads;
 using model_format::read_gguf_model_view;
 using tensor::DType;
@@ -236,6 +238,28 @@ void add_model_load_benchmarks(BenchmarkReport& report, const std::filesystem::p
             std::size_t bytes_processed = 0;
             std::uint64_t checksum = 0;
             for (const auto& tensor : loaded) {
+                bytes_processed += tensor.storage.bytes().size();
+                checksum ^= checksum_byte_span(tensor.storage.bytes());
+            }
+
+            return IterationMeasurement {
+                .bytes_processed = bytes_processed,
+                .checksum = checksum,
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.load_model",
+        report.config.iterations,
+        "model=" + model_path.string(),
+        [&model]() {
+            const auto loaded = load_engine_model_from_gguf(model);
+            std::size_t bytes_processed = 0;
+            std::uint64_t checksum = loaded.llama_config().block_count
+                ^ loaded.llama_config().embedding_length
+                ^ static_cast<std::uint64_t>(loaded.tensors().size());
+            for (const auto& tensor : loaded.tensors()) {
                 bytes_processed += tensor.storage.bytes().size();
                 checksum ^= checksum_byte_span(tensor.storage.bytes());
             }
