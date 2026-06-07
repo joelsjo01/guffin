@@ -47,6 +47,8 @@ using engine::run_llama_attention_layer_f32;
 using engine::run_llama_block_f32;
 using engine::run_llama_feed_forward_layer_f32;
 using engine::run_llama_model_blocks_f32;
+using engine::run_llama_model_logits_f32;
+using engine::run_llama_model_next_token_argmax_f32;
 using model_format::load_gguf_tensor_payloads;
 using model_format::read_gguf_model_view;
 using tensor::DType;
@@ -195,6 +197,10 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     const auto llama_gate_weight = make_f16_matrix(matmul_size, 128, 0.001F);
     const auto llama_up_weight = make_f16_matrix(matmul_size, 128, 0.0015F);
     const auto llama_down_weight = make_f16_matrix(128, matmul_size, 0.002F);
+    const auto llama_token_embedding_weight = make_f16_matrix(matmul_size, 1024, 0.0005F);
+    const auto llama_final_norm_weight = make_f32_storage(matmul_size, 1.0F);
+    const auto llama_logits_weight = make_f16_matrix(matmul_size, 1024, 0.00075F);
+    const std::array<std::uint32_t, 8> llama_token_ids {1, 5, 9, 13, 17, 21, 25, 29};
     const LlamaModelConfig llama_layer_config {
         .context_length = 128,
         .embedding_length = 64,
@@ -228,9 +234,12 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     };
     auto llama_model_blocks_config = llama_layer_config;
     llama_model_blocks_config.block_count = 2;
-    LlamaModelWeights llama_model_weights;
-    llama_model_weights.blocks.push_back(llama_block_weights);
-    llama_model_weights.blocks.push_back(llama_block_weights);
+    const LlamaModelWeights llama_model_weights {
+        .token_embedding_weight = llama_token_embedding_weight,
+        .output_norm_weight = llama_final_norm_weight,
+        .output_weight = llama_logits_weight,
+        .blocks = {llama_block_weights, llama_block_weights},
+    };
 
     report.measurements.push_back(measure(
         "tensor.allocate_f32",
@@ -484,6 +493,73 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
                     + llama_model_weights.blocks.size() * block_weight_bytes
                     + output.bytes().size(),
                 .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_model_logits_f32",
+        report.config.iterations,
+        "tokens=8 hidden=64 vocab=1024 blocks=2 dtype=F32/F16",
+        [&llama_token_ids, &llama_model_weights, &llama_model_blocks_config]() {
+            const auto output = run_llama_model_logits_f32(
+                std::span<const std::uint32_t>(llama_token_ids),
+                llama_model_weights,
+                llama_model_blocks_config,
+                1
+            );
+            const auto block_weight_bytes =
+                llama_model_weights.blocks[0].attention.attention_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.query_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.key_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.value_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.output_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.feed_forward_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.gate_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.up_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.down_weight.bytes().size();
+
+            return IterationMeasurement {
+                .bytes_processed = llama_token_ids.size() * sizeof(std::uint32_t)
+                    + llama_model_weights.token_embedding_weight.bytes().size()
+                    + llama_model_weights.output_norm_weight.bytes().size()
+                    + llama_model_weights.output_weight.bytes().size()
+                    + llama_model_weights.blocks.size() * block_weight_bytes
+                    + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_next_token_argmax_f32",
+        report.config.iterations,
+        "tokens=8 hidden=64 vocab=1024 blocks=2 sampler=argmax",
+        [&llama_token_ids, &llama_model_weights, &llama_model_blocks_config]() {
+            const auto token = run_llama_model_next_token_argmax_f32(
+                std::span<const std::uint32_t>(llama_token_ids),
+                llama_model_weights,
+                llama_model_blocks_config,
+                1
+            );
+            const auto block_weight_bytes =
+                llama_model_weights.blocks[0].attention.attention_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.query_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.key_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.value_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.output_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.feed_forward_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.gate_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.up_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.down_weight.bytes().size();
+
+            return IterationMeasurement {
+                .bytes_processed = llama_token_ids.size() * sizeof(std::uint32_t)
+                    + llama_model_weights.token_embedding_weight.bytes().size()
+                    + llama_model_weights.output_norm_weight.bytes().size()
+                    + llama_model_weights.output_weight.bytes().size()
+                    + llama_model_weights.blocks.size() * block_weight_bytes,
+                .checksum = token,
             };
         }
     ));

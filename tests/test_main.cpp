@@ -2,6 +2,7 @@
 #include "local_gguf_engine/engine/llama_layer.hpp"
 #include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
+#include "local_gguf_engine/engine/sampling.hpp"
 #include "local_gguf_engine/frontends/cli/gguf_inspect.hpp"
 #include "local_gguf_engine/model_format/gguf_header.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
@@ -48,6 +49,7 @@ using local_gguf_engine::benchmarks::default_benchmark_output_path;
 using local_gguf_engine::benchmarks::format_benchmark_report;
 using local_gguf_engine::benchmarks::parse_benchmark_args;
 using local_gguf_engine::engine::bind_llama_model_weights;
+using local_gguf_engine::engine::embed_llama_token_ids_f32;
 using local_gguf_engine::engine::EngineModel;
 using local_gguf_engine::engine::EngineModelError;
 using local_gguf_engine::engine::EngineModelErrorCode;
@@ -60,10 +62,14 @@ using local_gguf_engine::engine::LlamaModelWeights;
 using local_gguf_engine::engine::ModelArchitecture;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::model_architecture_name;
+using local_gguf_engine::engine::project_llama_logits_f32;
 using local_gguf_engine::engine::run_llama_attention_layer_f32;
 using local_gguf_engine::engine::run_llama_block_f32;
 using local_gguf_engine::engine::run_llama_feed_forward_layer_f32;
 using local_gguf_engine::engine::run_llama_model_blocks_f32;
+using local_gguf_engine::engine::run_llama_model_logits_f32;
+using local_gguf_engine::engine::run_llama_model_next_token_argmax_f32;
+using local_gguf_engine::engine::sample_argmax_token_f32;
 using local_gguf_engine::model_format::GGUFHeader;
 using local_gguf_engine::model_format::GGUFMetadataEntry;
 using local_gguf_engine::model_format::GGUFMetadataArray;
@@ -2474,6 +2480,31 @@ void add_tiny_llama_block_tensors(
     }
 }
 
+void add_tiny_llama_top_level_tensors(std::vector<EngineTensor>& tensors) {
+    const std::array<float, 16> token_embedding_values {
+        1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F, 7.0F, 8.0F,
+        10.0F, 20.0F, 30.0F, 40.0F, 50.0F, 60.0F, 70.0F, 80.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 16> output_values {
+        1.0F, 0.0F, 2.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+        0.0F, 1.0F, 3.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+    };
+
+    tensors.push_back(engine_tensor(
+        "token_embd.weight",
+        tensor_f16_matrix(2, 8, std::span<const float>(token_embedding_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output_norm.weight",
+        tensor_f32_vector(std::span<const float>(norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output.weight",
+        tensor_f16_matrix(2, 8, std::span<const float>(output_values))
+    ));
+}
+
 [[nodiscard]] EngineModel tiny_bound_llama_model(LlamaModelConfig config, std::vector<EngineTensor> tensors) {
     return EngineModel(ModelArchitecture::llama, {}, config, std::move(tensors));
 }
@@ -2482,6 +2513,7 @@ void test_binds_and_runs_llama_model_blocks_from_named_tensors() {
     auto config = tiny_feed_forward_layer_config();
     config.block_count = 2;
     std::vector<EngineTensor> tensors;
+    add_tiny_llama_top_level_tensors(tensors);
     add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
     add_tiny_llama_block_tensors(tensors, 1, 0.5F, false, true);
     const auto model = tiny_bound_llama_model(config, std::move(tensors));
@@ -2523,6 +2555,7 @@ void test_rejects_llama_model_weight_binding_missing_tensor() {
     auto config = tiny_feed_forward_layer_config();
     config.block_count = 1;
     std::vector<EngineTensor> tensors;
+    add_tiny_llama_top_level_tensors(tensors);
     add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, false);
     const auto model = tiny_bound_llama_model(config, std::move(tensors));
 
@@ -2539,6 +2572,7 @@ void test_rejects_llama_model_blocks_projection_dtype_mismatch() {
     auto config = tiny_feed_forward_layer_config();
     config.block_count = 1;
     std::vector<EngineTensor> tensors;
+    add_tiny_llama_top_level_tensors(tensors);
     add_tiny_llama_block_tensors(tensors, 0, 1.0F, true, true);
     const auto model = tiny_bound_llama_model(config, std::move(tensors));
     const auto weights = bind_llama_model_weights(model);
@@ -2555,6 +2589,342 @@ void test_rejects_llama_model_blocks_projection_dtype_mismatch() {
         );
         expect(error.expected_value() == 1, "Llama model expected projection dtype mismatch");
         expect(error.actual_value() == 0, "Llama model actual projection dtype mismatch");
+    }
+}
+
+LlamaModelConfig tiny_logits_config() {
+    auto config = tiny_feed_forward_layer_config();
+    config.vocab_size = 3;
+    return config;
+}
+
+void test_embeds_llama_token_ids_from_f16_weight() {
+    const std::array<float, 6> embedding_values {
+        1.0F, 2.0F, 3.0F,
+        10.0F, 20.0F, 30.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 6> output_values {
+        1.0F, 0.0F, 2.0F,
+        0.0F, 1.0F, 3.0F,
+    };
+    const auto token_embedding_weight = tensor_f16_matrix(2, 3, std::span<const float>(embedding_values));
+    const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    const auto output_weight = tensor_f16_matrix(2, 3, std::span<const float>(output_values));
+    const LlamaModelWeights weights {
+        .token_embedding_weight = token_embedding_weight,
+        .output_norm_weight = output_norm_weight,
+        .output_weight = output_weight,
+        .blocks = {},
+    };
+    const std::array<std::uint32_t, 2> token_ids {2, 0};
+
+    const auto output = embed_llama_token_ids_f32(std::span<const std::uint32_t>(token_ids), weights, tiny_logits_config());
+
+    expect(output.descriptor().shape == Shape::from({2, 2}), "Llama token embedding output shape mismatch");
+    expect(output.descriptor().dtype == DType::f32, "Llama token embedding output dtype mismatch");
+    const std::array<std::uint64_t, 2> index_00 {0, 0};
+    const std::array<std::uint64_t, 2> index_01 {0, 1};
+    const std::array<std::uint64_t, 2> index_10 {1, 0};
+    const std::array<std::uint64_t, 2> index_11 {1, 1};
+    expect(read_f32(output, std::span<const std::uint64_t>(index_00)) == 3.0F, "Llama token embedding value 0,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_01)) == 30.0F, "Llama token embedding value 0,1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_10)) == 1.0F, "Llama token embedding value 1,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 10.0F, "Llama token embedding value 1,1 mismatch");
+}
+
+void test_rejects_llama_token_embedding_id_out_of_range() {
+    const std::array<float, 6> embedding_values {
+        1.0F, 2.0F, 3.0F,
+        10.0F, 20.0F, 30.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 6> output_values {
+        1.0F, 0.0F, 2.0F,
+        0.0F, 1.0F, 3.0F,
+    };
+    const auto token_embedding_weight = tensor_f16_matrix(2, 3, std::span<const float>(embedding_values));
+    const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    const auto output_weight = tensor_f16_matrix(2, 3, std::span<const float>(output_values));
+    const LlamaModelWeights weights {
+        .token_embedding_weight = token_embedding_weight,
+        .output_norm_weight = output_norm_weight,
+        .output_weight = output_weight,
+        .blocks = {},
+    };
+    const std::array<std::uint32_t, 1> token_ids {3};
+
+    try {
+        (void)embed_llama_token_ids_f32(std::span<const std::uint32_t>(token_ids), weights, tiny_logits_config());
+        throw TestFailure("Llama token embedding should reject token id above vocab");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_index_out_of_range, "Llama token id error mismatch");
+        expect(error.expected_value() == 3, "Llama token id expected vocab mismatch");
+        expect(error.actual_value() == 3, "Llama token id actual mismatch");
+    }
+}
+
+void test_projects_llama_logits_with_final_norm() {
+    const std::array<float, 6> embedding_values {
+        1.0F, 2.0F, 3.0F,
+        10.0F, 20.0F, 30.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 6> output_values {
+        1.0F, 0.0F, 2.0F,
+        0.0F, 1.0F, 3.0F,
+    };
+    const std::array<float, 2> hidden_values {3.0F, 4.0F};
+    const auto token_embedding_weight = tensor_f16_matrix(2, 3, std::span<const float>(embedding_values));
+    const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    const auto output_weight = tensor_f16_matrix(2, 3, std::span<const float>(output_values));
+    const auto hidden_states = tensor_f32_matrix(1, 2, std::span<const float>(hidden_values));
+    const LlamaModelWeights weights {
+        .token_embedding_weight = token_embedding_weight,
+        .output_norm_weight = output_norm_weight,
+        .output_weight = output_weight,
+        .blocks = {},
+    };
+
+    const auto logits = project_llama_logits_f32(hidden_states, weights, tiny_logits_config());
+
+    expect(logits.descriptor().shape == Shape::from({1, 3}), "Llama logits shape mismatch");
+    expect(logits.descriptor().dtype == DType::f32, "Llama logits dtype mismatch");
+    const std::array<std::uint64_t, 2> index_0 {0, 0};
+    const std::array<std::uint64_t, 2> index_1 {0, 1};
+    const std::array<std::uint64_t, 2> index_2 {0, 2};
+    expect_close(read_f32(logits, std::span<const std::uint64_t>(index_0)), 0.75F, 0.000001F, "Llama logits value 0 mismatch");
+    expect_close(read_f32(logits, std::span<const std::uint64_t>(index_1)), 1.0F, 0.000001F, "Llama logits value 1 mismatch");
+    expect_close(read_f32(logits, std::span<const std::uint64_t>(index_2)), 4.5F, 0.000001F, "Llama logits value 2 mismatch");
+}
+
+void test_runs_llama_model_logits_from_token_ids() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    const std::array<float, 6> embedding_values {
+        3.0F, 0.0F, 0.0F,
+        4.0F, 0.0F, 0.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 6> output_values {
+        1.0F, 0.0F, 2.0F,
+        0.0F, 1.0F, 3.0F,
+    };
+    std::vector<EngineTensor> tensors;
+    tensors.push_back(engine_tensor(
+        "token_embd.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output_norm.weight",
+        tensor_f32_vector(std::span<const float>(norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+    ));
+    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
+    const auto model = tiny_bound_llama_model(config, std::move(tensors));
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 1> token_ids {0};
+
+    const auto logits = run_llama_model_logits_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        0
+    );
+    const auto embeddings = embed_llama_token_ids_f32(std::span<const std::uint32_t>(token_ids), weights, model.llama_config());
+    const auto hidden_states = run_llama_model_blocks_f32(embeddings, weights, model.llama_config(), 0);
+    const auto expected = project_llama_logits_f32(hidden_states, weights, model.llama_config());
+
+    expect(logits.descriptor().shape == Shape::from({1, 3}), "Llama model logits shape mismatch");
+    const std::array<std::uint64_t, 2> index_0 {0, 0};
+    const std::array<std::uint64_t, 2> index_1 {0, 1};
+    const std::array<std::uint64_t, 2> index_2 {0, 2};
+    expect_close(
+        read_f32(logits, std::span<const std::uint64_t>(index_0)),
+        read_f32(expected, std::span<const std::uint64_t>(index_0)),
+        0.000001F,
+        "Llama model logits value 0 mismatch"
+    );
+    expect_close(
+        read_f32(logits, std::span<const std::uint64_t>(index_1)),
+        read_f32(expected, std::span<const std::uint64_t>(index_1)),
+        0.000001F,
+        "Llama model logits value 1 mismatch"
+    );
+    expect_close(
+        read_f32(logits, std::span<const std::uint64_t>(index_2)),
+        read_f32(expected, std::span<const std::uint64_t>(index_2)),
+        0.000001F,
+        "Llama model logits value 2 mismatch"
+    );
+}
+
+void test_rejects_llama_logits_output_weight_dtype_mismatch() {
+    const std::array<float, 6> embedding_values {
+        1.0F, 2.0F, 3.0F,
+        10.0F, 20.0F, 30.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 6> output_values {
+        1.0F, 0.0F, 2.0F,
+        0.0F, 1.0F, 3.0F,
+    };
+    const std::array<float, 2> hidden_values {3.0F, 4.0F};
+    const auto token_embedding_weight = tensor_f16_matrix(2, 3, std::span<const float>(embedding_values));
+    const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    const auto output_weight = tensor_f32_matrix(2, 3, std::span<const float>(output_values));
+    const auto hidden_states = tensor_f32_matrix(1, 2, std::span<const float>(hidden_values));
+    const LlamaModelWeights weights {
+        .token_embedding_weight = token_embedding_weight,
+        .output_norm_weight = output_norm_weight,
+        .output_weight = output_weight,
+        .blocks = {},
+    };
+
+    try {
+        (void)project_llama_logits_f32(hidden_states, weights, tiny_logits_config());
+        throw TestFailure("Llama logits projection should reject F32 output weight");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::unsupported_operator_dtype, "Llama logits dtype error mismatch");
+        expect(error.expected_value() == 1, "Llama logits expected output dtype mismatch");
+        expect(error.actual_value() == 0, "Llama logits actual output dtype mismatch");
+    }
+}
+
+void test_samples_argmax_token_from_f32_logits_vector() {
+    const std::array<float, 4> logits_values {0.5F, 3.0F, 3.0F, 2.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+
+    const auto token = sample_argmax_token_f32(logits);
+
+    expect(token == 1, "argmax sampler should pick the first max token");
+}
+
+void test_samples_argmax_token_from_last_logits_row() {
+    const std::array<float, 6> logits_values {
+        0.0F, 1.0F, 9.0F,
+        4.0F, 3.0F, 4.0F,
+    };
+    const auto logits = tensor_f32_matrix(2, 3, std::span<const float>(logits_values));
+
+    const auto token = sample_argmax_token_f32(logits);
+
+    expect(token == 0, "argmax sampler should use the last logits row and first-max tie break");
+}
+
+void test_rejects_argmax_sampler_dtype_mismatch() {
+    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
+    const auto logits = tensor_f16_matrix(1, 3, std::span<const float>(logits_values));
+
+    try {
+        (void)sample_argmax_token_f32(logits);
+        throw TestFailure("argmax sampler should reject F16 logits");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::unsupported_operator_dtype, "argmax sampler dtype error mismatch");
+        expect(error.expected_value() == 0, "argmax sampler expected dtype mismatch");
+        expect(error.actual_value() == 1, "argmax sampler actual dtype mismatch");
+    }
+}
+
+void test_rejects_argmax_sampler_rank_above_two() {
+    const auto logits = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 1, 2}), DType::f32));
+
+    try {
+        (void)sample_argmax_token_f32(logits);
+        throw TestFailure("argmax sampler should reject logits rank above two");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_shape_rank, "argmax sampler rank error mismatch");
+        expect(error.expected_value() == 2, "argmax sampler expected rank mismatch");
+        expect(error.actual_value() == 3, "argmax sampler actual rank mismatch");
+    }
+}
+
+void test_runs_llama_next_token_argmax_from_token_ids() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    const std::array<float, 6> embedding_values {
+        3.0F, 0.0F, 0.0F,
+        4.0F, 0.0F, 0.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 6> output_values {
+        1.0F, 0.0F, 2.0F,
+        0.0F, 1.0F, 3.0F,
+    };
+    std::vector<EngineTensor> tensors;
+    tensors.push_back(engine_tensor(
+        "token_embd.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output_norm.weight",
+        tensor_f32_vector(std::span<const float>(norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+    ));
+    add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
+    const auto model = tiny_bound_llama_model(config, std::move(tensors));
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 1> token_ids {0};
+
+    const auto token = run_llama_model_next_token_argmax_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        0
+    );
+
+    expect(token == 2, "Llama next-token argmax mismatch");
+}
+
+void test_rejects_llama_next_token_empty_token_ids() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    const std::array<float, 6> embedding_values {
+        3.0F, 0.0F, 0.0F,
+        4.0F, 0.0F, 0.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 6> output_values {
+        1.0F, 0.0F, 2.0F,
+        0.0F, 1.0F, 3.0F,
+    };
+    std::vector<EngineTensor> tensors;
+    tensors.push_back(engine_tensor(
+        "token_embd.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output_norm.weight",
+        tensor_f32_vector(std::span<const float>(norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+    ));
+    add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
+    const auto model = tiny_bound_llama_model(config, std::move(tensors));
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 0> token_ids {};
+
+    try {
+        (void)run_llama_model_next_token_argmax_f32(
+            std::span<const std::uint32_t>(token_ids),
+            weights,
+            model.llama_config(),
+            0
+        );
+        throw TestFailure("Llama next-token helper should reject empty token IDs");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Llama token id span must not be empty",
+            "Llama next-token empty input error mismatch"
+        );
     }
 }
 
@@ -3741,6 +4111,23 @@ int main() {
             "rejects Llama model blocks projection dtype mismatch",
             test_rejects_llama_model_blocks_projection_dtype_mismatch,
         },
+        {"embeds Llama token IDs from F16 weight", test_embeds_llama_token_ids_from_f16_weight},
+        {
+            "rejects Llama token embedding ID out of range",
+            test_rejects_llama_token_embedding_id_out_of_range,
+        },
+        {"projects Llama logits with final norm", test_projects_llama_logits_with_final_norm},
+        {"runs Llama model logits from token IDs", test_runs_llama_model_logits_from_token_ids},
+        {
+            "rejects Llama logits output weight dtype mismatch",
+            test_rejects_llama_logits_output_weight_dtype_mismatch,
+        },
+        {"samples argmax token from F32 logits vector", test_samples_argmax_token_from_f32_logits_vector},
+        {"samples argmax token from last logits row", test_samples_argmax_token_from_last_logits_row},
+        {"rejects argmax sampler dtype mismatch", test_rejects_argmax_sampler_dtype_mismatch},
+        {"rejects argmax sampler rank above two", test_rejects_argmax_sampler_rank_above_two},
+        {"runs Llama next-token argmax from token IDs", test_runs_llama_next_token_argmax_from_token_ids},
+        {"rejects Llama next-token empty token IDs", test_rejects_llama_next_token_empty_token_ids},
         {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
         {
             "converts Q8_0 GGUF payload view to tensor storage",

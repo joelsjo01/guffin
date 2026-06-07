@@ -10,6 +10,7 @@ ENGINE_SOURCES := \
 	src/engine/llama_layer.cpp \
 	src/engine/llama_model.cpp \
 	src/engine/model.cpp \
+	src/engine/sampling.cpp \
 	src/model_format/gguf_reader.cpp \
 	src/model_format/gguf_tensor_bridge.cpp \
 	src/tensor/dtype.cpp \
