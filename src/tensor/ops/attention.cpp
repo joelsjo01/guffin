@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 
 namespace local_gguf_engine::tensor::ops {
@@ -46,6 +47,21 @@ void require_positive_finite_scale(float scale) {
     }
 }
 
+void require_causal_position_window(
+    std::uint64_t query_rows,
+    std::uint64_t key_rows,
+    std::uint64_t query_position_start
+) {
+    if (query_position_start > std::numeric_limits<std::uint64_t>::max() - query_rows) {
+        throw std::invalid_argument("attention causal query positions overflow");
+    }
+
+    const auto query_position_end = query_position_start + query_rows;
+    if (query_position_end > key_rows) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_rows, query_position_end);
+    }
+}
+
 [[nodiscard]] float read_f32_linear(const TensorStorage& storage, std::uint64_t linear_index) {
     float value = 0.0F;
     const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
@@ -58,13 +74,13 @@ void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float 
     std::memcpy(storage.mutable_bytes().data() + byte_offset, &value, sizeof(float));
 }
 
-}  // namespace
-
-TensorStorage scaled_dot_product_attention_f32(
+[[nodiscard]] TensorStorage scaled_dot_product_attention_impl_f32(
     const TensorStorage& query,
     const TensorStorage& key,
     const TensorStorage& value,
-    float scale
+    float scale,
+    bool causal,
+    std::uint64_t query_position_start
 ) {
     require_f32_operand(query);
     require_f32_operand(key);
@@ -80,10 +96,18 @@ TensorStorage scaled_dot_product_attention_f32(
     const auto key_rows = key.descriptor().shape.dimension(0);
     const auto hidden = query.descriptor().shape.dimension(1);
     const auto value_hidden = value.descriptor().shape.dimension(1);
+    if (causal) {
+        require_causal_position_window(query_rows, key_rows, query_position_start);
+    }
 
     auto scores = TensorStorage::allocate(TensorDescriptor::from(Shape::from({query_rows, key_rows}), DType::f32));
     for (std::uint64_t query_row = 0; query_row < query_rows; ++query_row) {
         for (std::uint64_t key_row = 0; key_row < key_rows; ++key_row) {
+            if (causal && key_row > query_position_start + query_row) {
+                write_f32_linear(scores, query_row * key_rows + key_row, -std::numeric_limits<float>::infinity());
+                continue;
+            }
+
             float dot = 0.0F;
             for (std::uint64_t column = 0; column < hidden; ++column) {
                 dot += read_f32_linear(query, query_row * hidden + column)
@@ -110,6 +134,27 @@ TensorStorage scaled_dot_product_attention_f32(
     }
 
     return output;
+}
+
+}  // namespace
+
+TensorStorage scaled_dot_product_attention_f32(
+    const TensorStorage& query,
+    const TensorStorage& key,
+    const TensorStorage& value,
+    float scale
+) {
+    return scaled_dot_product_attention_impl_f32(query, key, value, scale, false, 0);
+}
+
+TensorStorage causal_scaled_dot_product_attention_f32(
+    const TensorStorage& query,
+    const TensorStorage& key,
+    const TensorStorage& value,
+    float scale,
+    std::uint64_t query_position_start
+) {
+    return scaled_dot_product_attention_impl_f32(query, key, value, scale, true, query_position_start);
 }
 
 }  // namespace local_gguf_engine::tensor::ops

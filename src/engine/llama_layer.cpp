@@ -21,11 +21,11 @@ using tensor::TensorError;
 using tensor::TensorErrorCode;
 using tensor::TensorStorage;
 using tensor::ops::add_f32;
+using tensor::ops::causal_scaled_dot_product_attention_f32;
 using tensor::ops::matmul_f32_f16;
 using tensor::ops::multiply_f32;
 using tensor::ops::rms_norm_f32;
 using tensor::ops::rope_f32;
-using tensor::ops::scaled_dot_product_attention_f32;
 using tensor::ops::silu_f32;
 
 constexpr std::size_t vector_rank = 1;
@@ -103,6 +103,14 @@ void require_supported_config(const LlamaModelConfig& config) {
     if (config.rope_dimension_count > config.attention_key_length) {
         throw std::invalid_argument("Llama RoPE dimension must not exceed attention key length");
     }
+}
+
+[[nodiscard]] std::uint64_t query_position_start(std::uint64_t final_position, std::uint64_t token_count) {
+    if (final_position < token_count - 1) {
+        throw std::invalid_argument("Llama attention position must cover input rows");
+    }
+
+    return final_position - (token_count - 1);
 }
 
 [[nodiscard]] float read_f32_linear(const TensorStorage& storage, std::uint64_t linear_index) {
@@ -220,6 +228,7 @@ TensorStorage run_llama_attention_layer_f32(
     );
     const auto kv_group_size = head_count / kv_head_count;
     const auto attention_scale = 1.0F / std::sqrt(static_cast<float>(key_length));
+    const auto attention_query_position_start = query_position_start(position, token_count);
 
     for (std::uint64_t head = 0; head < head_count; ++head) {
         const auto kv_head = head / kv_group_size;
@@ -228,11 +237,12 @@ TensorStorage run_llama_attention_layer_f32(
         const auto value_head = copy_f32_columns(value, kv_head * value_length, value_length);
         const auto rotated_query = rope_f32(query_head, position, config.rope_dimension_count, config.rope_freq_base);
         const auto rotated_key = rope_f32(key_head, position, config.rope_dimension_count, config.rope_freq_base);
-        const auto head_output = scaled_dot_product_attention_f32(
+        const auto head_output = causal_scaled_dot_product_attention_f32(
             rotated_query,
             rotated_key,
             value_head,
-            attention_scale
+            attention_scale,
+            attention_query_position_start
         );
 
         write_f32_columns(attention_output, head * value_length, head_output);

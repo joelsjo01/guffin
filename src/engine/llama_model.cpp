@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -94,6 +95,21 @@ void require_f32_vector_shape(const TensorStorage& storage, std::uint64_t length
 void require_positive_config_dimension(std::uint32_t value) {
     if (value == 0) {
         throw std::invalid_argument("Llama model config dimensions must be positive");
+    }
+}
+
+void require_generation_fits_context(std::size_t prompt_tokens, std::size_t max_new_tokens, std::uint32_t context_length) {
+    if (context_length == 0) {
+        throw std::invalid_argument("Llama model config dimensions must be positive");
+    }
+
+    if (prompt_tokens > std::numeric_limits<std::size_t>::max() - max_new_tokens) {
+        throw std::invalid_argument("Llama generation token count overflow");
+    }
+
+    const auto total_tokens = prompt_tokens + max_new_tokens;
+    if (total_tokens > static_cast<std::size_t>(context_length)) {
+        throw std::invalid_argument("Llama generation would exceed context length");
     }
 }
 
@@ -249,6 +265,38 @@ std::uint32_t run_llama_model_next_token_argmax_f32(
 ) {
     const auto logits = run_llama_model_logits_f32(token_ids, weights, config, position);
     return sample_argmax_token_f32(logits);
+}
+
+std::vector<std::uint32_t> generate_llama_argmax_tokens_f32(
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config
+) {
+    if (max_new_tokens == 0) {
+        throw std::invalid_argument("Llama generation max_new_tokens must be positive");
+    }
+
+    if (prompt_token_ids.empty()) {
+        throw std::invalid_argument("Llama token id span must not be empty");
+    }
+
+    require_generation_fits_context(prompt_token_ids.size(), max_new_tokens, config.context_length);
+
+    std::vector<std::uint32_t> tokens(prompt_token_ids.begin(), prompt_token_ids.end());
+    tokens.reserve(prompt_token_ids.size() + max_new_tokens);
+    for (std::size_t generated = 0; generated < max_new_tokens; ++generated) {
+        const auto position = static_cast<std::uint64_t>(tokens.size() - 1);
+        const auto next_token = run_llama_model_next_token_argmax_f32(
+            std::span<const std::uint32_t>(tokens.data(), tokens.size()),
+            weights,
+            config,
+            position
+        );
+        tokens.push_back(next_token);
+    }
+
+    return tokens;
 }
 
 }  // namespace local_gguf_engine::engine
