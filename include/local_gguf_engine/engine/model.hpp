@@ -17,6 +17,7 @@ enum class EngineModelErrorCode {
     invalid_metadata_type,
     unsupported_architecture,
     duplicate_tensor_name,
+    missing_tensor,
 };
 
 class EngineModelError final : public std::runtime_error {

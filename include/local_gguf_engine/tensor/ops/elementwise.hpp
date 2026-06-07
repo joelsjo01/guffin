@@ -5,6 +5,8 @@
 namespace local_gguf_engine::tensor::ops {
 
 [[nodiscard]] TensorStorage add_f32(const TensorStorage& left, const TensorStorage& right);
+[[nodiscard]] TensorStorage multiply_f32(const TensorStorage& left, const TensorStorage& right);
+[[nodiscard]] TensorStorage silu_f32(const TensorStorage& input);
 [[nodiscard]] TensorStorage copy_f32(const TensorStorage& input);
 [[nodiscard]] TensorStorage fill_f32(const TensorDescriptor& descriptor, float value);
 

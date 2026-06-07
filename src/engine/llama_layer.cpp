@@ -22,9 +22,11 @@ using tensor::TensorErrorCode;
 using tensor::TensorStorage;
 using tensor::ops::add_f32;
 using tensor::ops::matmul_f32_f16;
+using tensor::ops::multiply_f32;
 using tensor::ops::rms_norm_f32;
 using tensor::ops::rope_f32;
 using tensor::ops::scaled_dot_product_attention_f32;
+using tensor::ops::silu_f32;
 
 constexpr std::size_t vector_rank = 1;
 constexpr std::size_t matrix_rank = 2;
@@ -82,7 +84,7 @@ void require_f16_matrix_shape(const TensorStorage& storage, std::uint64_t rows, 
 
 void require_positive_config_dimension(std::uint32_t value) {
     if (value == 0) {
-        throw std::invalid_argument("Llama attention config dimensions must be positive");
+        throw std::invalid_argument("Llama layer config dimensions must be positive");
     }
 }
 
@@ -238,6 +240,43 @@ TensorStorage run_llama_attention_layer_f32(
 
     const auto projected = matmul_f32_f16(attention_output, weights.output_weight);
     return add_f32(input, projected);
+}
+
+TensorStorage run_llama_feed_forward_layer_f32(
+    const TensorStorage& input,
+    const LlamaFeedForwardLayerWeights& weights,
+    const LlamaModelConfig& config
+) {
+    require_positive_config_dimension(config.embedding_length);
+    require_positive_config_dimension(config.feed_forward_length);
+
+    const auto token_count = input.descriptor().shape.dimension(0);
+    const auto hidden = static_cast<std::uint64_t>(config.embedding_length);
+    const auto feed_forward = static_cast<std::uint64_t>(config.feed_forward_length);
+
+    require_f32_matrix_shape(input, token_count, hidden);
+    require_f32_vector_shape(weights.feed_forward_norm_weight, hidden);
+    require_f16_matrix_shape(weights.gate_weight, hidden, feed_forward);
+    require_f16_matrix_shape(weights.up_weight, hidden, feed_forward);
+    require_f16_matrix_shape(weights.down_weight, feed_forward, hidden);
+
+    const auto normalized = rms_norm_f32(input, weights.feed_forward_norm_weight, config.rms_norm_epsilon);
+    const auto gate = matmul_f32_f16(normalized, weights.gate_weight);
+    const auto up = matmul_f32_f16(normalized, weights.up_weight);
+    const auto activated_gate = silu_f32(gate);
+    const auto gated = multiply_f32(activated_gate, up);
+    const auto projected = matmul_f32_f16(gated, weights.down_weight);
+    return add_f32(input, projected);
+}
+
+TensorStorage run_llama_block_f32(
+    const TensorStorage& input,
+    const LlamaBlockWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+) {
+    const auto attention_output = run_llama_attention_layer_f32(input, weights.attention, config, position);
+    return run_llama_feed_forward_layer_f32(attention_output, weights.feed_forward, config);
 }
 
 }  // namespace local_gguf_engine::engine

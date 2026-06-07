@@ -1,6 +1,7 @@
 #include "local_gguf_engine/benchmarks/benchmark_harness.hpp"
 
 #include "local_gguf_engine/engine/llama_layer.hpp"
+#include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
@@ -37,9 +38,15 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 using engine::LlamaAttentionLayerWeights;
+using engine::LlamaBlockWeights;
+using engine::LlamaFeedForwardLayerWeights;
 using engine::LlamaModelConfig;
+using engine::LlamaModelWeights;
 using engine::load_engine_model_from_gguf;
 using engine::run_llama_attention_layer_f32;
+using engine::run_llama_block_f32;
+using engine::run_llama_feed_forward_layer_f32;
+using engine::run_llama_model_blocks_f32;
 using model_format::load_gguf_tensor_payloads;
 using model_format::read_gguf_model_view;
 using tensor::DType;
@@ -49,11 +56,13 @@ using tensor::TensorStorage;
 using tensor::write_f16_from_f32;
 using tensor::write_f32;
 using tensor::ops::add_f32;
-using tensor::ops::scaled_dot_product_attention_f32;
 using tensor::ops::matmul_f32;
 using tensor::ops::matmul_f32_f16;
+using tensor::ops::multiply_f32;
 using tensor::ops::rms_norm_f32;
 using tensor::ops::rope_f32;
+using tensor::ops::scaled_dot_product_attention_f32;
+using tensor::ops::silu_f32;
 using tensor::ops::softmax_f32;
 using tensor::ops::sum_f32;
 
@@ -182,6 +191,10 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     const auto llama_key_weight = make_f16_matrix(matmul_size, 32, 0.02F);
     const auto llama_value_weight = make_f16_matrix(matmul_size, 32, 0.03F);
     const auto llama_output_weight = make_f16_matrix(matmul_size, matmul_size, 0.04F);
+    const auto llama_feed_forward_norm_weight = make_f32_storage(matmul_size, 1.0F);
+    const auto llama_gate_weight = make_f16_matrix(matmul_size, 128, 0.001F);
+    const auto llama_up_weight = make_f16_matrix(matmul_size, 128, 0.0015F);
+    const auto llama_down_weight = make_f16_matrix(128, matmul_size, 0.002F);
     const LlamaModelConfig llama_layer_config {
         .context_length = 128,
         .embedding_length = 64,
@@ -203,6 +216,21 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         .value_weight = llama_value_weight,
         .output_weight = llama_output_weight,
     };
+    const LlamaFeedForwardLayerWeights llama_feed_forward_weights {
+        .feed_forward_norm_weight = llama_feed_forward_norm_weight,
+        .gate_weight = llama_gate_weight,
+        .up_weight = llama_up_weight,
+        .down_weight = llama_down_weight,
+    };
+    const LlamaBlockWeights llama_block_weights {
+        .attention = llama_layer_weights,
+        .feed_forward = llama_feed_forward_weights,
+    };
+    auto llama_model_blocks_config = llama_layer_config;
+    llama_model_blocks_config.block_count = 2;
+    LlamaModelWeights llama_model_weights;
+    llama_model_weights.blocks.push_back(llama_block_weights);
+    llama_model_weights.blocks.push_back(llama_block_weights);
 
     report.measurements.push_back(measure(
         "tensor.allocate_f32",
@@ -238,6 +266,32 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
             const auto output = add_f32(add_left, add_right);
             return IterationMeasurement {
                 .bytes_processed = add_left.bytes().size() + add_right.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tensor.multiply_f32",
+        report.config.iterations,
+        "shape=[4096] dtype=F32",
+        [&add_left, &add_right]() {
+            const auto output = multiply_f32(add_left, add_right);
+            return IterationMeasurement {
+                .bytes_processed = add_left.bytes().size() + add_right.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tensor.silu_f32",
+        report.config.iterations,
+        "shape=[4096] dtype=F32",
+        [&add_left]() {
+            const auto output = silu_f32(add_left);
+            return IterationMeasurement {
+                .bytes_processed = add_left.bytes().size() + output.bytes().size(),
                 .checksum = checksum_f32(sum_f32(output)),
             };
         }
@@ -347,6 +401,87 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
                     + llama_layer_weights.key_weight.bytes().size()
                     + llama_layer_weights.value_weight.bytes().size()
                     + llama_layer_weights.output_weight.bytes().size()
+                    + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_feed_forward_layer_f32",
+        report.config.iterations,
+        "input=[8,64] hidden=64 ffn=128 dtype=F32/F16",
+        [&llama_layer_input, &llama_feed_forward_weights, &llama_layer_config]() {
+            const auto output = run_llama_feed_forward_layer_f32(
+                llama_layer_input,
+                llama_feed_forward_weights,
+                llama_layer_config
+            );
+            return IterationMeasurement {
+                .bytes_processed = llama_layer_input.bytes().size()
+                    + llama_feed_forward_weights.feed_forward_norm_weight.bytes().size()
+                    + llama_feed_forward_weights.gate_weight.bytes().size()
+                    + llama_feed_forward_weights.up_weight.bytes().size()
+                    + llama_feed_forward_weights.down_weight.bytes().size()
+                    + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_block_f32",
+        report.config.iterations,
+        "input=[8,64] heads=4 kv_heads=2 ffn=128 dtype=F32/F16",
+        [&llama_layer_input, &llama_block_weights, &llama_layer_config]() {
+            const auto output = run_llama_block_f32(
+                llama_layer_input,
+                llama_block_weights,
+                llama_layer_config,
+                1
+            );
+            return IterationMeasurement {
+                .bytes_processed = llama_layer_input.bytes().size()
+                    + llama_block_weights.attention.attention_norm_weight.bytes().size()
+                    + llama_block_weights.attention.query_weight.bytes().size()
+                    + llama_block_weights.attention.key_weight.bytes().size()
+                    + llama_block_weights.attention.value_weight.bytes().size()
+                    + llama_block_weights.attention.output_weight.bytes().size()
+                    + llama_block_weights.feed_forward.feed_forward_norm_weight.bytes().size()
+                    + llama_block_weights.feed_forward.gate_weight.bytes().size()
+                    + llama_block_weights.feed_forward.up_weight.bytes().size()
+                    + llama_block_weights.feed_forward.down_weight.bytes().size()
+                    + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_model_blocks_f32",
+        report.config.iterations,
+        "input=[8,64] blocks=2 heads=4 kv_heads=2 ffn=128 dtype=F32/F16",
+        [&llama_layer_input, &llama_model_weights, &llama_model_blocks_config]() {
+            const auto output = run_llama_model_blocks_f32(
+                llama_layer_input,
+                llama_model_weights,
+                llama_model_blocks_config,
+                1
+            );
+            const auto block_weight_bytes =
+                llama_model_weights.blocks[0].attention.attention_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.query_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.key_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.value_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.output_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.feed_forward_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.gate_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.up_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.down_weight.bytes().size();
+
+            return IterationMeasurement {
+                .bytes_processed = llama_layer_input.bytes().size()
+                    + llama_model_weights.blocks.size() * block_weight_bytes
                     + output.bytes().size(),
                 .checksum = checksum_f32(sum_f32(output)),
             };

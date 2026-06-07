@@ -35,6 +35,9 @@ using model_format::load_gguf_tensor_payload;
         case EngineModelErrorCode::duplicate_tensor_name:
             message = "duplicate model tensor name";
             break;
+        case EngineModelErrorCode::missing_tensor:
+            message = "missing model tensor";
+            break;
     }
 
     if (!detail.empty()) {

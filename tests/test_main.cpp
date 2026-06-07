@@ -1,5 +1,6 @@
 #include "local_gguf_engine/benchmarks/benchmark_harness.hpp"
 #include "local_gguf_engine/engine/llama_layer.hpp"
+#include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/frontends/cli/gguf_inspect.hpp"
 #include "local_gguf_engine/model_format/gguf_header.hpp"
@@ -33,6 +34,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -45,14 +47,23 @@ using local_gguf_engine::benchmarks::benchmark_output_path_is_under_results;
 using local_gguf_engine::benchmarks::default_benchmark_output_path;
 using local_gguf_engine::benchmarks::format_benchmark_report;
 using local_gguf_engine::benchmarks::parse_benchmark_args;
+using local_gguf_engine::engine::bind_llama_model_weights;
+using local_gguf_engine::engine::EngineModel;
 using local_gguf_engine::engine::EngineModelError;
 using local_gguf_engine::engine::EngineModelErrorCode;
+using local_gguf_engine::engine::EngineTensor;
 using local_gguf_engine::engine::LlamaAttentionLayerWeights;
+using local_gguf_engine::engine::LlamaBlockWeights;
+using local_gguf_engine::engine::LlamaFeedForwardLayerWeights;
 using local_gguf_engine::engine::LlamaModelConfig;
+using local_gguf_engine::engine::LlamaModelWeights;
 using local_gguf_engine::engine::ModelArchitecture;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::model_architecture_name;
 using local_gguf_engine::engine::run_llama_attention_layer_f32;
+using local_gguf_engine::engine::run_llama_block_f32;
+using local_gguf_engine::engine::run_llama_feed_forward_layer_f32;
+using local_gguf_engine::engine::run_llama_model_blocks_f32;
 using local_gguf_engine::model_format::GGUFHeader;
 using local_gguf_engine::model_format::GGUFMetadataEntry;
 using local_gguf_engine::model_format::GGUFMetadataArray;
@@ -100,10 +111,12 @@ using local_gguf_engine::tensor::ops::fill_f32;
 using local_gguf_engine::tensor::ops::matmul_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_f16;
 using local_gguf_engine::tensor::ops::mean_square_f32;
+using local_gguf_engine::tensor::ops::multiply_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rms_f32;
 using local_gguf_engine::tensor::ops::rope_f32;
 using local_gguf_engine::tensor::ops::scaled_dot_product_attention_f32;
+using local_gguf_engine::tensor::ops::silu_f32;
 using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::sum_f32;
 using local_gguf_engine::tensor::ops::sum_squares_f32;
@@ -945,6 +958,107 @@ void test_rejects_f32_add_shape_mismatch() {
         expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "error code should be tensor_shape_mismatch");
         expect(error.expected_value() == 3, "expected shape dimension mismatch");
         expect(error.actual_value() == 2, "actual shape dimension mismatch");
+    }
+}
+
+void test_multiplies_f32_tensors_elementwise() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({2, 2}), DType::f32);
+    auto left = TensorStorage::allocate(descriptor);
+    auto right = TensorStorage::allocate(descriptor);
+
+    const std::array<std::uint64_t, 2> index_00 {0, 0};
+    const std::array<std::uint64_t, 2> index_01 {0, 1};
+    const std::array<std::uint64_t, 2> index_10 {1, 0};
+    const std::array<std::uint64_t, 2> index_11 {1, 1};
+
+    write_f32(left, std::span<const std::uint64_t>(index_00), 1.0F);
+    write_f32(left, std::span<const std::uint64_t>(index_01), -2.0F);
+    write_f32(left, std::span<const std::uint64_t>(index_10), 3.5F);
+    write_f32(left, std::span<const std::uint64_t>(index_11), 4.0F);
+
+    write_f32(right, std::span<const std::uint64_t>(index_00), 0.5F);
+    write_f32(right, std::span<const std::uint64_t>(index_01), 2.0F);
+    write_f32(right, std::span<const std::uint64_t>(index_10), -1.5F);
+    write_f32(right, std::span<const std::uint64_t>(index_11), 8.0F);
+
+    const auto output = multiply_f32(left, right);
+
+    expect(output.descriptor() == descriptor, "F32 multiply output descriptor mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_00)) == 0.5F, "F32 multiply value 0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_01)) == -4.0F, "F32 multiply value 1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_10)) == -5.25F, "F32 multiply value 2 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 32.0F, "F32 multiply value 3 mismatch");
+}
+
+void test_rejects_f32_multiply_dtype_mismatch() {
+    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f16));
+
+    try {
+        (void)multiply_f32(left, right);
+        throw TestFailure("F32 multiply should reject F16 operand");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_operator_dtype,
+            "F32 multiply dtype error code mismatch"
+        );
+        expect(error.expected_value() == 0, "F32 multiply expected dtype mismatch");
+        expect(error.actual_value() == 1, "F32 multiply actual dtype mismatch");
+    }
+}
+
+void test_rejects_f32_multiply_shape_mismatch() {
+    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 3}), DType::f32));
+    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+
+    try {
+        (void)multiply_f32(left, right);
+        throw TestFailure("F32 multiply should reject mismatched shapes");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 multiply shape error code mismatch");
+        expect(error.expected_value() == 3, "F32 multiply expected shape dimension mismatch");
+        expect(error.actual_value() == 2, "F32 multiply actual shape dimension mismatch");
+    }
+}
+
+void test_applies_f32_silu() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({3}), DType::f32));
+    const std::array<std::uint64_t, 1> index_0 {0};
+    const std::array<std::uint64_t, 1> index_1 {1};
+    const std::array<std::uint64_t, 1> index_2 {2};
+    write_f32(input, std::span<const std::uint64_t>(index_0), -1.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_1), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(index_2), 2.0F);
+
+    const auto output = silu_f32(input);
+
+    expect(output.descriptor() == input.descriptor(), "F32 SiLU output descriptor mismatch");
+    expect(output.bytes().data() != input.bytes().data(), "F32 SiLU output should not alias input");
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_0)),
+        static_cast<float>(-1.0 / (1.0 + std::exp(1.0))),
+        0.000001F,
+        "F32 SiLU value 0 mismatch"
+    );
+    expect(read_f32(output, std::span<const std::uint64_t>(index_1)) == 0.0F, "F32 SiLU value 1 mismatch");
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_2)),
+        static_cast<float>(2.0 / (1.0 + std::exp(-2.0))),
+        0.000001F,
+        "F32 SiLU value 2 mismatch"
+    );
+}
+
+void test_rejects_f32_silu_dtype_mismatch() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f16));
+
+    try {
+        (void)silu_f32(input);
+        throw TestFailure("F32 SiLU should reject F16 input");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::unsupported_operator_dtype, "F32 SiLU dtype error code mismatch");
+        expect(error.expected_value() == 0, "F32 SiLU expected dtype mismatch");
+        expect(error.actual_value() == 1, "F32 SiLU actual dtype mismatch");
     }
 }
 
@@ -2041,6 +2155,409 @@ void test_rejects_llama_attention_layer_invalid_head_layout() {
     }
 }
 
+LlamaModelConfig tiny_feed_forward_layer_config() {
+    auto config = tiny_attention_layer_config();
+    config.feed_forward_length = 2;
+    return config;
+}
+
+void test_runs_llama_feed_forward_layer_with_f16_weights() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto gate_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    const LlamaFeedForwardLayerWeights weights {
+        .feed_forward_norm_weight = feed_forward_norm_weight,
+        .gate_weight = gate_weight,
+        .up_weight = up_weight,
+        .down_weight = down_weight,
+    };
+
+    const auto output = run_llama_feed_forward_layer_f32(input, weights, tiny_feed_forward_layer_config());
+    const auto first_norm = 0.75;
+    const auto second_norm = 1.0;
+    const auto first_expected = 3.0 + first_norm * (first_norm / (1.0 + std::exp(-first_norm)));
+    const auto second_expected = 4.0 + second_norm * (second_norm / (1.0 + std::exp(-second_norm)));
+
+    expect(output.descriptor().shape == Shape::from({1, 2}), "Llama FFN layer output shape mismatch");
+    expect(output.descriptor().dtype == DType::f32, "Llama FFN layer output dtype mismatch");
+    const std::array<std::uint64_t, 2> index_0 {0, 0};
+    const std::array<std::uint64_t, 2> index_1 {0, 1};
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_0)),
+        static_cast<float>(first_expected),
+        0.000001F,
+        "Llama FFN layer output value 0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_1)),
+        static_cast<float>(second_expected),
+        0.000001F,
+        "Llama FFN layer output value 1 mismatch"
+    );
+}
+
+void test_rejects_llama_feed_forward_layer_projection_shape_mismatch() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 2> narrow_values {1.0F, 0.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto gate_weight = tensor_f16_matrix(2, 1, std::span<const float>(narrow_values));
+    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    const LlamaFeedForwardLayerWeights weights {
+        .feed_forward_norm_weight = feed_forward_norm_weight,
+        .gate_weight = gate_weight,
+        .up_weight = up_weight,
+        .down_weight = down_weight,
+    };
+
+    try {
+        (void)run_llama_feed_forward_layer_f32(input, weights, tiny_feed_forward_layer_config());
+        throw TestFailure("Llama FFN layer should reject gate projection shape mismatch");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "Llama FFN shape error mismatch");
+        expect(error.expected_value() == 2, "Llama FFN expected gate width mismatch");
+        expect(error.actual_value() == 1, "Llama FFN actual gate width mismatch");
+    }
+}
+
+void test_rejects_llama_feed_forward_layer_projection_dtype_mismatch() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto gate_weight = tensor_f32_matrix(2, 2, std::span<const float>(identity_values));
+    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    const LlamaFeedForwardLayerWeights weights {
+        .feed_forward_norm_weight = feed_forward_norm_weight,
+        .gate_weight = gate_weight,
+        .up_weight = up_weight,
+        .down_weight = down_weight,
+    };
+
+    try {
+        (void)run_llama_feed_forward_layer_f32(input, weights, tiny_feed_forward_layer_config());
+        throw TestFailure("Llama FFN layer should reject F32 gate projection weight");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_operator_dtype,
+            "Llama FFN projection dtype error mismatch"
+        );
+        expect(error.expected_value() == 1, "Llama FFN expected projection dtype mismatch");
+        expect(error.actual_value() == 0, "Llama FFN actual projection dtype mismatch");
+    }
+}
+
+void test_rejects_llama_feed_forward_layer_invalid_config() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto gate_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto config = tiny_feed_forward_layer_config();
+    config.feed_forward_length = 0;
+    const LlamaFeedForwardLayerWeights weights {
+        .feed_forward_norm_weight = feed_forward_norm_weight,
+        .gate_weight = gate_weight,
+        .up_weight = up_weight,
+        .down_weight = down_weight,
+    };
+
+    try {
+        (void)run_llama_feed_forward_layer_f32(input, weights, config);
+        throw TestFailure("Llama FFN layer should reject zero feed-forward length");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Llama layer config dimensions must be positive",
+            "Llama FFN invalid config error mismatch"
+        );
+    }
+}
+
+void test_runs_llama_block_with_f16_weights() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto gate_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    const LlamaBlockWeights weights {
+        .attention = LlamaAttentionLayerWeights {
+            .attention_norm_weight = attention_norm_weight,
+            .query_weight = query_weight,
+            .key_weight = key_weight,
+            .value_weight = value_weight,
+            .output_weight = output_weight,
+        },
+        .feed_forward = LlamaFeedForwardLayerWeights {
+            .feed_forward_norm_weight = feed_forward_norm_weight,
+            .gate_weight = gate_weight,
+            .up_weight = up_weight,
+            .down_weight = down_weight,
+        },
+    };
+
+    const auto output = run_llama_block_f32(input, weights, tiny_feed_forward_layer_config(), 0);
+    const auto attention_first = 3.75;
+    const auto attention_second = 5.0;
+    const auto block_mean_square = ((attention_first * attention_first) + (attention_second * attention_second)) / 2.0;
+    const auto inverse_rms = 1.0 / std::sqrt(block_mean_square + 3.5);
+    const auto first_norm = attention_first * inverse_rms;
+    const auto second_norm = attention_second * inverse_rms;
+    const auto first_expected = attention_first + first_norm * (first_norm / (1.0 + std::exp(-first_norm)));
+    const auto second_expected = attention_second + second_norm * (second_norm / (1.0 + std::exp(-second_norm)));
+
+    expect(output.descriptor().shape == Shape::from({1, 2}), "Llama block output shape mismatch");
+    expect(output.descriptor().dtype == DType::f32, "Llama block output dtype mismatch");
+    const std::array<std::uint64_t, 2> index_0 {0, 0};
+    const std::array<std::uint64_t, 2> index_1 {0, 1};
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_0)),
+        static_cast<float>(first_expected),
+        0.000001F,
+        "Llama block output value 0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_1)),
+        static_cast<float>(second_expected),
+        0.000001F,
+        "Llama block output value 1 mismatch"
+    );
+}
+
+void test_rejects_llama_block_attention_projection_shape_mismatch() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 2> narrow_values {1.0F, 0.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(2, 1, std::span<const float>(narrow_values));
+    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto gate_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    const LlamaBlockWeights weights {
+        .attention = LlamaAttentionLayerWeights {
+            .attention_norm_weight = attention_norm_weight,
+            .query_weight = query_weight,
+            .key_weight = key_weight,
+            .value_weight = value_weight,
+            .output_weight = output_weight,
+        },
+        .feed_forward = LlamaFeedForwardLayerWeights {
+            .feed_forward_norm_weight = feed_forward_norm_weight,
+            .gate_weight = gate_weight,
+            .up_weight = up_weight,
+            .down_weight = down_weight,
+        },
+    };
+
+    try {
+        (void)run_llama_block_f32(input, weights, tiny_feed_forward_layer_config(), 0);
+        throw TestFailure("Llama block should reject attention projection shape mismatch");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "Llama block shape error mismatch");
+        expect(error.expected_value() == 2, "Llama block expected query width mismatch");
+        expect(error.actual_value() == 1, "Llama block actual query width mismatch");
+    }
+}
+
+EngineTensor engine_tensor(std::string name, TensorStorage storage) {
+    return EngineTensor {
+        .name = std::move(name),
+        .storage = std::move(storage),
+    };
+}
+
+[[nodiscard]] std::string llama_block_tensor_name(std::uint32_t block_index, std::string_view suffix) {
+    return "blk." + std::to_string(block_index) + "." + std::string(suffix);
+}
+
+void add_tiny_llama_block_tensors(
+    std::vector<EngineTensor>& tensors,
+    std::uint32_t block_index,
+    float projection_scale,
+    bool query_as_f32,
+    bool include_down_weight
+) {
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> projection_values {
+        projection_scale, 0.0F,
+        0.0F, projection_scale,
+    };
+
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(block_index, "attn_norm.weight"),
+        tensor_f32_vector(std::span<const float>(norm_values))
+    ));
+    if (query_as_f32) {
+        tensors.push_back(engine_tensor(
+            llama_block_tensor_name(block_index, "attn_q.weight"),
+            tensor_f32_matrix(2, 2, std::span<const float>(projection_values))
+        ));
+    } else {
+        tensors.push_back(engine_tensor(
+            llama_block_tensor_name(block_index, "attn_q.weight"),
+            tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+        ));
+    }
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(block_index, "attn_k.weight"),
+        tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(block_index, "attn_v.weight"),
+        tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(block_index, "attn_output.weight"),
+        tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(block_index, "ffn_norm.weight"),
+        tensor_f32_vector(std::span<const float>(norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(block_index, "ffn_gate.weight"),
+        tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(block_index, "ffn_up.weight"),
+        tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+    ));
+    if (include_down_weight) {
+        tensors.push_back(engine_tensor(
+            llama_block_tensor_name(block_index, "ffn_down.weight"),
+            tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+        ));
+    }
+}
+
+[[nodiscard]] EngineModel tiny_bound_llama_model(LlamaModelConfig config, std::vector<EngineTensor> tensors) {
+    return EngineModel(ModelArchitecture::llama, {}, config, std::move(tensors));
+}
+
+void test_binds_and_runs_llama_model_blocks_from_named_tensors() {
+    auto config = tiny_feed_forward_layer_config();
+    config.block_count = 2;
+    std::vector<EngineTensor> tensors;
+    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
+    add_tiny_llama_block_tensors(tensors, 1, 0.5F, false, true);
+    const auto model = tiny_bound_llama_model(config, std::move(tensors));
+    const auto weights = bind_llama_model_weights(model);
+
+    expect(weights.blocks.size() == 2, "bound Llama model block count mismatch");
+    const auto* block_one_down = model.find_tensor("blk.1.ffn_down.weight");
+    expect(block_one_down != nullptr, "bound Llama model test tensor lookup failed");
+    expect(
+        &weights.blocks[1].feed_forward.down_weight == &block_one_down->storage,
+        "bound Llama model should borrow block 1 down weight"
+    );
+
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    const auto output = run_llama_model_blocks_f32(input, weights, model.llama_config(), 0);
+    const auto first_block = run_llama_block_f32(input, weights.blocks[0], model.llama_config(), 0);
+    const auto expected = run_llama_block_f32(first_block, weights.blocks[1], model.llama_config(), 0);
+
+    expect(output.descriptor().shape == Shape::from({1, 2}), "bound Llama model output shape mismatch");
+    expect(output.descriptor().dtype == DType::f32, "bound Llama model output dtype mismatch");
+    const std::array<std::uint64_t, 2> index_0 {0, 0};
+    const std::array<std::uint64_t, 2> index_1 {0, 1};
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_0)),
+        read_f32(expected, std::span<const std::uint64_t>(index_0)),
+        0.000001F,
+        "bound Llama model output value 0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_1)),
+        read_f32(expected, std::span<const std::uint64_t>(index_1)),
+        0.000001F,
+        "bound Llama model output value 1 mismatch"
+    );
+}
+
+void test_rejects_llama_model_weight_binding_missing_tensor() {
+    auto config = tiny_feed_forward_layer_config();
+    config.block_count = 1;
+    std::vector<EngineTensor> tensors;
+    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, false);
+    const auto model = tiny_bound_llama_model(config, std::move(tensors));
+
+    try {
+        (void)bind_llama_model_weights(model);
+        throw TestFailure("Llama model weight binding should reject missing named tensors");
+    } catch (const EngineModelError& error) {
+        expect(error.code() == EngineModelErrorCode::missing_tensor, "Llama model missing tensor error mismatch");
+        expect(error.detail() == "blk.0.ffn_down.weight", "Llama model missing tensor detail mismatch");
+    }
+}
+
+void test_rejects_llama_model_blocks_projection_dtype_mismatch() {
+    auto config = tiny_feed_forward_layer_config();
+    config.block_count = 1;
+    std::vector<EngineTensor> tensors;
+    add_tiny_llama_block_tensors(tensors, 0, 1.0F, true, true);
+    const auto model = tiny_bound_llama_model(config, std::move(tensors));
+    const auto weights = bind_llama_model_weights(model);
+
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    try {
+        (void)run_llama_model_blocks_f32(input, weights, model.llama_config(), 0);
+        throw TestFailure("Llama model block execution should reject F32 query projection weight");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_operator_dtype,
+            "Llama model projection dtype error mismatch"
+        );
+        expect(error.expected_value() == 1, "Llama model expected projection dtype mismatch");
+        expect(error.actual_value() == 0, "Llama model actual projection dtype mismatch");
+    }
+}
+
 void test_converts_gguf_payload_view_to_tensor_storage() {
     const auto bytes = fixture("valid-tensor-payload-view");
     const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
@@ -3125,6 +3642,11 @@ int main() {
         {"adds F32 tensors elementwise", test_adds_f32_tensors_elementwise},
         {"rejects F32 add dtype mismatch", test_rejects_f32_add_dtype_mismatch},
         {"rejects F32 add shape mismatch", test_rejects_f32_add_shape_mismatch},
+        {"multiplies F32 tensors elementwise", test_multiplies_f32_tensors_elementwise},
+        {"rejects F32 multiply dtype mismatch", test_rejects_f32_multiply_dtype_mismatch},
+        {"rejects F32 multiply shape mismatch", test_rejects_f32_multiply_shape_mismatch},
+        {"applies F32 SiLU", test_applies_f32_silu},
+        {"rejects F32 SiLU dtype mismatch", test_rejects_f32_silu_dtype_mismatch},
         {"fills F32 tensor with scalar", test_fills_f32_tensor_with_scalar},
         {"rejects F32 fill dtype mismatch", test_rejects_f32_fill_dtype_mismatch},
         {"copies F32 tensor storage", test_copies_f32_tensor_storage},
@@ -3191,6 +3713,33 @@ int main() {
         {
             "rejects Llama attention layer invalid head layout",
             test_rejects_llama_attention_layer_invalid_head_layout,
+        },
+        {"runs Llama FFN layer with F16 weights", test_runs_llama_feed_forward_layer_with_f16_weights},
+        {
+            "rejects Llama FFN layer projection shape mismatch",
+            test_rejects_llama_feed_forward_layer_projection_shape_mismatch,
+        },
+        {
+            "rejects Llama FFN layer projection dtype mismatch",
+            test_rejects_llama_feed_forward_layer_projection_dtype_mismatch,
+        },
+        {"rejects Llama FFN layer invalid config", test_rejects_llama_feed_forward_layer_invalid_config},
+        {"runs Llama block with F16 weights", test_runs_llama_block_with_f16_weights},
+        {
+            "rejects Llama block attention projection shape mismatch",
+            test_rejects_llama_block_attention_projection_shape_mismatch,
+        },
+        {
+            "binds and runs Llama model blocks from named tensors",
+            test_binds_and_runs_llama_model_blocks_from_named_tensors,
+        },
+        {
+            "rejects Llama model weight binding missing tensor",
+            test_rejects_llama_model_weight_binding_missing_tensor,
+        },
+        {
+            "rejects Llama model blocks projection dtype mismatch",
+            test_rejects_llama_model_blocks_projection_dtype_mismatch,
         },
         {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
         {
