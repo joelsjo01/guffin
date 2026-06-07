@@ -7,6 +7,7 @@ GGUF_INSPECT_BINARY := $(BUILD_DIR)/gguf-inspect
 BENCHMARK_BINARY := $(BUILD_DIR)/local-gguf-bench
 
 ENGINE_SOURCES := \
+	src/engine/llama_layer.cpp \
 	src/engine/model.cpp \
 	src/model_format/gguf_reader.cpp \
 	src/model_format/gguf_tensor_bridge.cpp \

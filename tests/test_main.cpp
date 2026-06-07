@@ -1,4 +1,5 @@
 #include "local_gguf_engine/benchmarks/benchmark_harness.hpp"
+#include "local_gguf_engine/engine/llama_layer.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/frontends/cli/gguf_inspect.hpp"
 #include "local_gguf_engine/model_format/gguf_header.hpp"
@@ -46,9 +47,12 @@ using local_gguf_engine::benchmarks::format_benchmark_report;
 using local_gguf_engine::benchmarks::parse_benchmark_args;
 using local_gguf_engine::engine::EngineModelError;
 using local_gguf_engine::engine::EngineModelErrorCode;
+using local_gguf_engine::engine::LlamaAttentionLayerWeights;
+using local_gguf_engine::engine::LlamaModelConfig;
 using local_gguf_engine::engine::ModelArchitecture;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::model_architecture_name;
+using local_gguf_engine::engine::run_llama_attention_layer_f32;
 using local_gguf_engine::model_format::GGUFHeader;
 using local_gguf_engine::model_format::GGUFMetadataEntry;
 using local_gguf_engine::model_format::GGUFMetadataArray;
@@ -254,6 +258,58 @@ std::vector<GGUFMetadataEntry> tiny_llama_metadata() {
         metadata_f32("llama.rope.freq_base", 10000.0F),
         metadata_f32("llama.attention.layer_norm_rms_epsilon", 0.00001F),
     };
+}
+
+TensorStorage tensor_f32_vector(std::span<const float> values) {
+    auto storage = TensorStorage::allocate(
+        TensorDescriptor::from(Shape::from({static_cast<std::uint64_t>(values.size())}), DType::f32)
+    );
+    for (std::uint64_t index = 0; index < values.size(); ++index) {
+        const std::array<std::uint64_t, 1> tensor_index {index};
+        write_f32(storage, std::span<const std::uint64_t>(tensor_index), values[static_cast<std::size_t>(index)]);
+    }
+
+    return storage;
+}
+
+TensorStorage tensor_f32_matrix(std::uint64_t rows, std::uint64_t columns, std::span<const float> values) {
+    if (values.size() != rows * columns) {
+        throw TestFailure("F32 matrix fixture value count mismatch");
+    }
+
+    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f32));
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            const std::array<std::uint64_t, 2> tensor_index {row, column};
+            write_f32(
+                storage,
+                std::span<const std::uint64_t>(tensor_index),
+                values[static_cast<std::size_t>(row * columns + column)]
+            );
+        }
+    }
+
+    return storage;
+}
+
+TensorStorage tensor_f16_matrix(std::uint64_t rows, std::uint64_t columns, std::span<const float> values) {
+    if (values.size() != rows * columns) {
+        throw TestFailure("F16 matrix fixture value count mismatch");
+    }
+
+    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f16));
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            const std::array<std::uint64_t, 2> tensor_index {row, column};
+            write_f16_from_f32(
+                storage,
+                std::span<const std::uint64_t>(tensor_index),
+                values[static_cast<std::size_t>(row * columns + column)]
+            );
+        }
+    }
+
+    return storage;
 }
 
 GGUFModelView tiny_model_view(
@@ -1823,6 +1879,168 @@ void test_rejects_f32_f16_matmul_right_dtype_mismatch() {
     }
 }
 
+LlamaModelConfig tiny_attention_layer_config() {
+    return LlamaModelConfig {
+        .context_length = 16,
+        .embedding_length = 2,
+        .block_count = 1,
+        .feed_forward_length = 8,
+        .attention_head_count = 1,
+        .attention_head_count_kv = 1,
+        .attention_key_length = 2,
+        .attention_value_length = 2,
+        .rope_dimension_count = 2,
+        .vocab_size = 8,
+        .rope_freq_base = 10000.0F,
+        .rms_norm_epsilon = 3.5F,
+    };
+}
+
+void test_runs_llama_attention_layer_with_f16_weights() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    const LlamaAttentionLayerWeights weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+
+    const auto output = run_llama_attention_layer_f32(input, weights, tiny_attention_layer_config(), 0);
+
+    expect(output.descriptor().shape == Shape::from({1, 2}), "Llama attention layer output shape mismatch");
+    expect(output.descriptor().dtype == DType::f32, "Llama attention layer output dtype mismatch");
+    const std::array<std::uint64_t, 2> index_0 {0, 0};
+    const std::array<std::uint64_t, 2> index_1 {0, 1};
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_0)),
+        3.75F,
+        0.000001F,
+        "Llama attention layer output value 0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(index_1)),
+        5.0F,
+        0.000001F,
+        "Llama attention layer output value 1 mismatch"
+    );
+}
+
+void test_rejects_llama_attention_layer_projection_shape_mismatch() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 2> narrow_values {1.0F, 0.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(2, 1, std::span<const float>(narrow_values));
+    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    const LlamaAttentionLayerWeights weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+
+    try {
+        (void)run_llama_attention_layer_f32(input, weights, tiny_attention_layer_config(), 0);
+        throw TestFailure("Llama attention layer should reject query projection shape mismatch");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::tensor_shape_mismatch,
+            "Llama attention layer projection shape error mismatch"
+        );
+        expect(error.expected_value() == 2, "Llama attention layer expected query width mismatch");
+        expect(error.actual_value() == 1, "Llama attention layer actual query width mismatch");
+    }
+}
+
+void test_rejects_llama_attention_layer_projection_dtype_mismatch() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f32_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    const LlamaAttentionLayerWeights weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+
+    try {
+        (void)run_llama_attention_layer_f32(input, weights, tiny_attention_layer_config(), 0);
+        throw TestFailure("Llama attention layer should reject F32 query projection weight");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_operator_dtype,
+            "Llama attention layer projection dtype error mismatch"
+        );
+        expect(error.expected_value() == 1, "Llama attention layer expected projection dtype mismatch");
+        expect(error.actual_value() == 0, "Llama attention layer actual projection dtype mismatch");
+    }
+}
+
+void test_rejects_llama_attention_layer_invalid_head_layout() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto config = tiny_attention_layer_config();
+    config.attention_head_count = 3;
+    config.attention_head_count_kv = 2;
+    const LlamaAttentionLayerWeights weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+
+    try {
+        (void)run_llama_attention_layer_f32(input, weights, config, 0);
+        throw TestFailure("Llama attention layer should reject non-divisible head layout");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Llama attention head count must be divisible by KV head count",
+            "Llama attention layer invalid head layout error mismatch"
+        );
+    }
+}
+
 void test_converts_gguf_payload_view_to_tensor_storage() {
     const auto bytes = fixture("valid-tensor-payload-view");
     const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
@@ -2961,6 +3179,19 @@ int main() {
         {"rejects F32 matmul inner dimension mismatch", test_rejects_f32_matmul_inner_dimension_mismatch},
         {"multiplies F32 by F16 matrices into F32", test_multiplies_f32_by_f16_matrices_into_f32},
         {"rejects F32xF16 matmul right dtype mismatch", test_rejects_f32_f16_matmul_right_dtype_mismatch},
+        {"runs Llama attention layer with F16 weights", test_runs_llama_attention_layer_with_f16_weights},
+        {
+            "rejects Llama attention layer projection shape mismatch",
+            test_rejects_llama_attention_layer_projection_shape_mismatch,
+        },
+        {
+            "rejects Llama attention layer projection dtype mismatch",
+            test_rejects_llama_attention_layer_projection_dtype_mismatch,
+        },
+        {
+            "rejects Llama attention layer invalid head layout",
+            test_rejects_llama_attention_layer_invalid_head_layout,
+        },
         {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
         {
             "converts Q8_0 GGUF payload view to tensor storage",

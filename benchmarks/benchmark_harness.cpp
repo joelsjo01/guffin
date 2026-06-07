@@ -1,5 +1,6 @@
 #include "local_gguf_engine/benchmarks/benchmark_harness.hpp"
 
+#include "local_gguf_engine/engine/llama_layer.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
@@ -35,7 +36,10 @@ namespace local_gguf_engine::benchmarks {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using engine::LlamaAttentionLayerWeights;
+using engine::LlamaModelConfig;
 using engine::load_engine_model_from_gguf;
+using engine::run_llama_attention_layer_f32;
 using model_format::load_gguf_tensor_payloads;
 using model_format::read_gguf_model_view;
 using tensor::DType;
@@ -172,6 +176,33 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     const auto attention_query = make_f32_matrix(matmul_size, matmul_size, 0.01F);
     const auto attention_key = make_f32_matrix(matmul_size, matmul_size, 0.02F);
     const auto attention_value = make_f32_matrix(matmul_size, matmul_size, 0.03F);
+    const auto llama_layer_input = make_f32_matrix(8, matmul_size, 0.01F);
+    const auto llama_attention_norm_weight = make_f32_storage(matmul_size, 1.0F);
+    const auto llama_query_weight = make_f16_matrix(matmul_size, matmul_size, 0.01F);
+    const auto llama_key_weight = make_f16_matrix(matmul_size, 32, 0.02F);
+    const auto llama_value_weight = make_f16_matrix(matmul_size, 32, 0.03F);
+    const auto llama_output_weight = make_f16_matrix(matmul_size, matmul_size, 0.04F);
+    const LlamaModelConfig llama_layer_config {
+        .context_length = 128,
+        .embedding_length = 64,
+        .block_count = 1,
+        .feed_forward_length = 128,
+        .attention_head_count = 4,
+        .attention_head_count_kv = 2,
+        .attention_key_length = 16,
+        .attention_value_length = 16,
+        .rope_dimension_count = 16,
+        .vocab_size = 1024,
+        .rope_freq_base = 10000.0F,
+        .rms_norm_epsilon = 0.00001F,
+    };
+    const LlamaAttentionLayerWeights llama_layer_weights {
+        .attention_norm_weight = llama_attention_norm_weight,
+        .query_weight = llama_query_weight,
+        .key_weight = llama_key_weight,
+        .value_weight = llama_value_weight,
+        .output_weight = llama_output_weight,
+    };
 
     report.measurements.push_back(measure(
         "tensor.allocate_f32",
@@ -292,6 +323,30 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
                 .bytes_processed = attention_query.bytes().size()
                     + attention_key.bytes().size()
                     + attention_value.bytes().size()
+                    + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_attention_layer_f32",
+        report.config.iterations,
+        "input=[8,64] heads=4 kv_heads=2 key=16 value=16 dtype=F32/F16",
+        [&llama_layer_input, &llama_layer_weights, &llama_layer_config]() {
+            const auto output = run_llama_attention_layer_f32(
+                llama_layer_input,
+                llama_layer_weights,
+                llama_layer_config,
+                1
+            );
+            return IterationMeasurement {
+                .bytes_processed = llama_layer_input.bytes().size()
+                    + llama_layer_weights.attention_norm_weight.bytes().size()
+                    + llama_layer_weights.query_weight.bytes().size()
+                    + llama_layer_weights.key_weight.bytes().size()
+                    + llama_layer_weights.value_weight.bytes().size()
+                    + llama_layer_weights.output_weight.bytes().size()
                     + output.bytes().size(),
                 .checksum = checksum_f32(sum_f32(output)),
             };
