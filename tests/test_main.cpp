@@ -6,6 +6,7 @@
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
+#include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
@@ -98,6 +99,7 @@ using local_gguf_engine::tensor::ops::mean_square_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rms_f32;
 using local_gguf_engine::tensor::ops::rope_f32;
+using local_gguf_engine::tensor::ops::scaled_dot_product_attention_f32;
 using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::sum_f32;
 using local_gguf_engine::tensor::ops::sum_squares_f32;
@@ -1473,6 +1475,200 @@ void test_rejects_f32_softmax_input_rank_above_two() {
     }
 }
 
+void test_applies_f32_scaled_dot_product_attention() {
+    auto query = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+    auto key = TensorStorage::allocate(TensorDescriptor::from(Shape::from({3, 2}), DType::f32));
+    auto value = TensorStorage::allocate(TensorDescriptor::from(Shape::from({3, 2}), DType::f32));
+
+    const float query_values[2][2] {
+        {1.0F, 0.0F},
+        {0.0F, 1.0F},
+    };
+    const float key_values[3][2] {
+        {1.0F, 0.0F},
+        {0.0F, 1.0F},
+        {1.0F, 1.0F},
+    };
+    const float value_values[3][2] {
+        {10.0F, 0.0F},
+        {0.0F, 20.0F},
+        {10.0F, 20.0F},
+    };
+
+    for (std::uint64_t row = 0; row < 2; ++row) {
+        for (std::uint64_t column = 0; column < 2; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            write_f32(query, std::span<const std::uint64_t>(index), query_values[row][column]);
+        }
+    }
+
+    for (std::uint64_t row = 0; row < 3; ++row) {
+        for (std::uint64_t column = 0; column < 2; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            write_f32(key, std::span<const std::uint64_t>(index), key_values[row][column]);
+            write_f32(value, std::span<const std::uint64_t>(index), value_values[row][column]);
+        }
+    }
+
+    const auto output = scaled_dot_product_attention_f32(query, key, value, 0.5F);
+    const auto denominator = 2.0 + std::exp(-0.5);
+
+    expect(output.descriptor().shape == Shape::from({2, 2}), "F32 attention output shape mismatch");
+    expect(output.descriptor().dtype == DType::f32, "F32 attention output dtype mismatch");
+    expect(output.bytes().data() != query.bytes().data(), "F32 attention output should not alias query");
+    expect(output.bytes().data() != key.bytes().data(), "F32 attention output should not alias key");
+    expect(output.bytes().data() != value.bytes().data(), "F32 attention output should not alias value");
+
+    const std::array<std::uint64_t, 2> row0_col0 {0, 0};
+    const std::array<std::uint64_t, 2> row0_col1 {0, 1};
+    const std::array<std::uint64_t, 2> row1_col0 {1, 0};
+    const std::array<std::uint64_t, 2> row1_col1 {1, 1};
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row0_col0)),
+        static_cast<float>(20.0 / denominator),
+        0.000001F,
+        "F32 attention value 0,0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row0_col1)),
+        static_cast<float>(20.0 * (1.0 + std::exp(-0.5)) / denominator),
+        0.000001F,
+        "F32 attention value 0,1 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row1_col0)),
+        static_cast<float>(10.0 * (1.0 + std::exp(-0.5)) / denominator),
+        0.000001F,
+        "F32 attention value 1,0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row1_col1)),
+        static_cast<float>(40.0 / denominator),
+        0.000001F,
+        "F32 attention value 1,1 mismatch"
+    );
+}
+
+void test_applies_f32_scaled_dot_product_attention_with_distinct_value_width() {
+    auto query = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+    auto key = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+    auto value = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 1}), DType::f32));
+    const std::array<std::uint64_t, 2> query_0_0 {0, 0};
+    const std::array<std::uint64_t, 2> query_0_1 {0, 1};
+    const std::array<std::uint64_t, 2> key_0_0 {0, 0};
+    const std::array<std::uint64_t, 2> key_0_1 {0, 1};
+    const std::array<std::uint64_t, 2> key_1_0 {1, 0};
+    const std::array<std::uint64_t, 2> key_1_1 {1, 1};
+    const std::array<std::uint64_t, 2> value_0_0 {0, 0};
+    const std::array<std::uint64_t, 2> value_1_0 {1, 0};
+    write_f32(query, std::span<const std::uint64_t>(query_0_0), 1.0F);
+    write_f32(query, std::span<const std::uint64_t>(query_0_1), 0.0F);
+    write_f32(key, std::span<const std::uint64_t>(key_0_0), 1.0F);
+    write_f32(key, std::span<const std::uint64_t>(key_0_1), 0.0F);
+    write_f32(key, std::span<const std::uint64_t>(key_1_0), 0.0F);
+    write_f32(key, std::span<const std::uint64_t>(key_1_1), 0.0F);
+    write_f32(value, std::span<const std::uint64_t>(value_0_0), 0.0F);
+    write_f32(value, std::span<const std::uint64_t>(value_1_0), 10.0F);
+
+    const auto output = scaled_dot_product_attention_f32(query, key, value, 2.0F);
+    const auto denominator = 1.0 + std::exp(-2.0);
+    const std::array<std::uint64_t, 2> output_0_0 {0, 0};
+
+    expect(output.descriptor().shape == Shape::from({1, 1}), "F32 attention distinct value width shape mismatch");
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(output_0_0)),
+        static_cast<float>(10.0 * std::exp(-2.0) / denominator),
+        0.000001F,
+        "F32 attention explicit scale value mismatch"
+    );
+}
+
+void test_rejects_f32_attention_dtype_mismatch() {
+    const auto query = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+    const auto key = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f16));
+    const auto value = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+
+    try {
+        (void)scaled_dot_product_attention_f32(query, key, value, 1.0F);
+        throw TestFailure("F32 attention should reject F16 key");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::unsupported_operator_dtype, "F32 attention dtype error code mismatch");
+        expect(error.expected_value() == 0, "F32 attention expected dtype mismatch");
+        expect(error.actual_value() == 1, "F32 attention actual dtype mismatch");
+    }
+}
+
+void test_rejects_f32_attention_non_matrix_rank() {
+    const auto query = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+    const auto key = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+    const auto value = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+
+    try {
+        (void)scaled_dot_product_attention_f32(query, key, value, 1.0F);
+        throw TestFailure("F32 attention should reject rank-one query");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_shape_rank, "F32 attention rank error code mismatch");
+        expect(error.expected_value() == 2, "F32 attention expected rank mismatch");
+        expect(error.actual_value() == 1, "F32 attention actual rank mismatch");
+    }
+}
+
+void test_rejects_f32_attention_query_key_hidden_mismatch() {
+    const auto query = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+    const auto key = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 3}), DType::f32));
+    const auto value = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+
+    try {
+        (void)scaled_dot_product_attention_f32(query, key, value, 1.0F);
+        throw TestFailure("F32 attention should reject query/key hidden mismatch");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 attention hidden error code mismatch");
+        expect(error.expected_value() == 2, "F32 attention expected hidden mismatch");
+        expect(error.actual_value() == 3, "F32 attention actual hidden mismatch");
+    }
+}
+
+void test_rejects_f32_attention_key_value_row_mismatch() {
+    const auto query = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+    const auto key = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+    const auto value = TensorStorage::allocate(TensorDescriptor::from(Shape::from({3, 2}), DType::f32));
+
+    try {
+        (void)scaled_dot_product_attention_f32(query, key, value, 1.0F);
+        throw TestFailure("F32 attention should reject key/value row mismatch");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 attention row error code mismatch");
+        expect(error.expected_value() == 2, "F32 attention expected key row mismatch");
+        expect(error.actual_value() == 3, "F32 attention actual value row mismatch");
+    }
+}
+
+void test_rejects_f32_attention_nonpositive_scale() {
+    const auto query = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+    const auto key = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+    const auto value = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2}), DType::f32));
+
+    try {
+        (void)scaled_dot_product_attention_f32(query, key, value, 0.0F);
+        throw TestFailure("F32 attention should reject nonpositive scale");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "attention scale must be positive and finite",
+            "F32 attention scale error mismatch"
+        );
+    }
+
+    try {
+        (void)scaled_dot_product_attention_f32(query, key, value, std::numeric_limits<float>::quiet_NaN());
+        throw TestFailure("F32 attention should reject NaN scale");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "attention scale must be positive and finite",
+            "F32 attention NaN scale error mismatch"
+        );
+    }
+}
+
 void test_multiplies_f32_matrices() {
     const auto left_descriptor = TensorDescriptor::from(Shape::from({2, 3}), DType::f32);
     const auto right_descriptor = TensorDescriptor::from(Shape::from({3, 2}), DType::f32);
@@ -2743,6 +2939,22 @@ int main() {
         {"applies F32 softmax to large values", test_applies_f32_softmax_to_large_values},
         {"rejects F32 softmax dtype mismatch", test_rejects_f32_softmax_dtype_mismatch},
         {"rejects F32 softmax input rank above two", test_rejects_f32_softmax_input_rank_above_two},
+        {"applies F32 scaled dot product attention", test_applies_f32_scaled_dot_product_attention},
+        {
+            "applies F32 scaled dot product attention with distinct value width",
+            test_applies_f32_scaled_dot_product_attention_with_distinct_value_width,
+        },
+        {"rejects F32 attention dtype mismatch", test_rejects_f32_attention_dtype_mismatch},
+        {"rejects F32 attention non-matrix rank", test_rejects_f32_attention_non_matrix_rank},
+        {
+            "rejects F32 attention query/key hidden mismatch",
+            test_rejects_f32_attention_query_key_hidden_mismatch,
+        },
+        {
+            "rejects F32 attention key/value row mismatch",
+            test_rejects_f32_attention_key_value_row_mismatch,
+        },
+        {"rejects F32 attention nonpositive scale", test_rejects_f32_attention_nonpositive_scale},
         {"multiplies F32 matrices", test_multiplies_f32_matrices},
         {"rejects F32 matmul dtype mismatch", test_rejects_f32_matmul_dtype_mismatch},
         {"rejects F32 matmul non-matrix rank", test_rejects_f32_matmul_non_matrix_rank},

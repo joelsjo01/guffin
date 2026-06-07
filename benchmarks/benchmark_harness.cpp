@@ -3,6 +3,7 @@
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
+#include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
@@ -44,6 +45,7 @@ using tensor::TensorStorage;
 using tensor::write_f16_from_f32;
 using tensor::write_f32;
 using tensor::ops::add_f32;
+using tensor::ops::scaled_dot_product_attention_f32;
 using tensor::ops::matmul_f32;
 using tensor::ops::matmul_f32_f16;
 using tensor::ops::rms_norm_f32;
@@ -167,6 +169,9 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     const auto matmul_right = make_f32_matrix(matmul_size, matmul_size, 0.02F);
     const auto matmul_right_f16 = make_f16_matrix(matmul_size, matmul_size, 0.02F);
     const auto rms_norm_weight = make_f32_storage(matmul_size, 1.0F);
+    const auto attention_query = make_f32_matrix(matmul_size, matmul_size, 0.01F);
+    const auto attention_key = make_f32_matrix(matmul_size, matmul_size, 0.02F);
+    const auto attention_value = make_f32_matrix(matmul_size, matmul_size, 0.03F);
 
     report.measurements.push_back(measure(
         "tensor.allocate_f32",
@@ -267,6 +272,27 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
             const auto output = softmax_f32(matmul_left);
             return IterationMeasurement {
                 .bytes_processed = matmul_left.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tensor.scaled_dot_product_attention_f32",
+        report.config.iterations,
+        "query=[64,64] key=[64,64] value=[64,64] dtype=F32 scale=0.125",
+        [&attention_query, &attention_key, &attention_value]() {
+            const auto output = scaled_dot_product_attention_f32(
+                attention_query,
+                attention_key,
+                attention_value,
+                0.125F
+            );
+            return IterationMeasurement {
+                .bytes_processed = attention_query.bytes().size()
+                    + attention_key.bytes().size()
+                    + attention_value.bytes().size()
+                    + output.bytes().size(),
                 .checksum = checksum_f32(sum_f32(output)),
             };
         }

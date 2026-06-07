@@ -13,6 +13,7 @@ ENGINE_SOURCES := \
 	src/tensor/dtype.cpp \
 	src/tensor/f16.cpp \
 	src/tensor/layout.cpp \
+	src/tensor/ops/attention.cpp \
 	src/tensor/ops/elementwise.cpp \
 	src/tensor/ops/matmul.cpp \
 	src/tensor/ops/normalization.cpp \

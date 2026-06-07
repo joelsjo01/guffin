@@ -1,0 +1,115 @@
+#include "local_gguf_engine/tensor/ops/attention.hpp"
+
+#include "validation.hpp"
+
+#include "local_gguf_engine/tensor/ops/softmax.hpp"
+
+#include <cmath>
+#include <cstring>
+#include <stdexcept>
+
+namespace local_gguf_engine::tensor::ops {
+
+namespace {
+
+constexpr std::size_t matrix_rank = 2;
+
+void require_matrix_descriptor(const TensorDescriptor& descriptor) {
+    if (descriptor.shape.rank() != matrix_rank) {
+        throw TensorError(
+            TensorErrorCode::invalid_shape_rank,
+            static_cast<std::uint64_t>(matrix_rank),
+            static_cast<std::uint64_t>(descriptor.shape.rank())
+        );
+    }
+}
+
+void require_query_key_hidden_match(const TensorDescriptor& query, const TensorDescriptor& key) {
+    const auto query_hidden = query.shape.dimension(1);
+    const auto key_hidden = key.shape.dimension(1);
+    if (query_hidden != key_hidden) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, query_hidden, key_hidden);
+    }
+}
+
+void require_key_value_row_match(const TensorDescriptor& key, const TensorDescriptor& value) {
+    const auto key_rows = key.shape.dimension(0);
+    const auto value_rows = value.shape.dimension(0);
+    if (key_rows != value_rows) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_rows, value_rows);
+    }
+}
+
+void require_positive_finite_scale(float scale) {
+    if (!(scale > 0.0F) || !std::isfinite(scale)) {
+        throw std::invalid_argument("attention scale must be positive and finite");
+    }
+}
+
+[[nodiscard]] float read_f32_linear(const TensorStorage& storage, std::uint64_t linear_index) {
+    float value = 0.0F;
+    const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
+    std::memcpy(&value, storage.bytes().data() + byte_offset, sizeof(float));
+    return value;
+}
+
+void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float value) {
+    const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
+    std::memcpy(storage.mutable_bytes().data() + byte_offset, &value, sizeof(float));
+}
+
+}  // namespace
+
+TensorStorage scaled_dot_product_attention_f32(
+    const TensorStorage& query,
+    const TensorStorage& key,
+    const TensorStorage& value,
+    float scale
+) {
+    require_f32_operand(query);
+    require_f32_operand(key);
+    require_f32_operand(value);
+    require_matrix_descriptor(query.descriptor());
+    require_matrix_descriptor(key.descriptor());
+    require_matrix_descriptor(value.descriptor());
+    require_query_key_hidden_match(query.descriptor(), key.descriptor());
+    require_key_value_row_match(key.descriptor(), value.descriptor());
+    require_positive_finite_scale(scale);
+
+    const auto query_rows = query.descriptor().shape.dimension(0);
+    const auto key_rows = key.descriptor().shape.dimension(0);
+    const auto hidden = query.descriptor().shape.dimension(1);
+    const auto value_hidden = value.descriptor().shape.dimension(1);
+
+    auto scores = TensorStorage::allocate(TensorDescriptor::from(Shape::from({query_rows, key_rows}), DType::f32));
+    for (std::uint64_t query_row = 0; query_row < query_rows; ++query_row) {
+        for (std::uint64_t key_row = 0; key_row < key_rows; ++key_row) {
+            float dot = 0.0F;
+            for (std::uint64_t column = 0; column < hidden; ++column) {
+                dot += read_f32_linear(query, query_row * hidden + column)
+                    * read_f32_linear(key, key_row * hidden + column);
+            }
+
+            write_f32_linear(scores, query_row * key_rows + key_row, dot * scale);
+        }
+    }
+
+    const auto probabilities = softmax_f32(scores);
+    auto output = TensorStorage::allocate(TensorDescriptor::from(Shape::from({query_rows, value_hidden}), DType::f32));
+
+    for (std::uint64_t query_row = 0; query_row < query_rows; ++query_row) {
+        for (std::uint64_t value_column = 0; value_column < value_hidden; ++value_column) {
+            float sum = 0.0F;
+            for (std::uint64_t key_row = 0; key_row < key_rows; ++key_row) {
+                sum += read_f32_linear(probabilities, query_row * key_rows + key_row)
+                    * read_f32_linear(value, key_row * value_hidden + value_column);
+            }
+
+            write_f32_linear(output, query_row * value_hidden + value_column, sum);
+        }
+    }
+
+    return output;
+}
+
+}  // namespace local_gguf_engine::tensor::ops
