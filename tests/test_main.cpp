@@ -20,6 +20,7 @@
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
+#include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
 #include <array>
 #include <cmath>
@@ -129,6 +130,13 @@ using local_gguf_engine::tensor::ops::silu_f32;
 using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::sum_f32;
 using local_gguf_engine::tensor::ops::sum_squares_f32;
+using local_gguf_engine::tokenizer::load_tokenizer_from_gguf_metadata;
+using local_gguf_engine::tokenizer::TokenizerDecodeOptions;
+using local_gguf_engine::tokenizer::TokenizerEncodeOptions;
+using local_gguf_engine::tokenizer::TokenizerError;
+using local_gguf_engine::tokenizer::TokenizerErrorCode;
+using local_gguf_engine::tokenizer::TokenizerModel;
+using local_gguf_engine::tokenizer::tokenizer_model_name;
 
 class TestFailure final : public std::exception {
 public:
@@ -263,6 +271,55 @@ GGUFMetadataEntry metadata_f32(std::string key, float value) {
     };
 }
 
+GGUFMetadataEntry metadata_bool(std::string key, bool value) {
+    return GGUFMetadataEntry {
+        .key = std::move(key),
+        .value = GGUFMetadataValue {
+            .type = GGUFMetadataValueType::boolean,
+            .data = value,
+        },
+    };
+}
+
+GGUFMetadataEntry metadata_string_array(std::string key, std::vector<std::string> values) {
+    return GGUFMetadataEntry {
+        .key = std::move(key),
+        .value = GGUFMetadataValue {
+            .type = GGUFMetadataValueType::array,
+            .data = GGUFMetadataArray {
+                .element_type = GGUFMetadataValueType::string,
+                .values = std::move(values),
+            },
+        },
+    };
+}
+
+GGUFMetadataEntry metadata_f32_array(std::string key, std::vector<float> values) {
+    return GGUFMetadataEntry {
+        .key = std::move(key),
+        .value = GGUFMetadataValue {
+            .type = GGUFMetadataValueType::array,
+            .data = GGUFMetadataArray {
+                .element_type = GGUFMetadataValueType::float32,
+                .values = std::move(values),
+            },
+        },
+    };
+}
+
+GGUFMetadataEntry metadata_i32_array(std::string key, std::vector<std::int32_t> values) {
+    return GGUFMetadataEntry {
+        .key = std::move(key),
+        .value = GGUFMetadataValue {
+            .type = GGUFMetadataValueType::array,
+            .data = GGUFMetadataArray {
+                .element_type = GGUFMetadataValueType::int32,
+                .values = std::move(values),
+            },
+        },
+    };
+}
+
 std::vector<GGUFMetadataEntry> tiny_llama_metadata() {
     return {
         metadata_string("general.architecture", "llama"),
@@ -279,6 +336,43 @@ std::vector<GGUFMetadataEntry> tiny_llama_metadata() {
         metadata_u32("llama.vocab_size", 64),
         metadata_f32("llama.rope.freq_base", 10000.0F),
         metadata_f32("llama.attention.layer_norm_rms_epsilon", 0.00001F),
+    };
+}
+
+std::vector<GGUFMetadataEntry> tiny_llama_tokenizer_metadata() {
+    auto metadata = tiny_llama_metadata();
+    metadata[11] = metadata_u32("llama.vocab_size", 7);
+    metadata.push_back(metadata_string("tokenizer.ggml.model", "gpt2"));
+    metadata.push_back(metadata_string_array(
+        "tokenizer.ggml.tokens",
+        {"<s>", "</s>", "Hello", " world", "!", "Hello world", "<unk>"}
+    ));
+    metadata.push_back(metadata_f32_array(
+        "tokenizer.ggml.scores",
+        {0.0F, 0.0F, -1.0F, -1.1F, -1.2F, -0.2F, -10.0F}
+    ));
+    metadata.push_back(metadata_i32_array(
+        "tokenizer.ggml.token_type",
+        {3, 3, 1, 1, 1, 1, 2}
+    ));
+    metadata.push_back(metadata_u32("tokenizer.ggml.bos_token_id", 0));
+    metadata.push_back(metadata_u32("tokenizer.ggml.eos_token_id", 1));
+    metadata.push_back(metadata_u32("tokenizer.ggml.unknown_token_id", 6));
+    metadata.push_back(metadata_bool("tokenizer.ggml.add_bos_token", true));
+    metadata.push_back(metadata_bool("tokenizer.ggml.add_eos_token", false));
+    return metadata;
+}
+
+GGUFMetadataSection metadata_section(std::vector<GGUFMetadataEntry> entries) {
+    const auto metadata_count = static_cast<std::uint64_t>(entries.size());
+    return GGUFMetadataSection {
+        .header = GGUFHeader {
+            .version = 3,
+            .tensor_count = 0,
+            .metadata_kv_count = metadata_count,
+        },
+        .entries = std::move(entries),
+        .encoded_byte_count = 0,
     };
 }
 
@@ -4276,6 +4370,99 @@ void test_rejects_engine_model_duplicate_tensor_names() {
     }
 }
 
+void test_loads_llama_tokenizer_from_metadata() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_llama_tokenizer_metadata()));
+
+    expect(tokenizer.model() == TokenizerModel::gpt2, "tokenizer model enum mismatch");
+    expect(tokenizer.model_name() == "gpt2", "tokenizer model name mismatch");
+    expect(tokenizer_model_name(tokenizer.model()) == "gpt2", "tokenizer model helper mismatch");
+    expect(tokenizer.vocabulary().size() == 7, "tokenizer vocabulary size mismatch");
+    expect(tokenizer.vocabulary()[0].text == "<s>", "tokenizer BOS text mismatch");
+    expect(tokenizer.vocabulary()[2].text == "Hello", "tokenizer normal token text mismatch");
+    expect(tokenizer.vocabulary()[5].score.has_value(), "tokenizer score should load");
+    expect(*tokenizer.vocabulary()[5].score == -0.2F, "tokenizer score mismatch");
+    expect(tokenizer.vocabulary()[0].type.has_value(), "tokenizer token type should load");
+    expect(*tokenizer.vocabulary()[0].type == 3, "tokenizer token type mismatch");
+    expect(tokenizer.special_tokens().bos_token_id == 0, "tokenizer BOS id mismatch");
+    expect(tokenizer.special_tokens().eos_token_id == 1, "tokenizer EOS id mismatch");
+    expect(tokenizer.special_tokens().unknown_token_id == 6, "tokenizer unknown id mismatch");
+
+    const auto options = tokenizer.default_encode_options();
+    expect(options.add_bos, "tokenizer default should add BOS from metadata");
+    expect(!options.add_eos, "tokenizer default should not add EOS from metadata");
+}
+
+void test_encodes_llama_tokenizer_known_ids_with_special_tokens() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_llama_tokenizer_metadata()));
+
+    const auto default_ids = tokenizer.encode("Hello world!");
+
+    expect(default_ids.size() == 3, "tokenizer default encoded count mismatch");
+    expect(default_ids[0] == 0, "tokenizer default BOS id mismatch");
+    expect(default_ids[1] == 5, "tokenizer should prefer longest matching token");
+    expect(default_ids[2] == 4, "tokenizer punctuation id mismatch");
+
+    const auto eos_ids = tokenizer.encode("Hello world!", TokenizerEncodeOptions {.add_bos = false, .add_eos = true});
+    expect(eos_ids.size() == 3, "tokenizer explicit EOS count mismatch");
+    expect(eos_ids[0] == 5, "tokenizer explicit first token mismatch");
+    expect(eos_ids[1] == 4, "tokenizer explicit punctuation mismatch");
+    expect(eos_ids[2] == 1, "tokenizer explicit EOS id mismatch");
+}
+
+void test_decodes_llama_tokenizer_known_ids_and_skips_special_tokens() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_llama_tokenizer_metadata()));
+    const std::array<std::uint32_t, 5> ids {0, 2, 3, 4, 1};
+
+    const auto decoded = tokenizer.decode(std::span<const std::uint32_t>(ids));
+    const auto skipped = tokenizer.decode(
+        std::span<const std::uint32_t>(ids),
+        TokenizerDecodeOptions {.skip_special_tokens = true}
+    );
+
+    expect(decoded == "<s>Hello world!</s>", "tokenizer decoded text mismatch");
+    expect(skipped == "Hello world!", "tokenizer skip-special decoded text mismatch");
+}
+
+void test_rejects_tokenizer_decode_id_out_of_range() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_llama_tokenizer_metadata()));
+    const std::array<std::uint32_t, 1> ids {7};
+
+    try {
+        (void)tokenizer.decode(std::span<const std::uint32_t>(ids));
+        throw TestFailure("tokenizer decode should reject invalid token id");
+    } catch (const TokenizerError& error) {
+        expect(error.code() == TokenizerErrorCode::token_id_out_of_range, "tokenizer invalid id error mismatch");
+        expect(error.detail() == "7", "tokenizer invalid id detail mismatch");
+    }
+}
+
+void test_rejects_tokenizer_malformed_token_metadata() {
+    auto metadata = tiny_llama_tokenizer_metadata();
+    metadata[17] = metadata_i32_array("tokenizer.ggml.token_type", {3, 3});
+
+    try {
+        (void)load_tokenizer_from_gguf_metadata(metadata_section(std::move(metadata)));
+        throw TestFailure("tokenizer should reject token type length mismatch");
+    } catch (const TokenizerError& error) {
+        expect(error.code() == TokenizerErrorCode::invalid_vocabulary, "tokenizer malformed metadata error mismatch");
+        expect(error.detail() == "tokenizer.ggml.token_type", "tokenizer malformed metadata detail mismatch");
+    }
+}
+
+void test_rejects_tokenizer_without_matching_token() {
+    auto metadata = tiny_llama_tokenizer_metadata();
+    metadata.erase(metadata.begin() + 20);
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(std::move(metadata)));
+
+    try {
+        (void)tokenizer.encode("Hello?");
+        throw TestFailure("tokenizer should reject unmatched text without unknown token");
+    } catch (const TokenizerError& error) {
+        expect(error.code() == TokenizerErrorCode::no_matching_token, "tokenizer no-match error mismatch");
+        expect(error.detail() == "byte offset 5", "tokenizer no-match detail mismatch");
+    }
+}
+
 void test_parses_default_benchmark_args() {
     const char* argv[] = {"local-gguf-bench"};
     const auto parsed = parse_benchmark_args(1, argv);
@@ -4646,6 +4833,21 @@ int main() {
         {"rejects engine model missing Llama metadata", test_rejects_engine_model_missing_llama_metadata},
         {"rejects engine model invalid metadata type", test_rejects_engine_model_invalid_metadata_type},
         {"rejects engine model duplicate tensor names", test_rejects_engine_model_duplicate_tensor_names},
+        {"loads Llama tokenizer from metadata", test_loads_llama_tokenizer_from_metadata},
+        {
+            "encodes Llama tokenizer known IDs with special tokens",
+            test_encodes_llama_tokenizer_known_ids_with_special_tokens,
+        },
+        {
+            "decodes Llama tokenizer known IDs and skips special tokens",
+            test_decodes_llama_tokenizer_known_ids_and_skips_special_tokens,
+        },
+        {"rejects tokenizer decode ID out of range", test_rejects_tokenizer_decode_id_out_of_range},
+        {
+            "rejects tokenizer malformed token metadata",
+            test_rejects_tokenizer_malformed_token_metadata,
+        },
+        {"rejects tokenizer without matching token", test_rejects_tokenizer_without_matching_token},
         {"parses default benchmark args", test_parses_default_benchmark_args},
         {
             "parses benchmark model output and iterations",

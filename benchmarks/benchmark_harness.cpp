@@ -3,6 +3,8 @@
 #include "local_gguf_engine/engine/llama_layer.hpp"
 #include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
+#include "local_gguf_engine/model_format/gguf_header.hpp"
+#include "local_gguf_engine/model_format/gguf_metadata.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
@@ -15,6 +17,7 @@
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
+#include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -27,6 +30,7 @@
 #include <span>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -51,6 +55,12 @@ using engine::run_llama_model_blocks_f32;
 using engine::run_llama_model_logits_f32;
 using engine::run_llama_model_next_token_argmax_f32;
 using model_format::load_gguf_tensor_payloads;
+using model_format::GGUFHeader;
+using model_format::GGUFMetadataArray;
+using model_format::GGUFMetadataEntry;
+using model_format::GGUFMetadataSection;
+using model_format::GGUFMetadataValue;
+using model_format::GGUFMetadataValueType;
 using model_format::read_gguf_model_view;
 using tensor::DType;
 using tensor::Shape;
@@ -70,6 +80,9 @@ using tensor::ops::scaled_dot_product_attention_f32;
 using tensor::ops::silu_f32;
 using tensor::ops::softmax_f32;
 using tensor::ops::sum_f32;
+using tokenizer::load_tokenizer_from_gguf_metadata;
+using tokenizer::TokenizerDecodeOptions;
+using tokenizer::TokenizerEncodeOptions;
 
 struct IterationMeasurement {
     std::size_t bytes_processed = 0;
@@ -173,6 +186,108 @@ template <typename Callable>
     return bytes;
 }
 
+[[nodiscard]] GGUFMetadataEntry metadata_string(std::string key, std::string value) {
+    return GGUFMetadataEntry {
+        .key = std::move(key),
+        .value = GGUFMetadataValue {
+            .type = GGUFMetadataValueType::string,
+            .data = std::move(value),
+        },
+    };
+}
+
+[[nodiscard]] GGUFMetadataEntry metadata_u32(std::string key, std::uint32_t value) {
+    return GGUFMetadataEntry {
+        .key = std::move(key),
+        .value = GGUFMetadataValue {
+            .type = GGUFMetadataValueType::uint32,
+            .data = value,
+        },
+    };
+}
+
+[[nodiscard]] GGUFMetadataEntry metadata_bool(std::string key, bool value) {
+    return GGUFMetadataEntry {
+        .key = std::move(key),
+        .value = GGUFMetadataValue {
+            .type = GGUFMetadataValueType::boolean,
+            .data = value,
+        },
+    };
+}
+
+[[nodiscard]] GGUFMetadataEntry metadata_string_array(std::string key, std::vector<std::string> values) {
+    return GGUFMetadataEntry {
+        .key = std::move(key),
+        .value = GGUFMetadataValue {
+            .type = GGUFMetadataValueType::array,
+            .data = GGUFMetadataArray {
+                .element_type = GGUFMetadataValueType::string,
+                .values = std::move(values),
+            },
+        },
+    };
+}
+
+[[nodiscard]] GGUFMetadataEntry metadata_f32_array(std::string key, std::vector<float> values) {
+    return GGUFMetadataEntry {
+        .key = std::move(key),
+        .value = GGUFMetadataValue {
+            .type = GGUFMetadataValueType::array,
+            .data = GGUFMetadataArray {
+                .element_type = GGUFMetadataValueType::float32,
+                .values = std::move(values),
+            },
+        },
+    };
+}
+
+[[nodiscard]] GGUFMetadataEntry metadata_i32_array(std::string key, std::vector<std::int32_t> values) {
+    return GGUFMetadataEntry {
+        .key = std::move(key),
+        .value = GGUFMetadataValue {
+            .type = GGUFMetadataValueType::array,
+            .data = GGUFMetadataArray {
+                .element_type = GGUFMetadataValueType::int32,
+                .values = std::move(values),
+            },
+        },
+    };
+}
+
+[[nodiscard]] GGUFMetadataSection make_synthetic_tokenizer_metadata() {
+    std::vector<GGUFMetadataEntry> entries {
+        metadata_string("general.architecture", "llama"),
+        metadata_u32("llama.vocab_size", 7),
+        metadata_string("tokenizer.ggml.model", "gpt2"),
+        metadata_string_array(
+            "tokenizer.ggml.tokens",
+            {"<s>", "</s>", "Hello", " world", "!", "Hello world", "<unk>"}
+        ),
+        metadata_f32_array(
+            "tokenizer.ggml.scores",
+            {0.0F, 0.0F, -1.0F, -1.1F, -1.2F, -0.2F, -10.0F}
+        ),
+        metadata_i32_array("tokenizer.ggml.token_type", {3, 3, 1, 1, 1, 1, 2}),
+        metadata_u32("tokenizer.ggml.bos_token_id", 0),
+        metadata_u32("tokenizer.ggml.eos_token_id", 1),
+        metadata_u32("tokenizer.ggml.unknown_token_id", 6),
+        metadata_bool("tokenizer.ggml.add_bos_token", true),
+        metadata_bool("tokenizer.ggml.add_eos_token", false),
+    };
+    const auto metadata_count = static_cast<std::uint64_t>(entries.size());
+
+    return GGUFMetadataSection {
+        .header = GGUFHeader {
+            .version = 3,
+            .tensor_count = 0,
+            .metadata_kv_count = metadata_count,
+        },
+        .entries = std::move(entries),
+        .encoded_byte_count = 0,
+    };
+}
+
 void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     constexpr std::uint64_t add_element_count = 4096;
     constexpr std::uint64_t copy_element_count = 16 * 1024;
@@ -204,6 +319,13 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     const auto llama_final_norm_weight = make_f32_storage(matmul_size, 1.0F);
     const auto llama_logits_weight = make_f16_matrix(matmul_size, 1024, 0.00075F);
     const std::array<std::uint32_t, 8> llama_token_ids {1, 5, 9, 13, 17, 21, 25, 29};
+    const auto tokenizer_metadata = make_synthetic_tokenizer_metadata();
+    const auto synthetic_tokenizer = load_tokenizer_from_gguf_metadata(tokenizer_metadata);
+    const std::string tokenizer_text = "Hello world!Hello world!";
+    const auto tokenizer_ids = synthetic_tokenizer.encode(
+        tokenizer_text,
+        TokenizerEncodeOptions {.add_bos = true, .add_eos = true}
+    );
     const LlamaModelConfig llama_layer_config {
         .context_length = 128,
         .embedding_length = 64,
@@ -383,6 +505,41 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
             return IterationMeasurement {
                 .bytes_processed = matmul_left.bytes().size() + output.bytes().size(),
                 .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tokenizer.encode_greedy",
+        report.config.iterations,
+        "model=gpt2 vocab=7 text_bytes=24 bos/eos",
+        [&synthetic_tokenizer, &tokenizer_text]() {
+            const auto token_ids = synthetic_tokenizer.encode(
+                tokenizer_text,
+                TokenizerEncodeOptions {.add_bos = true, .add_eos = true}
+            );
+            return IterationMeasurement {
+                .bytes_processed = tokenizer_text.size() + token_ids.size() * sizeof(std::uint32_t),
+                .checksum = token_ids.empty() ? 0 : static_cast<std::uint64_t>(token_ids.back() + token_ids.size()),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tokenizer.decode",
+        report.config.iterations,
+        "model=gpt2 tokens=6 skip_special=true",
+        [&synthetic_tokenizer, &tokenizer_ids]() {
+            const auto text = synthetic_tokenizer.decode(
+                std::span<const std::uint32_t>(tokenizer_ids),
+                TokenizerDecodeOptions {.skip_special_tokens = true}
+            );
+            return IterationMeasurement {
+                .bytes_processed = tokenizer_ids.size() * sizeof(std::uint32_t) + text.size(),
+                .checksum = checksum_byte_span(std::span<const std::uint8_t>(
+                    reinterpret_cast<const std::uint8_t*>(text.data()),
+                    text.size()
+                )),
             };
         }
     ));

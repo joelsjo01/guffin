@@ -13,6 +13,7 @@ ENGINE_SOURCES := \
 	src/engine/sampling.cpp \
 	src/model_format/gguf_reader.cpp \
 	src/model_format/gguf_tensor_bridge.cpp \
+	src/tokenizer/tokenizer.cpp \
 	src/tensor/dtype.cpp \
 	src/tensor/f16.cpp \
 	src/tensor/layout.cpp \
