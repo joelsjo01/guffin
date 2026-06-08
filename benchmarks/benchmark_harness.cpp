@@ -65,6 +65,7 @@ using tensor::ops::matmul_f32_f16;
 using tensor::ops::multiply_f32;
 using tensor::ops::rms_norm_f32;
 using tensor::ops::rope_f32;
+using tensor::ops::rope_f32_with_position_start;
 using tensor::ops::scaled_dot_product_attention_f32;
 using tensor::ops::silu_f32;
 using tensor::ops::softmax_f32;
@@ -353,6 +354,19 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         "input=[64,64] position=1 rope_dim=64 freq_base=10000 dtype=F32",
         [&matmul_left]() {
             const auto output = rope_f32(matmul_left, 1, 64, 10000.0F);
+            return IterationMeasurement {
+                .bytes_processed = matmul_left.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tensor.rope_f32_with_position_start",
+        report.config.iterations,
+        "input=[64,64] position_start=0 rope_dim=64 freq_base=10000 dtype=F32",
+        [&matmul_left]() {
+            const auto output = rope_f32_with_position_start(matmul_left, 0, 64, 10000.0F);
             return IterationMeasurement {
                 .bytes_processed = matmul_left.bytes().size() + output.bytes().size(),
                 .checksum = checksum_f32(sum_f32(output)),

@@ -123,6 +123,7 @@ using local_gguf_engine::tensor::ops::multiply_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rms_f32;
 using local_gguf_engine::tensor::ops::rope_f32;
+using local_gguf_engine::tensor::ops::rope_f32_with_position_start;
 using local_gguf_engine::tensor::ops::scaled_dot_product_attention_f32;
 using local_gguf_engine::tensor::ops::silu_f32;
 using local_gguf_engine::tensor::ops::softmax_f32;
@@ -1423,6 +1424,41 @@ void test_applies_f32_rope_to_batched_rows() {
     expect_close(read_f32(output, std::span<const std::uint64_t>(row1_col3)), sine, 0.000001F, "F32 RoPE batch value 1,3 mismatch");
 }
 
+void test_applies_f32_rope_to_batched_rows_with_position_start() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 4}), DType::f32));
+    const std::array<std::uint64_t, 2> row0_col0 {0, 0};
+    const std::array<std::uint64_t, 2> row0_col1 {0, 1};
+    const std::array<std::uint64_t, 2> row0_col2 {0, 2};
+    const std::array<std::uint64_t, 2> row0_col3 {0, 3};
+    const std::array<std::uint64_t, 2> row1_col0 {1, 0};
+    const std::array<std::uint64_t, 2> row1_col1 {1, 1};
+    const std::array<std::uint64_t, 2> row1_col2 {1, 2};
+    const std::array<std::uint64_t, 2> row1_col3 {1, 3};
+    write_f32(input, std::span<const std::uint64_t>(row0_col0), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(row0_col1), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row0_col2), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row0_col3), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col0), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col1), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col2), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_col3), 0.0F);
+
+    const auto output = rope_f32_with_position_start(input, 1, 4, 1.0F);
+    const auto row0_cosine = static_cast<float>(std::cos(1.0));
+    const auto row0_sine = static_cast<float>(std::sin(1.0));
+    const auto row1_cosine = static_cast<float>(std::cos(2.0));
+    const auto row1_sine = static_cast<float>(std::sin(2.0));
+
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col0)), row0_cosine, 0.000001F, "F32 rowwise RoPE batch value 0,0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col1)), row0_sine, 0.000001F, "F32 rowwise RoPE batch value 0,1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col2)), -row0_sine, 0.000001F, "F32 rowwise RoPE batch value 0,2 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_col3)), row0_cosine, 0.000001F, "F32 rowwise RoPE batch value 0,3 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_col0)), -row1_sine, 0.000001F, "F32 rowwise RoPE batch value 1,0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_col1)), row1_cosine, 0.000001F, "F32 rowwise RoPE batch value 1,1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_col2)), row1_cosine, 0.000001F, "F32 rowwise RoPE batch value 1,2 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_col3)), row1_sine, 0.000001F, "F32 rowwise RoPE batch value 1,3 mismatch");
+}
+
 void test_applies_f32_rope_frequency_base_by_pair() {
     auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({4}), DType::f32));
     const std::array<std::uint64_t, 1> index_0 {0};
@@ -1516,6 +1552,20 @@ void test_rejects_f32_rope_nonpositive_frequency_base() {
         expect(
             std::string_view(error.what()) == "RoPE frequency base must be positive",
             "F32 RoPE NaN frequency base error mismatch"
+        );
+    }
+}
+
+void test_rejects_f32_rope_row_position_overflow() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+
+    try {
+        (void)rope_f32_with_position_start(input, std::numeric_limits<std::uint64_t>::max(), 2, 1.0F);
+        throw TestFailure("F32 rowwise RoPE should reject overflowing row positions");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "RoPE row positions overflow",
+            "F32 rowwise RoPE overflow error mismatch"
         );
     }
 }
@@ -2193,6 +2243,110 @@ void test_runs_llama_attention_layer_with_causal_mask() {
         0.000001F,
         "Llama causal attention row 1 value 1 mismatch"
     );
+}
+
+void test_runs_llama_attention_layer_with_rowwise_rope_positions() {
+    const std::array<float, 4> input_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(2, 2, std::span<const float>(input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto config = tiny_attention_layer_config();
+    config.rope_freq_base = 1.0F;
+    config.rms_norm_epsilon = 0.5F;
+    const LlamaAttentionLayerWeights weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+
+    const auto output = run_llama_attention_layer_f32(input, weights, config, 1);
+
+    const auto score_scale = 1.0 / std::sqrt(2.0);
+    const auto score0 = -std::sin(1.0) * score_scale;
+    const auto score1 = score_scale;
+    const auto score_max = score0 > score1 ? score0 : score1;
+    const auto weight0_numerator = std::exp(score0 - score_max);
+    const auto weight1_numerator = std::exp(score1 - score_max);
+    const auto weight_sum = weight0_numerator + weight1_numerator;
+    const auto row1_weight0 = static_cast<float>(weight0_numerator / weight_sum);
+    const auto row1_weight1 = static_cast<float>(weight1_numerator / weight_sum);
+    const std::array<std::uint64_t, 2> row0_col0 {0, 0};
+    const std::array<std::uint64_t, 2> row0_col1 {0, 1};
+    const std::array<std::uint64_t, 2> row1_col0 {1, 0};
+    const std::array<std::uint64_t, 2> row1_col1 {1, 1};
+
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row0_col0)),
+        2.0F,
+        0.000001F,
+        "Llama rowwise RoPE row 0 value 0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row0_col1)),
+        0.0F,
+        0.000001F,
+        "Llama rowwise RoPE row 0 value 1 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row1_col0)),
+        row1_weight0,
+        0.000001F,
+        "Llama rowwise RoPE row 1 value 0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row1_col1)),
+        1.0F + row1_weight1,
+        0.000001F,
+        "Llama rowwise RoPE row 1 value 1 mismatch"
+    );
+}
+
+void test_rejects_llama_attention_layer_position_before_input_window() {
+    const std::array<float, 4> input_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    auto input = tensor_f32_matrix(2, 2, std::span<const float>(input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    const LlamaAttentionLayerWeights weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+
+    try {
+        (void)run_llama_attention_layer_f32(input, weights, tiny_attention_layer_config(), 0);
+        throw TestFailure("Llama attention layer should reject a final position before the input window");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Llama attention position must cover input rows",
+            "Llama attention layer input-window position error mismatch"
+        );
+    }
 }
 
 void test_rejects_llama_attention_layer_projection_shape_mismatch() {
@@ -4312,12 +4466,17 @@ int main() {
         {"rejects F32 RMSNorm nonpositive epsilon", test_rejects_f32_rms_norm_nonpositive_epsilon},
         {"applies F32 RoPE to vector", test_applies_f32_rope_to_vector},
         {"applies F32 RoPE to batched rows", test_applies_f32_rope_to_batched_rows},
+        {
+            "applies F32 RoPE to batched rows with position start",
+            test_applies_f32_rope_to_batched_rows_with_position_start,
+        },
         {"applies F32 RoPE frequency base by pair", test_applies_f32_rope_frequency_base_by_pair},
         {"rejects F32 RoPE dtype mismatch", test_rejects_f32_rope_dtype_mismatch},
         {"rejects F32 RoPE input rank above two", test_rejects_f32_rope_input_rank_above_two},
         {"rejects F32 RoPE invalid dimension count", test_rejects_f32_rope_invalid_dimension_count},
         {"rejects F32 RoPE dimension count above hidden", test_rejects_f32_rope_dimension_count_above_hidden},
         {"rejects F32 RoPE nonpositive frequency base", test_rejects_f32_rope_nonpositive_frequency_base},
+        {"rejects F32 RoPE row position overflow", test_rejects_f32_rope_row_position_overflow},
         {"applies F32 softmax to vector", test_applies_f32_softmax_to_vector},
         {"applies F32 softmax to batched rows", test_applies_f32_softmax_to_batched_rows},
         {"applies F32 softmax to large values", test_applies_f32_softmax_to_large_values},
@@ -4359,6 +4518,14 @@ int main() {
         {"rejects F32xF16 matmul right dtype mismatch", test_rejects_f32_f16_matmul_right_dtype_mismatch},
         {"runs Llama attention layer with F16 weights", test_runs_llama_attention_layer_with_f16_weights},
         {"runs Llama attention layer with causal mask", test_runs_llama_attention_layer_with_causal_mask},
+        {
+            "runs Llama attention layer with rowwise RoPE positions",
+            test_runs_llama_attention_layer_with_rowwise_rope_positions,
+        },
+        {
+            "rejects Llama attention layer position before input window",
+            test_rejects_llama_attention_layer_position_before_input_window,
+        },
         {
             "rejects Llama attention layer projection shape mismatch",
             test_rejects_llama_attention_layer_projection_shape_mismatch,

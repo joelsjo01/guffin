@@ -13,4 +13,11 @@ namespace local_gguf_engine::tensor::ops {
     float frequency_base
 );
 
+[[nodiscard]] TensorStorage rope_f32_with_position_start(
+    const TensorStorage& input,
+    std::uint64_t position_start,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+);
+
 }  // namespace local_gguf_engine::tensor::ops

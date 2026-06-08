@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 
 namespace local_gguf_engine::tensor::ops {
@@ -47,6 +48,16 @@ void require_positive_frequency_base(float frequency_base) {
     }
 }
 
+void require_row_position_window(std::uint64_t row_count, std::uint64_t position_start) {
+    if (row_count == 0) {
+        return;
+    }
+
+    if (position_start > std::numeric_limits<std::uint64_t>::max() - (row_count - 1)) {
+        throw std::invalid_argument("RoPE row positions overflow");
+    }
+}
+
 [[nodiscard]] float read_f32_linear(const TensorStorage& storage, std::uint64_t linear_index) {
     float value = 0.0F;
     const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
@@ -69,13 +80,12 @@ void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float 
     return static_cast<double>(position) / std::pow(static_cast<double>(frequency_base), exponent);
 }
 
-}  // namespace
-
-TensorStorage rope_f32(
+[[nodiscard]] TensorStorage rope_impl_f32(
     const TensorStorage& input,
-    std::uint64_t position,
+    std::uint64_t position_start,
     std::uint64_t rope_dimension_count,
-    float frequency_base
+    float frequency_base,
+    bool rowwise_positions
 ) {
     require_f32_operand(input);
     require_supported_input_rank(input.descriptor());
@@ -85,10 +95,15 @@ TensorStorage rope_f32(
 
     const auto hidden = hidden_dimension(input.descriptor());
     const auto row_count = input.descriptor().element_count / hidden;
+    if (rowwise_positions) {
+        require_row_position_window(row_count, position_start);
+    }
+
     auto output = TensorStorage::from_bytes(input.descriptor(), input.bytes());
 
     for (std::uint64_t row = 0; row < row_count; ++row) {
         const auto row_offset = row * hidden;
+        const auto position = rowwise_positions ? position_start + row : position_start;
         for (std::uint64_t pair_offset = 0; pair_offset < rope_dimension_count; pair_offset += 2) {
             const auto angle = rope_angle(position, pair_offset, rope_dimension_count, frequency_base);
             const auto angle_cos = static_cast<float>(std::cos(angle));
@@ -104,6 +119,26 @@ TensorStorage rope_f32(
     }
 
     return output;
+}
+
+}  // namespace
+
+TensorStorage rope_f32(
+    const TensorStorage& input,
+    std::uint64_t position,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    return rope_impl_f32(input, position, rope_dimension_count, frequency_base, false);
+}
+
+TensorStorage rope_f32_with_position_start(
+    const TensorStorage& input,
+    std::uint64_t position_start,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    return rope_impl_f32(input, position_start, rope_dimension_count, frequency_base, true);
 }
 
 }  // namespace local_gguf_engine::tensor::ops

@@ -25,7 +25,7 @@ using tensor::ops::causal_scaled_dot_product_attention_f32;
 using tensor::ops::matmul_f32_f16;
 using tensor::ops::multiply_f32;
 using tensor::ops::rms_norm_f32;
-using tensor::ops::rope_f32;
+using tensor::ops::rope_f32_with_position_start;
 using tensor::ops::silu_f32;
 
 constexpr std::size_t vector_rank = 1;
@@ -235,8 +235,18 @@ TensorStorage run_llama_attention_layer_f32(
         const auto query_head = copy_f32_columns(query, head * key_length, key_length);
         const auto key_head = copy_f32_columns(key, kv_head * key_length, key_length);
         const auto value_head = copy_f32_columns(value, kv_head * value_length, value_length);
-        const auto rotated_query = rope_f32(query_head, position, config.rope_dimension_count, config.rope_freq_base);
-        const auto rotated_key = rope_f32(key_head, position, config.rope_dimension_count, config.rope_freq_base);
+        const auto rotated_query = rope_f32_with_position_start(
+            query_head,
+            attention_query_position_start,
+            config.rope_dimension_count,
+            config.rope_freq_base
+        );
+        const auto rotated_key = rope_f32_with_position_start(
+            key_head,
+            attention_query_position_start,
+            config.rope_dimension_count,
+            config.rope_freq_base
+        );
         const auto head_output = causal_scaled_dot_product_attention_f32(
             rotated_query,
             rotated_key,
