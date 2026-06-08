@@ -1,5 +1,6 @@
 #pragma once
 
+#include "local_gguf_engine/engine/kv_cache.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
@@ -34,6 +35,14 @@ struct LlamaBlockWeights {
     std::uint64_t position
 );
 
+[[nodiscard]] tensor::TensorStorage run_llama_attention_layer_with_kv_cache_f32(
+    const tensor::TensorStorage& input,
+    const LlamaAttentionLayerWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCacheLayer& cache
+);
+
 [[nodiscard]] tensor::TensorStorage run_llama_feed_forward_layer_f32(
     const tensor::TensorStorage& input,
     const LlamaFeedForwardLayerWeights& weights,
@@ -45,6 +54,14 @@ struct LlamaBlockWeights {
     const LlamaBlockWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position
+);
+
+[[nodiscard]] tensor::TensorStorage run_llama_block_with_kv_cache_f32(
+    const tensor::TensorStorage& input,
+    const LlamaBlockWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCacheLayer& cache
 );
 
 }  // namespace local_gguf_engine::engine

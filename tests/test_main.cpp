@@ -1,4 +1,5 @@
 #include "local_gguf_engine/benchmarks/benchmark_harness.hpp"
+#include "local_gguf_engine/engine/kv_cache.hpp"
 #include "local_gguf_engine/engine/llama_layer.hpp"
 #include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
@@ -49,7 +50,9 @@ using local_gguf_engine::benchmarks::benchmark_output_path_is_under_results;
 using local_gguf_engine::benchmarks::default_benchmark_output_path;
 using local_gguf_engine::benchmarks::format_benchmark_report;
 using local_gguf_engine::benchmarks::parse_benchmark_args;
+using local_gguf_engine::engine::append_llama_kv_cache_layer_f32;
 using local_gguf_engine::engine::bind_llama_model_weights;
+using local_gguf_engine::engine::create_llama_kv_cache;
 using local_gguf_engine::engine::embed_llama_token_ids_f32;
 using local_gguf_engine::engine::EngineModel;
 using local_gguf_engine::engine::EngineModelError;
@@ -59,6 +62,10 @@ using local_gguf_engine::engine::generate_llama_argmax_tokens_f32;
 using local_gguf_engine::engine::LlamaAttentionLayerWeights;
 using local_gguf_engine::engine::LlamaBlockWeights;
 using local_gguf_engine::engine::LlamaFeedForwardLayerWeights;
+using local_gguf_engine::engine::LlamaKVCache;
+using local_gguf_engine::engine::LlamaKVCacheLayer;
+using local_gguf_engine::engine::llama_kv_cache_layer_key_prefix_f32;
+using local_gguf_engine::engine::llama_kv_cache_layer_value_prefix_f32;
 using local_gguf_engine::engine::LlamaModelConfig;
 using local_gguf_engine::engine::LlamaModelWeights;
 using local_gguf_engine::engine::ModelArchitecture;
@@ -66,11 +73,16 @@ using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::model_architecture_name;
 using local_gguf_engine::engine::project_llama_logits_f32;
 using local_gguf_engine::engine::run_llama_attention_layer_f32;
+using local_gguf_engine::engine::run_llama_attention_layer_with_kv_cache_f32;
 using local_gguf_engine::engine::run_llama_block_f32;
+using local_gguf_engine::engine::run_llama_block_with_kv_cache_f32;
 using local_gguf_engine::engine::run_llama_feed_forward_layer_f32;
 using local_gguf_engine::engine::run_llama_model_blocks_f32;
+using local_gguf_engine::engine::run_llama_model_blocks_with_kv_cache_f32;
 using local_gguf_engine::engine::run_llama_model_logits_f32;
+using local_gguf_engine::engine::run_llama_model_logits_with_kv_cache_f32;
 using local_gguf_engine::engine::run_llama_model_next_token_argmax_f32;
+using local_gguf_engine::engine::run_llama_model_next_token_argmax_with_kv_cache_f32;
 using local_gguf_engine::engine::sample_argmax_token_f32;
 using local_gguf_engine::model_format::GGUFHeader;
 using local_gguf_engine::model_format::GGUFMetadataEntry;
@@ -2233,6 +2245,110 @@ LlamaModelConfig tiny_attention_layer_config() {
     };
 }
 
+void test_creates_llama_kv_cache() {
+    auto config = tiny_attention_layer_config();
+    config.block_count = 2;
+
+    const auto cache = create_llama_kv_cache(config);
+
+    expect(cache.layers.size() == 2, "Llama KV cache layer count mismatch");
+    expect(cache.context_length == 16, "Llama KV cache context length mismatch");
+    expect(cache.key_width == 2, "Llama KV cache key width mismatch");
+    expect(cache.value_width == 2, "Llama KV cache value width mismatch");
+    expect(cache.layers[0].filled_token_count == 0, "Llama KV cache initial fill mismatch");
+    expect(cache.layers[0].key.descriptor().shape == Shape::from({16, 2}), "Llama KV cache key shape mismatch");
+    expect(cache.layers[0].key.descriptor().dtype == DType::f32, "Llama KV cache key dtype mismatch");
+    expect(cache.layers[0].value.descriptor().shape == Shape::from({16, 2}), "Llama KV cache value shape mismatch");
+    expect(cache.layers[0].value.descriptor().dtype == DType::f32, "Llama KV cache value dtype mismatch");
+}
+
+void test_appends_and_reads_llama_kv_cache_layer() {
+    auto cache = create_llama_kv_cache(tiny_attention_layer_config());
+    const std::array<float, 4> key_values {
+        1.0F, 2.0F,
+        3.0F, 4.0F,
+    };
+    const std::array<float, 4> value_values {
+        10.0F, 20.0F,
+        30.0F, 40.0F,
+    };
+    const auto key_rows = tensor_f32_matrix(2, 2, std::span<const float>(key_values));
+    const auto value_rows = tensor_f32_matrix(2, 2, std::span<const float>(value_values));
+
+    append_llama_kv_cache_layer_f32(cache.layers[0], key_rows, value_rows, 0);
+    const auto key_prefix = llama_kv_cache_layer_key_prefix_f32(cache.layers[0]);
+    const auto value_prefix = llama_kv_cache_layer_value_prefix_f32(cache.layers[0]);
+
+    expect(cache.layers[0].filled_token_count == 2, "Llama KV cache filled token count mismatch");
+    expect(key_prefix.descriptor().shape == Shape::from({2, 2}), "Llama KV cache key prefix shape mismatch");
+    expect(value_prefix.descriptor().shape == Shape::from({2, 2}), "Llama KV cache value prefix shape mismatch");
+    const std::array<std::uint64_t, 2> row1_col0 {1, 0};
+    const std::array<std::uint64_t, 2> row1_col1 {1, 1};
+    expect(read_f32(key_prefix, std::span<const std::uint64_t>(row1_col0)) == 3.0F, "Llama KV key prefix value mismatch");
+    expect(read_f32(value_prefix, std::span<const std::uint64_t>(row1_col1)) == 40.0F, "Llama KV value prefix value mismatch");
+}
+
+void test_rejects_llama_kv_cache_append_position_mismatch() {
+    auto cache = create_llama_kv_cache(tiny_attention_layer_config());
+    const std::array<float, 2> key_values {1.0F, 2.0F};
+    const std::array<float, 2> value_values {10.0F, 20.0F};
+    const auto key_rows = tensor_f32_matrix(1, 2, std::span<const float>(key_values));
+    const auto value_rows = tensor_f32_matrix(1, 2, std::span<const float>(value_values));
+
+    try {
+        append_llama_kv_cache_layer_f32(cache.layers[0], key_rows, value_rows, 1);
+        throw TestFailure("Llama KV cache should reject non-contiguous append position");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Llama KV cache append position must match filled token count",
+            "Llama KV cache position mismatch error text mismatch"
+        );
+    }
+}
+
+void test_rejects_llama_kv_cache_context_overflow() {
+    auto config = tiny_attention_layer_config();
+    config.context_length = 1;
+    auto cache = create_llama_kv_cache(config);
+    const std::array<float, 4> key_values {
+        1.0F, 2.0F,
+        3.0F, 4.0F,
+    };
+    const std::array<float, 4> value_values {
+        10.0F, 20.0F,
+        30.0F, 40.0F,
+    };
+    const auto key_rows = tensor_f32_matrix(2, 2, std::span<const float>(key_values));
+    const auto value_rows = tensor_f32_matrix(2, 2, std::span<const float>(value_values));
+
+    try {
+        append_llama_kv_cache_layer_f32(cache.layers[0], key_rows, value_rows, 0);
+        throw TestFailure("Llama KV cache should reject context overflow");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Llama KV cache append would exceed context length",
+            "Llama KV cache overflow error text mismatch"
+        );
+    }
+}
+
+void test_rejects_llama_kv_cache_key_shape_mismatch() {
+    auto cache = create_llama_kv_cache(tiny_attention_layer_config());
+    const std::array<float, 1> key_values {1.0F};
+    const std::array<float, 2> value_values {10.0F, 20.0F};
+    const auto key_rows = tensor_f32_matrix(1, 1, std::span<const float>(key_values));
+    const auto value_rows = tensor_f32_matrix(1, 2, std::span<const float>(value_values));
+
+    try {
+        append_llama_kv_cache_layer_f32(cache.layers[0], key_rows, value_rows, 0);
+        throw TestFailure("Llama KV cache should reject key width mismatch");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "Llama KV cache key shape error mismatch");
+        expect(error.expected_value() == 2, "Llama KV cache expected key width mismatch");
+        expect(error.actual_value() == 1, "Llama KV cache actual key width mismatch");
+    }
+}
+
 void test_runs_llama_attention_layer_with_f16_weights() {
     const std::array<float, 2> input_values {3.0F, 4.0F};
     const std::array<float, 2> norm_values {1.0F, 1.0F};
@@ -2336,6 +2452,69 @@ void test_runs_llama_attention_layer_with_causal_mask() {
         static_cast<float>(40.0 + (1.0 + row1_norm1) / 2.0),
         0.000001F,
         "Llama causal attention row 1 value 1 mismatch"
+    );
+}
+
+void test_runs_llama_attention_layer_with_kv_cache_matches_no_cache() {
+    const std::array<float, 4> full_input_values {
+        3.0F, 4.0F,
+        30.0F, 40.0F,
+    };
+    const std::array<float, 2> first_input_values {3.0F, 4.0F};
+    const std::array<float, 2> second_input_values {30.0F, 40.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> zero_values {
+        0.0F, 0.0F,
+        0.0F, 0.0F,
+    };
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    const auto full_input = tensor_f32_matrix(2, 2, std::span<const float>(full_input_values));
+    const auto first_input = tensor_f32_matrix(1, 2, std::span<const float>(first_input_values));
+    const auto second_input = tensor_f32_matrix(1, 2, std::span<const float>(second_input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(zero_values));
+    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(zero_values));
+    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    const LlamaAttentionLayerWeights weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+    auto cache = create_llama_kv_cache(tiny_attention_layer_config());
+
+    const auto no_cache = run_llama_attention_layer_f32(full_input, weights, tiny_attention_layer_config(), 1);
+    (void)run_llama_attention_layer_with_kv_cache_f32(first_input, weights, tiny_attention_layer_config(), 0, cache.layers[0]);
+    const auto cached = run_llama_attention_layer_with_kv_cache_f32(
+        second_input,
+        weights,
+        tiny_attention_layer_config(),
+        1,
+        cache.layers[0]
+    );
+
+    expect(cache.layers[0].filled_token_count == 2, "Llama attention KV cache fill mismatch");
+    expect(cached.descriptor().shape == Shape::from({1, 2}), "Llama cached attention output shape mismatch");
+    const std::array<std::uint64_t, 2> no_cache_row1_col0 {1, 0};
+    const std::array<std::uint64_t, 2> no_cache_row1_col1 {1, 1};
+    const std::array<std::uint64_t, 2> cached_row0_col0 {0, 0};
+    const std::array<std::uint64_t, 2> cached_row0_col1 {0, 1};
+    expect_close(
+        read_f32(cached, std::span<const std::uint64_t>(cached_row0_col0)),
+        read_f32(no_cache, std::span<const std::uint64_t>(no_cache_row1_col0)),
+        0.000001F,
+        "Llama cached attention value 0 should match no-cache row 1"
+    );
+    expect_close(
+        read_f32(cached, std::span<const std::uint64_t>(cached_row0_col1)),
+        read_f32(no_cache, std::span<const std::uint64_t>(no_cache_row1_col1)),
+        0.000001F,
+        "Llama cached attention value 1 should match no-cache row 1"
     );
 }
 
@@ -3146,6 +3325,89 @@ void test_runs_llama_model_logits_from_token_ids() {
         0.000001F,
         "Llama model logits value 2 mismatch"
     );
+}
+
+void test_runs_llama_model_logits_with_kv_cache_matches_no_cache() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.vocab_size = 8;
+    std::vector<EngineTensor> tensors;
+    add_tiny_llama_top_level_tensors(tensors);
+    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
+    const auto model = tiny_bound_llama_model(config, std::move(tensors));
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 2> full_token_ids {0, 1};
+    const std::array<std::uint32_t, 1> first_token_id {0};
+    const std::array<std::uint32_t, 1> second_token_id {1};
+    auto cache = create_llama_kv_cache(model.llama_config());
+
+    const auto no_cache = run_llama_model_logits_f32(
+        std::span<const std::uint32_t>(full_token_ids),
+        weights,
+        model.llama_config(),
+        1
+    );
+    (void)run_llama_model_logits_with_kv_cache_f32(
+        std::span<const std::uint32_t>(first_token_id),
+        weights,
+        model.llama_config(),
+        0,
+        cache
+    );
+    const auto cached = run_llama_model_logits_with_kv_cache_f32(
+        std::span<const std::uint32_t>(second_token_id),
+        weights,
+        model.llama_config(),
+        1,
+        cache
+    );
+
+    expect(cache.layers[0].filled_token_count == 2, "Llama model KV cache fill mismatch");
+    expect(cached.descriptor().shape == Shape::from({1, 8}), "Llama cached logits shape mismatch");
+    for (std::uint64_t token = 0; token < 8; ++token) {
+        const std::array<std::uint64_t, 2> no_cache_index {1, token};
+        const std::array<std::uint64_t, 2> cached_index {0, token};
+        expect_close(
+            read_f32(cached, std::span<const std::uint64_t>(cached_index)),
+            read_f32(no_cache, std::span<const std::uint64_t>(no_cache_index)),
+            0.00001F,
+            "Llama cached logits should match no-cache final row"
+        );
+    }
+}
+
+void test_rejects_llama_model_kv_cache_layer_count_mismatch() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.vocab_size = 8;
+    std::vector<EngineTensor> tensors;
+    add_tiny_llama_top_level_tensors(tensors);
+    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
+    const auto model = tiny_bound_llama_model(config, std::move(tensors));
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 1> token_ids {0};
+    LlamaKVCache cache {
+        .layers = {},
+        .context_length = 0,
+        .key_width = 0,
+        .value_width = 0,
+    };
+
+    try {
+        (void)run_llama_model_logits_with_kv_cache_f32(
+            std::span<const std::uint32_t>(token_ids),
+            weights,
+            model.llama_config(),
+            0,
+            cache
+        );
+        throw TestFailure("Llama model cached logits should reject cache layer count mismatch");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Llama KV cache layer count must match model block count",
+            "Llama KV cache layer count error text mismatch"
+        );
+    }
 }
 
 void test_rejects_llama_logits_output_weight_dtype_mismatch() {
@@ -4703,8 +4965,20 @@ int main() {
         {"rejects F32 matmul inner dimension mismatch", test_rejects_f32_matmul_inner_dimension_mismatch},
         {"multiplies F32 by F16 matrices into F32", test_multiplies_f32_by_f16_matrices_into_f32},
         {"rejects F32xF16 matmul right dtype mismatch", test_rejects_f32_f16_matmul_right_dtype_mismatch},
+        {"creates Llama KV cache", test_creates_llama_kv_cache},
+        {"appends and reads Llama KV cache layer", test_appends_and_reads_llama_kv_cache_layer},
+        {
+            "rejects Llama KV cache append position mismatch",
+            test_rejects_llama_kv_cache_append_position_mismatch,
+        },
+        {"rejects Llama KV cache context overflow", test_rejects_llama_kv_cache_context_overflow},
+        {"rejects Llama KV cache key shape mismatch", test_rejects_llama_kv_cache_key_shape_mismatch},
         {"runs Llama attention layer with F16 weights", test_runs_llama_attention_layer_with_f16_weights},
         {"runs Llama attention layer with causal mask", test_runs_llama_attention_layer_with_causal_mask},
+        {
+            "runs Llama attention layer with KV cache matches no-cache",
+            test_runs_llama_attention_layer_with_kv_cache_matches_no_cache,
+        },
         {
             "runs Llama attention layer with rowwise RoPE positions",
             test_runs_llama_attention_layer_with_rowwise_rope_positions,
@@ -4759,6 +5033,14 @@ int main() {
         },
         {"projects Llama logits with final norm", test_projects_llama_logits_with_final_norm},
         {"runs Llama model logits from token IDs", test_runs_llama_model_logits_from_token_ids},
+        {
+            "runs Llama model logits with KV cache matches no-cache",
+            test_runs_llama_model_logits_with_kv_cache_matches_no_cache,
+        },
+        {
+            "rejects Llama model KV cache layer count mismatch",
+            test_rejects_llama_model_kv_cache_layer_count_mismatch,
+        },
         {
             "rejects Llama logits output weight dtype mismatch",
             test_rejects_llama_logits_output_weight_dtype_mismatch,

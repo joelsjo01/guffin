@@ -228,6 +228,39 @@ tensor::TensorStorage run_llama_model_blocks_f32(
     return output;
 }
 
+tensor::TensorStorage run_llama_model_blocks_with_kv_cache_f32(
+    const tensor::TensorStorage& input,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCache& cache
+) {
+    if (weights.blocks.empty()) {
+        throw std::invalid_argument("Llama model must contain at least one block");
+    }
+
+    if (weights.blocks.size() != config.block_count) {
+        throw std::invalid_argument("Llama model bound block count must match config block count");
+    }
+
+    if (cache.layers.size() != weights.blocks.size()) {
+        throw std::invalid_argument("Llama KV cache layer count must match model block count");
+    }
+
+    auto output = run_llama_block_with_kv_cache_f32(input, weights.blocks[0], config, position, cache.layers[0]);
+    for (std::size_t block_index = 1; block_index < weights.blocks.size(); ++block_index) {
+        output = run_llama_block_with_kv_cache_f32(
+            output,
+            weights.blocks[block_index],
+            config,
+            position,
+            cache.layers[block_index]
+        );
+    }
+
+    return output;
+}
+
 TensorStorage project_llama_logits_f32(
     const TensorStorage& hidden_states,
     const LlamaModelWeights& weights,
@@ -257,6 +290,24 @@ TensorStorage run_llama_model_logits_f32(
     return project_llama_logits_f32(hidden_states, weights, config);
 }
 
+TensorStorage run_llama_model_logits_with_kv_cache_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCache& cache
+) {
+    const auto embeddings = embed_llama_token_ids_f32(token_ids, weights, config);
+    const auto hidden_states = run_llama_model_blocks_with_kv_cache_f32(
+        embeddings,
+        weights,
+        config,
+        position,
+        cache
+    );
+    return project_llama_logits_f32(hidden_states, weights, config);
+}
+
 std::uint32_t run_llama_model_next_token_argmax_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelWeights& weights,
@@ -264,6 +315,17 @@ std::uint32_t run_llama_model_next_token_argmax_f32(
     std::uint64_t position
 ) {
     const auto logits = run_llama_model_logits_f32(token_ids, weights, config, position);
+    return sample_argmax_token_f32(logits);
+}
+
+std::uint32_t run_llama_model_next_token_argmax_with_kv_cache_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCache& cache
+) {
+    const auto logits = run_llama_model_logits_with_kv_cache_f32(token_ids, weights, config, position, cache);
     return sample_argmax_token_f32(logits);
 }
 

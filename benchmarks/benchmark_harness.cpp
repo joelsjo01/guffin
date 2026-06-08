@@ -1,5 +1,6 @@
 #include "local_gguf_engine/benchmarks/benchmark_harness.hpp"
 
+#include "local_gguf_engine/engine/kv_cache.hpp"
 #include "local_gguf_engine/engine/llama_layer.hpp"
 #include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
@@ -41,6 +42,7 @@ namespace local_gguf_engine::benchmarks {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using engine::create_llama_kv_cache;
 using engine::generate_llama_argmax_tokens_f32;
 using engine::LlamaAttentionLayerWeights;
 using engine::LlamaBlockWeights;
@@ -54,6 +56,7 @@ using engine::run_llama_feed_forward_layer_f32;
 using engine::run_llama_model_blocks_f32;
 using engine::run_llama_model_logits_f32;
 using engine::run_llama_model_next_token_argmax_f32;
+using engine::run_llama_model_next_token_argmax_with_kv_cache_f32;
 using model_format::load_gguf_tensor_payloads;
 using model_format::GGUFHeader;
 using model_format::GGUFMetadataArray;
@@ -755,6 +758,52 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
                     + llama_model_weights.output_weight.bytes().size()
                     + llama_model_weights.blocks.size() * block_weight_bytes,
                 .checksum = token,
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_next_token_argmax_with_kv_cache_f32",
+        report.config.iterations,
+        "prefill_tokens=7 next_tokens=1 hidden=64 vocab=1024 blocks=2",
+        [&llama_token_ids, &llama_model_weights, &llama_model_blocks_config]() {
+            auto cache = create_llama_kv_cache(llama_model_blocks_config);
+            (void)run_llama_model_next_token_argmax_with_kv_cache_f32(
+                std::span<const std::uint32_t>(llama_token_ids.data(), llama_token_ids.size() - 1),
+                llama_model_weights,
+                llama_model_blocks_config,
+                6,
+                cache
+            );
+            const auto token = run_llama_model_next_token_argmax_with_kv_cache_f32(
+                std::span<const std::uint32_t>(llama_token_ids.data() + (llama_token_ids.size() - 1), 1),
+                llama_model_weights,
+                llama_model_blocks_config,
+                7,
+                cache
+            );
+            const auto block_weight_bytes =
+                llama_model_weights.blocks[0].attention.attention_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.query_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.key_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.value_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.output_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.feed_forward_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.gate_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.up_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.down_weight.bytes().size();
+
+            return IterationMeasurement {
+                .bytes_processed = llama_token_ids.size() * sizeof(std::uint32_t)
+                    + cache.layers.size() * (
+                        cache.layers[0].key.bytes().size()
+                        + cache.layers[0].value.bytes().size()
+                    )
+                    + llama_model_weights.token_embedding_weight.bytes().size()
+                    + llama_model_weights.output_norm_weight.bytes().size()
+                    + llama_model_weights.output_weight.bytes().size()
+                    + llama_model_weights.blocks.size() * block_weight_bytes,
+                .checksum = token ^ static_cast<std::uint64_t>(cache.layers[0].filled_token_count),
             };
         }
     ));

@@ -7,6 +7,7 @@ GGUF_INSPECT_BINARY := $(BUILD_DIR)/gguf-inspect
 BENCHMARK_BINARY := $(BUILD_DIR)/local-gguf-bench
 
 ENGINE_SOURCES := \
+	src/engine/kv_cache.cpp \
 	src/engine/llama_layer.cpp \
 	src/engine/llama_model.cpp \
 	src/engine/model.cpp \

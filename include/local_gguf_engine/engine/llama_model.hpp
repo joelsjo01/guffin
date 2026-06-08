@@ -34,6 +34,14 @@ struct LlamaModelWeights {
     std::uint64_t position
 );
 
+[[nodiscard]] tensor::TensorStorage run_llama_model_blocks_with_kv_cache_f32(
+    const tensor::TensorStorage& input,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCache& cache
+);
+
 [[nodiscard]] tensor::TensorStorage project_llama_logits_f32(
     const tensor::TensorStorage& hidden_states,
     const LlamaModelWeights& weights,
@@ -47,11 +55,27 @@ struct LlamaModelWeights {
     std::uint64_t position
 );
 
+[[nodiscard]] tensor::TensorStorage run_llama_model_logits_with_kv_cache_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCache& cache
+);
+
 [[nodiscard]] std::uint32_t run_llama_model_next_token_argmax_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position
+);
+
+[[nodiscard]] std::uint32_t run_llama_model_next_token_argmax_with_kv_cache_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCache& cache
 );
 
 [[nodiscard]] std::vector<std::uint32_t> generate_llama_argmax_tokens_f32(
