@@ -59,6 +59,7 @@ using local_gguf_engine::engine::EngineModelError;
 using local_gguf_engine::engine::EngineModelErrorCode;
 using local_gguf_engine::engine::EngineTensor;
 using local_gguf_engine::engine::generate_llama_argmax_tokens_f32;
+using local_gguf_engine::engine::generate_llama_argmax_tokens_with_kv_cache_f32;
 using local_gguf_engine::engine::LlamaAttentionLayerWeights;
 using local_gguf_engine::engine::LlamaBlockWeights;
 using local_gguf_engine::engine::LlamaFeedForwardLayerWeights;
@@ -128,6 +129,7 @@ using local_gguf_engine::tensor::write_f32;
 using local_gguf_engine::tensor::ops::add_f32;
 using local_gguf_engine::tensor::ops::causal_scaled_dot_product_attention_f32;
 using local_gguf_engine::tensor::ops::copy_f32;
+using local_gguf_engine::tensor::ops::F32MatrixColumnView;
 using local_gguf_engine::tensor::ops::fill_f32;
 using local_gguf_engine::tensor::ops::matmul_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_f16;
@@ -1973,6 +1975,116 @@ void test_applies_f32_causal_attention_with_query_position_offset() {
     );
 }
 
+void test_applies_f32_causal_attention_with_column_views() {
+    const std::array<float, 4> query_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    const std::array<float, 4> key_reference_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    const std::array<float, 4> value_reference_values {
+        10.0F, 20.0F,
+        30.0F, 40.0F,
+    };
+    const std::array<float, 12> key_cache_values {
+        99.0F, 1.0F, 0.0F, -99.0F,
+        88.0F, 0.0F, 1.0F, -88.0F,
+        77.0F, 5.0F, 5.0F, -77.0F,
+    };
+    const std::array<float, 12> value_cache_values {
+        -1.0F, -2.0F, 10.0F, 20.0F,
+        -3.0F, -4.0F, 30.0F, 40.0F,
+        -5.0F, -6.0F, 50.0F, 60.0F,
+    };
+    const auto query = tensor_f32_matrix(2, 2, std::span<const float>(query_values));
+    const auto key_reference = tensor_f32_matrix(2, 2, std::span<const float>(key_reference_values));
+    const auto value_reference = tensor_f32_matrix(2, 2, std::span<const float>(value_reference_values));
+    const auto key_cache = tensor_f32_matrix(3, 4, std::span<const float>(key_cache_values));
+    const auto value_cache = tensor_f32_matrix(3, 4, std::span<const float>(value_cache_values));
+
+    const auto reference = causal_scaled_dot_product_attention_f32(
+        query,
+        key_reference,
+        value_reference,
+        1.0F,
+        0
+    );
+    const auto output = causal_scaled_dot_product_attention_f32(
+        query,
+        F32MatrixColumnView {
+            .storage = key_cache,
+            .row_count = 2,
+            .first_column = 1,
+            .column_count = 2,
+        },
+        F32MatrixColumnView {
+            .storage = value_cache,
+            .row_count = 2,
+            .first_column = 2,
+            .column_count = 2,
+        },
+        1.0F,
+        0
+    );
+
+    expect(output.descriptor().shape == Shape::from({2, 2}), "F32 causal attention view output shape mismatch");
+    for (std::uint64_t row = 0; row < 2; ++row) {
+        for (std::uint64_t column = 0; column < 2; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            expect_close(
+                read_f32(output, std::span<const std::uint64_t>(index)),
+                read_f32(reference, std::span<const std::uint64_t>(index)),
+                0.000001F,
+                "F32 causal attention view parity mismatch"
+            );
+        }
+    }
+}
+
+void test_rejects_f32_causal_attention_column_view_row_mismatch() {
+    const std::array<float, 2> query_values {1.0F, 0.0F};
+    const std::array<float, 6> key_cache_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+        1.0F, 1.0F,
+    };
+    const std::array<float, 6> value_cache_values {
+        10.0F, 20.0F,
+        30.0F, 40.0F,
+        50.0F, 60.0F,
+    };
+    const auto query = tensor_f32_matrix(1, 2, std::span<const float>(query_values));
+    const auto key_cache = tensor_f32_matrix(3, 2, std::span<const float>(key_cache_values));
+    const auto value_cache = tensor_f32_matrix(3, 2, std::span<const float>(value_cache_values));
+
+    try {
+        (void)causal_scaled_dot_product_attention_f32(
+            query,
+            F32MatrixColumnView {
+                .storage = key_cache,
+                .row_count = 2,
+                .first_column = 0,
+                .column_count = 2,
+            },
+            F32MatrixColumnView {
+                .storage = value_cache,
+                .row_count = 1,
+                .first_column = 0,
+                .column_count = 2,
+            },
+            1.0F,
+            0
+        );
+        throw TestFailure("F32 causal attention should reject mismatched column view rows");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 causal attention view row error mismatch");
+        expect(error.expected_value() == 2, "F32 causal attention view expected row mismatch");
+        expect(error.actual_value() == 1, "F32 causal attention view actual row mismatch");
+    }
+}
+
 void test_rejects_f32_causal_attention_position_window_overflow() {
     const auto query = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 1}), DType::f32));
     const auto key = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 1}), DType::f32));
@@ -3490,6 +3602,33 @@ void test_rejects_argmax_sampler_rank_above_two() {
     }
 }
 
+EngineModel tiny_argmax_generation_model(LlamaModelConfig config) {
+    const std::array<float, 6> embedding_values {
+        3.0F, 0.0F, 0.0F,
+        4.0F, 0.0F, 0.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 6> output_values {
+        1.0F, 0.0F, 2.0F,
+        0.0F, 1.0F, 3.0F,
+    };
+    std::vector<EngineTensor> tensors;
+    tensors.push_back(engine_tensor(
+        "token_embd.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output_norm.weight",
+        tensor_f32_vector(std::span<const float>(norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+    ));
+    add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
+    return tiny_bound_llama_model(config, std::move(tensors));
+}
+
 void test_runs_llama_next_token_argmax_from_token_ids() {
     auto config = tiny_logits_config();
     config.block_count = 1;
@@ -3617,6 +3756,104 @@ void test_generates_llama_argmax_tokens() {
     expect(tokens[0] == 0, "Llama argmax generation prompt token mismatch");
     expect(tokens[1] == 2, "Llama argmax generation first token mismatch");
     expect(tokens[2] == 0, "Llama argmax generation second token mismatch");
+}
+
+void test_generates_llama_argmax_tokens_with_kv_cache_matches_no_cache() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.context_length = 8;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 1> prompt_tokens {0};
+
+    const auto cached_tokens = generate_llama_argmax_tokens_with_kv_cache_f32(
+        std::span<const std::uint32_t>(prompt_tokens),
+        2,
+        weights,
+        model.llama_config()
+    );
+    const auto no_cache_tokens = generate_llama_argmax_tokens_f32(
+        std::span<const std::uint32_t>(prompt_tokens),
+        2,
+        weights,
+        model.llama_config()
+    );
+
+    expect(cached_tokens == no_cache_tokens, "cached Llama argmax generation should match no-cache generation");
+    expect(cached_tokens.size() == 3, "cached Llama argmax generation token count mismatch");
+    expect(cached_tokens[0] == 0, "cached Llama argmax generation prompt token mismatch");
+    expect(cached_tokens[1] == 2, "cached Llama argmax generation first token mismatch");
+    expect(cached_tokens[2] == 0, "cached Llama argmax generation second token mismatch");
+}
+
+void test_rejects_llama_cached_generation_zero_new_tokens() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 1> prompt_tokens {0};
+
+    try {
+        (void)generate_llama_argmax_tokens_with_kv_cache_f32(
+            std::span<const std::uint32_t>(prompt_tokens),
+            0,
+            weights,
+            model.llama_config()
+        );
+        throw TestFailure("cached Llama generation should reject zero new tokens");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Llama generation max_new_tokens must be positive",
+            "cached Llama generation zero-token error mismatch"
+        );
+    }
+}
+
+void test_rejects_llama_cached_generation_empty_prompt() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 0> prompt_tokens {};
+
+    try {
+        (void)generate_llama_argmax_tokens_with_kv_cache_f32(
+            std::span<const std::uint32_t>(prompt_tokens),
+            1,
+            weights,
+            model.llama_config()
+        );
+        throw TestFailure("cached Llama generation should reject empty prompt");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Llama token id span must not be empty",
+            "cached Llama generation empty-prompt error mismatch"
+        );
+    }
+}
+
+void test_rejects_llama_cached_generation_context_overflow() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.context_length = 2;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 1> prompt_tokens {0};
+
+    try {
+        (void)generate_llama_argmax_tokens_with_kv_cache_f32(
+            std::span<const std::uint32_t>(prompt_tokens),
+            2,
+            weights,
+            model.llama_config()
+        );
+        throw TestFailure("cached Llama generation should reject context overflow");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Llama generation would exceed context length",
+            "cached Llama generation context overflow error mismatch"
+        );
+    }
 }
 
 void test_rejects_llama_generation_zero_new_tokens() {
@@ -4945,6 +5182,14 @@ int main() {
             test_applies_f32_causal_attention_with_query_position_offset,
         },
         {
+            "applies F32 causal attention with column views",
+            test_applies_f32_causal_attention_with_column_views,
+        },
+        {
+            "rejects F32 causal attention column view row mismatch",
+            test_rejects_f32_causal_attention_column_view_row_mismatch,
+        },
+        {
             "rejects F32 causal attention position window overflow",
             test_rejects_f32_causal_attention_position_window_overflow,
         },
@@ -5052,6 +5297,22 @@ int main() {
         {"runs Llama next-token argmax from token IDs", test_runs_llama_next_token_argmax_from_token_ids},
         {"rejects Llama next-token empty token IDs", test_rejects_llama_next_token_empty_token_ids},
         {"generates Llama argmax tokens", test_generates_llama_argmax_tokens},
+        {
+            "generates Llama argmax tokens with KV cache matches no-cache",
+            test_generates_llama_argmax_tokens_with_kv_cache_matches_no_cache,
+        },
+        {
+            "rejects Llama cached generation zero new tokens",
+            test_rejects_llama_cached_generation_zero_new_tokens,
+        },
+        {
+            "rejects Llama cached generation empty prompt",
+            test_rejects_llama_cached_generation_empty_prompt,
+        },
+        {
+            "rejects Llama cached generation context overflow",
+            test_rejects_llama_cached_generation_context_overflow,
+        },
         {"rejects Llama generation zero new tokens", test_rejects_llama_generation_zero_new_tokens},
         {"rejects Llama generation context overflow", test_rejects_llama_generation_context_overflow},
         {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},

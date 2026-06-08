@@ -85,4 +85,11 @@ struct LlamaModelWeights {
     const LlamaModelConfig& config
 );
 
+[[nodiscard]] std::vector<std::uint32_t> generate_llama_argmax_tokens_with_kv_cache_f32(
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config
+);
+
 }  // namespace local_gguf_engine::engine

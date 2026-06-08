@@ -22,6 +22,7 @@ using tensor::TensorErrorCode;
 using tensor::TensorStorage;
 using tensor::ops::add_f32;
 using tensor::ops::causal_scaled_dot_product_attention_f32;
+using tensor::ops::F32MatrixColumnView;
 using tensor::ops::matmul_f32_f16;
 using tensor::ops::multiply_f32;
 using tensor::ops::rms_norm_f32;
@@ -330,8 +331,7 @@ TensorStorage run_llama_attention_layer_with_kv_cache_f32(
     const auto rotated_key = rotate_key_projection_f32(key, config, attention_query_position_start);
 
     append_llama_kv_cache_layer_f32(cache, rotated_key, value, attention_query_position_start);
-    const auto cached_key = llama_kv_cache_layer_key_prefix_f32(cache);
-    const auto cached_value = llama_kv_cache_layer_value_prefix_f32(cache);
+    const auto cached_token_count = cache.filled_token_count;
 
     auto attention_output = TensorStorage::allocate(
         TensorDescriptor::from(Shape::from({token_count, attention_output_width}), DType::f32)
@@ -342,8 +342,6 @@ TensorStorage run_llama_attention_layer_with_kv_cache_f32(
     for (std::uint64_t head = 0; head < head_count; ++head) {
         const auto kv_head = head / kv_group_size;
         const auto query_head = copy_f32_columns(query, head * key_length, key_length);
-        const auto key_head = copy_f32_columns(cached_key, kv_head * key_length, key_length);
-        const auto value_head = copy_f32_columns(cached_value, kv_head * value_length, value_length);
         const auto rotated_query = rope_f32_with_position_start(
             query_head,
             attention_query_position_start,
@@ -352,8 +350,18 @@ TensorStorage run_llama_attention_layer_with_kv_cache_f32(
         );
         const auto head_output = causal_scaled_dot_product_attention_f32(
             rotated_query,
-            key_head,
-            value_head,
+            F32MatrixColumnView {
+                .storage = cache.key,
+                .row_count = cached_token_count,
+                .first_column = kv_head * key_length,
+                .column_count = key_length,
+            },
+            F32MatrixColumnView {
+                .storage = cache.value,
+                .row_count = cached_token_count,
+                .first_column = kv_head * value_length,
+                .column_count = value_length,
+            },
             attention_scale,
             attention_query_position_start
         );

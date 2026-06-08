@@ -44,9 +44,11 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using engine::create_llama_kv_cache;
 using engine::generate_llama_argmax_tokens_f32;
+using engine::generate_llama_argmax_tokens_with_kv_cache_f32;
 using engine::LlamaAttentionLayerWeights;
 using engine::LlamaBlockWeights;
 using engine::LlamaFeedForwardLayerWeights;
+using engine::LlamaKVCache;
 using engine::LlamaModelConfig;
 using engine::LlamaModelWeights;
 using engine::load_engine_model_from_gguf;
@@ -55,6 +57,7 @@ using engine::run_llama_block_f32;
 using engine::run_llama_feed_forward_layer_f32;
 using engine::run_llama_model_blocks_f32;
 using engine::run_llama_model_logits_f32;
+using engine::run_llama_model_logits_with_kv_cache_f32;
 using engine::run_llama_model_next_token_argmax_f32;
 using engine::run_llama_model_next_token_argmax_with_kv_cache_f32;
 using model_format::load_gguf_tensor_payloads;
@@ -368,6 +371,19 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         .output_weight = llama_logits_weight,
         .blocks = {llama_block_weights, llama_block_weights},
     };
+    std::vector<LlamaKVCache> cached_next_token_caches;
+    cached_next_token_caches.reserve(report.config.iterations);
+    for (std::size_t index = 0; index < report.config.iterations; ++index) {
+        auto cache = create_llama_kv_cache(llama_model_blocks_config);
+        (void)run_llama_model_logits_with_kv_cache_f32(
+            std::span<const std::uint32_t>(llama_token_ids.data(), llama_token_ids.size() - 1),
+            llama_model_weights,
+            llama_model_blocks_config,
+            6,
+            cache
+        );
+        cached_next_token_caches.push_back(std::move(cache));
+    }
 
     report.measurements.push_back(measure(
         "tensor.allocate_f32",
@@ -763,18 +779,56 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     ));
 
     report.measurements.push_back(measure(
-        "engine.llama_next_token_argmax_with_kv_cache_f32",
+        "engine.llama_kv_cache_prefill_f32",
         report.config.iterations,
-        "prefill_tokens=7 next_tokens=1 hidden=64 vocab=1024 blocks=2",
+        "prompt_tokens=7 hidden=64 vocab=1024 blocks=2",
         [&llama_token_ids, &llama_model_weights, &llama_model_blocks_config]() {
             auto cache = create_llama_kv_cache(llama_model_blocks_config);
-            (void)run_llama_model_next_token_argmax_with_kv_cache_f32(
+            const auto logits = run_llama_model_logits_with_kv_cache_f32(
                 std::span<const std::uint32_t>(llama_token_ids.data(), llama_token_ids.size() - 1),
                 llama_model_weights,
                 llama_model_blocks_config,
                 6,
                 cache
             );
+            const auto block_weight_bytes =
+                llama_model_weights.blocks[0].attention.attention_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.query_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.key_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.value_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.output_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.feed_forward_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.gate_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.up_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.down_weight.bytes().size();
+
+            return IterationMeasurement {
+                .bytes_processed = (llama_token_ids.size() - 1) * sizeof(std::uint32_t)
+                    + cache.layers.size() * (
+                        cache.layers[0].key.bytes().size()
+                        + cache.layers[0].value.bytes().size()
+                    )
+                    + llama_model_weights.token_embedding_weight.bytes().size()
+                    + llama_model_weights.output_norm_weight.bytes().size()
+                    + llama_model_weights.output_weight.bytes().size()
+                    + llama_model_weights.blocks.size() * block_weight_bytes,
+                .checksum = checksum_f32(sum_f32(logits))
+                    ^ static_cast<std::uint64_t>(cache.layers[0].filled_token_count),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_cached_next_token_argmax_f32",
+        report.config.iterations,
+        "next_tokens=1 hidden=64 vocab=1024 blocks=2 cache_prefilled=7",
+        [&llama_token_ids,
+         &llama_model_weights,
+         &llama_model_blocks_config,
+         &cached_next_token_caches,
+         cache_index = std::size_t {0}]() mutable {
+            auto& cache = cached_next_token_caches[cache_index];
+            ++cache_index;
             const auto token = run_llama_model_next_token_argmax_with_kv_cache_f32(
                 std::span<const std::uint32_t>(llama_token_ids.data() + (llama_token_ids.size() - 1), 1),
                 llama_model_weights,
@@ -794,7 +848,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
                 + llama_model_weights.blocks[0].feed_forward.down_weight.bytes().size();
 
             return IterationMeasurement {
-                .bytes_processed = llama_token_ids.size() * sizeof(std::uint32_t)
+                .bytes_processed = sizeof(std::uint32_t)
                     + cache.layers.size() * (
                         cache.layers[0].key.bytes().size()
                         + cache.layers[0].value.bytes().size()
@@ -815,6 +869,40 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         [&llama_token_ids, &llama_model_weights, &llama_model_blocks_config]() {
             constexpr std::size_t max_new_tokens = 2;
             const auto tokens = generate_llama_argmax_tokens_f32(
+                std::span<const std::uint32_t>(llama_token_ids),
+                max_new_tokens,
+                llama_model_weights,
+                llama_model_blocks_config
+            );
+            const auto block_weight_bytes =
+                llama_model_weights.blocks[0].attention.attention_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.query_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.key_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.value_weight.bytes().size()
+                + llama_model_weights.blocks[0].attention.output_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.feed_forward_norm_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.gate_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.up_weight.bytes().size()
+                + llama_model_weights.blocks[0].feed_forward.down_weight.bytes().size();
+
+            return IterationMeasurement {
+                .bytes_processed = tokens.size() * sizeof(std::uint32_t)
+                    + llama_model_weights.token_embedding_weight.bytes().size()
+                    + llama_model_weights.output_norm_weight.bytes().size()
+                    + llama_model_weights.output_weight.bytes().size()
+                    + max_new_tokens * llama_model_weights.blocks.size() * block_weight_bytes,
+                .checksum = tokens.empty() ? 0 : tokens.back(),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_generate_argmax_with_kv_cache_f32",
+        report.config.iterations,
+        "prompt_tokens=8 max_new_tokens=2 hidden=64 vocab=1024 blocks=2",
+        [&llama_token_ids, &llama_model_weights, &llama_model_blocks_config]() {
+            constexpr std::size_t max_new_tokens = 2;
+            const auto tokens = generate_llama_argmax_tokens_with_kv_cache_f32(
                 std::span<const std::uint32_t>(llama_token_ids),
                 max_new_tokens,
                 llama_model_weights,
