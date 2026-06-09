@@ -48,6 +48,9 @@ constexpr std::int32_t gguf_token_type_unused = 5;
         case TokenizerErrorCode::no_matching_token:
             message = "no tokenizer vocabulary match";
             break;
+        case TokenizerErrorCode::unsupported_chat_template:
+            message = "unsupported chat template";
+            break;
     }
 
     if (!detail.empty()) {
@@ -100,6 +103,23 @@ constexpr std::int32_t gguf_token_type_unused = 5;
     }
 
     return std::get<std::string>(entry.value.data);
+}
+
+[[nodiscard]] std::optional<std::string> optional_metadata_string(
+    const GGUFMetadataSection& metadata,
+    std::string_view key
+) {
+    const auto* entry = find_metadata_entry(metadata, key);
+    if (entry == nullptr) {
+        return std::nullopt;
+    }
+
+    if (entry->value.type != GGUFMetadataValueType::string
+        || !std::holds_alternative<std::string>(entry->value.data)) {
+        throw TokenizerError(TokenizerErrorCode::invalid_metadata_type, std::string(key));
+    }
+
+    return std::get<std::string>(entry->value.data);
 }
 
 [[nodiscard]] std::optional<std::uint32_t> optional_metadata_u32(
@@ -651,6 +671,30 @@ void append_utf8_code_point(std::string& output, char32_t code_point) {
     return {merge.substr(0, separator), merge.substr(separator + 1)};
 }
 
+constexpr std::string_view smollm2_default_system_prompt =
+    "You are a helpful AI assistant named SmolLM, trained by Hugging Face";
+
+[[nodiscard]] bool supports_smollm2_single_user_template(std::string_view chat_template) noexcept {
+    return chat_template.find(smollm2_default_system_prompt) != std::string_view::npos
+        && chat_template.find("messages[0]['role'] != 'system'") != std::string_view::npos
+        && chat_template.find("message['role']") != std::string_view::npos
+        && chat_template.find("message['content']") != std::string_view::npos
+        && chat_template.find("add_generation_prompt") != std::string_view::npos
+        && chat_template.find("<|im_start|>assistant\n") != std::string_view::npos;
+}
+
+[[nodiscard]] std::string format_smollm2_single_user_prompt(std::string_view prompt) {
+    // Keep chat-template support engine-owned without adding a production Jinja dependency.
+    std::string formatted;
+    formatted.reserve(prompt.size() + smollm2_default_system_prompt.size() + 80U);
+    formatted += "<|im_start|>system\n";
+    formatted += smollm2_default_system_prompt;
+    formatted += "<|im_end|>\n<|im_start|>user\n";
+    formatted += prompt;
+    formatted += "<|im_end|>\n<|im_start|>assistant\n";
+    return formatted;
+}
+
 void append_gpt2_decoded_text(std::string& output, std::string_view token_text) {
     // GPT-2 vocab stores bytes in a reversible Unicode alphabet before BPE merges.
     std::size_t offset = 0;
@@ -711,6 +755,28 @@ std::string_view tokenizer_model_name(TokenizerModel model) noexcept {
     return "unknown";
 }
 
+PromptFormatResult format_generate_prompt_from_gguf_metadata(
+    const GGUFMetadataSection& metadata,
+    std::string_view prompt
+) {
+    const auto chat_template = optional_metadata_string(metadata, "tokenizer.chat_template");
+    if (!chat_template.has_value()) {
+        return PromptFormatResult {
+            .text = std::string(prompt),
+            .encode_special_tokens = false,
+        };
+    }
+
+    if (!supports_smollm2_single_user_template(*chat_template)) {
+        throw TokenizerError(TokenizerErrorCode::unsupported_chat_template, "tokenizer.chat_template");
+    }
+
+    return PromptFormatResult {
+        .text = format_smollm2_single_user_prompt(prompt),
+        .encode_special_tokens = true,
+    };
+}
+
 Tokenizer::Tokenizer(
     TokenizerModel model,
     std::vector<TokenizerToken> vocabulary,
@@ -722,10 +788,12 @@ Tokenizer::Tokenizer(
       vocabulary_(std::move(vocabulary)),
       special_tokens_(special_tokens),
       encode_candidate_token_ids_(),
+      special_encode_candidate_token_ids_(),
       token_text_to_id_(),
       bpe_merge_ranks_(),
       add_space_prefix_(add_space_prefix) {
     encode_candidate_token_ids_.reserve(vocabulary_.size());
+    special_encode_candidate_token_ids_.reserve(vocabulary_.size());
     token_text_to_id_.reserve(vocabulary_.size());
     for (std::size_t index = 0; index < vocabulary_.size(); ++index) {
         if (index > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
@@ -736,6 +804,8 @@ Tokenizer::Tokenizer(
         if (token_id_can_encode_text(token_id)) {
             encode_candidate_token_ids_.push_back(token_id);
             token_text_to_id_.emplace(vocabulary_[index].text, token_id);
+        } else if (token_id_can_encode_special(token_id)) {
+            special_encode_candidate_token_ids_.push_back(token_id);
         }
     }
 
@@ -754,6 +824,20 @@ Tokenizer::Tokenizer(
     std::sort(
         encode_candidate_token_ids_.begin(),
         encode_candidate_token_ids_.end(),
+        [this](std::uint32_t left, std::uint32_t right) {
+            const auto left_size = vocabulary_[left].text.size();
+            const auto right_size = vocabulary_[right].text.size();
+            if (left_size != right_size) {
+                return left_size > right_size;
+            }
+
+            return left < right;
+        }
+    );
+
+    std::sort(
+        special_encode_candidate_token_ids_.begin(),
+        special_encode_candidate_token_ids_.end(),
         [this](std::uint32_t left, std::uint32_t right) {
             const auto left_size = vocabulary_[left].text.size();
             const auto right_size = vocabulary_[right].text.size();
@@ -804,17 +888,46 @@ std::vector<std::uint32_t> Tokenizer::encode(
         token_ids.push_back(require_special_token_id(special_tokens_.bos_token_id, "tokenizer.ggml.bos_token_id"));
     }
 
-    if (model_ == TokenizerModel::gpt2 && !bpe_merge_ranks_.empty()) {
-        append_gpt2_bpe_token_ids(token_ids, text);
-    } else {
-        append_exact_token_ids(token_ids, text);
-    }
+    append_piece_token_ids(token_ids, text, options.encode_special_tokens);
 
     if (options.add_eos) {
         token_ids.push_back(require_special_token_id(special_tokens_.eos_token_id, "tokenizer.ggml.eos_token_id"));
     }
 
     return token_ids;
+}
+
+void Tokenizer::append_piece_token_ids(
+    std::vector<std::uint32_t>& token_ids,
+    std::string_view text,
+    bool encode_special_tokens
+) const {
+    if (!encode_special_tokens) {
+        if (model_ == TokenizerModel::gpt2 && !bpe_merge_ranks_.empty()) {
+            append_gpt2_bpe_token_ids(token_ids, text);
+        } else {
+            append_exact_token_ids(token_ids, text);
+        }
+        return;
+    }
+
+    std::size_t offset = 0;
+    while (offset < text.size()) {
+        const auto special_match = special_token_match_at(text, offset);
+        if (special_match.has_value()) {
+            token_ids.push_back(special_match->first);
+            offset += special_match->second;
+            continue;
+        }
+
+        const auto piece_start = offset;
+        ++offset;
+        while (offset < text.size() && !special_token_match_at(text, offset).has_value()) {
+            ++offset;
+        }
+
+        append_piece_token_ids(token_ids, text.substr(piece_start, offset - piece_start), false);
+    }
 }
 
 void Tokenizer::append_exact_token_ids(std::vector<std::uint32_t>& token_ids, std::string_view text) const {
@@ -976,6 +1089,32 @@ bool Tokenizer::token_id_can_encode_text(std::uint32_t token_id) const noexcept 
 
     const auto type = vocabulary_[token_id].type;
     return type != gguf_token_type_unknown;
+}
+
+bool Tokenizer::token_id_can_encode_special(std::uint32_t token_id) const noexcept {
+    if (static_cast<std::uint64_t>(token_id) >= static_cast<std::uint64_t>(vocabulary_.size())) {
+        return false;
+    }
+
+    if (special_tokens_.unknown_token_id == token_id) {
+        return false;
+    }
+
+    return token_id_is_special(token_id);
+}
+
+std::optional<std::pair<std::uint32_t, std::size_t>> Tokenizer::special_token_match_at(
+    std::string_view text,
+    std::size_t offset
+) const noexcept {
+    for (const auto token_id : special_encode_candidate_token_ids_) {
+        const auto& token_text = vocabulary_[token_id].text;
+        if (starts_with_at(text, offset, token_text)) {
+            return std::pair<std::uint32_t, std::size_t>(token_id, token_text.size());
+        }
+    }
+
+    return std::nullopt;
 }
 
 Tokenizer load_tokenizer_from_gguf_metadata(const GGUFMetadataSection& metadata) {

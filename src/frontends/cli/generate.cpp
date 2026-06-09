@@ -29,8 +29,10 @@ using engine::load_engine_model_from_gguf;
 using model_format::GGUFReadError;
 using model_format::read_gguf_model_view;
 using tensor::TensorError;
+using tokenizer::format_generate_prompt_from_gguf_metadata;
 using tokenizer::load_tokenizer_from_gguf_metadata;
 using tokenizer::TokenizerDecodeOptions;
+using tokenizer::TokenizerEncodeOptions;
 using tokenizer::TokenizerError;
 
 class GenerateFileReadError final : public std::runtime_error {
@@ -108,7 +110,16 @@ std::string generate_text_from_gguf_bytes(
     const auto model_view = read_gguf_model_view(bytes);
     const auto model = load_engine_model_from_gguf(model_view);
     const auto tokenizer = load_tokenizer_from_gguf_metadata(model_view.directory.metadata);
-    const auto prompt_token_ids = tokenizer.encode(prompt);
+    const auto formatted_prompt = format_generate_prompt_from_gguf_metadata(model_view.directory.metadata, prompt);
+    const auto default_encode_options = tokenizer.default_encode_options();
+    const auto prompt_token_ids = tokenizer.encode(
+        formatted_prompt.text,
+        TokenizerEncodeOptions {
+            .add_bos = default_encode_options.add_bos,
+            .add_eos = default_encode_options.add_eos,
+            .encode_special_tokens = formatted_prompt.encode_special_tokens,
+        }
+    );
     const auto weights = bind_llama_model_weights(model);
     const auto output_token_ids = generate_llama_argmax_tokens_with_kv_cache_f32(
         std::span<const std::uint32_t>(prompt_token_ids),

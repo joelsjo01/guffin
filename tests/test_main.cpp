@@ -151,6 +151,7 @@ using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::sum_f32;
 using local_gguf_engine::tensor::ops::sum_squares_f32;
 using local_gguf_engine::tokenizer::load_tokenizer_from_gguf_metadata;
+using local_gguf_engine::tokenizer::format_generate_prompt_from_gguf_metadata;
 using local_gguf_engine::tokenizer::TokenizerDecodeOptions;
 using local_gguf_engine::tokenizer::TokenizerEncodeOptions;
 using local_gguf_engine::tokenizer::TokenizerError;
@@ -682,6 +683,45 @@ std::vector<GGUFMetadataEntry> tiny_gpt2_bpe_tokenizer_metadata(bool add_space_p
     return metadata;
 }
 
+std::string smollm2_chat_template_fixture() {
+    return "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\n"
+        "You are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n"
+        "' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n"
+        "' + message['content'] + '<|im_end|>' + '\n"
+        "'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n"
+        "' }}{% endif %}";
+}
+
+std::string smollm2_formatted_prompt_fixture(std::string_view prompt) {
+    std::string formatted;
+    formatted += "<|im_start|>system\n";
+    formatted += "You are a helpful AI assistant named SmolLM, trained by Hugging Face";
+    formatted += "<|im_end|>\n<|im_start|>user\n";
+    formatted += prompt;
+    formatted += "<|im_end|>\n<|im_start|>assistant\n";
+    return formatted;
+}
+
+std::vector<GGUFMetadataEntry> tiny_gpt2_special_tokenizer_metadata() {
+    auto metadata = tiny_llama_metadata();
+    metadata[11] = metadata_u32("llama.vocab_size", 4);
+    metadata.push_back(metadata_string("tokenizer.ggml.model", "gpt2"));
+    metadata.push_back(metadata_string_array(
+        "tokenizer.ggml.tokens",
+        {"<unk>", "<|im_start|>", "<|im_end|>", "Hello"}
+    ));
+    metadata.push_back(metadata_i32_array(
+        "tokenizer.ggml.token_type",
+        {2, 3, 3, 1}
+    ));
+    metadata.push_back(metadata_u32("tokenizer.ggml.bos_token_id", 1));
+    metadata.push_back(metadata_u32("tokenizer.ggml.eos_token_id", 2));
+    metadata.push_back(metadata_u32("tokenizer.ggml.unknown_token_id", 0));
+    metadata.push_back(metadata_bool("tokenizer.ggml.add_bos_token", false));
+    metadata.push_back(metadata_bool("tokenizer.ggml.add_eos_token", false));
+    return metadata;
+}
+
 std::vector<GGUFMetadataEntry> tiny_generate_cli_metadata(const LlamaModelConfig& config) {
     return {
         metadata_string("general.architecture", "llama"),
@@ -705,6 +745,48 @@ std::vector<GGUFMetadataEntry> tiny_generate_cli_metadata(const LlamaModelConfig
         metadata_u32("tokenizer.ggml.bos_token_id", 0),
         metadata_bool("tokenizer.ggml.add_bos_token", true),
         metadata_bool("tokenizer.ggml.add_eos_token", false),
+    };
+}
+
+std::vector<GGUFMetadataEntry> tiny_generate_cli_chat_metadata(const LlamaModelConfig& config) {
+    return {
+        metadata_string("general.architecture", "llama"),
+        metadata_string("general.name", "Tiny Chat Generate Fixture"),
+        metadata_u32("llama.context_length", config.context_length),
+        metadata_u32("llama.embedding_length", config.embedding_length),
+        metadata_u32("llama.block_count", config.block_count),
+        metadata_u32("llama.feed_forward_length", config.feed_forward_length),
+        metadata_u32("llama.attention.head_count", config.attention_head_count),
+        metadata_u32("llama.attention.head_count_kv", config.attention_head_count_kv),
+        metadata_u32("llama.attention.key_length", config.attention_key_length),
+        metadata_u32("llama.attention.value_length", config.attention_value_length),
+        metadata_u32("llama.rope.dimension_count", config.rope_dimension_count),
+        metadata_u32("llama.vocab_size", config.vocab_size),
+        metadata_f32("llama.rope.freq_base", config.rope_freq_base),
+        metadata_f32("llama.attention.layer_norm_rms_epsilon", config.rms_norm_epsilon),
+        metadata_string("tokenizer.ggml.model", "gpt2"),
+        metadata_string_array(
+            "tokenizer.ggml.tokens",
+            {
+                "<pad>",
+                "<|im_start|>",
+                "<|im_end|>",
+                "system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face",
+                "\n",
+                "user\nHello",
+                "assistant\n",
+                "!",
+            }
+        ),
+        metadata_i32_array(
+            "tokenizer.ggml.token_type",
+            {1, 3, 3, 1, 1, 1, 1, 1}
+        ),
+        metadata_u32("tokenizer.ggml.bos_token_id", 1),
+        metadata_u32("tokenizer.ggml.eos_token_id", 2),
+        metadata_bool("tokenizer.ggml.add_bos_token", false),
+        metadata_bool("tokenizer.ggml.add_eos_token", false),
+        metadata_string("tokenizer.chat_template", smollm2_chat_template_fixture()),
     };
 }
 
@@ -4350,6 +4432,32 @@ EngineModel tiny_eos_then_visible_generation_model(LlamaModelConfig config) {
     return tiny_bound_llama_model(config, std::move(tensors));
 }
 
+EngineModel tiny_chat_template_generation_model(LlamaModelConfig config) {
+    std::vector<float> embedding_values(static_cast<std::size_t>(config.embedding_length) * config.vocab_size, 0.0F);
+    std::vector<float> output_values(static_cast<std::size_t>(config.embedding_length) * config.vocab_size, 0.0F);
+    for (std::uint32_t token = 0; token < config.vocab_size; ++token) {
+        embedding_values[token] = 1.0F;
+    }
+    output_values[7] = 2.0F;
+
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    std::vector<EngineTensor> tensors;
+    tensors.push_back(engine_tensor(
+        "token_embd.weight",
+        tensor_f16_matrix(config.embedding_length, config.vocab_size, std::span<const float>(embedding_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output_norm.weight",
+        tensor_f32_vector(std::span<const float>(norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output.weight",
+        tensor_f16_matrix(config.embedding_length, config.vocab_size, std::span<const float>(output_values))
+    ));
+    add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
+    return tiny_bound_llama_model(config, std::move(tensors));
+}
+
 std::vector<std::uint8_t> tiny_generate_cli_gguf_bytes() {
     auto config = tiny_logits_config();
     config.block_count = 1;
@@ -4379,6 +4487,18 @@ std::vector<std::uint8_t> tiny_eos_generate_cli_gguf_bytes() {
     const auto model = tiny_eos_then_visible_generation_model(config);
     return write_tiny_gguf_bytes(
         tiny_generate_cli_eos_metadata(config),
+        tiny_gguf_tensors_from_engine_model(model)
+    );
+}
+
+std::vector<std::uint8_t> tiny_chat_template_generate_cli_gguf_bytes() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.context_length = 16;
+    config.vocab_size = 8;
+    const auto model = tiny_chat_template_generation_model(config);
+    return write_tiny_gguf_bytes(
+        tiny_generate_cli_chat_metadata(config),
         tiny_gguf_tensors_from_engine_model(model)
     );
 }
@@ -4796,6 +4916,14 @@ void test_generates_text_from_gguf_bytes_stops_at_tokenizer_eos() {
     const auto text = generate_text_from_gguf_bytes(std::span<const std::uint8_t>(bytes), "", 2);
 
     expect(text.empty(), "generate text should stop before visible token after EOS");
+}
+
+void test_generates_text_from_gguf_bytes_with_chat_template_prompt() {
+    const auto bytes = tiny_chat_template_generate_cli_gguf_bytes();
+
+    const auto text = generate_text_from_gguf_bytes(std::span<const std::uint8_t>(bytes), "Hello", 1);
+
+    expect(text == "!", "generate text should apply tokenizer chat template before encoding");
 }
 
 void test_runs_generate_success_path() {
@@ -5838,6 +5966,83 @@ void test_encodes_gpt2_bpe_with_space_prefix() {
     );
 }
 
+void test_encodes_tokenizer_special_tokens_when_enabled() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(
+        metadata_section(tiny_gpt2_special_tokenizer_metadata())
+    );
+
+    const auto ids = tokenizer.encode(
+        "<|im_start|>Hello<|im_end|>",
+        TokenizerEncodeOptions {.add_bos = false, .add_eos = false, .encode_special_tokens = true}
+    );
+    const auto ordinary_ids = tokenizer.encode(
+        "<|im_start|>",
+        TokenizerEncodeOptions {.add_bos = false, .add_eos = false, .encode_special_tokens = false}
+    );
+
+    expect(ids.size() == 3, "special-token encode count mismatch");
+    expect(ids[0] == 1, "special-token encode im_start mismatch");
+    expect(ids[1] == 3, "special-token encode text mismatch");
+    expect(ids[2] == 2, "special-token encode im_end mismatch");
+    expect(ordinary_ids.size() > 1, "ordinary encode should not collapse control tokens");
+    expect(ordinary_ids[0] == 0, "ordinary encode should route literal control text through unknown token");
+}
+
+void test_formats_smollm2_generate_prompt_from_chat_template() {
+    auto metadata = tiny_llama_tokenizer_metadata();
+    metadata.push_back(metadata_string("tokenizer.chat_template", smollm2_chat_template_fixture()));
+
+    const auto formatted = format_generate_prompt_from_gguf_metadata(metadata_section(std::move(metadata)), "Hello");
+
+    expect(formatted.encode_special_tokens, "chat-formatted prompt should enable special-token encoding");
+    expect(
+        formatted.text == smollm2_formatted_prompt_fixture("Hello"),
+        "SmolLM2 chat-formatted prompt mismatch"
+    );
+}
+
+void test_keeps_raw_generate_prompt_without_chat_template() {
+    const auto formatted = format_generate_prompt_from_gguf_metadata(
+        metadata_section(tiny_llama_tokenizer_metadata()),
+        "Hello"
+    );
+
+    expect(!formatted.encode_special_tokens, "raw prompt should not enable special-token encoding");
+    expect(formatted.text == "Hello", "raw prompt formatting mismatch");
+}
+
+void test_rejects_unsupported_chat_template() {
+    auto metadata = tiny_llama_tokenizer_metadata();
+    metadata.push_back(metadata_string("tokenizer.chat_template", "{{ messages }}"));
+
+    try {
+        (void)format_generate_prompt_from_gguf_metadata(metadata_section(std::move(metadata)), "Hello");
+        throw TestFailure("prompt formatter should reject unsupported chat template");
+    } catch (const TokenizerError& error) {
+        expect(
+            error.code() == TokenizerErrorCode::unsupported_chat_template,
+            "unsupported chat-template error mismatch"
+        );
+        expect(error.detail() == "tokenizer.chat_template", "unsupported chat-template detail mismatch");
+    }
+}
+
+void test_rejects_chat_template_invalid_type() {
+    auto metadata = tiny_llama_tokenizer_metadata();
+    metadata.push_back(metadata_bool("tokenizer.chat_template", true));
+
+    try {
+        (void)format_generate_prompt_from_gguf_metadata(metadata_section(std::move(metadata)), "Hello");
+        throw TestFailure("prompt formatter should reject invalid chat-template metadata type");
+    } catch (const TokenizerError& error) {
+        expect(
+            error.code() == TokenizerErrorCode::invalid_metadata_type,
+            "invalid chat-template metadata type error mismatch"
+        );
+        expect(error.detail() == "tokenizer.chat_template", "invalid chat-template metadata detail mismatch");
+    }
+}
+
 void test_decodes_llama_tokenizer_known_ids_and_skips_special_tokens() {
     const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_llama_tokenizer_metadata()));
     const std::array<std::uint32_t, 5> ids {0, 2, 3, 4, 1};
@@ -6323,6 +6528,10 @@ int main() {
             "generates text from GGUF bytes stops at tokenizer EOS",
             test_generates_text_from_gguf_bytes_stops_at_tokenizer_eos,
         },
+        {
+            "generates text from GGUF bytes with chat-template prompt",
+            test_generates_text_from_gguf_bytes_with_chat_template_prompt,
+        },
         {"runs generate success path", test_runs_generate_success_path},
         {"rejects generate missing arguments", test_rejects_generate_missing_arguments},
         {"rejects generate invalid max new tokens", test_rejects_generate_invalid_max_new_tokens},
@@ -6394,6 +6603,14 @@ int main() {
         },
         {"encodes GPT-2 BPE prompt pieces", test_encodes_gpt2_bpe_prompt_pieces},
         {"encodes GPT-2 BPE with space prefix", test_encodes_gpt2_bpe_with_space_prefix},
+        {"encodes tokenizer special tokens when enabled", test_encodes_tokenizer_special_tokens_when_enabled},
+        {
+            "formats SmolLM2 generate prompt from chat template",
+            test_formats_smollm2_generate_prompt_from_chat_template,
+        },
+        {"keeps raw generate prompt without chat template", test_keeps_raw_generate_prompt_without_chat_template},
+        {"rejects unsupported chat template", test_rejects_unsupported_chat_template},
+        {"rejects chat template invalid type", test_rejects_chat_template_invalid_type},
         {
             "decodes Llama tokenizer known IDs and skips special tokens",
             test_decodes_llama_tokenizer_known_ids_and_skips_special_tokens,
