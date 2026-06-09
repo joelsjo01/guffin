@@ -627,6 +627,30 @@ std::vector<GGUFMetadataEntry> tiny_llama_tokenizer_metadata() {
     return metadata;
 }
 
+std::vector<GGUFMetadataEntry> tiny_gpt2_byte_decoder_tokenizer_metadata() {
+    auto metadata = tiny_llama_metadata();
+    metadata[11] = metadata_u32("llama.vocab_size", 8);
+    metadata.push_back(metadata_string("tokenizer.ggml.model", "gpt2"));
+    metadata.push_back(metadata_string_array(
+        "tokenizer.ggml.tokens",
+        {"<s>", "</s>", "Hello", "\xC4\xA0world", "!", "\xC4\x8A", "\xC3\x83\xC2\xA5", "<unk>"}
+    ));
+    metadata.push_back(metadata_f32_array(
+        "tokenizer.ggml.scores",
+        {0.0F, 0.0F, -1.0F, -1.1F, -1.2F, -1.3F, -1.4F, -10.0F}
+    ));
+    metadata.push_back(metadata_i32_array(
+        "tokenizer.ggml.token_type",
+        {3, 3, 1, 1, 1, 1, 1, 2}
+    ));
+    metadata.push_back(metadata_u32("tokenizer.ggml.bos_token_id", 0));
+    metadata.push_back(metadata_u32("tokenizer.ggml.eos_token_id", 1));
+    metadata.push_back(metadata_u32("tokenizer.ggml.unknown_token_id", 7));
+    metadata.push_back(metadata_bool("tokenizer.ggml.add_bos_token", true));
+    metadata.push_back(metadata_bool("tokenizer.ggml.add_eos_token", false));
+    return metadata;
+}
+
 std::vector<GGUFMetadataEntry> tiny_generate_cli_metadata(const LlamaModelConfig& config) {
     return {
         metadata_string("general.architecture", "llama"),
@@ -5666,6 +5690,25 @@ void test_decodes_llama_tokenizer_known_ids_and_skips_special_tokens() {
     expect(skipped == "Hello world!", "tokenizer skip-special decoded text mismatch");
 }
 
+void test_decodes_gpt2_byte_level_markers() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(
+        metadata_section(tiny_gpt2_byte_decoder_tokenizer_metadata())
+    );
+    const std::array<std::uint32_t, 7> ids {0, 2, 3, 4, 5, 6, 1};
+
+    const auto decoded = tokenizer.decode(std::span<const std::uint32_t>(ids));
+    const auto skipped = tokenizer.decode(
+        std::span<const std::uint32_t>(ids),
+        TokenizerDecodeOptions {.skip_special_tokens = true}
+    );
+
+    const auto expected = std::string("<s>Hello world!\n") + "\xC3\xA5" + "</s>";
+    const auto expected_skipped = std::string("Hello world!\n") + "\xC3\xA5";
+
+    expect(decoded == expected, "GPT-2 byte-level decoded text mismatch");
+    expect(skipped == expected_skipped, "GPT-2 byte-level skip-special decoded text mismatch");
+}
+
 void test_rejects_tokenizer_decode_id_out_of_range() {
     const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_llama_tokenizer_metadata()));
     const std::array<std::uint32_t, 1> ids {7};
@@ -6164,6 +6207,7 @@ int main() {
             "decodes Llama tokenizer known IDs and skips special tokens",
             test_decodes_llama_tokenizer_known_ids_and_skips_special_tokens,
         },
+        {"decodes GPT-2 byte-level markers", test_decodes_gpt2_byte_level_markers},
         {"rejects tokenizer decode ID out of range", test_rejects_tokenizer_decode_id_out_of_range},
         {
             "rejects tokenizer malformed token metadata",

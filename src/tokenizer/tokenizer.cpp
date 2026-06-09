@@ -352,6 +352,127 @@ void validate_token_id(
     return *token_id;
 }
 
+[[nodiscard]] bool is_utf8_continuation(std::uint8_t byte) noexcept {
+    return (byte & 0xC0U) == 0x80U;
+}
+
+struct Utf8CodePoint {
+    char32_t value;
+    std::size_t byte_count;
+    bool valid;
+};
+
+[[nodiscard]] Utf8CodePoint read_utf8_code_point(std::string_view text, std::size_t offset) noexcept {
+    const auto first = static_cast<std::uint8_t>(text[offset]);
+    if (first < 0x80U) {
+        return Utf8CodePoint {.value = static_cast<char32_t>(first), .byte_count = 1, .valid = true};
+    }
+
+    const auto remaining = text.size() - offset;
+    if ((first & 0xE0U) == 0xC0U && remaining >= 2) {
+        const auto second = static_cast<std::uint8_t>(text[offset + 1]);
+        if (is_utf8_continuation(second)) {
+            return Utf8CodePoint {
+                .value = static_cast<char32_t>(((first & 0x1FU) << 6U) | (second & 0x3FU)),
+                .byte_count = 2,
+                .valid = true,
+            };
+        }
+    }
+
+    if ((first & 0xF0U) == 0xE0U && remaining >= 3) {
+        const auto second = static_cast<std::uint8_t>(text[offset + 1]);
+        const auto third = static_cast<std::uint8_t>(text[offset + 2]);
+        if (is_utf8_continuation(second) && is_utf8_continuation(third)) {
+            return Utf8CodePoint {
+                .value = static_cast<char32_t>(
+                    ((first & 0x0FU) << 12U)
+                    | ((second & 0x3FU) << 6U)
+                    | (third & 0x3FU)
+                ),
+                .byte_count = 3,
+                .valid = true,
+            };
+        }
+    }
+
+    if ((first & 0xF8U) == 0xF0U && remaining >= 4) {
+        const auto second = static_cast<std::uint8_t>(text[offset + 1]);
+        const auto third = static_cast<std::uint8_t>(text[offset + 2]);
+        const auto fourth = static_cast<std::uint8_t>(text[offset + 3]);
+        if (is_utf8_continuation(second) && is_utf8_continuation(third) && is_utf8_continuation(fourth)) {
+            return Utf8CodePoint {
+                .value = static_cast<char32_t>(
+                    ((first & 0x07U) << 18U)
+                    | ((second & 0x3FU) << 12U)
+                    | ((third & 0x3FU) << 6U)
+                    | (fourth & 0x3FU)
+                ),
+                .byte_count = 4,
+                .valid = true,
+            };
+        }
+    }
+
+    return Utf8CodePoint {.value = static_cast<char32_t>(first), .byte_count = 1, .valid = false};
+}
+
+[[nodiscard]] std::optional<std::uint8_t> gpt2_byte_from_code_point(char32_t code_point) noexcept {
+    const auto code = static_cast<std::uint32_t>(code_point);
+    if ((code >= 33U && code <= 126U) || (code >= 161U && code <= 172U) || (code >= 174U && code <= 255U)) {
+        return static_cast<std::uint8_t>(code);
+    }
+
+    if (code < 0x0100U || code > 0x0143U) {
+        return std::nullopt;
+    }
+
+    const auto compact = code - 0x0100U;
+    if (compact <= 32U) {
+        return static_cast<std::uint8_t>(compact);
+    }
+
+    if (compact <= 66U) {
+        return static_cast<std::uint8_t>(127U + (compact - 33U));
+    }
+
+    return static_cast<std::uint8_t>(173U);
+}
+
+void append_gpt2_decoded_text(std::string& output, std::string_view token_text) {
+    // GPT-2 vocab stores bytes in a reversible Unicode alphabet before BPE merges.
+    std::size_t offset = 0;
+    while (offset < token_text.size()) {
+        const auto code_point = read_utf8_code_point(token_text, offset);
+        if (code_point.valid) {
+            const auto byte = gpt2_byte_from_code_point(code_point.value);
+            if (byte.has_value()) {
+                output.push_back(static_cast<char>(*byte));
+                offset += code_point.byte_count;
+                continue;
+            }
+        }
+
+        output.append(token_text.substr(offset, code_point.byte_count));
+        offset += code_point.byte_count;
+    }
+}
+
+void append_decoded_token_text(
+    std::string& output,
+    TokenizerModel model,
+    std::string_view token_text
+) {
+    switch (model) {
+        case TokenizerModel::gpt2:
+            append_gpt2_decoded_text(output, token_text);
+            return;
+        case TokenizerModel::llama:
+            output += token_text;
+            return;
+    }
+}
+
 }  // namespace
 
 TokenizerError::TokenizerError(TokenizerErrorCode code, std::string detail)
@@ -505,7 +626,7 @@ std::string Tokenizer::decode(
             continue;
         }
 
-        output += vocabulary_[token_id].text;
+        append_decoded_token_text(output, model_, vocabulary_[token_id].text);
     }
 
     return output;
