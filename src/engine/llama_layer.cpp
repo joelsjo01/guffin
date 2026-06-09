@@ -26,7 +26,7 @@ using tensor::TensorStorage;
 using tensor::f16_bits_to_f32;
 using tensor::ops::add_f32;
 using tensor::ops::causal_scaled_dot_product_attention_f32;
-using tensor::ops::matmul_f32_f16;
+using tensor::ops::matmul_f32_f16_gguf_weight;
 using tensor::ops::multiply_f32;
 using tensor::ops::rms_norm_f32;
 using tensor::ops::rope_f32_with_position_start;
@@ -482,7 +482,7 @@ void accumulate_cached_attention_projection_f32(
     const auto key_length = static_cast<std::uint64_t>(config.attention_key_length);
     const auto value_length = static_cast<std::uint64_t>(config.attention_value_length);
     const auto kv_group_size = head_count / kv_head_count;
-    const auto output_columns = output_weight.descriptor().shape.dimension(1);
+    const auto output_rows = output_weight.descriptor().shape.dimension(0);
     std::vector<float> value_accumulator(static_cast<std::size_t>(value_length));
 
     for (std::uint64_t head = 0; head < head_count; ++head) {
@@ -549,8 +549,7 @@ void accumulate_cached_attention_projection_f32(
                 const auto attention_value = value_accumulator[static_cast<std::size_t>(value_column)] / denominator;
                 for (std::uint64_t hidden_column = 0; hidden_column < hidden; ++hidden_column) {
                     const auto projected_index = query_row * hidden + hidden_column;
-                    const auto output_weight_index = (output_first_row + value_column) * output_columns
-                        + hidden_column;
+                    const auto output_weight_index = hidden_column * output_rows + output_first_row + value_column;
                     const auto current = read_f32_linear(projected, projected_index);
                     write_f32_linear(
                         projected,
@@ -592,9 +591,9 @@ TensorStorage run_llama_attention_layer_f32(
     require_f16_matrix_shape(weights.output_weight, attention_output_width, hidden);
 
     const auto normalized = rms_norm_f32(input, weights.attention_norm_weight, config.rms_norm_epsilon);
-    const auto query = matmul_f32_f16(normalized, weights.query_weight);
-    const auto key = matmul_f32_f16(normalized, weights.key_weight);
-    const auto value = matmul_f32_f16(normalized, weights.value_weight);
+    const auto query = matmul_f32_f16_gguf_weight(normalized, weights.query_weight);
+    const auto key = matmul_f32_f16_gguf_weight(normalized, weights.key_weight);
+    const auto value = matmul_f32_f16_gguf_weight(normalized, weights.value_weight);
 
     auto attention_output = TensorStorage::allocate(
         TensorDescriptor::from(Shape::from({token_count, attention_output_width}), DType::f32)
@@ -631,7 +630,7 @@ TensorStorage run_llama_attention_layer_f32(
         write_f32_columns(attention_output, head * value_length, head_output);
     }
 
-    const auto projected = matmul_f32_f16(attention_output, weights.output_weight);
+    const auto projected = matmul_f32_f16_gguf_weight(attention_output, weights.output_weight);
     return add_f32(input, projected);
 }
 
@@ -668,9 +667,9 @@ TensorStorage run_llama_attention_layer_with_kv_cache_f32(
     }
 
     const auto normalized = rms_norm_f32(input, weights.attention_norm_weight, config.rms_norm_epsilon);
-    const auto query = matmul_f32_f16(normalized, weights.query_weight);
-    const auto key = matmul_f32_f16(normalized, weights.key_weight);
-    const auto value = matmul_f32_f16(normalized, weights.value_weight);
+    const auto query = matmul_f32_f16_gguf_weight(normalized, weights.query_weight);
+    const auto key = matmul_f32_f16_gguf_weight(normalized, weights.key_weight);
+    const auto value = matmul_f32_f16_gguf_weight(normalized, weights.value_weight);
 
     append_rotated_key_value_to_cache_f32(cache, key, value, config, attention_query_position_start);
     const auto cached_token_count = cache.filled_token_count;
@@ -710,11 +709,11 @@ TensorStorage run_llama_feed_forward_layer_f32(
     require_f16_matrix_shape(weights.down_weight, feed_forward, hidden);
 
     const auto normalized = rms_norm_f32(input, weights.feed_forward_norm_weight, config.rms_norm_epsilon);
-    const auto gate = matmul_f32_f16(normalized, weights.gate_weight);
-    const auto up = matmul_f32_f16(normalized, weights.up_weight);
+    const auto gate = matmul_f32_f16_gguf_weight(normalized, weights.gate_weight);
+    const auto up = matmul_f32_f16_gguf_weight(normalized, weights.up_weight);
     const auto activated_gate = silu_f32(gate);
     const auto gated = multiply_f32(activated_gate, up);
-    const auto projected = matmul_f32_f16(gated, weights.down_weight);
+    const auto projected = matmul_f32_f16_gguf_weight(gated, weights.down_weight);
     return add_f32(input, projected);
 }
 

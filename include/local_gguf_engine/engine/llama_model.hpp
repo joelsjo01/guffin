@@ -2,6 +2,7 @@
 
 #include "local_gguf_engine/engine/llama_layer.hpp"
 #include "local_gguf_engine/engine/model.hpp"
+#include "local_gguf_engine/engine/sampling.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
 #include <cstddef>
@@ -79,6 +80,25 @@ struct LlamaModelWeights {
     LlamaKVCache& cache
 );
 
+[[nodiscard]] std::uint32_t run_llama_model_next_token_sampled_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    const SamplingConfig& sampling,
+    SamplingState& sampling_state
+);
+
+[[nodiscard]] std::uint32_t run_llama_model_next_token_sampled_with_kv_cache_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCache& cache,
+    const SamplingConfig& sampling,
+    SamplingState& sampling_state
+);
+
 [[nodiscard]] std::vector<std::uint32_t> generate_llama_argmax_tokens_f32(
     std::span<const std::uint32_t> prompt_token_ids,
     std::size_t max_new_tokens,
@@ -92,6 +112,24 @@ struct LlamaModelWeights {
     std::size_t max_new_tokens,
     const LlamaModelWeights& weights,
     const LlamaModelConfig& config,
+    std::optional<std::uint32_t> stop_token_id = std::nullopt
+);
+
+[[nodiscard]] std::vector<std::uint32_t> generate_llama_sampled_tokens_f32(
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    const SamplingConfig& sampling,
+    std::optional<std::uint32_t> stop_token_id = std::nullopt
+);
+
+[[nodiscard]] std::vector<std::uint32_t> generate_llama_sampled_tokens_with_kv_cache_f32(
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    const SamplingConfig& sampling,
     std::optional<std::uint32_t> stop_token_id = std::nullopt
 );
 

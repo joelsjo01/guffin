@@ -23,7 +23,7 @@ using tensor::TensorDescriptor;
 using tensor::TensorError;
 using tensor::TensorErrorCode;
 using tensor::TensorStorage;
-using tensor::ops::matmul_f32_f16;
+using tensor::ops::matmul_f32_f16_gguf_weight;
 using tensor::ops::rms_norm_f32;
 
 constexpr std::size_t vector_rank = 1;
@@ -213,7 +213,7 @@ TensorStorage embed_llama_token_ids_f32(
             write_f32_linear(
                 output,
                 token_index * hidden + hidden_index,
-                read_f16_linear_as_f32(weights.token_embedding_weight, hidden_index * vocab + token_id)
+                read_f16_linear_as_f32(weights.token_embedding_weight, token_id * hidden + hidden_index)
             );
         }
     }
@@ -291,7 +291,7 @@ TensorStorage project_llama_logits_f32(
     require_f16_matrix_shape(weights.output_weight, hidden, vocab);
 
     const auto normalized = rms_norm_f32(hidden_states, weights.output_norm_weight, config.rms_norm_epsilon);
-    return matmul_f32_f16(normalized, weights.output_weight);
+    return matmul_f32_f16_gguf_weight(normalized, weights.output_weight);
 }
 
 TensorStorage run_llama_model_logits_f32(
@@ -342,6 +342,31 @@ std::uint32_t run_llama_model_next_token_argmax_with_kv_cache_f32(
 ) {
     const auto logits = run_llama_model_logits_with_kv_cache_f32(token_ids, weights, config, position, cache);
     return sample_argmax_token_f32(logits);
+}
+
+std::uint32_t run_llama_model_next_token_sampled_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    const SamplingConfig& sampling,
+    SamplingState& sampling_state
+) {
+    const auto logits = run_llama_model_logits_f32(token_ids, weights, config, position);
+    return sample_token_f32(logits, sampling, sampling_state);
+}
+
+std::uint32_t run_llama_model_next_token_sampled_with_kv_cache_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCache& cache,
+    const SamplingConfig& sampling,
+    SamplingState& sampling_state
+) {
+    const auto logits = run_llama_model_logits_with_kv_cache_f32(token_ids, weights, config, position, cache);
+    return sample_token_f32(logits, sampling, sampling_state);
 }
 
 std::vector<std::uint32_t> generate_llama_argmax_tokens_f32(
@@ -422,6 +447,104 @@ std::vector<std::uint32_t> generate_llama_argmax_tokens_with_kv_cache_f32(
             config,
             position,
             cache
+        );
+        tokens.push_back(next_token);
+        if (stop_token_id == next_token) {
+            break;
+        }
+    }
+
+    return tokens;
+}
+
+std::vector<std::uint32_t> generate_llama_sampled_tokens_f32(
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    const SamplingConfig& sampling,
+    std::optional<std::uint32_t> stop_token_id
+) {
+    if (max_new_tokens == 0) {
+        throw std::invalid_argument("Llama generation max_new_tokens must be positive");
+    }
+
+    if (prompt_token_ids.empty()) {
+        throw std::invalid_argument("Llama token id span must not be empty");
+    }
+
+    require_generation_fits_context(prompt_token_ids.size(), max_new_tokens, config.context_length);
+
+    SamplingState sampling_state(sampling.seed);
+    std::vector<std::uint32_t> tokens(prompt_token_ids.begin(), prompt_token_ids.end());
+    tokens.reserve(prompt_token_ids.size() + max_new_tokens);
+    for (std::size_t generated = 0; generated < max_new_tokens; ++generated) {
+        const auto position = static_cast<std::uint64_t>(tokens.size() - 1);
+        const auto next_token = run_llama_model_next_token_sampled_f32(
+            std::span<const std::uint32_t>(tokens.data(), tokens.size()),
+            weights,
+            config,
+            position,
+            sampling,
+            sampling_state
+        );
+        tokens.push_back(next_token);
+        if (stop_token_id == next_token) {
+            break;
+        }
+    }
+
+    return tokens;
+}
+
+std::vector<std::uint32_t> generate_llama_sampled_tokens_with_kv_cache_f32(
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    const SamplingConfig& sampling,
+    std::optional<std::uint32_t> stop_token_id
+) {
+    if (max_new_tokens == 0) {
+        throw std::invalid_argument("Llama generation max_new_tokens must be positive");
+    }
+
+    if (prompt_token_ids.empty()) {
+        throw std::invalid_argument("Llama token id span must not be empty");
+    }
+
+    require_generation_fits_context(prompt_token_ids.size(), max_new_tokens, config.context_length);
+
+    SamplingState sampling_state(sampling.seed);
+    auto cache = create_llama_kv_cache(config);
+    std::vector<std::uint32_t> tokens(prompt_token_ids.begin(), prompt_token_ids.end());
+    tokens.reserve(prompt_token_ids.size() + max_new_tokens);
+
+    const auto prompt_final_position = static_cast<std::uint64_t>(prompt_token_ids.size() - 1);
+    auto next_token = run_llama_model_next_token_sampled_with_kv_cache_f32(
+        prompt_token_ids,
+        weights,
+        config,
+        prompt_final_position,
+        cache,
+        sampling,
+        sampling_state
+    );
+    tokens.push_back(next_token);
+    if (stop_token_id == next_token) {
+        return tokens;
+    }
+
+    for (std::size_t generated = 1; generated < max_new_tokens; ++generated) {
+        const auto position = static_cast<std::uint64_t>(tokens.size() - 1);
+        next_token = run_llama_model_next_token_sampled_with_kv_cache_f32(
+            std::span<const std::uint32_t>(&tokens.back(), 1),
+            weights,
+            config,
+            position,
+            cache,
+            sampling,
+            sampling_state
         );
         tokens.push_back(next_token);
         if (stop_token_id == next_token) {

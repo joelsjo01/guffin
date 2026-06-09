@@ -97,4 +97,33 @@ TensorStorage matmul_f32_f16(const TensorStorage& left, const TensorStorage& rig
     return matmul_f32_with_right_reader(left, right, read_f16_linear_as_f32);
 }
 
+TensorStorage matmul_f32_f16_gguf_weight(const TensorStorage& left, const TensorStorage& right) {
+    require_f32_operand(left);
+    require_f16_operand(right);
+    require_matrix_descriptor(left.descriptor());
+    require_matrix_descriptor(right.descriptor());
+    require_matmul_inner_dimensions(left.descriptor(), right.descriptor());
+
+    const auto rows = left.descriptor().shape.dimension(0);
+    const auto shared = left.descriptor().shape.dimension(1);
+    const auto columns = right.descriptor().shape.dimension(1);
+    auto output = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f32));
+
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            float sum = 0.0F;
+            for (std::uint64_t inner = 0; inner < shared; ++inner) {
+                const auto left_index = row * shared + inner;
+                // GGUF/GGML stores dimension 0 contiguously, so each output column owns a packed input row.
+                const auto right_index = column * shared + inner;
+                sum += read_f32_linear(left, left_index) * read_f16_linear_as_f32(right, right_index);
+            }
+
+            write_f32_linear(output, row * columns + column, sum);
+        }
+    }
+
+    return output;
+}
+
 }  // namespace local_gguf_engine::tensor::ops

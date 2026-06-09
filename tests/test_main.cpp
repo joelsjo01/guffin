@@ -11,6 +11,7 @@
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
+#include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
@@ -63,6 +64,8 @@ using local_gguf_engine::engine::EngineModelErrorCode;
 using local_gguf_engine::engine::EngineTensor;
 using local_gguf_engine::engine::generate_llama_argmax_tokens_f32;
 using local_gguf_engine::engine::generate_llama_argmax_tokens_with_kv_cache_f32;
+using local_gguf_engine::engine::generate_llama_sampled_tokens_f32;
+using local_gguf_engine::engine::generate_llama_sampled_tokens_with_kv_cache_f32;
 using local_gguf_engine::engine::LlamaAttentionLayerWeights;
 using local_gguf_engine::engine::LlamaBlockWeights;
 using local_gguf_engine::engine::LlamaFeedForwardLayerWeights;
@@ -88,6 +91,10 @@ using local_gguf_engine::engine::run_llama_model_logits_with_kv_cache_f32;
 using local_gguf_engine::engine::run_llama_model_next_token_argmax_f32;
 using local_gguf_engine::engine::run_llama_model_next_token_argmax_with_kv_cache_f32;
 using local_gguf_engine::engine::sample_argmax_token_f32;
+using local_gguf_engine::engine::sample_token_f32;
+using local_gguf_engine::engine::SamplingConfig;
+using local_gguf_engine::engine::SamplingState;
+using local_gguf_engine::engine::top_logit_tokens_f32;
 using local_gguf_engine::model_format::GGUFHeader;
 using local_gguf_engine::model_format::GGUFMetadataEntry;
 using local_gguf_engine::model_format::GGUFMetadataArray;
@@ -106,6 +113,7 @@ using local_gguf_engine::model_format::read_gguf_header;
 using local_gguf_engine::model_format::read_gguf_metadata_section;
 using local_gguf_engine::model_format::read_gguf_model_view;
 using local_gguf_engine::model_format::read_gguf_tensor_directory;
+using local_gguf_engine::frontends::cli::GenerateOptions;
 using local_gguf_engine::frontends::cli::generate_text_from_gguf_bytes;
 using local_gguf_engine::frontends::cli::inspect_gguf_bytes;
 using local_gguf_engine::frontends::cli::run_generate;
@@ -119,6 +127,7 @@ using local_gguf_engine::tensor::element_count;
 using local_gguf_engine::tensor::linear_index;
 using local_gguf_engine::tensor::mutable_element_bytes;
 using local_gguf_engine::tensor::dequantize_q8_0_block;
+using local_gguf_engine::tensor::f32_to_f16_bits;
 using local_gguf_engine::tensor::q8_0_block_count;
 using local_gguf_engine::tensor::q8_0_block_view;
 using local_gguf_engine::tensor::Q8_0BlockView;
@@ -139,6 +148,7 @@ using local_gguf_engine::tensor::ops::F32RoPEMatrixColumnView;
 using local_gguf_engine::tensor::ops::fill_f32;
 using local_gguf_engine::tensor::ops::matmul_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_f16;
+using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight;
 using local_gguf_engine::tensor::ops::mean_square_f32;
 using local_gguf_engine::tensor::ops::multiply_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
@@ -855,6 +865,25 @@ TensorStorage tensor_f16_matrix(std::uint64_t rows, std::uint64_t columns, std::
                 std::span<const std::uint64_t>(tensor_index),
                 values[static_cast<std::size_t>(row * columns + column)]
             );
+        }
+    }
+
+    return storage;
+}
+
+TensorStorage tensor_f16_gguf_matrix(std::uint64_t rows, std::uint64_t columns, std::span<const float> values) {
+    if (values.size() != rows * columns) {
+        throw TestFailure("F16 GGUF matrix fixture value count mismatch");
+    }
+
+    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f16));
+    auto bytes = storage.mutable_bytes();
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            const auto bits = f32_to_f16_bits(values[static_cast<std::size_t>(row * columns + column)]);
+            const auto byte_offset = static_cast<std::size_t>((column * rows + row) * sizeof(std::uint16_t));
+            bytes[byte_offset] = static_cast<std::uint8_t>(bits & 0xFFU);
+            bytes[byte_offset + 1] = static_cast<std::uint8_t>(bits >> 8U);
         }
     }
 
@@ -2877,6 +2906,31 @@ void test_multiplies_f32_by_f16_matrices_into_f32() {
     expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 154.0F, "F32xF16 matmul value 1,1 mismatch");
 }
 
+void test_multiplies_f32_by_f16_gguf_weight_matrix() {
+    const std::array<float, 6> left_values {
+        1.0F, 1.0F, 1.0F,
+        2.0F, 0.0F, 1.0F,
+    };
+    const std::array<float, 6> right_values {
+        1.0F, 2.0F, 3.0F,
+        10.0F, 20.0F, 30.0F,
+    };
+    const auto left = tensor_f32_matrix(2, 3, std::span<const float>(left_values));
+    const auto right = tensor_f16_matrix(3, 2, std::span<const float>(right_values));
+
+    const auto output = matmul_f32_f16_gguf_weight(left, right);
+
+    expect(output.descriptor().shape == Shape::from({2, 2}), "F32xF16 GGUF weight matmul output shape mismatch");
+    const std::array<std::uint64_t, 2> index_00 {0, 0};
+    const std::array<std::uint64_t, 2> index_01 {0, 1};
+    const std::array<std::uint64_t, 2> index_10 {1, 0};
+    const std::array<std::uint64_t, 2> index_11 {1, 1};
+    expect(read_f32(output, std::span<const std::uint64_t>(index_00)) == 6.0F, "F32xF16 GGUF matmul value 0,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_01)) == 60.0F, "F32xF16 GGUF matmul value 0,1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_10)) == 5.0F, "F32xF16 GGUF matmul value 1,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 50.0F, "F32xF16 GGUF matmul value 1,1 mismatch");
+}
+
 void test_rejects_f32_f16_matmul_right_dtype_mismatch() {
     const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
     const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
@@ -3024,10 +3078,10 @@ void test_runs_llama_attention_layer_with_f16_weights() {
     };
     auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaAttentionLayerWeights weights {
         .attention_norm_weight = attention_norm_weight,
         .query_weight = query_weight,
@@ -3072,10 +3126,10 @@ void test_runs_llama_attention_layer_with_causal_mask() {
     };
     auto input = tensor_f32_matrix(2, 2, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(zero_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(zero_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(zero_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(zero_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaAttentionLayerWeights weights {
         .attention_norm_weight = attention_norm_weight,
         .query_weight = query_weight,
@@ -3141,10 +3195,10 @@ void test_runs_llama_attention_layer_with_kv_cache_matches_no_cache() {
     const auto first_input = tensor_f32_matrix(1, 2, std::span<const float>(first_input_values));
     const auto second_input = tensor_f32_matrix(1, 2, std::span<const float>(second_input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(zero_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(zero_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(zero_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(zero_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaAttentionLayerWeights weights {
         .attention_norm_weight = attention_norm_weight,
         .query_weight = query_weight,
@@ -3233,10 +3287,10 @@ void test_runs_grouped_llama_attention_layer_with_kv_cache_matches_no_cache() {
     const auto prefill_input = tensor_f32_matrix(2, 4, std::span<const float>(prefill_input_values));
     const auto decode_input = tensor_f32_matrix(1, 4, std::span<const float>(decode_input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(4, 8, std::span<const float>(query_weight_values));
-    auto key_weight = tensor_f16_matrix(4, 4, std::span<const float>(key_weight_values));
-    auto value_weight = tensor_f16_matrix(4, 4, std::span<const float>(value_weight_values));
-    auto output_weight = tensor_f16_matrix(8, 4, std::span<const float>(output_weight_values));
+    auto query_weight = tensor_f16_gguf_matrix(4, 8, std::span<const float>(query_weight_values));
+    auto key_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(key_weight_values));
+    auto value_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(value_weight_values));
+    auto output_weight = tensor_f16_gguf_matrix(8, 4, std::span<const float>(output_weight_values));
     auto config = tiny_attention_layer_config();
     config.embedding_length = 4;
     config.attention_head_count = 4;
@@ -3292,10 +3346,10 @@ void test_runs_llama_attention_layer_with_kv_cache_appends_rotated_key_heads() {
     };
     const auto input = tensor_f32_matrix(2, 4, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(4, 4, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_matrix(4, 4, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_matrix(4, 4, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(4, 4, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(identity_values));
     auto config = tiny_attention_layer_config();
     config.embedding_length = 4;
     config.attention_head_count = 2;
@@ -3358,10 +3412,10 @@ void test_rejects_llama_attention_layer_with_kv_cache_invalid_rope_dimension_cou
     };
     const auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     auto config = tiny_attention_layer_config();
     config.rope_dimension_count = 1;
     const LlamaAttentionLayerWeights weights {
@@ -3399,10 +3453,10 @@ void test_runs_llama_attention_layer_with_rowwise_rope_positions() {
     };
     auto input = tensor_f32_matrix(2, 2, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     auto config = tiny_attention_layer_config();
     config.rope_freq_base = 1.0F;
     config.rms_norm_epsilon = 0.5F;
@@ -3468,10 +3522,10 @@ void test_rejects_llama_attention_layer_position_before_input_window() {
     };
     auto input = tensor_f32_matrix(2, 2, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaAttentionLayerWeights weights {
         .attention_norm_weight = attention_norm_weight,
         .query_weight = query_weight,
@@ -3501,10 +3555,10 @@ void test_rejects_llama_attention_layer_projection_shape_mismatch() {
     };
     auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(2, 1, std::span<const float>(narrow_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(2, 1, std::span<const float>(narrow_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaAttentionLayerWeights weights {
         .attention_norm_weight = attention_norm_weight,
         .query_weight = query_weight,
@@ -3536,9 +3590,9 @@ void test_rejects_llama_attention_layer_projection_dtype_mismatch() {
     auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
     auto query_weight = tensor_f32_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaAttentionLayerWeights weights {
         .attention_norm_weight = attention_norm_weight,
         .query_weight = query_weight,
@@ -3569,10 +3623,10 @@ void test_rejects_llama_attention_layer_invalid_head_layout() {
     };
     auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     auto config = tiny_attention_layer_config();
     config.attention_head_count = 3;
     config.attention_head_count_kv = 2;
@@ -3610,9 +3664,9 @@ void test_runs_llama_feed_forward_layer_with_f16_weights() {
     };
     auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto gate_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto gate_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaFeedForwardLayerWeights weights {
         .feed_forward_norm_weight = feed_forward_norm_weight,
         .gate_weight = gate_weight,
@@ -3654,9 +3708,9 @@ void test_rejects_llama_feed_forward_layer_projection_shape_mismatch() {
     };
     auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto gate_weight = tensor_f16_matrix(2, 1, std::span<const float>(narrow_values));
-    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto gate_weight = tensor_f16_gguf_matrix(2, 1, std::span<const float>(narrow_values));
+    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaFeedForwardLayerWeights weights {
         .feed_forward_norm_weight = feed_forward_norm_weight,
         .gate_weight = gate_weight,
@@ -3684,8 +3738,8 @@ void test_rejects_llama_feed_forward_layer_projection_dtype_mismatch() {
     auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
     auto gate_weight = tensor_f32_matrix(2, 2, std::span<const float>(identity_values));
-    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaFeedForwardLayerWeights weights {
         .feed_forward_norm_weight = feed_forward_norm_weight,
         .gate_weight = gate_weight,
@@ -3715,9 +3769,9 @@ void test_rejects_llama_feed_forward_layer_invalid_config() {
     };
     auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto gate_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto gate_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     auto config = tiny_feed_forward_layer_config();
     config.feed_forward_length = 0;
     const LlamaFeedForwardLayerWeights weights {
@@ -3748,13 +3802,13 @@ void test_runs_llama_block_with_f16_weights() {
     auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
     auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto gate_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto gate_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaBlockWeights weights {
         .attention = LlamaAttentionLayerWeights {
             .attention_norm_weight = attention_norm_weight,
@@ -3810,13 +3864,13 @@ void test_rejects_llama_block_attention_projection_shape_mismatch() {
     auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
     auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
     auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_matrix(2, 1, std::span<const float>(narrow_values));
-    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto gate_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto up_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto query_weight = tensor_f16_gguf_matrix(2, 1, std::span<const float>(narrow_values));
+    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto gate_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
+    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
     const LlamaBlockWeights weights {
         .attention = LlamaAttentionLayerWeights {
             .attention_norm_weight = attention_norm_weight,
@@ -3879,20 +3933,20 @@ void add_tiny_llama_block_tensors(
     } else {
         tensors.push_back(engine_tensor(
             llama_block_tensor_name(block_index, "attn_q.weight"),
-            tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+            tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
         ));
     }
     tensors.push_back(engine_tensor(
         llama_block_tensor_name(block_index, "attn_k.weight"),
-        tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+        tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
     ));
     tensors.push_back(engine_tensor(
         llama_block_tensor_name(block_index, "attn_v.weight"),
-        tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+        tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
     ));
     tensors.push_back(engine_tensor(
         llama_block_tensor_name(block_index, "attn_output.weight"),
-        tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+        tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
     ));
     tensors.push_back(engine_tensor(
         llama_block_tensor_name(block_index, "ffn_norm.weight"),
@@ -3900,16 +3954,16 @@ void add_tiny_llama_block_tensors(
     ));
     tensors.push_back(engine_tensor(
         llama_block_tensor_name(block_index, "ffn_gate.weight"),
-        tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+        tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
     ));
     tensors.push_back(engine_tensor(
         llama_block_tensor_name(block_index, "ffn_up.weight"),
-        tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+        tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
     ));
     if (include_down_weight) {
         tensors.push_back(engine_tensor(
             llama_block_tensor_name(block_index, "ffn_down.weight"),
-            tensor_f16_matrix(2, 2, std::span<const float>(projection_values))
+            tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
         ));
     }
 }
@@ -3927,7 +3981,7 @@ void add_tiny_llama_top_level_tensors(std::vector<EngineTensor>& tensors) {
 
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(2, 8, std::span<const float>(token_embedding_values))
+        tensor_f16_gguf_matrix(2, 8, std::span<const float>(token_embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -3935,7 +3989,7 @@ void add_tiny_llama_top_level_tensors(std::vector<EngineTensor>& tensors) {
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_matrix(2, 8, std::span<const float>(output_values))
+        tensor_f16_gguf_matrix(2, 8, std::span<const float>(output_values))
     ));
 }
 
@@ -4042,9 +4096,9 @@ void test_embeds_llama_token_ids_from_f16_weight() {
         1.0F, 0.0F, 2.0F,
         0.0F, 1.0F, 3.0F,
     };
-    const auto token_embedding_weight = tensor_f16_matrix(2, 3, std::span<const float>(embedding_values));
+    const auto token_embedding_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values));
     const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    const auto output_weight = tensor_f16_matrix(2, 3, std::span<const float>(output_values));
+    const auto output_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values));
     const LlamaModelWeights weights {
         .token_embedding_weight = token_embedding_weight,
         .output_norm_weight = output_norm_weight,
@@ -4077,9 +4131,9 @@ void test_rejects_llama_token_embedding_id_out_of_range() {
         1.0F, 0.0F, 2.0F,
         0.0F, 1.0F, 3.0F,
     };
-    const auto token_embedding_weight = tensor_f16_matrix(2, 3, std::span<const float>(embedding_values));
+    const auto token_embedding_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values));
     const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    const auto output_weight = tensor_f16_matrix(2, 3, std::span<const float>(output_values));
+    const auto output_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values));
     const LlamaModelWeights weights {
         .token_embedding_weight = token_embedding_weight,
         .output_norm_weight = output_norm_weight,
@@ -4109,9 +4163,9 @@ void test_projects_llama_logits_with_final_norm() {
         0.0F, 1.0F, 3.0F,
     };
     const std::array<float, 2> hidden_values {3.0F, 4.0F};
-    const auto token_embedding_weight = tensor_f16_matrix(2, 3, std::span<const float>(embedding_values));
+    const auto token_embedding_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values));
     const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    const auto output_weight = tensor_f16_matrix(2, 3, std::span<const float>(output_values));
+    const auto output_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values));
     const auto hidden_states = tensor_f32_matrix(1, 2, std::span<const float>(hidden_values));
     const LlamaModelWeights weights {
         .token_embedding_weight = token_embedding_weight,
@@ -4147,7 +4201,7 @@ void test_runs_llama_model_logits_from_token_ids() {
     std::vector<EngineTensor> tensors;
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4155,7 +4209,7 @@ void test_runs_llama_model_logits_from_token_ids() {
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values))
     ));
     add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
     const auto model = tiny_bound_llama_model(config, std::move(tensors));
@@ -4290,7 +4344,7 @@ void test_rejects_llama_logits_output_weight_dtype_mismatch() {
         0.0F, 1.0F, 3.0F,
     };
     const std::array<float, 2> hidden_values {3.0F, 4.0F};
-    const auto token_embedding_weight = tensor_f16_matrix(2, 3, std::span<const float>(embedding_values));
+    const auto token_embedding_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values));
     const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
     const auto output_weight = tensor_f32_matrix(2, 3, std::span<const float>(output_values));
     const auto hidden_states = tensor_f32_matrix(1, 2, std::span<const float>(hidden_values));
@@ -4332,9 +4386,25 @@ void test_samples_argmax_token_from_last_logits_row() {
     expect(token == 0, "argmax sampler should use the last logits row and first-max tie break");
 }
 
+void test_selects_top_logit_tokens_from_last_row() {
+    const std::array<float, 8> logits_values {
+        9.0F, 0.0F, 1.0F, 2.0F,
+        4.0F, 5.0F, 5.0F, 1.0F,
+    };
+    const auto logits = tensor_f32_matrix(2, 4, std::span<const float>(logits_values));
+
+    const auto top_logits = top_logit_tokens_f32(logits, 3);
+
+    expect(top_logits.size() == 3, "top logits count mismatch");
+    expect(top_logits[0].token == 1, "top logits first token mismatch");
+    expect(top_logits[1].token == 2, "top logits tie should prefer lower token id");
+    expect(top_logits[2].token == 0, "top logits third token mismatch");
+    expect_close(top_logits[0].logit, 5.0F, 0.000001F, "top logits first value mismatch");
+}
+
 void test_rejects_argmax_sampler_dtype_mismatch() {
     const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
-    const auto logits = tensor_f16_matrix(1, 3, std::span<const float>(logits_values));
+    const auto logits = tensor_f16_gguf_matrix(1, 3, std::span<const float>(logits_values));
 
     try {
         (void)sample_argmax_token_f32(logits);
@@ -4359,6 +4429,78 @@ void test_rejects_argmax_sampler_rank_above_two() {
     }
 }
 
+void test_samples_temperature_top_k_token_from_f32_logits_vector() {
+    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    const SamplingConfig sampling {
+        .temperature = 1.0F,
+        .top_k = 2,
+        .seed = 0,
+    };
+    SamplingState first_state(sampling.seed);
+    SamplingState second_state(sampling.seed);
+
+    const auto first_token = sample_token_f32(logits, sampling, first_state);
+    const auto second_token = sample_token_f32(logits, sampling, second_state);
+
+    expect(first_token == 1, "temperature top-k sampler should draw the second top-k candidate for seed 0");
+    expect(second_token == first_token, "temperature top-k sampler should be deterministic for the same seed");
+}
+
+void test_samples_temperature_top_k_token_from_last_logits_row() {
+    const std::array<float, 6> logits_values {
+        100.0F, 0.0F, 0.0F,
+        0.0F, 1.0F, 2.0F,
+    };
+    const auto logits = tensor_f32_matrix(2, 3, std::span<const float>(logits_values));
+    const SamplingConfig sampling {
+        .temperature = 1.0F,
+        .top_k = 2,
+        .seed = 0,
+    };
+    SamplingState state(sampling.seed);
+
+    const auto token = sample_token_f32(logits, sampling, state);
+
+    expect(token == 1, "temperature top-k sampler should use the final logits row");
+}
+
+void test_sampling_temperature_zero_keeps_argmax_path() {
+    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    const SamplingConfig sampling {
+        .temperature = 0.0F,
+        .top_k = 2,
+        .seed = 0,
+    };
+    SamplingState state(sampling.seed);
+
+    const auto token = sample_token_f32(logits, sampling, state);
+
+    expect(token == 2, "zero-temperature sampler should preserve argmax behavior");
+}
+
+void test_rejects_sampling_negative_temperature() {
+    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    const SamplingConfig sampling {
+        .temperature = -1.0F,
+        .top_k = 2,
+        .seed = 0,
+    };
+    SamplingState state(sampling.seed);
+
+    try {
+        (void)sample_token_f32(logits, sampling, state);
+        throw TestFailure("temperature sampler should reject negative temperature");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "sampling temperature must be zero or a positive finite value",
+            "temperature sampler error text mismatch"
+        );
+    }
+}
+
 EngineModel tiny_argmax_generation_model(LlamaModelConfig config) {
     const std::array<float, 6> embedding_values {
         3.0F, 0.0F, 0.0F,
@@ -4372,7 +4514,7 @@ EngineModel tiny_argmax_generation_model(LlamaModelConfig config) {
     std::vector<EngineTensor> tensors;
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4380,7 +4522,7 @@ EngineModel tiny_argmax_generation_model(LlamaModelConfig config) {
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values))
     ));
     add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
     return tiny_bound_llama_model(config, std::move(tensors));
@@ -4395,7 +4537,7 @@ EngineModel tiny_tied_output_generation_model(LlamaModelConfig config) {
     std::vector<EngineTensor> tensors;
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4418,7 +4560,7 @@ EngineModel tiny_eos_then_visible_generation_model(LlamaModelConfig config) {
     std::vector<EngineTensor> tensors;
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4426,7 +4568,7 @@ EngineModel tiny_eos_then_visible_generation_model(LlamaModelConfig config) {
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values))
     ));
     add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
     return tiny_bound_llama_model(config, std::move(tensors));
@@ -4444,7 +4586,7 @@ EngineModel tiny_chat_template_generation_model(LlamaModelConfig config) {
     std::vector<EngineTensor> tensors;
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(config.embedding_length, config.vocab_size, std::span<const float>(embedding_values))
+        tensor_f16_gguf_matrix(config.embedding_length, config.vocab_size, std::span<const float>(embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4452,7 +4594,7 @@ EngineModel tiny_chat_template_generation_model(LlamaModelConfig config) {
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_matrix(config.embedding_length, config.vocab_size, std::span<const float>(output_values))
+        tensor_f16_gguf_matrix(config.embedding_length, config.vocab_size, std::span<const float>(output_values))
     ));
     add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
     return tiny_bound_llama_model(config, std::move(tensors));
@@ -4547,7 +4689,7 @@ void test_runs_llama_next_token_argmax_from_token_ids() {
     std::vector<EngineTensor> tensors;
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4555,7 +4697,7 @@ void test_runs_llama_next_token_argmax_from_token_ids() {
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values))
     ));
     add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
     const auto model = tiny_bound_llama_model(config, std::move(tensors));
@@ -4587,7 +4729,7 @@ void test_rejects_llama_next_token_empty_token_ids() {
     std::vector<EngineTensor> tensors;
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4595,7 +4737,7 @@ void test_rejects_llama_next_token_empty_token_ids() {
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values))
     ));
     add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
     const auto model = tiny_bound_llama_model(config, std::move(tensors));
@@ -4633,7 +4775,7 @@ void test_generates_llama_argmax_tokens() {
     std::vector<EngineTensor> tensors;
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4641,7 +4783,7 @@ void test_generates_llama_argmax_tokens() {
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values))
     ));
     add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
     const auto model = tiny_bound_llama_model(config, std::move(tensors));
@@ -4731,6 +4873,41 @@ void test_generates_llama_argmax_tokens_with_kv_cache_stops_at_token() {
     expect(tokens[1] == 2, "cached Llama argmax stop-token generated token mismatch");
 }
 
+void test_generates_llama_sampled_tokens_with_kv_cache_matches_no_cache() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.context_length = 8;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 1> prompt_tokens {0};
+    const SamplingConfig sampling {
+        .temperature = 10.0F,
+        .top_k = 2,
+        .seed = 0,
+    };
+
+    const auto cached_tokens = generate_llama_sampled_tokens_with_kv_cache_f32(
+        std::span<const std::uint32_t>(prompt_tokens),
+        2,
+        weights,
+        model.llama_config(),
+        sampling
+    );
+    const auto no_cache_tokens = generate_llama_sampled_tokens_f32(
+        std::span<const std::uint32_t>(prompt_tokens),
+        2,
+        weights,
+        model.llama_config(),
+        sampling
+    );
+
+    expect(cached_tokens == no_cache_tokens, "cached Llama sampled generation should match no-cache generation");
+    expect(cached_tokens.size() == 3, "cached Llama sampled generation token count mismatch");
+    expect(cached_tokens[0] == 0, "cached Llama sampled generation prompt token mismatch");
+    expect(cached_tokens[1] == 1, "cached Llama sampled generation first token mismatch");
+    expect(cached_tokens[2] == 0, "cached Llama sampled generation second token mismatch");
+}
+
 void test_rejects_llama_cached_generation_zero_new_tokens() {
     auto config = tiny_logits_config();
     config.block_count = 1;
@@ -4816,7 +4993,7 @@ void test_rejects_llama_generation_zero_new_tokens() {
     std::vector<EngineTensor> tensors;
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4824,7 +5001,7 @@ void test_rejects_llama_generation_zero_new_tokens() {
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values))
     ));
     add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
     const auto model = tiny_bound_llama_model(config, std::move(tensors));
@@ -4863,7 +5040,7 @@ void test_rejects_llama_generation_context_overflow() {
     std::vector<EngineTensor> tensors;
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4871,7 +5048,7 @@ void test_rejects_llama_generation_context_overflow() {
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values))
     ));
     add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
     const auto model = tiny_bound_llama_model(config, std::move(tensors));
@@ -4926,6 +5103,21 @@ void test_generates_text_from_gguf_bytes_with_chat_template_prompt() {
     expect(text == "!", "generate text should apply tokenizer chat template before encoding");
 }
 
+void test_generates_text_from_gguf_bytes_with_sampling_options() {
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+    const GenerateOptions options {
+        .sampling = SamplingConfig {
+            .temperature = 10.0F,
+            .top_k = 2,
+            .seed = 0,
+        },
+    };
+
+    const auto text = generate_text_from_gguf_bytes(std::span<const std::uint8_t>(bytes), "", 1, options);
+
+    expect(text == "Hello", "generate text should use seeded temperature/top-k sampling options");
+}
+
 void test_runs_generate_success_path() {
     const auto bytes = tiny_generate_cli_gguf_bytes();
     const TempBinaryFile model("tiny-generate", std::span<const std::uint8_t>(bytes));
@@ -4937,6 +5129,68 @@ void test_runs_generate_success_path() {
     expect(exit_code == EXIT_SUCCESS, "generate success exit code mismatch");
     expect(output.str() == "!\n", "generate success output mismatch");
     expect(error.str().empty(), "generate success should not write stderr");
+}
+
+void test_runs_generate_with_sampling_options() {
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-generate-sampling", std::span<const std::uint8_t>(bytes));
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = model.path().string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "1",
+        "--temperature",
+        "10",
+        "--top-k",
+        "2",
+        "--seed",
+        "0",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(10, argv, output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "generate sampling success exit code mismatch");
+    expect(output.str() == "Hello\n", "generate sampling success output mismatch");
+    expect(error.str().empty(), "generate sampling success should not write stderr");
+}
+
+void test_runs_generate_with_first_token_debug() {
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-generate-debug", std::span<const std::uint8_t>(bytes));
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = model.path().string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "1",
+        "--debug-first-token",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(5, argv, output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "generate debug success exit code mismatch");
+    expect(output.str() == "!\n", "generate debug output mismatch");
+    expect(error.str().find("debug: formatted_prompt=\"\"") != std::string::npos, "generate debug prompt missing");
+    expect(
+        error.str().find("debug: encode_special_tokens=false") != std::string::npos,
+        "generate debug special-token flag missing"
+    );
+    expect(error.str().find("debug: prompt_token_ids=[0]") != std::string::npos, "generate debug token IDs missing");
+    expect(
+        error.str().find("debug:   token=2") != std::string::npos,
+        "generate debug top token missing"
+    );
+    expect(
+        error.str().find("text=\"!\"") != std::string::npos,
+        "generate debug decoded top token missing"
+    );
 }
 
 void test_rejects_generate_missing_arguments() {
@@ -4967,6 +5221,31 @@ void test_rejects_generate_invalid_max_new_tokens() {
     expect(
         error.str().find("max-new-tokens must be a positive integer") != std::string::npos,
         "generate invalid-max error missing"
+    );
+}
+
+void test_rejects_generate_invalid_temperature_option() {
+    const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-generate.gguf";
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "1",
+        "--temperature",
+        "0",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(6, argv, output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate invalid-temperature exit code mismatch");
+    expect(output.str().empty(), "generate invalid-temperature should not write stdout");
+    expect(
+        error.str().find("--temperature must be a positive finite number") != std::string::npos,
+        "generate invalid-temperature error missing"
     );
 }
 
@@ -6389,6 +6668,7 @@ int main() {
         {"rejects F32 matmul non-matrix rank", test_rejects_f32_matmul_non_matrix_rank},
         {"rejects F32 matmul inner dimension mismatch", test_rejects_f32_matmul_inner_dimension_mismatch},
         {"multiplies F32 by F16 matrices into F32", test_multiplies_f32_by_f16_matrices_into_f32},
+        {"multiplies F32 by F16 GGUF weight matrix", test_multiplies_f32_by_f16_gguf_weight_matrix},
         {"rejects F32xF16 matmul right dtype mismatch", test_rejects_f32_f16_matmul_right_dtype_mismatch},
         {"creates Llama KV cache", test_creates_llama_kv_cache},
         {"appends and reads Llama KV cache layer", test_appends_and_reads_llama_kv_cache_layer},
@@ -6488,8 +6768,19 @@ int main() {
         },
         {"samples argmax token from F32 logits vector", test_samples_argmax_token_from_f32_logits_vector},
         {"samples argmax token from last logits row", test_samples_argmax_token_from_last_logits_row},
+        {"selects top logit tokens from last row", test_selects_top_logit_tokens_from_last_row},
         {"rejects argmax sampler dtype mismatch", test_rejects_argmax_sampler_dtype_mismatch},
         {"rejects argmax sampler rank above two", test_rejects_argmax_sampler_rank_above_two},
+        {
+            "samples temperature top-k token from F32 logits vector",
+            test_samples_temperature_top_k_token_from_f32_logits_vector,
+        },
+        {
+            "samples temperature top-k token from last logits row",
+            test_samples_temperature_top_k_token_from_last_logits_row,
+        },
+        {"sampling temperature zero keeps argmax path", test_sampling_temperature_zero_keeps_argmax_path},
+        {"rejects sampling negative temperature", test_rejects_sampling_negative_temperature},
         {"runs Llama next-token argmax from token IDs", test_runs_llama_next_token_argmax_from_token_ids},
         {"rejects Llama next-token empty token IDs", test_rejects_llama_next_token_empty_token_ids},
         {"generates Llama argmax tokens", test_generates_llama_argmax_tokens},
@@ -6501,6 +6792,10 @@ int main() {
         {
             "generates Llama argmax tokens with KV cache stops at token",
             test_generates_llama_argmax_tokens_with_kv_cache_stops_at_token,
+        },
+        {
+            "generates Llama sampled tokens with KV cache matches no-cache",
+            test_generates_llama_sampled_tokens_with_kv_cache_matches_no_cache,
         },
         {
             "rejects Llama cached generation zero new tokens",
@@ -6532,9 +6827,16 @@ int main() {
             "generates text from GGUF bytes with chat-template prompt",
             test_generates_text_from_gguf_bytes_with_chat_template_prompt,
         },
+        {
+            "generates text from GGUF bytes with sampling options",
+            test_generates_text_from_gguf_bytes_with_sampling_options,
+        },
         {"runs generate success path", test_runs_generate_success_path},
+        {"runs generate with sampling options", test_runs_generate_with_sampling_options},
+        {"runs generate with first-token debug", test_runs_generate_with_first_token_debug},
         {"rejects generate missing arguments", test_rejects_generate_missing_arguments},
         {"rejects generate invalid max new tokens", test_rejects_generate_invalid_max_new_tokens},
+        {"rejects generate invalid temperature option", test_rejects_generate_invalid_temperature_option},
         {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
         {
             "converts Q8_0 GGUF payload view to tensor storage",
