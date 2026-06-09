@@ -38,6 +38,13 @@ make gguf-inspect
 ./build/debug/gguf-inspect models/SmolLM2-135M-Instruct-F16.gguf
 ```
 
+Build the minimal CPU generate CLI with:
+
+```bash
+make generate
+./build/debug/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "Hello" 8
+```
+
 Build the benchmark scaffold with:
 
 ```bash
@@ -51,8 +58,10 @@ Git.
 ## Status
 
 This project is in the early implementation stage. The GGUF reader and initial
-Tensor Core are in place for F32, F16, and Q8_0 payloads. Real token generation
-is not implemented yet, but the engine can now load a narrow Llama-family GGUF
-model structure for the first SmolLM2 inference path. The current runnable
-surfaces are `gguf-inspect` for concise local GGUF summaries and
-`local-gguf-bench` for engine-native tensor/load microbenchmarks.
+Tensor Core are in place for F32, F16, and Q8_0 payloads. The engine can now
+load a narrow Llama-family GGUF model structure, tokenize prompts from GGUF
+metadata, bind F16 model weights, and run cached CPU argmax generation for the
+first SmolLM2 inference path. The current runnable surfaces are `gguf-inspect`
+for concise local GGUF summaries, `local-gguf-generate` for minimal CPU text
+generation, and `local-gguf-bench` for engine-native tensor/load
+microbenchmarks.

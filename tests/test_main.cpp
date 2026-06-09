@@ -4,6 +4,7 @@
 #include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
+#include "local_gguf_engine/frontends/cli/generate.hpp"
 #include "local_gguf_engine/frontends/cli/gguf_inspect.hpp"
 #include "local_gguf_engine/model_format/gguf_header.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
@@ -24,6 +25,7 @@
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -103,7 +105,9 @@ using local_gguf_engine::model_format::read_gguf_header;
 using local_gguf_engine::model_format::read_gguf_metadata_section;
 using local_gguf_engine::model_format::read_gguf_model_view;
 using local_gguf_engine::model_format::read_gguf_tensor_directory;
+using local_gguf_engine::frontends::cli::generate_text_from_gguf_bytes;
 using local_gguf_engine::frontends::cli::inspect_gguf_bytes;
+using local_gguf_engine::frontends::cli::run_generate;
 using local_gguf_engine::frontends::cli::run_gguf_inspect;
 using local_gguf_engine::frontends::cli::write_gguf_inspection_summary;
 using local_gguf_engine::tensor::byte_size;
@@ -234,6 +238,37 @@ private:
     std::filesystem::path path_;
 };
 
+class TempBinaryFile final {
+public:
+    TempBinaryFile(std::string_view name, std::span<const std::uint8_t> bytes)
+        : path_(std::filesystem::temp_directory_path() / ("local-gguf-engine-" + std::string(name) + ".gguf")) {
+        std::ofstream output(path_, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            throw TestFailure("could not create temp binary file: " + path_.string());
+        }
+
+        output.write(
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size())
+        );
+        if (!output) {
+            throw TestFailure("could not write temp binary file: " + path_.string());
+        }
+    }
+
+    ~TempBinaryFile() {
+        std::error_code ignored;
+        std::filesystem::remove(path_, ignored);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
 int run_gguf_inspect_for_path(
     const std::filesystem::path& path,
     std::ostringstream& output,
@@ -243,6 +278,26 @@ int run_gguf_inspect_for_path(
     const std::string path_string = path.string();
     const char* argv[] = {program.c_str(), path_string.c_str()};
     return run_gguf_inspect(2, argv, output, error);
+}
+
+int run_generate_for_path(
+    const std::filesystem::path& path,
+    std::string_view prompt,
+    std::string_view max_new_tokens,
+    std::ostringstream& output,
+    std::ostringstream& error
+) {
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const std::string prompt_string(prompt);
+    const std::string max_new_tokens_string(max_new_tokens);
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        prompt_string.c_str(),
+        max_new_tokens_string.c_str(),
+    };
+    return run_generate(4, argv, output, error);
 }
 
 template <typename Value>
@@ -335,6 +390,200 @@ GGUFMetadataEntry metadata_i32_array(std::string key, std::vector<std::int32_t> 
     };
 }
 
+void append_u8(std::vector<std::uint8_t>& bytes, std::uint8_t value) {
+    bytes.push_back(value);
+}
+
+void append_u32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+    for (std::uint32_t shift = 0; shift < 32; shift += 8) {
+        bytes.push_back(static_cast<std::uint8_t>((value >> shift) & 0xFFU));
+    }
+}
+
+void append_u64(std::vector<std::uint8_t>& bytes, std::uint64_t value) {
+    for (std::uint32_t shift = 0; shift < 64; shift += 8) {
+        bytes.push_back(static_cast<std::uint8_t>((value >> shift) & 0xFFU));
+    }
+}
+
+void append_i32(std::vector<std::uint8_t>& bytes, std::int32_t value) {
+    append_u32(bytes, std::bit_cast<std::uint32_t>(value));
+}
+
+void append_f32(std::vector<std::uint8_t>& bytes, float value) {
+    append_u32(bytes, std::bit_cast<std::uint32_t>(value));
+}
+
+void append_gguf_string(std::vector<std::uint8_t>& bytes, std::string_view value) {
+    append_u64(bytes, static_cast<std::uint64_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+}
+
+std::uint32_t gguf_metadata_type_id(GGUFMetadataValueType type) {
+    return static_cast<std::uint32_t>(type);
+}
+
+void append_metadata_array(std::vector<std::uint8_t>& bytes, const GGUFMetadataArray& array) {
+    append_u32(bytes, gguf_metadata_type_id(array.element_type));
+
+    switch (array.element_type) {
+        case GGUFMetadataValueType::string: {
+            const auto& values = std::get<std::vector<std::string>>(array.values);
+            append_u64(bytes, static_cast<std::uint64_t>(values.size()));
+            for (const auto& value : values) {
+                append_gguf_string(bytes, value);
+            }
+            return;
+        }
+        case GGUFMetadataValueType::float32: {
+            const auto& values = std::get<std::vector<float>>(array.values);
+            append_u64(bytes, static_cast<std::uint64_t>(values.size()));
+            for (const auto value : values) {
+                append_f32(bytes, value);
+            }
+            return;
+        }
+        case GGUFMetadataValueType::int32: {
+            const auto& values = std::get<std::vector<std::int32_t>>(array.values);
+            append_u64(bytes, static_cast<std::uint64_t>(values.size()));
+            for (const auto value : values) {
+                append_i32(bytes, value);
+            }
+            return;
+        }
+        default:
+            throw TestFailure("test GGUF writer unsupported metadata array type");
+    }
+}
+
+void append_metadata_value(std::vector<std::uint8_t>& bytes, const GGUFMetadataValue& value) {
+    append_u32(bytes, gguf_metadata_type_id(value.type));
+
+    switch (value.type) {
+        case GGUFMetadataValueType::uint32:
+            append_u32(bytes, std::get<std::uint32_t>(value.data));
+            return;
+        case GGUFMetadataValueType::float32:
+            append_f32(bytes, std::get<float>(value.data));
+            return;
+        case GGUFMetadataValueType::boolean:
+            append_u8(bytes, static_cast<std::uint8_t>(std::get<bool>(value.data) ? 1 : 0));
+            return;
+        case GGUFMetadataValueType::string:
+            append_gguf_string(bytes, std::get<std::string>(value.data));
+            return;
+        case GGUFMetadataValueType::array:
+            append_metadata_array(bytes, std::get<GGUFMetadataArray>(value.data));
+            return;
+        default:
+            throw TestFailure("test GGUF writer unsupported metadata value type");
+    }
+}
+
+void append_metadata_entry(std::vector<std::uint8_t>& bytes, const GGUFMetadataEntry& entry) {
+    append_gguf_string(bytes, entry.key);
+    append_metadata_value(bytes, entry.value);
+}
+
+std::uint32_t gguf_type_id_for_dtype(DType dtype) {
+    switch (dtype) {
+        case DType::f32:
+            return 0;
+        case DType::f16:
+            return 1;
+        case DType::q8_0:
+            return 8;
+    }
+
+    throw TestFailure("test GGUF writer unsupported tensor dtype");
+}
+
+struct TinyGGUFTensor {
+    std::string name;
+    std::vector<std::uint64_t> dimensions;
+    std::uint32_t type_id = 0;
+    std::vector<std::uint8_t> bytes;
+};
+
+std::size_t align_size(std::size_t value, std::size_t alignment) {
+    const auto remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+
+    return value + alignment - remainder;
+}
+
+std::vector<TinyGGUFTensor> tiny_gguf_tensors_from_engine_model(const EngineModel& model) {
+    std::vector<TinyGGUFTensor> tensors;
+    tensors.reserve(model.tensors().size());
+
+    for (const auto& tensor : model.tensors()) {
+        const auto dimensions = tensor.storage.descriptor().shape.dimensions();
+        tensors.push_back(TinyGGUFTensor {
+            .name = tensor.name,
+            .dimensions = std::vector<std::uint64_t>(dimensions.begin(), dimensions.end()),
+            .type_id = gguf_type_id_for_dtype(tensor.storage.descriptor().dtype),
+            .bytes = std::vector<std::uint8_t>(tensor.storage.bytes().begin(), tensor.storage.bytes().end()),
+        });
+    }
+
+    return tensors;
+}
+
+std::vector<std::uint8_t> write_tiny_gguf_bytes(
+    const std::vector<GGUFMetadataEntry>& metadata,
+    const std::vector<TinyGGUFTensor>& tensors
+) {
+    constexpr std::size_t alignment = 32;
+    std::vector<std::uint64_t> tensor_offsets;
+    tensor_offsets.reserve(tensors.size());
+
+    std::size_t payload_offset = 0;
+    for (const auto& tensor : tensors) {
+        tensor_offsets.push_back(static_cast<std::uint64_t>(payload_offset));
+        payload_offset = align_size(payload_offset + tensor.bytes.size(), alignment);
+    }
+
+    std::vector<std::uint8_t> bytes;
+    bytes.push_back(0x47);
+    bytes.push_back(0x47);
+    bytes.push_back(0x55);
+    bytes.push_back(0x46);
+    append_u32(bytes, 3);
+    append_u64(bytes, static_cast<std::uint64_t>(tensors.size()));
+    append_u64(bytes, static_cast<std::uint64_t>(metadata.size()));
+
+    for (const auto& entry : metadata) {
+        append_metadata_entry(bytes, entry);
+    }
+
+    for (std::size_t tensor_index = 0; tensor_index < tensors.size(); ++tensor_index) {
+        const auto& tensor = tensors[tensor_index];
+        append_gguf_string(bytes, tensor.name);
+        append_u32(bytes, static_cast<std::uint32_t>(tensor.dimensions.size()));
+        for (const auto dimension : tensor.dimensions) {
+            append_u64(bytes, dimension);
+        }
+        append_u32(bytes, tensor.type_id);
+        append_u64(bytes, tensor_offsets[tensor_index]);
+    }
+
+    const auto tensor_data_start = align_size(bytes.size(), alignment);
+    bytes.resize(tensor_data_start, 0);
+
+    for (std::size_t tensor_index = 0; tensor_index < tensors.size(); ++tensor_index) {
+        const auto& tensor = tensors[tensor_index];
+        const auto write_offset = tensor_data_start + static_cast<std::size_t>(tensor_offsets[tensor_index]);
+        if (bytes.size() < write_offset) {
+            bytes.resize(write_offset, 0);
+        }
+        bytes.insert(bytes.end(), tensor.bytes.begin(), tensor.bytes.end());
+    }
+
+    return bytes;
+}
+
 std::vector<GGUFMetadataEntry> tiny_llama_metadata() {
     return {
         metadata_string("general.architecture", "llama"),
@@ -376,6 +625,32 @@ std::vector<GGUFMetadataEntry> tiny_llama_tokenizer_metadata() {
     metadata.push_back(metadata_bool("tokenizer.ggml.add_bos_token", true));
     metadata.push_back(metadata_bool("tokenizer.ggml.add_eos_token", false));
     return metadata;
+}
+
+std::vector<GGUFMetadataEntry> tiny_generate_cli_metadata(const LlamaModelConfig& config) {
+    return {
+        metadata_string("general.architecture", "llama"),
+        metadata_string("general.name", "Tiny Generate Fixture"),
+        metadata_u32("llama.context_length", config.context_length),
+        metadata_u32("llama.embedding_length", config.embedding_length),
+        metadata_u32("llama.block_count", config.block_count),
+        metadata_u32("llama.feed_forward_length", config.feed_forward_length),
+        metadata_u32("llama.attention.head_count", config.attention_head_count),
+        metadata_u32("llama.attention.head_count_kv", config.attention_head_count_kv),
+        metadata_u32("llama.attention.key_length", config.attention_key_length),
+        metadata_u32("llama.attention.value_length", config.attention_value_length),
+        metadata_u32("llama.rope.dimension_count", config.rope_dimension_count),
+        metadata_u32("llama.vocab_size", config.vocab_size),
+        metadata_f32("llama.rope.freq_base", config.rope_freq_base),
+        metadata_f32("llama.attention.layer_norm_rms_epsilon", config.rms_norm_epsilon),
+        metadata_string("tokenizer.ggml.model", "gpt2"),
+        metadata_string_array("tokenizer.ggml.tokens", {"<s>", "Hello", "!"}),
+        metadata_f32_array("tokenizer.ggml.scores", {0.0F, -1.0F, -0.5F}),
+        metadata_i32_array("tokenizer.ggml.token_type", {3, 1, 1}),
+        metadata_u32("tokenizer.ggml.bos_token_id", 0),
+        metadata_bool("tokenizer.ggml.add_bos_token", true),
+        metadata_bool("tokenizer.ggml.add_eos_token", false),
+    };
 }
 
 GGUFMetadataSection metadata_section(std::vector<GGUFMetadataEntry> entries) {
@@ -3968,6 +4243,76 @@ EngineModel tiny_argmax_generation_model(LlamaModelConfig config) {
     return tiny_bound_llama_model(config, std::move(tensors));
 }
 
+EngineModel tiny_tied_output_generation_model(LlamaModelConfig config) {
+    const std::array<float, 6> embedding_values {
+        1.0F, 0.0F, 2.0F,
+        0.0F, 0.0F, 0.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    std::vector<EngineTensor> tensors;
+    tensors.push_back(engine_tensor(
+        "token_embd.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output_norm.weight",
+        tensor_f32_vector(std::span<const float>(norm_values))
+    ));
+    add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
+    return tiny_bound_llama_model(config, std::move(tensors));
+}
+
+std::vector<std::uint8_t> tiny_generate_cli_gguf_bytes() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.context_length = 8;
+    const auto model = tiny_argmax_generation_model(config);
+    return write_tiny_gguf_bytes(
+        tiny_generate_cli_metadata(config),
+        tiny_gguf_tensors_from_engine_model(model)
+    );
+}
+
+std::vector<std::uint8_t> tiny_tied_output_generate_cli_gguf_bytes() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.context_length = 8;
+    const auto model = tiny_tied_output_generation_model(config);
+    return write_tiny_gguf_bytes(
+        tiny_generate_cli_metadata(config),
+        tiny_gguf_tensors_from_engine_model(model)
+    );
+}
+
+void test_binds_llama_model_missing_output_weight_to_token_embedding() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.context_length = 8;
+    const auto model = tiny_tied_output_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const auto* token_embedding = model.find_tensor("token_embd.weight");
+
+    expect(token_embedding != nullptr, "tied-output Llama model should have token embedding");
+    expect(model.find_tensor("output.weight") == nullptr, "tied-output Llama model should omit output weight");
+    expect(
+        &weights.output_weight == &token_embedding->storage,
+        "tied-output Llama model should reuse token embedding as output weight"
+    );
+
+    const std::array<std::uint32_t, 1> prompt_tokens {0};
+    const auto tokens = generate_llama_argmax_tokens_with_kv_cache_f32(
+        std::span<const std::uint32_t>(prompt_tokens),
+        2,
+        weights,
+        model.llama_config()
+    );
+
+    expect(tokens.size() == 3, "tied-output Llama generation token count mismatch");
+    expect(tokens[0] == 0, "tied-output Llama generation prompt token mismatch");
+    expect(tokens[1] == 2, "tied-output Llama generation first token mismatch");
+    expect(tokens[2] == 2, "tied-output Llama generation second token mismatch");
+}
+
 void test_runs_llama_next_token_argmax_from_token_ids() {
     auto config = tiny_logits_config();
     config.block_count = 1;
@@ -4286,6 +4631,66 @@ void test_rejects_llama_generation_context_overflow() {
             "Llama generation context overflow error mismatch"
         );
     }
+}
+
+void test_generates_text_from_gguf_bytes_with_cached_argmax() {
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+
+    const auto text = generate_text_from_gguf_bytes(std::span<const std::uint8_t>(bytes), "", 2);
+
+    expect(text == "!", "generate text should decode newly generated non-special tokens");
+}
+
+void test_generates_text_from_gguf_bytes_with_tied_output_weight() {
+    const auto bytes = tiny_tied_output_generate_cli_gguf_bytes();
+
+    const auto text = generate_text_from_gguf_bytes(std::span<const std::uint8_t>(bytes), "", 2);
+
+    expect(text == "!!", "generate text should support tied output weights");
+}
+
+void test_runs_generate_success_path() {
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-generate", std::span<const std::uint8_t>(bytes));
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_for_path(model.path(), "", "2", output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "generate success exit code mismatch");
+    expect(output.str() == "!\n", "generate success output mismatch");
+    expect(error.str().empty(), "generate success should not write stderr");
+}
+
+void test_rejects_generate_missing_arguments() {
+    const char* argv[] = {"local-gguf-generate"};
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(1, argv, output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate missing-args exit code mismatch");
+    expect(output.str().empty(), "generate missing-args should not write stdout");
+    expect(
+        error.str().find("usage: local-gguf-generate <model.gguf> <prompt> <max-new-tokens>") != std::string::npos,
+        "generate missing-args usage missing"
+    );
+    expect(error.str().find("missing required argument") != std::string::npos, "generate missing-args error missing");
+}
+
+void test_rejects_generate_invalid_max_new_tokens() {
+    const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-generate.gguf";
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_for_path(path, "", "0", output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate invalid-max exit code mismatch");
+    expect(output.str().empty(), "generate invalid-max should not write stdout");
+    expect(
+        error.str().find("max-new-tokens must be a positive integer") != std::string::npos,
+        "generate invalid-max error missing"
+    );
 }
 
 void test_converts_gguf_payload_view_to_tensor_storage() {
@@ -5627,6 +6032,10 @@ int main() {
             test_rejects_llama_model_weight_binding_missing_tensor,
         },
         {
+            "binds Llama model missing output weight to token embedding",
+            test_binds_llama_model_missing_output_weight_to_token_embedding,
+        },
+        {
             "rejects Llama model blocks projection dtype mismatch",
             test_rejects_llama_model_blocks_projection_dtype_mismatch,
         },
@@ -5674,6 +6083,17 @@ int main() {
         },
         {"rejects Llama generation zero new tokens", test_rejects_llama_generation_zero_new_tokens},
         {"rejects Llama generation context overflow", test_rejects_llama_generation_context_overflow},
+        {
+            "generates text from GGUF bytes with cached argmax",
+            test_generates_text_from_gguf_bytes_with_cached_argmax,
+        },
+        {
+            "generates text from GGUF bytes with tied output weight",
+            test_generates_text_from_gguf_bytes_with_tied_output_weight,
+        },
+        {"runs generate success path", test_runs_generate_success_path},
+        {"rejects generate missing arguments", test_rejects_generate_missing_arguments},
+        {"rejects generate invalid max new tokens", test_rejects_generate_invalid_max_new_tokens},
         {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
         {
             "converts Q8_0 GGUF payload view to tensor storage",

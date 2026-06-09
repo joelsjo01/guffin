@@ -42,6 +42,19 @@ constexpr std::size_t matrix_rank = 2;
     return tensor->storage;
 }
 
+[[nodiscard]] const tensor::TensorStorage& output_weight_or_tied_embedding(
+    const EngineModel& model,
+    const tensor::TensorStorage& token_embedding_weight
+) {
+    const auto* output_weight = model.find_tensor("output.weight");
+    if (output_weight == nullptr) {
+        // Tied-output GGUFs omit lm_head/output.weight and reuse token_embd.weight.
+        return token_embedding_weight;
+    }
+
+    return output_weight->storage;
+}
+
 [[nodiscard]] std::uint64_t dtype_value(DType dtype) noexcept {
     return static_cast<std::uint64_t>(static_cast<std::uint8_t>(dtype));
 }
@@ -162,10 +175,12 @@ LlamaModelWeights bind_llama_model_weights(const EngineModel& model) {
         blocks.push_back(bind_llama_block_weights(model, block_index));
     }
 
+    const auto& token_embedding_weight = require_tensor(model, "token_embd.weight");
+
     return LlamaModelWeights {
-        .token_embedding_weight = require_tensor(model, "token_embd.weight"),
+        .token_embedding_weight = token_embedding_weight,
         .output_norm_weight = require_tensor(model, "output_norm.weight"),
-        .output_weight = require_tensor(model, "output.weight"),
+        .output_weight = output_weight_or_tied_embedding(model, token_embedding_weight),
         .blocks = std::move(blocks),
     };
 }
