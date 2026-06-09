@@ -13,6 +13,12 @@ struct F32MatrixColumnView {
     std::uint64_t column_count = 0;
 };
 
+struct F32RoPEMatrixColumnView {
+    F32MatrixColumnView columns;
+    std::uint64_t rope_dimension_count = 0;
+    float frequency_base = 0.0F;
+};
+
 [[nodiscard]] TensorStorage scaled_dot_product_attention_f32(
     const TensorStorage& query,
     const TensorStorage& key,
@@ -30,6 +36,14 @@ struct F32MatrixColumnView {
 
 [[nodiscard]] TensorStorage causal_scaled_dot_product_attention_f32(
     const TensorStorage& query,
+    F32MatrixColumnView key,
+    F32MatrixColumnView value,
+    float scale,
+    std::uint64_t query_position_start
+);
+
+[[nodiscard]] TensorStorage causal_scaled_dot_product_attention_f32(
+    F32RoPEMatrixColumnView query,
     F32MatrixColumnView key,
     F32MatrixColumnView value,
     float scale,

@@ -130,6 +130,7 @@ using local_gguf_engine::tensor::ops::add_f32;
 using local_gguf_engine::tensor::ops::causal_scaled_dot_product_attention_f32;
 using local_gguf_engine::tensor::ops::copy_f32;
 using local_gguf_engine::tensor::ops::F32MatrixColumnView;
+using local_gguf_engine::tensor::ops::F32RoPEMatrixColumnView;
 using local_gguf_engine::tensor::ops::fill_f32;
 using local_gguf_engine::tensor::ops::matmul_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_f16;
@@ -2043,6 +2044,95 @@ void test_applies_f32_causal_attention_with_column_views() {
     }
 }
 
+void test_applies_f32_causal_attention_with_rope_query_column_view() {
+    const auto row0_sine = static_cast<float>(std::sin(1.0));
+    const auto row0_cosine = static_cast<float>(std::cos(1.0));
+    const auto row1_sine = static_cast<float>(std::sin(2.0));
+    const auto row1_cosine = static_cast<float>(std::cos(2.0));
+    const std::array<float, 8> query_source_values {
+        99.0F, 1.0F, 0.0F, -99.0F,
+        88.0F, 0.0F, 1.0F, -88.0F,
+    };
+    const std::array<float, 4> query_reference_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    const std::array<float, 6> key_reference_values {
+        1.0F, 0.0F,
+        row0_cosine, row0_sine,
+        -row1_sine, row1_cosine,
+    };
+    const std::array<float, 12> key_cache_values {
+        99.0F, 1.0F, 0.0F, -99.0F,
+        88.0F, row0_cosine, row0_sine, -88.0F,
+        77.0F, -row1_sine, row1_cosine, -77.0F,
+    };
+    const std::array<float, 6> value_reference_values {
+        10.0F, 20.0F,
+        30.0F, 40.0F,
+        50.0F, 60.0F,
+    };
+    const std::array<float, 12> value_cache_values {
+        -1.0F, 10.0F, 20.0F, -2.0F,
+        -3.0F, 30.0F, 40.0F, -4.0F,
+        -5.0F, 50.0F, 60.0F, -6.0F,
+    };
+    const auto query_source = tensor_f32_matrix(2, 4, std::span<const float>(query_source_values));
+    const auto query_reference = tensor_f32_matrix(2, 2, std::span<const float>(query_reference_values));
+    const auto rotated_query = rope_f32_with_position_start(query_reference, 1, 2, 1.0F);
+    const auto key_reference = tensor_f32_matrix(3, 2, std::span<const float>(key_reference_values));
+    const auto key_cache = tensor_f32_matrix(3, 4, std::span<const float>(key_cache_values));
+    const auto value_reference = tensor_f32_matrix(3, 2, std::span<const float>(value_reference_values));
+    const auto value_cache = tensor_f32_matrix(3, 4, std::span<const float>(value_cache_values));
+
+    const auto reference = causal_scaled_dot_product_attention_f32(
+        rotated_query,
+        key_reference,
+        value_reference,
+        1.0F,
+        1
+    );
+    const auto output = causal_scaled_dot_product_attention_f32(
+        F32RoPEMatrixColumnView {
+            .columns = F32MatrixColumnView {
+                .storage = query_source,
+                .row_count = 2,
+                .first_column = 1,
+                .column_count = 2,
+            },
+            .rope_dimension_count = 2,
+            .frequency_base = 1.0F,
+        },
+        F32MatrixColumnView {
+            .storage = key_cache,
+            .row_count = 3,
+            .first_column = 1,
+            .column_count = 2,
+        },
+        F32MatrixColumnView {
+            .storage = value_cache,
+            .row_count = 3,
+            .first_column = 1,
+            .column_count = 2,
+        },
+        1.0F,
+        1
+    );
+
+    expect(output.descriptor().shape == Shape::from({2, 2}), "F32 causal attention RoPE query view shape mismatch");
+    for (std::uint64_t row = 0; row < 2; ++row) {
+        for (std::uint64_t column = 0; column < 2; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            expect_close(
+                read_f32(output, std::span<const std::uint64_t>(index)),
+                read_f32(reference, std::span<const std::uint64_t>(index)),
+                0.000001F,
+                "F32 causal attention RoPE query view parity mismatch"
+            );
+        }
+    }
+}
+
 void test_rejects_f32_causal_attention_column_view_row_mismatch() {
     const std::array<float, 2> query_values {1.0F, 0.0F};
     const std::array<float, 6> key_cache_values {
@@ -2082,6 +2172,52 @@ void test_rejects_f32_causal_attention_column_view_row_mismatch() {
         expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 causal attention view row error mismatch");
         expect(error.expected_value() == 2, "F32 causal attention view expected row mismatch");
         expect(error.actual_value() == 1, "F32 causal attention view actual row mismatch");
+    }
+}
+
+void test_rejects_f32_causal_attention_rope_query_view_invalid_dimension_count() {
+    const std::array<float, 2> query_values {1.0F, 0.0F};
+    const std::array<float, 2> key_values {1.0F, 0.0F};
+    const std::array<float, 1> value_values {10.0F};
+    const auto query = tensor_f32_matrix(1, 2, std::span<const float>(query_values));
+    const auto key = tensor_f32_matrix(1, 2, std::span<const float>(key_values));
+    const auto value = tensor_f32_matrix(1, 1, std::span<const float>(value_values));
+
+    try {
+        (void)causal_scaled_dot_product_attention_f32(
+            F32RoPEMatrixColumnView {
+                .columns = F32MatrixColumnView {
+                    .storage = query,
+                    .row_count = 1,
+                    .first_column = 0,
+                    .column_count = 2,
+                },
+                .rope_dimension_count = 1,
+                .frequency_base = 1.0F,
+            },
+            F32MatrixColumnView {
+                .storage = key,
+                .row_count = 1,
+                .first_column = 0,
+                .column_count = 2,
+            },
+            F32MatrixColumnView {
+                .storage = value,
+                .row_count = 1,
+                .first_column = 0,
+                .column_count = 1,
+            },
+            1.0F,
+            0
+        );
+        throw TestFailure("F32 causal attention should reject invalid RoPE query dimension count");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_shape_dimension,
+            "F32 causal attention RoPE query dimension error mismatch"
+        );
+        expect(error.expected_value() == 2, "F32 causal attention expected RoPE dimension mismatch");
+        expect(error.actual_value() == 1, "F32 causal attention actual RoPE dimension mismatch");
     }
 }
 
@@ -2628,6 +2764,209 @@ void test_runs_llama_attention_layer_with_kv_cache_matches_no_cache() {
         0.000001F,
         "Llama cached attention value 1 should match no-cache row 1"
     );
+}
+
+void test_runs_grouped_llama_attention_layer_with_kv_cache_matches_no_cache() {
+    const std::array<float, 12> full_input_values {
+        1.0F, 2.0F, 3.0F, 4.0F,
+        -2.0F, 1.0F, 0.5F, 3.0F,
+        4.0F, -1.0F, 2.0F, 0.0F,
+    };
+    const std::array<float, 8> prefill_input_values {
+        1.0F, 2.0F, 3.0F, 4.0F,
+        -2.0F, 1.0F, 0.5F, 3.0F,
+    };
+    const std::array<float, 4> decode_input_values {
+        4.0F, -1.0F, 2.0F, 0.0F,
+    };
+    const std::array<float, 4> norm_values {1.0F, 1.0F, 1.0F, 1.0F};
+    std::array<float, 32> query_weight_values {};
+    std::array<float, 16> key_weight_values {};
+    std::array<float, 16> value_weight_values {};
+    std::array<float, 32> output_weight_values {};
+
+    for (std::uint64_t row = 0; row < 4; ++row) {
+        for (std::uint64_t column = 0; column < 8; ++column) {
+            const auto pattern = static_cast<int>((row + 1) * (column + 2)) % 7 - 3;
+            query_weight_values[static_cast<std::size_t>(row * 8 + column)] = static_cast<float>(pattern) * 0.125F;
+        }
+    }
+
+    for (std::uint64_t row = 0; row < 4; ++row) {
+        for (std::uint64_t column = 0; column < 4; ++column) {
+            const auto key_pattern = static_cast<int>((row + 2) * (column + 1)) % 5 - 2;
+            const auto value_pattern = static_cast<int>((row + 3) * (column + 2)) % 7 - 3;
+            key_weight_values[static_cast<std::size_t>(row * 4 + column)] =
+                static_cast<float>(key_pattern) * 0.25F;
+            value_weight_values[static_cast<std::size_t>(row * 4 + column)] =
+                static_cast<float>(value_pattern) * 0.125F;
+        }
+    }
+
+    for (std::uint64_t row = 0; row < 8; ++row) {
+        for (std::uint64_t column = 0; column < 4; ++column) {
+            const auto pattern = static_cast<int>((row + 1) + (column * 2)) % 7 - 3;
+            output_weight_values[static_cast<std::size_t>(row * 4 + column)] =
+                static_cast<float>(pattern) * 0.125F;
+        }
+    }
+
+    const auto full_input = tensor_f32_matrix(3, 4, std::span<const float>(full_input_values));
+    const auto prefill_input = tensor_f32_matrix(2, 4, std::span<const float>(prefill_input_values));
+    const auto decode_input = tensor_f32_matrix(1, 4, std::span<const float>(decode_input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(4, 8, std::span<const float>(query_weight_values));
+    auto key_weight = tensor_f16_matrix(4, 4, std::span<const float>(key_weight_values));
+    auto value_weight = tensor_f16_matrix(4, 4, std::span<const float>(value_weight_values));
+    auto output_weight = tensor_f16_matrix(8, 4, std::span<const float>(output_weight_values));
+    auto config = tiny_attention_layer_config();
+    config.embedding_length = 4;
+    config.attention_head_count = 4;
+    config.attention_head_count_kv = 2;
+    config.attention_key_length = 2;
+    config.attention_value_length = 2;
+    config.rope_freq_base = 2.0F;
+    config.rms_norm_epsilon = 0.25F;
+    const LlamaAttentionLayerWeights weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+    auto cache = create_llama_kv_cache(config);
+
+    const auto no_cache = run_llama_attention_layer_f32(full_input, weights, config, 2);
+    (void)run_llama_attention_layer_with_kv_cache_f32(prefill_input, weights, config, 1, cache.layers[0]);
+    const auto cached = run_llama_attention_layer_with_kv_cache_f32(
+        decode_input,
+        weights,
+        config,
+        2,
+        cache.layers[0]
+    );
+
+    expect(cache.layers[0].filled_token_count == 3, "grouped Llama attention KV cache fill mismatch");
+    expect(cached.descriptor().shape == Shape::from({1, 4}), "grouped Llama cached attention output shape mismatch");
+    for (std::uint64_t column = 0; column < 4; ++column) {
+        const std::array<std::uint64_t, 2> no_cache_index {2, column};
+        const std::array<std::uint64_t, 2> cached_index {0, column};
+        expect_close(
+            read_f32(cached, std::span<const std::uint64_t>(cached_index)),
+            read_f32(no_cache, std::span<const std::uint64_t>(no_cache_index)),
+            0.00001F,
+            "grouped Llama cached attention should match no-cache final row"
+        );
+    }
+}
+
+void test_runs_llama_attention_layer_with_kv_cache_appends_rotated_key_heads() {
+    const std::array<float, 8> input_values {
+        1.0F, 0.0F, 0.0F, 1.0F,
+        0.0F, 1.0F, 1.0F, 0.0F,
+    };
+    const std::array<float, 4> norm_values {1.0F, 1.0F, 1.0F, 1.0F};
+    const std::array<float, 16> identity_values {
+        1.0F, 0.0F, 0.0F, 0.0F,
+        0.0F, 1.0F, 0.0F, 0.0F,
+        0.0F, 0.0F, 1.0F, 0.0F,
+        0.0F, 0.0F, 0.0F, 1.0F,
+    };
+    const auto input = tensor_f32_matrix(2, 4, std::span<const float>(input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(4, 4, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_matrix(4, 4, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_matrix(4, 4, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(4, 4, std::span<const float>(identity_values));
+    auto config = tiny_attention_layer_config();
+    config.embedding_length = 4;
+    config.attention_head_count = 2;
+    config.attention_head_count_kv = 2;
+    config.attention_key_length = 2;
+    config.attention_value_length = 2;
+    config.rope_freq_base = 1.0F;
+    config.rms_norm_epsilon = 0.5F;
+    const LlamaAttentionLayerWeights weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+    auto cache = create_llama_kv_cache(config);
+
+    (void)run_llama_attention_layer_with_kv_cache_f32(input, weights, config, 1, cache.layers[0]);
+
+    const auto sine = static_cast<float>(std::sin(1.0));
+    const auto cosine = static_cast<float>(std::cos(1.0));
+    const std::array<float, 8> expected_key_values {
+        1.0F, 0.0F, 0.0F, 1.0F,
+        -sine, cosine, cosine, sine,
+    };
+    const std::array<float, 4> expected_value_row1 {
+        0.0F, 1.0F, 1.0F, 0.0F,
+    };
+
+    expect(cache.layers[0].filled_token_count == 2, "Llama cached attention rotated key fill mismatch");
+    for (std::uint64_t row = 0; row < 2; ++row) {
+        for (std::uint64_t column = 0; column < 4; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            expect_close(
+                read_f32(cache.layers[0].key, std::span<const std::uint64_t>(index)),
+                expected_key_values[static_cast<std::size_t>(row * 4 + column)],
+                0.000001F,
+                "Llama cached rotated key value mismatch"
+            );
+        }
+    }
+
+    for (std::uint64_t column = 0; column < 4; ++column) {
+        const std::array<std::uint64_t, 2> index {1, column};
+        expect_close(
+            read_f32(cache.layers[0].value, std::span<const std::uint64_t>(index)),
+            expected_value_row1[static_cast<std::size_t>(column)],
+            0.000001F,
+            "Llama cached appended value mismatch"
+        );
+    }
+}
+
+void test_rejects_llama_attention_layer_with_kv_cache_invalid_rope_dimension_count() {
+    const std::array<float, 2> input_values {1.0F, 0.0F};
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 4> identity_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+    };
+    const auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    auto query_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto key_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto value_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto output_weight = tensor_f16_matrix(2, 2, std::span<const float>(identity_values));
+    auto config = tiny_attention_layer_config();
+    config.rope_dimension_count = 1;
+    const LlamaAttentionLayerWeights weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+    auto cache = create_llama_kv_cache(config);
+
+    try {
+        (void)run_llama_attention_layer_with_kv_cache_f32(input, weights, config, 0, cache.layers[0]);
+        throw TestFailure("cached Llama attention should reject invalid RoPE dimension count");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_shape_dimension,
+            "cached Llama attention RoPE dimension error mismatch"
+        );
+        expect(error.expected_value() == 2, "cached Llama attention expected RoPE dimension mismatch");
+        expect(error.actual_value() == 1, "cached Llama attention actual RoPE dimension mismatch");
+        expect(cache.layers[0].filled_token_count == 0, "cached Llama attention should not append invalid RoPE rows");
+    }
 }
 
 void test_runs_llama_attention_layer_with_rowwise_rope_positions() {
@@ -5186,8 +5525,16 @@ int main() {
             test_applies_f32_causal_attention_with_column_views,
         },
         {
+            "applies F32 causal attention with RoPE query column view",
+            test_applies_f32_causal_attention_with_rope_query_column_view,
+        },
+        {
             "rejects F32 causal attention column view row mismatch",
             test_rejects_f32_causal_attention_column_view_row_mismatch,
+        },
+        {
+            "rejects F32 causal attention RoPE query view invalid dimension count",
+            test_rejects_f32_causal_attention_rope_query_view_invalid_dimension_count,
         },
         {
             "rejects F32 causal attention position window overflow",
@@ -5223,6 +5570,18 @@ int main() {
         {
             "runs Llama attention layer with KV cache matches no-cache",
             test_runs_llama_attention_layer_with_kv_cache_matches_no_cache,
+        },
+        {
+            "runs grouped Llama attention layer with KV cache matches no-cache",
+            test_runs_grouped_llama_attention_layer_with_kv_cache_matches_no_cache,
+        },
+        {
+            "runs Llama attention layer with KV cache appends rotated key heads",
+            test_runs_llama_attention_layer_with_kv_cache_appends_rotated_key_heads,
+        },
+        {
+            "rejects Llama attention layer with KV cache invalid RoPE dimension count",
+            test_rejects_llama_attention_layer_with_kv_cache_invalid_rope_dimension_count,
         },
         {
             "runs Llama attention layer with rowwise RoPE positions",
