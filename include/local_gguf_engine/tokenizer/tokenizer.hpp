@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace local_gguf_engine::tokenizer {
@@ -91,8 +92,14 @@ private:
     Tokenizer(
         TokenizerModel model,
         std::vector<TokenizerToken> vocabulary,
-        TokenizerSpecialTokens special_tokens
+        TokenizerSpecialTokens special_tokens,
+        std::vector<std::string> bpe_merges,
+        bool add_space_prefix
     );
+
+    void append_exact_token_ids(std::vector<std::uint32_t>& token_ids, std::string_view text) const;
+    void append_gpt2_bpe_token_ids(std::vector<std::uint32_t>& token_ids, std::string_view text) const;
+    void append_token_id_for_text(std::vector<std::uint32_t>& token_ids, std::string_view token_text) const;
 
     [[nodiscard]] bool token_id_is_special(std::uint32_t token_id) const noexcept;
     [[nodiscard]] bool token_id_is_control(std::uint32_t token_id) const noexcept;
@@ -102,6 +109,9 @@ private:
     std::vector<TokenizerToken> vocabulary_;
     TokenizerSpecialTokens special_tokens_;
     std::vector<std::uint32_t> encode_candidate_token_ids_;
+    std::unordered_map<std::string, std::uint32_t> token_text_to_id_;
+    std::unordered_map<std::string, std::uint32_t> bpe_merge_ranks_;
+    bool add_space_prefix_;
 };
 
 [[nodiscard]] std::string_view tokenizer_model_name(TokenizerModel model) noexcept;

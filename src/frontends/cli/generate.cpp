@@ -114,7 +114,8 @@ std::string generate_text_from_gguf_bytes(
         std::span<const std::uint32_t>(prompt_token_ids),
         max_new_tokens,
         weights,
-        model.llama_config()
+        model.llama_config(),
+        tokenizer.special_tokens().eos_token_id
     );
 
     return tokenizer.decode(

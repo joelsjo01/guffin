@@ -301,6 +301,26 @@ void validate_token_id(
     return vocabulary;
 }
 
+[[nodiscard]] std::vector<std::string> load_bpe_merges(const GGUFMetadataSection& metadata) {
+    const auto merges = optional_metadata_array_values<std::vector<std::string>>(
+        metadata,
+        "tokenizer.ggml.merges",
+        GGUFMetadataValueType::string
+    );
+    if (!merges.has_value()) {
+        return {};
+    }
+
+    for (const auto& merge : merges->get()) {
+        const auto separator = merge.find(' ');
+        if (separator == std::string::npos || separator == 0 || separator + 1 == merge.size()) {
+            throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "tokenizer.ggml.merges");
+        }
+    }
+
+    return merges->get();
+}
+
 [[nodiscard]] TokenizerSpecialTokens load_special_tokens(
     const GGUFMetadataSection& metadata,
     std::size_t token_count
@@ -328,6 +348,10 @@ void validate_token_id(
     return special_tokens;
 }
 
+[[nodiscard]] bool load_add_space_prefix(const GGUFMetadataSection& metadata) {
+    return optional_metadata_bool(metadata, "tokenizer.ggml.add_space_prefix").value_or(false);
+}
+
 [[nodiscard]] bool starts_with_at(
     std::string_view text,
     std::size_t offset,
@@ -350,6 +374,14 @@ void validate_token_id(
     }
 
     return *token_id;
+}
+
+[[nodiscard]] bool is_ascii_alpha(char character) noexcept {
+    return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z');
+}
+
+[[nodiscard]] bool is_ascii_digit(char character) noexcept {
+    return character >= '0' && character <= '9';
 }
 
 [[nodiscard]] bool is_utf8_continuation(std::uint8_t byte) noexcept {
@@ -417,6 +449,154 @@ struct Utf8CodePoint {
     return Utf8CodePoint {.value = static_cast<char32_t>(first), .byte_count = 1, .valid = false};
 }
 
+[[nodiscard]] bool code_point_is_space(char32_t code_point) noexcept {
+    return code_point == U' '
+        || code_point == U'\t'
+        || code_point == U'\n'
+        || code_point == U'\r'
+        || code_point == U'\v'
+        || code_point == U'\f'
+        || code_point == 0x0085U
+        || code_point == 0x00A0U;
+}
+
+enum class GPT2PieceClass {
+    letter,
+    number,
+    punctuation,
+    space,
+};
+
+[[nodiscard]] GPT2PieceClass gpt2_piece_class(std::string_view text, std::size_t offset) noexcept {
+    const auto code_point = read_utf8_code_point(text, offset);
+    if (code_point_is_space(code_point.value)) {
+        return GPT2PieceClass::space;
+    }
+
+    const auto first = text[offset];
+    if (static_cast<unsigned char>(first) < 0x80U) {
+        if (is_ascii_alpha(first)) {
+            return GPT2PieceClass::letter;
+        }
+
+        if (is_ascii_digit(first)) {
+            return GPT2PieceClass::number;
+        }
+
+        return GPT2PieceClass::punctuation;
+    }
+
+    return GPT2PieceClass::letter;
+}
+
+[[nodiscard]] bool starts_with_ascii(std::string_view text, std::size_t offset, std::string_view prefix) noexcept {
+    return prefix.size() <= text.size() - offset && text.compare(offset, prefix.size(), prefix) == 0;
+}
+
+[[nodiscard]] std::size_t contraction_byte_count(std::string_view text, std::size_t offset) noexcept {
+    constexpr std::string_view contractions[] = {"'re", "'ve", "'ll", "'s", "'t", "'m", "'d"};
+    for (const auto contraction : contractions) {
+        if (starts_with_ascii(text, offset, contraction)) {
+            return contraction.size();
+        }
+    }
+
+    return 0;
+}
+
+[[nodiscard]] std::size_t code_point_byte_count(std::string_view text, std::size_t offset) noexcept {
+    return read_utf8_code_point(text, offset).byte_count;
+}
+
+[[nodiscard]] std::vector<std::string_view> gpt2_pretokenize(std::string_view text) {
+    std::vector<std::string_view> pieces;
+    pieces.reserve(text.size());
+
+    std::size_t offset = 0;
+    while (offset < text.size()) {
+        const auto contraction_size = contraction_byte_count(text, offset);
+        if (contraction_size != 0) {
+            pieces.push_back(text.substr(offset, contraction_size));
+            offset += contraction_size;
+            continue;
+        }
+
+        const auto piece_start = offset;
+        auto piece_class = gpt2_piece_class(text, offset);
+        if (text[offset] == ' ' && offset + 1 < text.size()) {
+            const auto next_offset = offset + 1;
+            const auto next_class = gpt2_piece_class(text, next_offset);
+            if (next_class != GPT2PieceClass::space) {
+                offset = next_offset;
+                piece_class = next_class;
+            }
+        }
+
+        offset += code_point_byte_count(text, offset);
+        while (offset < text.size() && contraction_byte_count(text, offset) == 0) {
+            if (gpt2_piece_class(text, offset) != piece_class) {
+                break;
+            }
+            offset += code_point_byte_count(text, offset);
+        }
+
+        pieces.push_back(text.substr(piece_start, offset - piece_start));
+    }
+
+    return pieces;
+}
+
+void append_utf8_code_point(std::string& output, char32_t code_point) {
+    if (code_point <= 0x7FU) {
+        output.push_back(static_cast<char>(code_point));
+        return;
+    }
+
+    if (code_point <= 0x7FFU) {
+        output.push_back(static_cast<char>(0xC0U | ((static_cast<std::uint32_t>(code_point) >> 6U) & 0x1FU)));
+        output.push_back(static_cast<char>(0x80U | (static_cast<std::uint32_t>(code_point) & 0x3FU)));
+        return;
+    }
+
+    if (code_point <= 0xFFFFU) {
+        output.push_back(static_cast<char>(0xE0U | ((static_cast<std::uint32_t>(code_point) >> 12U) & 0x0FU)));
+        output.push_back(static_cast<char>(0x80U | ((static_cast<std::uint32_t>(code_point) >> 6U) & 0x3FU)));
+        output.push_back(static_cast<char>(0x80U | (static_cast<std::uint32_t>(code_point) & 0x3FU)));
+        return;
+    }
+
+    output.push_back(static_cast<char>(0xF0U | ((static_cast<std::uint32_t>(code_point) >> 18U) & 0x07U)));
+    output.push_back(static_cast<char>(0x80U | ((static_cast<std::uint32_t>(code_point) >> 12U) & 0x3FU)));
+    output.push_back(static_cast<char>(0x80U | ((static_cast<std::uint32_t>(code_point) >> 6U) & 0x3FU)));
+    output.push_back(static_cast<char>(0x80U | (static_cast<std::uint32_t>(code_point) & 0x3FU)));
+}
+
+[[nodiscard]] char32_t gpt2_code_point_from_byte(std::uint8_t byte) noexcept {
+    if ((byte >= 33U && byte <= 126U) || (byte >= 161U && byte <= 172U) || (byte >= 174U && byte <= 255U)) {
+        return static_cast<char32_t>(byte);
+    }
+
+    if (byte <= 32U) {
+        return static_cast<char32_t>(0x0100U + byte);
+    }
+
+    if (byte >= 127U && byte <= 160U) {
+        return static_cast<char32_t>(0x0100U + 33U + (byte - 127U));
+    }
+
+    return static_cast<char32_t>(0x0143U);
+}
+
+[[nodiscard]] std::string gpt2_byte_encode(std::string_view text) {
+    std::string output;
+    output.reserve(text.size());
+    for (const auto character : text) {
+        append_utf8_code_point(output, gpt2_code_point_from_byte(static_cast<std::uint8_t>(character)));
+    }
+
+    return output;
+}
+
 [[nodiscard]] std::optional<std::uint8_t> gpt2_byte_from_code_point(char32_t code_point) noexcept {
     const auto code = static_cast<std::uint32_t>(code_point);
     if ((code >= 33U && code <= 126U) || (code >= 161U && code <= 172U) || (code >= 174U && code <= 255U)) {
@@ -437,6 +617,38 @@ struct Utf8CodePoint {
     }
 
     return static_cast<std::uint8_t>(173U);
+}
+
+[[nodiscard]] std::vector<std::string> split_utf8_symbols(std::string_view text) {
+    std::vector<std::string> symbols;
+    symbols.reserve(text.size());
+
+    std::size_t offset = 0;
+    while (offset < text.size()) {
+        const auto code_point = read_utf8_code_point(text, offset);
+        symbols.emplace_back(text.substr(offset, code_point.byte_count));
+        offset += code_point.byte_count;
+    }
+
+    return symbols;
+}
+
+[[nodiscard]] std::string bpe_merge_key(std::string_view left, std::string_view right) {
+    std::string key;
+    key.reserve(left.size() + 1U + right.size());
+    key += left;
+    key.push_back('\0');
+    key += right;
+    return key;
+}
+
+[[nodiscard]] std::pair<std::string_view, std::string_view> parse_bpe_merge(std::string_view merge) {
+    const auto separator = merge.find(' ');
+    if (separator == std::string_view::npos || separator == 0 || separator + 1 == merge.size()) {
+        throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "tokenizer.ggml.merges");
+    }
+
+    return {merge.substr(0, separator), merge.substr(separator + 1)};
 }
 
 void append_gpt2_decoded_text(std::string& output, std::string_view token_text) {
@@ -502,13 +714,19 @@ std::string_view tokenizer_model_name(TokenizerModel model) noexcept {
 Tokenizer::Tokenizer(
     TokenizerModel model,
     std::vector<TokenizerToken> vocabulary,
-    TokenizerSpecialTokens special_tokens
+    TokenizerSpecialTokens special_tokens,
+    std::vector<std::string> bpe_merges,
+    bool add_space_prefix
 )
     : model_(model),
       vocabulary_(std::move(vocabulary)),
       special_tokens_(special_tokens),
-      encode_candidate_token_ids_() {
+      encode_candidate_token_ids_(),
+      token_text_to_id_(),
+      bpe_merge_ranks_(),
+      add_space_prefix_(add_space_prefix) {
     encode_candidate_token_ids_.reserve(vocabulary_.size());
+    token_text_to_id_.reserve(vocabulary_.size());
     for (std::size_t index = 0; index < vocabulary_.size(); ++index) {
         if (index > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
             throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "token id overflow");
@@ -517,6 +735,19 @@ Tokenizer::Tokenizer(
         const auto token_id = static_cast<std::uint32_t>(index);
         if (token_id_can_encode_text(token_id)) {
             encode_candidate_token_ids_.push_back(token_id);
+            token_text_to_id_.emplace(vocabulary_[index].text, token_id);
+        }
+    }
+
+    bpe_merge_ranks_.reserve(bpe_merges.size());
+    for (std::size_t index = 0; index < bpe_merges.size(); ++index) {
+        if (index > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+            throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "tokenizer.ggml.merges");
+        }
+
+        const auto [left, right] = parse_bpe_merge(bpe_merges[index]);
+        if (!bpe_merge_ranks_.emplace(bpe_merge_key(left, right), static_cast<std::uint32_t>(index)).second) {
+            throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "tokenizer.ggml.merges");
         }
     }
 
@@ -573,6 +804,20 @@ std::vector<std::uint32_t> Tokenizer::encode(
         token_ids.push_back(require_special_token_id(special_tokens_.bos_token_id, "tokenizer.ggml.bos_token_id"));
     }
 
+    if (model_ == TokenizerModel::gpt2 && !bpe_merge_ranks_.empty()) {
+        append_gpt2_bpe_token_ids(token_ids, text);
+    } else {
+        append_exact_token_ids(token_ids, text);
+    }
+
+    if (options.add_eos) {
+        token_ids.push_back(require_special_token_id(special_tokens_.eos_token_id, "tokenizer.ggml.eos_token_id"));
+    }
+
+    return token_ids;
+}
+
+void Tokenizer::append_exact_token_ids(std::vector<std::uint32_t>& token_ids, std::string_view text) const {
     std::size_t offset = 0;
     while (offset < text.size()) {
         bool matched = false;
@@ -600,12 +845,81 @@ std::vector<std::uint32_t> Tokenizer::encode(
 
         throw TokenizerError(TokenizerErrorCode::no_matching_token, byte_offset_detail(offset));
     }
+}
 
-    if (options.add_eos) {
-        token_ids.push_back(require_special_token_id(special_tokens_.eos_token_id, "tokenizer.ggml.eos_token_id"));
+void Tokenizer::append_gpt2_bpe_token_ids(std::vector<std::uint32_t>& token_ids, std::string_view text) const {
+    std::string prefixed_text;
+    std::string_view text_to_encode = text;
+    if (add_space_prefix_ && !text.empty() && !code_point_is_space(read_utf8_code_point(text, 0).value)) {
+        prefixed_text.reserve(text.size() + 1U);
+        prefixed_text.push_back(' ');
+        prefixed_text += text;
+        text_to_encode = prefixed_text;
     }
 
-    return token_ids;
+    const auto pieces = gpt2_pretokenize(text_to_encode);
+    for (const auto piece : pieces) {
+        const auto byte_encoded_piece = gpt2_byte_encode(piece);
+        auto symbols = split_utf8_symbols(byte_encoded_piece);
+
+        while (symbols.size() > 1) {
+            bool has_best = false;
+            std::uint32_t best_rank = std::numeric_limits<std::uint32_t>::max();
+            std::string best_left;
+            std::string best_right;
+
+            for (std::size_t index = 0; index + 1 < symbols.size(); ++index) {
+                const auto found = bpe_merge_ranks_.find(bpe_merge_key(symbols[index], symbols[index + 1]));
+                if (found == bpe_merge_ranks_.end() || (has_best && found->second >= best_rank)) {
+                    continue;
+                }
+
+                has_best = true;
+                best_rank = found->second;
+                best_left = symbols[index];
+                best_right = symbols[index + 1];
+            }
+
+            if (!has_best) {
+                break;
+            }
+
+            std::vector<std::string> merged_symbols;
+            merged_symbols.reserve(symbols.size());
+            std::size_t index = 0;
+            while (index < symbols.size()) {
+                if (index + 1 < symbols.size() && symbols[index] == best_left && symbols[index + 1] == best_right) {
+                    merged_symbols.push_back(symbols[index] + symbols[index + 1]);
+                    index += 2;
+                    continue;
+                }
+
+                merged_symbols.push_back(std::move(symbols[index]));
+                ++index;
+            }
+
+            symbols = std::move(merged_symbols);
+        }
+
+        for (const auto& symbol : symbols) {
+            append_token_id_for_text(token_ids, symbol);
+        }
+    }
+}
+
+void Tokenizer::append_token_id_for_text(std::vector<std::uint32_t>& token_ids, std::string_view token_text) const {
+    const auto found = token_text_to_id_.find(std::string(token_text));
+    if (found != token_text_to_id_.end()) {
+        token_ids.push_back(found->second);
+        return;
+    }
+
+    if (special_tokens_.unknown_token_id.has_value()) {
+        token_ids.push_back(*special_tokens_.unknown_token_id);
+        return;
+    }
+
+    throw TokenizerError(TokenizerErrorCode::no_matching_token, std::string(token_text));
 }
 
 std::string Tokenizer::decode(std::span<const std::uint32_t> token_ids) const {
@@ -668,9 +982,11 @@ Tokenizer load_tokenizer_from_gguf_metadata(const GGUFMetadataSection& metadata)
     validate_architecture(metadata);
     const auto model = parse_tokenizer_model(require_metadata_string(metadata, "tokenizer.ggml.model"));
     auto vocabulary = build_vocabulary(metadata);
+    auto bpe_merges = load_bpe_merges(metadata);
     const auto special_tokens = load_special_tokens(metadata, vocabulary.size());
+    const auto add_space_prefix = load_add_space_prefix(metadata);
 
-    return Tokenizer(model, std::move(vocabulary), special_tokens);
+    return Tokenizer(model, std::move(vocabulary), special_tokens, std::move(bpe_merges), add_space_prefix);
 }
 
 }  // namespace local_gguf_engine::tokenizer

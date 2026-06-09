@@ -34,6 +34,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -651,6 +652,36 @@ std::vector<GGUFMetadataEntry> tiny_gpt2_byte_decoder_tokenizer_metadata() {
     return metadata;
 }
 
+std::vector<GGUFMetadataEntry> tiny_gpt2_bpe_tokenizer_metadata(bool add_space_prefix) {
+    auto metadata = tiny_llama_metadata();
+    metadata[11] = metadata_u32("llama.vocab_size", 25);
+    metadata.push_back(metadata_string("tokenizer.ggml.model", "gpt2"));
+    metadata.push_back(metadata_string_array(
+        "tokenizer.ggml.tokens",
+        {
+            "<s>", "</s>", "H", "e", "l", "o", "\xC4\xA0", "w", "r", "d", "!",
+            "\xC3\x83", "\xC2\xA5", "He", "Hel", "Hell", "Hello",
+            "\xC4\xA0w", "\xC4\xA0wo", "\xC4\xA0wor", "\xC4\xA0worl", "\xC4\xA0world",
+            "\xC3\x83\xC2\xA5", "\xC4\xA0Hello", "<unk>",
+        }
+    ));
+    metadata.push_back(metadata_string_array(
+        "tokenizer.ggml.merges",
+        {
+            "H e", "He l", "Hel l", "Hell o",
+            "\xC4\xA0 w", "\xC4\xA0w o", "\xC4\xA0wo r", "\xC4\xA0wor l", "\xC4\xA0worl d",
+            "\xC3\x83 \xC2\xA5", "\xC4\xA0 Hello",
+        }
+    ));
+    metadata.push_back(metadata_u32("tokenizer.ggml.bos_token_id", 0));
+    metadata.push_back(metadata_u32("tokenizer.ggml.eos_token_id", 1));
+    metadata.push_back(metadata_u32("tokenizer.ggml.unknown_token_id", 24));
+    metadata.push_back(metadata_bool("tokenizer.ggml.add_bos_token", true));
+    metadata.push_back(metadata_bool("tokenizer.ggml.add_eos_token", false));
+    metadata.push_back(metadata_bool("tokenizer.ggml.add_space_prefix", add_space_prefix));
+    return metadata;
+}
+
 std::vector<GGUFMetadataEntry> tiny_generate_cli_metadata(const LlamaModelConfig& config) {
     return {
         metadata_string("general.architecture", "llama"),
@@ -675,6 +706,12 @@ std::vector<GGUFMetadataEntry> tiny_generate_cli_metadata(const LlamaModelConfig
         metadata_bool("tokenizer.ggml.add_bos_token", true),
         metadata_bool("tokenizer.ggml.add_eos_token", false),
     };
+}
+
+std::vector<GGUFMetadataEntry> tiny_generate_cli_eos_metadata(const LlamaModelConfig& config) {
+    auto metadata = tiny_generate_cli_metadata(config);
+    metadata.push_back(metadata_u32("tokenizer.ggml.eos_token_id", 1));
+    return metadata;
 }
 
 GGUFMetadataSection metadata_section(std::vector<GGUFMetadataEntry> entries) {
@@ -4286,6 +4323,33 @@ EngineModel tiny_tied_output_generation_model(LlamaModelConfig config) {
     return tiny_bound_llama_model(config, std::move(tensors));
 }
 
+EngineModel tiny_eos_then_visible_generation_model(LlamaModelConfig config) {
+    const std::array<float, 6> embedding_values {
+        1.0F, 0.0F, 0.0F,
+        0.0F, 1.0F, 0.0F,
+    };
+    const std::array<float, 2> norm_values {1.0F, 1.0F};
+    const std::array<float, 6> output_values {
+        0.0F, 2.0F, 0.0F,
+        0.0F, 0.0F, 2.0F,
+    };
+    std::vector<EngineTensor> tensors;
+    tensors.push_back(engine_tensor(
+        "token_embd.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(embedding_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output_norm.weight",
+        tensor_f32_vector(std::span<const float>(norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output.weight",
+        tensor_f16_matrix(2, 3, std::span<const float>(output_values))
+    ));
+    add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
+    return tiny_bound_llama_model(config, std::move(tensors));
+}
+
 std::vector<std::uint8_t> tiny_generate_cli_gguf_bytes() {
     auto config = tiny_logits_config();
     config.block_count = 1;
@@ -4304,6 +4368,17 @@ std::vector<std::uint8_t> tiny_tied_output_generate_cli_gguf_bytes() {
     const auto model = tiny_tied_output_generation_model(config);
     return write_tiny_gguf_bytes(
         tiny_generate_cli_metadata(config),
+        tiny_gguf_tensors_from_engine_model(model)
+    );
+}
+
+std::vector<std::uint8_t> tiny_eos_generate_cli_gguf_bytes() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.context_length = 8;
+    const auto model = tiny_eos_then_visible_generation_model(config);
+    return write_tiny_gguf_bytes(
+        tiny_generate_cli_eos_metadata(config),
         tiny_gguf_tensors_from_engine_model(model)
     );
 }
@@ -4466,6 +4541,27 @@ void test_generates_llama_argmax_tokens() {
     expect(tokens[2] == 0, "Llama argmax generation second token mismatch");
 }
 
+void test_generates_llama_argmax_tokens_stops_at_token() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.context_length = 8;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 1> prompt_tokens {0};
+
+    const auto tokens = generate_llama_argmax_tokens_f32(
+        std::span<const std::uint32_t>(prompt_tokens),
+        4,
+        weights,
+        model.llama_config(),
+        std::optional<std::uint32_t>(2)
+    );
+
+    expect(tokens.size() == 2, "Llama argmax stop-token generation count mismatch");
+    expect(tokens[0] == 0, "Llama argmax stop-token prompt mismatch");
+    expect(tokens[1] == 2, "Llama argmax stop-token generated token mismatch");
+}
+
 void test_generates_llama_argmax_tokens_with_kv_cache_matches_no_cache() {
     auto config = tiny_logits_config();
     config.block_count = 1;
@@ -4492,6 +4588,27 @@ void test_generates_llama_argmax_tokens_with_kv_cache_matches_no_cache() {
     expect(cached_tokens[0] == 0, "cached Llama argmax generation prompt token mismatch");
     expect(cached_tokens[1] == 2, "cached Llama argmax generation first token mismatch");
     expect(cached_tokens[2] == 0, "cached Llama argmax generation second token mismatch");
+}
+
+void test_generates_llama_argmax_tokens_with_kv_cache_stops_at_token() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    config.context_length = 8;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const std::array<std::uint32_t, 1> prompt_tokens {0};
+
+    const auto tokens = generate_llama_argmax_tokens_with_kv_cache_f32(
+        std::span<const std::uint32_t>(prompt_tokens),
+        4,
+        weights,
+        model.llama_config(),
+        std::optional<std::uint32_t>(2)
+    );
+
+    expect(tokens.size() == 2, "cached Llama argmax stop-token generation count mismatch");
+    expect(tokens[0] == 0, "cached Llama argmax stop-token prompt mismatch");
+    expect(tokens[1] == 2, "cached Llama argmax stop-token generated token mismatch");
 }
 
 void test_rejects_llama_cached_generation_zero_new_tokens() {
@@ -4671,6 +4788,14 @@ void test_generates_text_from_gguf_bytes_with_tied_output_weight() {
     const auto text = generate_text_from_gguf_bytes(std::span<const std::uint8_t>(bytes), "", 2);
 
     expect(text == "!!", "generate text should support tied output weights");
+}
+
+void test_generates_text_from_gguf_bytes_stops_at_tokenizer_eos() {
+    const auto bytes = tiny_eos_generate_cli_gguf_bytes();
+
+    const auto text = generate_text_from_gguf_bytes(std::span<const std::uint8_t>(bytes), "", 2);
+
+    expect(text.empty(), "generate text should stop before visible token after EOS");
 }
 
 void test_runs_generate_success_path() {
@@ -5676,6 +5801,43 @@ void test_encodes_llama_tokenizer_known_ids_with_special_tokens() {
     expect(eos_ids[2] == 1, "tokenizer explicit EOS id mismatch");
 }
 
+void test_encodes_gpt2_bpe_prompt_pieces() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(
+        metadata_section(tiny_gpt2_bpe_tokenizer_metadata(false))
+    );
+
+    const auto prompt = std::string("Hello world!") + "\xC3\xA5";
+    const auto ids = tokenizer.encode(prompt, TokenizerEncodeOptions {.add_bos = false, .add_eos = true});
+
+    expect(ids.size() == 5, "GPT-2 BPE encoded count mismatch");
+    expect(ids[0] == 16, "GPT-2 BPE should merge Hello");
+    expect(ids[1] == 21, "GPT-2 BPE should merge space-prefixed world");
+    expect(ids[2] == 10, "GPT-2 BPE punctuation token mismatch");
+    expect(ids[3] == 22, "GPT-2 BPE UTF-8 byte merge mismatch");
+    expect(ids[4] == 1, "GPT-2 BPE EOS id mismatch");
+
+    const auto decoded = tokenizer.decode(
+        std::span<const std::uint32_t>(ids),
+        TokenizerDecodeOptions {.skip_special_tokens = true}
+    );
+    expect(decoded == prompt, "GPT-2 BPE encode/decode round-trip mismatch");
+}
+
+void test_encodes_gpt2_bpe_with_space_prefix() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(
+        metadata_section(tiny_gpt2_bpe_tokenizer_metadata(true))
+    );
+
+    const auto ids = tokenizer.encode("Hello", TokenizerEncodeOptions {.add_bos = false, .add_eos = false});
+
+    expect(ids.size() == 1, "GPT-2 BPE space-prefix encoded count mismatch");
+    expect(ids[0] == 23, "GPT-2 BPE should use space-prefixed token");
+    expect(
+        tokenizer.decode(std::span<const std::uint32_t>(ids)) == " Hello",
+        "GPT-2 BPE space-prefix decode mismatch"
+    );
+}
+
 void test_decodes_llama_tokenizer_known_ids_and_skips_special_tokens() {
     const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_llama_tokenizer_metadata()));
     const std::array<std::uint32_t, 5> ids {0, 2, 3, 4, 1};
@@ -5732,6 +5894,24 @@ void test_rejects_tokenizer_malformed_token_metadata() {
     } catch (const TokenizerError& error) {
         expect(error.code() == TokenizerErrorCode::invalid_vocabulary, "tokenizer malformed metadata error mismatch");
         expect(error.detail() == "tokenizer.ggml.token_type", "tokenizer malformed metadata detail mismatch");
+    }
+}
+
+void test_rejects_tokenizer_malformed_bpe_merges() {
+    auto metadata = tiny_gpt2_bpe_tokenizer_metadata(false);
+    for (auto& entry : metadata) {
+        if (entry.key == "tokenizer.ggml.merges") {
+            entry = metadata_string_array("tokenizer.ggml.merges", {"bad-merge"});
+            break;
+        }
+    }
+
+    try {
+        (void)load_tokenizer_from_gguf_metadata(metadata_section(std::move(metadata)));
+        throw TestFailure("tokenizer should reject malformed BPE merge metadata");
+    } catch (const TokenizerError& error) {
+        expect(error.code() == TokenizerErrorCode::invalid_vocabulary, "tokenizer malformed BPE error mismatch");
+        expect(error.detail() == "tokenizer.ggml.merges", "tokenizer malformed BPE detail mismatch");
     }
 }
 
@@ -6108,9 +6288,14 @@ int main() {
         {"runs Llama next-token argmax from token IDs", test_runs_llama_next_token_argmax_from_token_ids},
         {"rejects Llama next-token empty token IDs", test_rejects_llama_next_token_empty_token_ids},
         {"generates Llama argmax tokens", test_generates_llama_argmax_tokens},
+        {"generates Llama argmax tokens stops at token", test_generates_llama_argmax_tokens_stops_at_token},
         {
             "generates Llama argmax tokens with KV cache matches no-cache",
             test_generates_llama_argmax_tokens_with_kv_cache_matches_no_cache,
+        },
+        {
+            "generates Llama argmax tokens with KV cache stops at token",
+            test_generates_llama_argmax_tokens_with_kv_cache_stops_at_token,
         },
         {
             "rejects Llama cached generation zero new tokens",
@@ -6133,6 +6318,10 @@ int main() {
         {
             "generates text from GGUF bytes with tied output weight",
             test_generates_text_from_gguf_bytes_with_tied_output_weight,
+        },
+        {
+            "generates text from GGUF bytes stops at tokenizer EOS",
+            test_generates_text_from_gguf_bytes_stops_at_tokenizer_eos,
         },
         {"runs generate success path", test_runs_generate_success_path},
         {"rejects generate missing arguments", test_rejects_generate_missing_arguments},
@@ -6203,6 +6392,8 @@ int main() {
             "encodes Llama tokenizer known IDs with special tokens",
             test_encodes_llama_tokenizer_known_ids_with_special_tokens,
         },
+        {"encodes GPT-2 BPE prompt pieces", test_encodes_gpt2_bpe_prompt_pieces},
+        {"encodes GPT-2 BPE with space prefix", test_encodes_gpt2_bpe_with_space_prefix},
         {
             "decodes Llama tokenizer known IDs and skips special tokens",
             test_decodes_llama_tokenizer_known_ids_and_skips_special_tokens,
@@ -6213,6 +6404,7 @@ int main() {
             "rejects tokenizer malformed token metadata",
             test_rejects_tokenizer_malformed_token_metadata,
         },
+        {"rejects tokenizer malformed BPE merges", test_rejects_tokenizer_malformed_bpe_merges},
         {"rejects tokenizer without matching token", test_rejects_tokenizer_without_matching_token},
         {"parses default benchmark args", test_parses_default_benchmark_args},
         {

@@ -348,7 +348,8 @@ std::vector<std::uint32_t> generate_llama_argmax_tokens_f32(
     std::span<const std::uint32_t> prompt_token_ids,
     std::size_t max_new_tokens,
     const LlamaModelWeights& weights,
-    const LlamaModelConfig& config
+    const LlamaModelConfig& config,
+    std::optional<std::uint32_t> stop_token_id
 ) {
     if (max_new_tokens == 0) {
         throw std::invalid_argument("Llama generation max_new_tokens must be positive");
@@ -371,6 +372,9 @@ std::vector<std::uint32_t> generate_llama_argmax_tokens_f32(
             position
         );
         tokens.push_back(next_token);
+        if (stop_token_id == next_token) {
+            break;
+        }
     }
 
     return tokens;
@@ -380,7 +384,8 @@ std::vector<std::uint32_t> generate_llama_argmax_tokens_with_kv_cache_f32(
     std::span<const std::uint32_t> prompt_token_ids,
     std::size_t max_new_tokens,
     const LlamaModelWeights& weights,
-    const LlamaModelConfig& config
+    const LlamaModelConfig& config,
+    std::optional<std::uint32_t> stop_token_id
 ) {
     if (max_new_tokens == 0) {
         throw std::invalid_argument("Llama generation max_new_tokens must be positive");
@@ -405,6 +410,9 @@ std::vector<std::uint32_t> generate_llama_argmax_tokens_with_kv_cache_f32(
         cache
     );
     tokens.push_back(next_token);
+    if (stop_token_id == next_token) {
+        return tokens;
+    }
 
     for (std::size_t generated = 1; generated < max_new_tokens; ++generated) {
         const auto position = static_cast<std::uint64_t>(tokens.size() - 1);
@@ -416,6 +424,9 @@ std::vector<std::uint32_t> generate_llama_argmax_tokens_with_kv_cache_f32(
             cache
         );
         tokens.push_back(next_token);
+        if (stop_token_id == next_token) {
+            break;
+        }
     }
 
     return tokens;

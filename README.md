@@ -61,7 +61,7 @@ This project is in the early implementation stage. The GGUF reader and initial
 Tensor Core are in place for F32, F16, and Q8_0 payloads. The engine can now
 load a narrow Llama-family GGUF model structure, tokenize prompts from GGUF
 metadata, bind F16 model weights, and run cached CPU argmax generation for the
-first SmolLM2 inference path. The current runnable surfaces are `gguf-inspect`
-for concise local GGUF summaries, `local-gguf-generate` for minimal CPU text
-generation, and `local-gguf-bench` for engine-native tensor/load
-microbenchmarks.
+first SmolLM2 inference path, including tokenizer-EOS stopping. The current
+runnable surfaces are `gguf-inspect` for concise local GGUF summaries,
+`local-gguf-generate` for minimal CPU text generation, and `local-gguf-bench`
+for engine-native tensor/load microbenchmarks.
