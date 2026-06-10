@@ -44,6 +44,13 @@ using tokenizer::TokenizerEncodeOptions;
 using tokenizer::TokenizerError;
 
 constexpr std::size_t default_debug_top_token_count = 16;
+constexpr engine::SamplingConfig default_cli_sampling {
+    .temperature = 0.7F,
+    .top_k = 40,
+    .top_p = 0.9F,
+    .repetition_penalty = 1.1F,
+    .seed = 1,
+};
 
 class GenerateFileReadError final : public std::runtime_error {
 public:
@@ -57,7 +64,8 @@ struct EncodedGeneratePrompt {
 
 void write_generate_usage(std::ostream& error) {
     error << "usage: local-gguf-generate <model.gguf> <prompt> <max-new-tokens>"
-          << " [--temperature <value>] [--top-k <count>] [--seed <integer>] [--debug-first-token]\n";
+          << " [--greedy] [--temperature <value>] [--top-k <count>] [--top-p <value>]"
+          << " [--repeat-penalty <value>] [--seed <integer>] [--debug-first-token]\n";
 }
 
 [[nodiscard]] std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
@@ -152,7 +160,7 @@ void write_generate_usage(std::ostream& error) {
     return true;
 }
 
-[[nodiscard]] bool parse_positive_finite_float(std::string_view text, float& value) {
+[[nodiscard]] bool parse_nonnegative_finite_float(std::string_view text, float& value) {
     if (text.empty()) {
         return false;
     }
@@ -164,7 +172,7 @@ void write_generate_usage(std::ostream& error) {
     if (
         errno == ERANGE
         || parsed_end != text_copy.c_str() + text_copy.size()
-        || parsed <= 0.0F
+        || parsed < 0.0F
         || !std::isfinite(parsed)
     ) {
         return false;
@@ -172,6 +180,22 @@ void write_generate_usage(std::ostream& error) {
 
     value = parsed;
     return true;
+}
+
+[[nodiscard]] bool parse_probability_float(std::string_view text, float& value) {
+    if (!parse_nonnegative_finite_float(text, value)) {
+        return false;
+    }
+
+    return value > 0.0F && value <= 1.0F;
+}
+
+[[nodiscard]] bool parse_at_least_one_float(std::string_view text, float& value) {
+    if (!parse_nonnegative_finite_float(text, value)) {
+        return false;
+    }
+
+    return value >= 1.0F;
 }
 
 [[nodiscard]] bool parse_sampling_options(
@@ -182,10 +206,16 @@ void write_generate_usage(std::ostream& error) {
 ) {
     bool temperature_set = false;
     bool top_k_set = false;
+    bool top_p_set = false;
+    bool repetition_penalty_set = false;
     bool seed_set = false;
+    bool greedy_set = false;
     for (int index = 4; index < argc; ++index) {
         const std::string_view option(argv[index]);
-        if (option == "--temperature") {
+        if (option == "--greedy") {
+            options.sampling = engine::SamplingConfig {};
+            greedy_set = true;
+        } else if (option == "--temperature") {
             if (index + 1 >= argc) {
                 write_generate_usage(error);
                 error << "error: --temperature requires a value\n";
@@ -193,9 +223,9 @@ void write_generate_usage(std::ostream& error) {
             }
 
             float temperature = 0.0F;
-            if (!parse_positive_finite_float(argv[index + 1], temperature)) {
+            if (!parse_nonnegative_finite_float(argv[index + 1], temperature)) {
                 write_generate_usage(error);
-                error << "error: --temperature must be a positive finite number\n";
+                error << "error: --temperature must be a nonnegative finite number\n";
                 return false;
             }
 
@@ -218,6 +248,40 @@ void write_generate_usage(std::ostream& error) {
 
             options.sampling.top_k = top_k;
             top_k_set = true;
+            ++index;
+        } else if (option == "--top-p") {
+            if (index + 1 >= argc) {
+                write_generate_usage(error);
+                error << "error: --top-p requires a value\n";
+                return false;
+            }
+
+            float top_p = 0.0F;
+            if (!parse_probability_float(argv[index + 1], top_p)) {
+                write_generate_usage(error);
+                error << "error: --top-p must be in (0, 1]\n";
+                return false;
+            }
+
+            options.sampling.top_p = top_p;
+            top_p_set = true;
+            ++index;
+        } else if (option == "--repeat-penalty") {
+            if (index + 1 >= argc) {
+                write_generate_usage(error);
+                error << "error: --repeat-penalty requires a value\n";
+                return false;
+            }
+
+            float repetition_penalty = 1.0F;
+            if (!parse_at_least_one_float(argv[index + 1], repetition_penalty)) {
+                write_generate_usage(error);
+                error << "error: --repeat-penalty must be at least 1\n";
+                return false;
+            }
+
+            options.sampling.repetition_penalty = repetition_penalty;
+            repetition_penalty_set = true;
             ++index;
         } else if (option == "--seed") {
             if (index + 1 >= argc) {
@@ -245,9 +309,9 @@ void write_generate_usage(std::ostream& error) {
         }
     }
 
-    if (!temperature_set && (top_k_set || seed_set)) {
+    if (greedy_set && (temperature_set || top_k_set || top_p_set || repetition_penalty_set || seed_set)) {
         write_generate_usage(error);
-        error << "error: --temperature must be set to enable sampling options\n";
+        error << "error: --greedy cannot be combined with sampling options\n";
         return false;
     }
 
@@ -442,7 +506,9 @@ int run_generate(int argc, const char* const* argv, std::ostream& output, std::o
         return 1;
     }
 
-    GenerateOptions options;
+    GenerateOptions options {
+        .sampling = default_cli_sampling,
+    };
     if (!parse_sampling_options(argc, argv, options, error)) {
         return 1;
     }

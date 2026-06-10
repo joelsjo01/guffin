@@ -350,10 +350,11 @@ std::uint32_t run_llama_model_next_token_sampled_f32(
     const LlamaModelConfig& config,
     std::uint64_t position,
     const SamplingConfig& sampling,
-    SamplingState& sampling_state
+    SamplingState& sampling_state,
+    std::span<const std::uint32_t> repetition_token_ids
 ) {
     const auto logits = run_llama_model_logits_f32(token_ids, weights, config, position);
-    return sample_token_f32(logits, sampling, sampling_state);
+    return sample_token_f32(logits, sampling, sampling_state, repetition_token_ids);
 }
 
 std::uint32_t run_llama_model_next_token_sampled_with_kv_cache_f32(
@@ -363,10 +364,11 @@ std::uint32_t run_llama_model_next_token_sampled_with_kv_cache_f32(
     std::uint64_t position,
     LlamaKVCache& cache,
     const SamplingConfig& sampling,
-    SamplingState& sampling_state
+    SamplingState& sampling_state,
+    std::span<const std::uint32_t> repetition_token_ids
 ) {
     const auto logits = run_llama_model_logits_with_kv_cache_f32(token_ids, weights, config, position, cache);
-    return sample_token_f32(logits, sampling, sampling_state);
+    return sample_token_f32(logits, sampling, sampling_state, repetition_token_ids);
 }
 
 std::vector<std::uint32_t> generate_llama_argmax_tokens_f32(
@@ -486,7 +488,8 @@ std::vector<std::uint32_t> generate_llama_sampled_tokens_f32(
             config,
             position,
             sampling,
-            sampling_state
+            sampling_state,
+            std::span<const std::uint32_t>(tokens.data(), tokens.size())
         );
         tokens.push_back(next_token);
         if (stop_token_id == next_token) {
@@ -528,7 +531,8 @@ std::vector<std::uint32_t> generate_llama_sampled_tokens_with_kv_cache_f32(
         prompt_final_position,
         cache,
         sampling,
-        sampling_state
+        sampling_state,
+        prompt_token_ids
     );
     tokens.push_back(next_token);
     if (stop_token_id == next_token) {
@@ -544,7 +548,8 @@ std::vector<std::uint32_t> generate_llama_sampled_tokens_with_kv_cache_f32(
             position,
             cache,
             sampling,
-            sampling_state
+            sampling_state,
+            std::span<const std::uint32_t>(tokens.data(), tokens.size())
         );
         tokens.push_back(next_token);
         if (stop_token_id == next_token) {

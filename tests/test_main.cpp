@@ -4465,6 +4465,38 @@ void test_samples_temperature_top_k_token_from_last_logits_row() {
     expect(token == 1, "temperature top-k sampler should use the final logits row");
 }
 
+void test_samples_temperature_top_p_token_from_f32_logits_vector() {
+    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    const SamplingConfig sampling {
+        .temperature = 1.0F,
+        .top_p = 0.5F,
+        .seed = 0,
+    };
+    SamplingState state(sampling.seed);
+
+    const auto token = sample_token_f32(logits, sampling, state);
+
+    expect(token == 2, "temperature top-p sampler should keep at least the highest-probability token");
+}
+
+void test_samples_temperature_repetition_penalty_token_from_f32_logits_vector() {
+    const std::array<float, 3> logits_values {0.0F, 4.0F, 5.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    const std::array<std::uint32_t, 1> repetition_tokens {2};
+    const SamplingConfig sampling {
+        .temperature = 1.0F,
+        .top_p = 0.01F,
+        .repetition_penalty = 2.0F,
+        .seed = 0,
+    };
+    SamplingState state(sampling.seed);
+
+    const auto token = sample_token_f32(logits, sampling, state, std::span<const std::uint32_t>(repetition_tokens));
+
+    expect(token == 1, "repetition penalty should lower a repeated positive-logit token before top-p filtering");
+}
+
 void test_sampling_temperature_zero_keeps_argmax_path() {
     const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
     const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
@@ -4497,6 +4529,48 @@ void test_rejects_sampling_negative_temperature() {
         expect(
             std::string_view(error.what()) == "sampling temperature must be zero or a positive finite value",
             "temperature sampler error text mismatch"
+        );
+    }
+}
+
+void test_rejects_sampling_invalid_top_p() {
+    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    const SamplingConfig sampling {
+        .temperature = 1.0F,
+        .top_p = 0.0F,
+        .seed = 0,
+    };
+    SamplingState state(sampling.seed);
+
+    try {
+        (void)sample_token_f32(logits, sampling, state);
+        throw TestFailure("temperature sampler should reject invalid top-p");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "sampling top-p must be in (0, 1]",
+            "top-p sampler error text mismatch"
+        );
+    }
+}
+
+void test_rejects_sampling_invalid_repetition_penalty() {
+    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    const SamplingConfig sampling {
+        .temperature = 1.0F,
+        .repetition_penalty = 0.5F,
+        .seed = 0,
+    };
+    SamplingState state(sampling.seed);
+
+    try {
+        (void)sample_token_f32(logits, sampling, state);
+        throw TestFailure("temperature sampler should reject invalid repetition penalty");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "sampling repetition penalty must be at least 1",
+            "repetition-penalty sampler error text mismatch"
         );
     }
 }
@@ -5127,8 +5201,30 @@ void test_runs_generate_success_path() {
     const auto exit_code = run_generate_for_path(model.path(), "", "2", output, error);
 
     expect(exit_code == EXIT_SUCCESS, "generate success exit code mismatch");
-    expect(output.str() == "!\n", "generate success output mismatch");
+    expect(output.str() == "!!\n", "generate success output mismatch");
     expect(error.str().empty(), "generate success should not write stderr");
+}
+
+void test_runs_generate_with_greedy_option() {
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-generate-greedy", std::span<const std::uint8_t>(bytes));
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = model.path().string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "2",
+        "--greedy",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(5, argv, output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "generate greedy success exit code mismatch");
+    expect(output.str() == "!\n", "generate greedy output mismatch");
+    expect(error.str().empty(), "generate greedy should not write stderr");
 }
 
 void test_runs_generate_with_sampling_options() {
@@ -5145,6 +5241,37 @@ void test_runs_generate_with_sampling_options() {
         "10",
         "--top-k",
         "2",
+        "--top-p",
+        "1",
+        "--repeat-penalty",
+        "1",
+        "--seed",
+        "0",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(14, argv, output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "generate sampling success exit code mismatch");
+    expect(output.str() == "Hello\n", "generate sampling success output mismatch");
+    expect(error.str().empty(), "generate sampling success should not write stderr");
+}
+
+void test_runs_generate_with_top_p_option() {
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-generate-top-p", std::span<const std::uint8_t>(bytes));
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = model.path().string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "1",
+        "--temperature",
+        "10",
+        "--top-p",
+        "0.01",
         "--seed",
         "0",
     };
@@ -5153,9 +5280,9 @@ void test_runs_generate_with_sampling_options() {
 
     const auto exit_code = run_generate(10, argv, output, error);
 
-    expect(exit_code == EXIT_SUCCESS, "generate sampling success exit code mismatch");
-    expect(output.str() == "Hello\n", "generate sampling success output mismatch");
-    expect(error.str().empty(), "generate sampling success should not write stderr");
+    expect(exit_code == EXIT_SUCCESS, "generate top-p success exit code mismatch");
+    expect(output.str() == "!\n", "generate top-p output mismatch");
+    expect(error.str().empty(), "generate top-p should not write stderr");
 }
 
 void test_runs_generate_with_first_token_debug() {
@@ -5234,7 +5361,7 @@ void test_rejects_generate_invalid_temperature_option() {
         "",
         "1",
         "--temperature",
-        "0",
+        "-1",
     };
     std::ostringstream output;
     std::ostringstream error;
@@ -5244,8 +5371,84 @@ void test_rejects_generate_invalid_temperature_option() {
     expect(exit_code == EXIT_FAILURE, "generate invalid-temperature exit code mismatch");
     expect(output.str().empty(), "generate invalid-temperature should not write stdout");
     expect(
-        error.str().find("--temperature must be a positive finite number") != std::string::npos,
+        error.str().find("--temperature must be a nonnegative finite number") != std::string::npos,
         "generate invalid-temperature error missing"
+    );
+}
+
+void test_rejects_generate_invalid_top_p_option() {
+    const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-generate.gguf";
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "1",
+        "--top-p",
+        "0",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(6, argv, output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate invalid-top-p exit code mismatch");
+    expect(output.str().empty(), "generate invalid-top-p should not write stdout");
+    expect(
+        error.str().find("--top-p must be in (0, 1]") != std::string::npos,
+        "generate invalid-top-p error missing"
+    );
+}
+
+void test_rejects_generate_invalid_repeat_penalty_option() {
+    const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-generate.gguf";
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "1",
+        "--repeat-penalty",
+        "0.5",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(6, argv, output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate invalid-repeat-penalty exit code mismatch");
+    expect(output.str().empty(), "generate invalid-repeat-penalty should not write stdout");
+    expect(
+        error.str().find("--repeat-penalty must be at least 1") != std::string::npos,
+        "generate invalid-repeat-penalty error missing"
+    );
+}
+
+void test_rejects_generate_greedy_sampling_conflict() {
+    const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-generate.gguf";
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "1",
+        "--greedy",
+        "--seed",
+        "1",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(7, argv, output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate greedy-conflict exit code mismatch");
+    expect(output.str().empty(), "generate greedy-conflict should not write stdout");
+    expect(
+        error.str().find("--greedy cannot be combined with sampling options") != std::string::npos,
+        "generate greedy-conflict error missing"
     );
 }
 
@@ -6779,8 +6982,18 @@ int main() {
             "samples temperature top-k token from last logits row",
             test_samples_temperature_top_k_token_from_last_logits_row,
         },
+        {
+            "samples temperature top-p token from F32 logits vector",
+            test_samples_temperature_top_p_token_from_f32_logits_vector,
+        },
+        {
+            "samples temperature repetition-penalty token from F32 logits vector",
+            test_samples_temperature_repetition_penalty_token_from_f32_logits_vector,
+        },
         {"sampling temperature zero keeps argmax path", test_sampling_temperature_zero_keeps_argmax_path},
         {"rejects sampling negative temperature", test_rejects_sampling_negative_temperature},
+        {"rejects sampling invalid top-p", test_rejects_sampling_invalid_top_p},
+        {"rejects sampling invalid repetition penalty", test_rejects_sampling_invalid_repetition_penalty},
         {"runs Llama next-token argmax from token IDs", test_runs_llama_next_token_argmax_from_token_ids},
         {"rejects Llama next-token empty token IDs", test_rejects_llama_next_token_empty_token_ids},
         {"generates Llama argmax tokens", test_generates_llama_argmax_tokens},
@@ -6832,11 +7045,19 @@ int main() {
             test_generates_text_from_gguf_bytes_with_sampling_options,
         },
         {"runs generate success path", test_runs_generate_success_path},
+        {"runs generate with greedy option", test_runs_generate_with_greedy_option},
         {"runs generate with sampling options", test_runs_generate_with_sampling_options},
+        {"runs generate with top-p option", test_runs_generate_with_top_p_option},
         {"runs generate with first-token debug", test_runs_generate_with_first_token_debug},
         {"rejects generate missing arguments", test_rejects_generate_missing_arguments},
         {"rejects generate invalid max new tokens", test_rejects_generate_invalid_max_new_tokens},
         {"rejects generate invalid temperature option", test_rejects_generate_invalid_temperature_option},
+        {"rejects generate invalid top-p option", test_rejects_generate_invalid_top_p_option},
+        {
+            "rejects generate invalid repeat-penalty option",
+            test_rejects_generate_invalid_repeat_penalty_option,
+        },
+        {"rejects generate greedy sampling conflict", test_rejects_generate_greedy_sampling_conflict},
         {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
         {
             "converts Q8_0 GGUF payload view to tensor storage",

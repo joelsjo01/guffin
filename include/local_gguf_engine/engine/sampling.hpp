@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace local_gguf_engine::engine {
@@ -11,6 +12,8 @@ namespace local_gguf_engine::engine {
 struct SamplingConfig {
     float temperature = 0.0F;
     std::uint32_t top_k = 0;
+    float top_p = 1.0F;
+    float repetition_penalty = 1.0F;
     std::uint64_t seed = 0;
 };
 
@@ -39,7 +42,8 @@ private:
 [[nodiscard]] std::uint32_t sample_token_f32(
     const tensor::TensorStorage& logits,
     const SamplingConfig& config,
-    SamplingState& state
+    SamplingState& state,
+    std::span<const std::uint32_t> repetition_token_ids = {}
 );
 
 }  // namespace local_gguf_engine::engine

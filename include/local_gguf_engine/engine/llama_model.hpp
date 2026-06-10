@@ -86,7 +86,8 @@ struct LlamaModelWeights {
     const LlamaModelConfig& config,
     std::uint64_t position,
     const SamplingConfig& sampling,
-    SamplingState& sampling_state
+    SamplingState& sampling_state,
+    std::span<const std::uint32_t> repetition_token_ids = {}
 );
 
 [[nodiscard]] std::uint32_t run_llama_model_next_token_sampled_with_kv_cache_f32(
@@ -96,7 +97,8 @@ struct LlamaModelWeights {
     std::uint64_t position,
     LlamaKVCache& cache,
     const SamplingConfig& sampling,
-    SamplingState& sampling_state
+    SamplingState& sampling_state,
+    std::span<const std::uint32_t> repetition_token_ids = {}
 );
 
 [[nodiscard]] std::vector<std::uint32_t> generate_llama_argmax_tokens_f32(
