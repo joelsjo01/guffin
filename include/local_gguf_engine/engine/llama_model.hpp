@@ -21,7 +21,23 @@ struct LlamaModelWeights {
     std::vector<LlamaBlockWeights> blocks;
 };
 
+struct LlamaModelAttentionBackendWeights {
+    std::vector<LlamaAttentionLayerBackendWeights> blocks;
+};
+
+struct LlamaModelFeedForwardBackendWeights {
+    std::vector<LlamaFeedForwardLayerBackendWeights> blocks;
+};
+
 [[nodiscard]] LlamaModelWeights bind_llama_model_weights(const EngineModel& model);
+[[nodiscard]] LlamaModelAttentionBackendWeights copy_llama_model_attention_weights_to_backend(
+    const LlamaModelWeights& weights,
+    runtime::BackendKind backend
+);
+[[nodiscard]] LlamaModelFeedForwardBackendWeights copy_llama_model_feed_forward_weights_to_backend(
+    const LlamaModelWeights& weights,
+    runtime::BackendKind backend
+);
 
 [[nodiscard]] tensor::TensorStorage embed_llama_token_ids_f32(
     std::span<const std::uint32_t> token_ids,

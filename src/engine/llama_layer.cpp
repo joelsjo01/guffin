@@ -24,6 +24,7 @@ using tensor::TensorError;
 using tensor::TensorErrorCode;
 using tensor::TensorStorage;
 using tensor::f16_bits_to_f32;
+using tensor::copy_tensor_to_backend;
 using tensor::ops::add_f32;
 using tensor::ops::causal_scaled_dot_product_attention_f32;
 using tensor::ops::matmul_f32_f16_gguf_weight;
@@ -79,11 +80,23 @@ void require_f32_vector_shape(const TensorStorage& storage, std::uint64_t length
     require_dimension(storage.descriptor(), 0, length);
 }
 
+void require_f16_matrix_shape(const TensorDescriptor& descriptor, std::uint64_t rows, std::uint64_t columns) {
+    require_dtype(descriptor, DType::f16);
+    require_rank(descriptor, matrix_rank);
+    require_dimension(descriptor, 0, rows);
+    require_dimension(descriptor, 1, columns);
+}
+
 void require_f16_matrix_shape(const TensorStorage& storage, std::uint64_t rows, std::uint64_t columns) {
-    require_dtype(storage.descriptor(), DType::f16);
-    require_rank(storage.descriptor(), matrix_rank);
-    require_dimension(storage.descriptor(), 0, rows);
-    require_dimension(storage.descriptor(), 1, columns);
+    require_f16_matrix_shape(storage.descriptor(), rows, columns);
+}
+
+[[nodiscard]] const TensorDescriptor& projection_weight_descriptor(const TensorStorage& storage) noexcept {
+    return storage.descriptor();
+}
+
+[[nodiscard]] const TensorDescriptor& projection_weight_descriptor(const tensor::BackendBuffer& buffer) noexcept {
+    return buffer.descriptor();
 }
 
 void require_positive_config_dimension(std::uint32_t value) {
@@ -562,11 +575,10 @@ void accumulate_cached_attention_projection_f32(
     }
 }
 
-}  // namespace
-
-TensorStorage run_llama_attention_layer_f32(
+template <typename Weights>
+[[nodiscard]] TensorStorage run_llama_attention_layer_impl(
     const TensorStorage& input,
-    const LlamaAttentionLayerWeights& weights,
+    const Weights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position
 ) {
@@ -585,10 +597,10 @@ TensorStorage run_llama_attention_layer_f32(
 
     require_f32_matrix_shape(input, token_count, hidden);
     require_f32_vector_shape(weights.attention_norm_weight, hidden);
-    require_f16_matrix_shape(weights.query_weight, hidden, query_width);
-    require_f16_matrix_shape(weights.key_weight, hidden, key_width);
-    require_f16_matrix_shape(weights.value_weight, hidden, value_width);
-    require_f16_matrix_shape(weights.output_weight, attention_output_width, hidden);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.query_weight), hidden, query_width);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.key_weight), hidden, key_width);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.value_weight), hidden, value_width);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.output_weight), attention_output_width, hidden);
 
     const auto normalized = rms_norm_f32(input, weights.attention_norm_weight, config.rms_norm_epsilon);
     const auto query = matmul_f32_f16_gguf_weight(normalized, weights.query_weight);
@@ -632,6 +644,79 @@ TensorStorage run_llama_attention_layer_f32(
 
     const auto projected = matmul_f32_f16_gguf_weight(attention_output, weights.output_weight);
     return add_f32(input, projected);
+}
+
+template <typename Weights>
+[[nodiscard]] TensorStorage run_llama_feed_forward_layer_impl(
+    const TensorStorage& input,
+    const Weights& weights,
+    const LlamaModelConfig& config
+) {
+    require_positive_config_dimension(config.embedding_length);
+    require_positive_config_dimension(config.feed_forward_length);
+
+    const auto token_count = input.descriptor().shape.dimension(0);
+    const auto hidden = static_cast<std::uint64_t>(config.embedding_length);
+    const auto feed_forward = static_cast<std::uint64_t>(config.feed_forward_length);
+
+    require_f32_matrix_shape(input, token_count, hidden);
+    require_f32_vector_shape(weights.feed_forward_norm_weight, hidden);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.gate_weight), hidden, feed_forward);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.up_weight), hidden, feed_forward);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.down_weight), feed_forward, hidden);
+
+    const auto normalized = rms_norm_f32(input, weights.feed_forward_norm_weight, config.rms_norm_epsilon);
+    const auto gate = matmul_f32_f16_gguf_weight(normalized, weights.gate_weight);
+    const auto up = matmul_f32_f16_gguf_weight(normalized, weights.up_weight);
+    const auto activated_gate = silu_f32(gate);
+    const auto gated = multiply_f32(activated_gate, up);
+    const auto projected = matmul_f32_f16_gguf_weight(gated, weights.down_weight);
+    return add_f32(input, projected);
+}
+
+}  // namespace
+
+LlamaAttentionLayerBackendWeights copy_llama_attention_layer_weights_to_backend(
+    const LlamaAttentionLayerWeights& weights,
+    runtime::BackendKind backend
+) {
+    return LlamaAttentionLayerBackendWeights {
+        .attention_norm_weight = weights.attention_norm_weight,
+        .query_weight = copy_tensor_to_backend(weights.query_weight, backend),
+        .key_weight = copy_tensor_to_backend(weights.key_weight, backend),
+        .value_weight = copy_tensor_to_backend(weights.value_weight, backend),
+        .output_weight = copy_tensor_to_backend(weights.output_weight, backend),
+    };
+}
+
+LlamaFeedForwardLayerBackendWeights copy_llama_feed_forward_layer_weights_to_backend(
+    const LlamaFeedForwardLayerWeights& weights,
+    runtime::BackendKind backend
+) {
+    return LlamaFeedForwardLayerBackendWeights {
+        .feed_forward_norm_weight = weights.feed_forward_norm_weight,
+        .gate_weight = copy_tensor_to_backend(weights.gate_weight, backend),
+        .up_weight = copy_tensor_to_backend(weights.up_weight, backend),
+        .down_weight = copy_tensor_to_backend(weights.down_weight, backend),
+    };
+}
+
+TensorStorage run_llama_attention_layer_f32(
+    const TensorStorage& input,
+    const LlamaAttentionLayerWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+) {
+    return run_llama_attention_layer_impl(input, weights, config, position);
+}
+
+TensorStorage run_llama_attention_layer_f32(
+    const TensorStorage& input,
+    const LlamaAttentionLayerBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+) {
+    return run_llama_attention_layer_impl(input, weights, config, position);
 }
 
 TensorStorage run_llama_attention_layer_with_kv_cache_f32(
@@ -695,26 +780,15 @@ TensorStorage run_llama_feed_forward_layer_f32(
     const LlamaFeedForwardLayerWeights& weights,
     const LlamaModelConfig& config
 ) {
-    require_positive_config_dimension(config.embedding_length);
-    require_positive_config_dimension(config.feed_forward_length);
+    return run_llama_feed_forward_layer_impl(input, weights, config);
+}
 
-    const auto token_count = input.descriptor().shape.dimension(0);
-    const auto hidden = static_cast<std::uint64_t>(config.embedding_length);
-    const auto feed_forward = static_cast<std::uint64_t>(config.feed_forward_length);
-
-    require_f32_matrix_shape(input, token_count, hidden);
-    require_f32_vector_shape(weights.feed_forward_norm_weight, hidden);
-    require_f16_matrix_shape(weights.gate_weight, hidden, feed_forward);
-    require_f16_matrix_shape(weights.up_weight, hidden, feed_forward);
-    require_f16_matrix_shape(weights.down_weight, feed_forward, hidden);
-
-    const auto normalized = rms_norm_f32(input, weights.feed_forward_norm_weight, config.rms_norm_epsilon);
-    const auto gate = matmul_f32_f16_gguf_weight(normalized, weights.gate_weight);
-    const auto up = matmul_f32_f16_gguf_weight(normalized, weights.up_weight);
-    const auto activated_gate = silu_f32(gate);
-    const auto gated = multiply_f32(activated_gate, up);
-    const auto projected = matmul_f32_f16_gguf_weight(gated, weights.down_weight);
-    return add_f32(input, projected);
+TensorStorage run_llama_feed_forward_layer_f32(
+    const TensorStorage& input,
+    const LlamaFeedForwardLayerBackendWeights& weights,
+    const LlamaModelConfig& config
+) {
+    return run_llama_feed_forward_layer_impl(input, weights, config);
 }
 
 TensorStorage run_llama_block_f32(

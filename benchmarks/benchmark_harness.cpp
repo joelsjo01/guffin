@@ -10,6 +10,7 @@
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
+#include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
@@ -72,6 +73,7 @@ using model_format::GGUFMetadataValue;
 using model_format::GGUFMetadataValueType;
 using model_format::read_gguf_model_view;
 using runtime::BackendKind;
+using tensor::copy_tensor_to_backend;
 using tensor::DType;
 using tensor::Shape;
 using tensor::TensorDescriptor;
@@ -345,6 +347,7 @@ void add_projection_backend_benchmarks(
     const TensorStorage& right,
     bool metal_available
 ) {
+    const auto cpu_right_buffer = copy_tensor_to_backend(right, BackendKind::cpu);
     report.measurements.push_back(measure(
         "tensor.matmul_f32_f16_gguf_weight.cpu." + std::string(label),
         report.config.iterations,
@@ -358,10 +361,25 @@ void add_projection_backend_benchmarks(
         }
     ));
 
+    report.measurements.push_back(measure(
+        "tensor.matmul_f32_f16_gguf_weight.cpu_buffered." + std::string(label),
+        report.config.iterations,
+        projection_benchmark_detail(left, right, "cpu", "compute+allocation preloaded-right"),
+        [&left, cpu_right_buffer]() {
+            const auto output = matmul_f32_f16_gguf_weight(left, cpu_right_buffer);
+            return IterationMeasurement {
+                .bytes_processed = left.bytes().size() + cpu_right_buffer.descriptor().byte_count
+                    + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
     if (!metal_available) {
         return;
     }
 
+    const auto metal_right_buffer = copy_tensor_to_backend(right, BackendKind::metal);
     report.measurements.push_back(measure(
         "tensor.matmul_f32_f16_gguf_weight.metal." + std::string(label),
         report.config.iterations,
@@ -375,6 +393,25 @@ void add_projection_backend_benchmarks(
             const auto output = matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
             return IterationMeasurement {
                 .bytes_processed = left.bytes().size() + right.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "tensor.matmul_f32_f16_gguf_weight.metal_buffered." + std::string(label),
+        report.config.iterations,
+        projection_benchmark_detail(
+            left,
+            right,
+            "metal",
+            "input-copy+dispatch+output-copy preloaded-right cached-pipeline"
+        ),
+        [&left, metal_right_buffer]() {
+            const auto output = matmul_f32_f16_gguf_weight(left, metal_right_buffer);
+            return IterationMeasurement {
+                .bytes_processed = left.bytes().size() + metal_right_buffer.descriptor().byte_count
+                    + output.bytes().size(),
                 .checksum = checksum_f32(sum_f32(output)),
             };
         }

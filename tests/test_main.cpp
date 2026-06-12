@@ -12,6 +12,7 @@
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
+#include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
@@ -27,6 +28,7 @@
 #include "local_gguf_engine/tensor/typed_access.hpp"
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -58,6 +60,10 @@ using local_gguf_engine::benchmarks::format_benchmark_report;
 using local_gguf_engine::benchmarks::parse_benchmark_args;
 using local_gguf_engine::engine::append_llama_kv_cache_layer_f32;
 using local_gguf_engine::engine::bind_llama_model_weights;
+using local_gguf_engine::engine::copy_llama_attention_layer_weights_to_backend;
+using local_gguf_engine::engine::copy_llama_feed_forward_layer_weights_to_backend;
+using local_gguf_engine::engine::copy_llama_model_attention_weights_to_backend;
+using local_gguf_engine::engine::copy_llama_model_feed_forward_weights_to_backend;
 using local_gguf_engine::engine::create_llama_kv_cache;
 using local_gguf_engine::engine::embed_llama_token_ids_f32;
 using local_gguf_engine::engine::EngineModel;
@@ -68,6 +74,7 @@ using local_gguf_engine::engine::generate_llama_argmax_tokens_f32;
 using local_gguf_engine::engine::generate_llama_argmax_tokens_with_kv_cache_f32;
 using local_gguf_engine::engine::generate_llama_sampled_tokens_f32;
 using local_gguf_engine::engine::generate_llama_sampled_tokens_with_kv_cache_f32;
+using local_gguf_engine::engine::LlamaAttentionLayerBackendWeights;
 using local_gguf_engine::engine::LlamaAttentionLayerWeights;
 using local_gguf_engine::engine::LlamaBlockWeights;
 using local_gguf_engine::engine::LlamaFeedForwardLayerWeights;
@@ -75,6 +82,8 @@ using local_gguf_engine::engine::LlamaKVCache;
 using local_gguf_engine::engine::LlamaKVCacheLayer;
 using local_gguf_engine::engine::llama_kv_cache_layer_key_prefix_f32;
 using local_gguf_engine::engine::llama_kv_cache_layer_value_prefix_f32;
+using local_gguf_engine::engine::LlamaModelAttentionBackendWeights;
+using local_gguf_engine::engine::LlamaModelFeedForwardBackendWeights;
 using local_gguf_engine::engine::LlamaModelConfig;
 using local_gguf_engine::engine::LlamaModelWeights;
 using local_gguf_engine::engine::ModelArchitecture;
@@ -125,6 +134,8 @@ using local_gguf_engine::frontends::cli::run_generate;
 using local_gguf_engine::frontends::cli::run_gguf_inspect;
 using local_gguf_engine::frontends::cli::write_gguf_inspection_summary;
 using local_gguf_engine::tensor::byte_size;
+using local_gguf_engine::tensor::copy_tensor_from_backend;
+using local_gguf_engine::tensor::copy_tensor_to_backend;
 using local_gguf_engine::tensor::DType;
 using local_gguf_engine::tensor::element_byte_offset;
 using local_gguf_engine::tensor::element_bytes;
@@ -199,6 +210,31 @@ void expect_close(float actual, float expected, float tolerance, std::string_vie
         std::ostringstream stream;
         stream << message << ": expected " << expected << ", got " << actual;
         throw TestFailure(stream.str());
+    }
+}
+
+void expect_f32_matrix_close(
+    const TensorStorage& actual,
+    const TensorStorage& expected,
+    float tolerance,
+    std::string_view message
+) {
+    expect(actual.descriptor() == expected.descriptor(), std::string(message) + " descriptor mismatch");
+    expect(actual.descriptor().dtype == DType::f32, std::string(message) + " dtype mismatch");
+    expect(actual.descriptor().shape.rank() == 2, std::string(message) + " rank mismatch");
+
+    const auto rows = actual.descriptor().shape.dimension(0);
+    const auto columns = actual.descriptor().shape.dimension(1);
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            expect_close(
+                read_f32(actual, std::span<const std::uint64_t>(index)),
+                read_f32(expected, std::span<const std::uint64_t>(index)),
+                tolerance,
+                message
+            );
+        }
     }
 }
 
@@ -2962,6 +2998,51 @@ void test_multiplies_f32_by_f16_gguf_weight_matrix_on_cpu_backend() {
     expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 50.0F, "CPU backend GGUF matmul value 1,1 mismatch");
 }
 
+void test_copies_tensor_to_and_from_cpu_backend_buffer() {
+    const std::array<float, 4> values {
+        1.25F, -2.5F,
+        3.75F, -4.5F,
+    };
+    const auto storage = tensor_f32_matrix(2, 2, std::span<const float>(values));
+
+    const auto buffer = copy_tensor_to_backend(storage, BackendKind::cpu);
+    const auto roundtrip = copy_tensor_from_backend(buffer);
+
+    expect(buffer.backend() == BackendKind::cpu, "CPU backend buffer kind mismatch");
+    expect(buffer.descriptor() == storage.descriptor(), "CPU backend buffer descriptor mismatch");
+    expect(roundtrip.descriptor() == storage.descriptor(), "CPU backend buffer roundtrip descriptor mismatch");
+    expect(roundtrip.bytes().data() != storage.bytes().data(), "CPU backend buffer should not alias original storage");
+    expect(
+        std::equal(storage.bytes().begin(), storage.bytes().end(), roundtrip.bytes().begin()),
+        "CPU backend buffer roundtrip bytes mismatch"
+    );
+}
+
+void test_multiplies_f32_by_cpu_backend_f16_gguf_weight_buffer() {
+    const std::array<float, 6> left_values {
+        1.0F, 1.0F, 1.0F,
+        2.0F, 0.0F, 1.0F,
+    };
+    const std::array<float, 6> right_values {
+        1.0F, 2.0F, 3.0F,
+        10.0F, 20.0F, 30.0F,
+    };
+    const auto left = tensor_f32_matrix(2, 3, std::span<const float>(left_values));
+    const auto right = tensor_f16_matrix(3, 2, std::span<const float>(right_values));
+    const auto right_buffer = copy_tensor_to_backend(right, BackendKind::cpu);
+
+    const auto output = matmul_f32_f16_gguf_weight(left, right_buffer);
+
+    const std::array<std::uint64_t, 2> index_00 {0, 0};
+    const std::array<std::uint64_t, 2> index_01 {0, 1};
+    const std::array<std::uint64_t, 2> index_10 {1, 0};
+    const std::array<std::uint64_t, 2> index_11 {1, 1};
+    expect(read_f32(output, std::span<const std::uint64_t>(index_00)) == 6.0F, "CPU buffered GGUF matmul value 0,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_01)) == 60.0F, "CPU buffered GGUF matmul value 0,1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_10)) == 5.0F, "CPU buffered GGUF matmul value 1,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 50.0F, "CPU buffered GGUF matmul value 1,1 mismatch");
+}
+
 void test_matches_cpu_f32_by_f16_gguf_weight_matmul_on_metal_backend() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -3033,6 +3114,66 @@ void test_reuses_metal_f32_by_f16_gguf_weight_matmul_state() {
     }
 }
 
+void test_copies_tensor_to_and_from_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 4> values {
+        1.25F, -2.5F,
+        3.75F, -4.5F,
+    };
+    const auto storage = tensor_f32_matrix(2, 2, std::span<const float>(values));
+
+    const auto buffer = copy_tensor_to_backend(storage, BackendKind::metal);
+    const auto roundtrip = copy_tensor_from_backend(buffer);
+
+    expect(buffer.backend() == BackendKind::metal, "Metal backend buffer kind mismatch");
+    expect(buffer.descriptor() == storage.descriptor(), "Metal backend buffer descriptor mismatch");
+    expect(roundtrip.descriptor() == storage.descriptor(), "Metal backend buffer roundtrip descriptor mismatch");
+    expect(
+        std::equal(storage.bytes().begin(), storage.bytes().end(), roundtrip.bytes().begin()),
+        "Metal backend buffer roundtrip bytes mismatch"
+    );
+}
+
+void test_multiplies_f32_by_metal_backend_f16_gguf_weight_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 12> left_values {
+        0.5F, -1.0F, 2.0F, 3.5F,
+        -2.0F, 0.25F, 1.5F, -0.75F,
+        4.0F, -3.0F, 0.125F, 2.25F,
+    };
+    const std::array<float, 20> right_values {
+        0.25F, -0.5F, 1.0F, 2.0F, -1.5F,
+        1.25F, 0.75F, -2.0F, 0.5F, 3.0F,
+        -0.25F, 1.5F, 0.125F, -1.0F, 2.25F,
+        2.5F, -1.25F, 0.625F, 1.75F, -0.875F,
+    };
+    const auto left = tensor_f32_matrix(3, 4, std::span<const float>(left_values));
+    const auto right = tensor_f16_gguf_matrix(4, 5, std::span<const float>(right_values));
+    const auto right_buffer = copy_tensor_to_backend(right, BackendKind::metal);
+
+    const auto cpu_output = matmul_f32_f16_gguf_weight(left, right, BackendKind::cpu);
+    const auto metal_output = matmul_f32_f16_gguf_weight(left, right_buffer);
+
+    expect(metal_output.descriptor() == cpu_output.descriptor(), "Metal buffered GGUF matmul descriptor mismatch");
+    for (std::uint64_t row = 0; row < 3; ++row) {
+        for (std::uint64_t column = 0; column < 5; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            expect_close(
+                read_f32(metal_output, std::span<const std::uint64_t>(index)),
+                read_f32(cpu_output, std::span<const std::uint64_t>(index)),
+                1.0e-3F,
+                "Metal buffered GGUF matmul parity mismatch"
+            );
+        }
+    }
+}
+
 void test_reports_unavailable_metal_backend_for_gguf_matmul_when_missing() {
     if (tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -3062,6 +3203,29 @@ void test_reports_unavailable_metal_backend_for_gguf_matmul_when_missing() {
             !tensor_backend_unavailable_reason(BackendKind::metal).empty(),
             "Metal backend unavailable reason should be non-empty"
         );
+    }
+}
+
+void test_reports_unavailable_metal_backend_buffer_copy_when_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 4> values {
+        1.0F, 2.0F,
+        3.0F, 4.0F,
+    };
+    const auto storage = tensor_f32_matrix(2, 2, std::span<const float>(values));
+
+    try {
+        (void)copy_tensor_to_backend(storage, BackendKind::metal);
+        throw TestFailure("Metal backend buffer copy should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Metal backend buffer unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Metal backend buffer unavailable backend mismatch");
     }
 }
 
@@ -4131,6 +4295,242 @@ void add_tiny_llama_top_level_tensors(std::vector<EngineTensor>& tensors) {
     return EngineModel(ModelArchitecture::llama, {}, config, std::move(tensors));
 }
 
+LlamaModelConfig backend_feed_forward_fixture_config() {
+    return LlamaModelConfig {
+        .context_length = 8,
+        .embedding_length = 4,
+        .block_count = 1,
+        .feed_forward_length = 6,
+        .attention_head_count = 1,
+        .attention_head_count_kv = 1,
+        .attention_key_length = 4,
+        .attention_value_length = 4,
+        .rope_dimension_count = 4,
+        .vocab_size = 5,
+        .rope_freq_base = 10000.0F,
+        .rms_norm_epsilon = 0.25F,
+    };
+}
+
+void add_backend_feed_forward_fixture_tensors(std::vector<EngineTensor>& tensors) {
+    const std::array<float, 20> top_level_values {};
+    const std::array<float, 4> attention_norm_values {1.0F, 1.0F, 1.0F, 1.0F};
+    const std::array<float, 4> feed_forward_norm_values {1.0F, 0.75F, 1.25F, 0.5F};
+    const std::array<float, 16> query_values {
+        0.5F, -0.25F, 1.0F, 0.75F,
+        -0.5F, 0.875F, 0.25F, -1.25F,
+        1.5F, 0.0F, -0.75F, 0.5F,
+        0.125F, 1.25F, -1.0F, 0.375F,
+    };
+    const std::array<float, 16> key_values {
+        -0.75F, 0.5F, 0.25F, 1.25F,
+        1.0F, -1.5F, 0.625F, -0.125F,
+        0.375F, 0.875F, -0.5F, 0.75F,
+        -1.25F, 0.25F, 1.5F, -0.375F,
+    };
+    const std::array<float, 16> value_values {
+        1.25F, -0.5F, 0.875F, 0.0F,
+        -0.25F, 1.5F, -1.0F, 0.625F,
+        0.75F, 0.125F, 0.5F, -1.25F,
+        -1.5F, 0.375F, 1.0F, 0.25F,
+    };
+    const std::array<float, 16> attention_output_values {
+        0.625F, -0.875F, 0.25F, 1.0F,
+        1.25F, 0.5F, -1.5F, 0.125F,
+        -0.375F, 1.125F, 0.75F, -0.5F,
+        0.0F, -0.25F, 1.5F, 0.875F,
+    };
+    const std::array<float, 24> gate_values {
+        0.25F, -0.5F, 0.75F, 1.0F, -0.25F, 0.5F,
+        -1.0F, 0.125F, 0.375F, -0.625F, 0.875F, 0.25F,
+        0.5F, 1.25F, -0.75F, 0.0F, 0.625F, -0.375F,
+        1.5F, -1.25F, 0.25F, 0.5F, -0.875F, 0.125F,
+    };
+    const std::array<float, 24> up_values {
+        -0.125F, 0.625F, 0.5F, -1.0F, 0.375F, 1.25F,
+        0.75F, -0.25F, 1.5F, 0.125F, -0.5F, 0.875F,
+        1.0F, 0.25F, -1.25F, 0.5F, 0.75F, -0.625F,
+        -0.75F, 1.125F, 0.0F, -0.375F, 1.375F, 0.25F,
+    };
+    const std::array<float, 24> down_values {
+        0.5F, -0.25F, 0.125F, 0.75F,
+        -0.5F, 1.0F, 0.625F, -0.125F,
+        0.25F, 0.375F, -0.75F, 1.25F,
+        1.5F, -1.0F, 0.5F, 0.0F,
+        -0.875F, 0.25F, 1.125F, -0.5F,
+        0.625F, 0.75F, -1.25F, 0.375F,
+    };
+
+    tensors.push_back(engine_tensor(
+        "token_embd.weight",
+        tensor_f16_gguf_matrix(4, 5, std::span<const float>(top_level_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output_norm.weight",
+        tensor_f32_vector(std::span<const float>(attention_norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        "output.weight",
+        tensor_f16_gguf_matrix(4, 5, std::span<const float>(top_level_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(0, "attn_norm.weight"),
+        tensor_f32_vector(std::span<const float>(attention_norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(0, "attn_q.weight"),
+        tensor_f16_gguf_matrix(4, 4, std::span<const float>(query_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(0, "attn_k.weight"),
+        tensor_f16_gguf_matrix(4, 4, std::span<const float>(key_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(0, "attn_v.weight"),
+        tensor_f16_gguf_matrix(4, 4, std::span<const float>(value_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(0, "attn_output.weight"),
+        tensor_f16_gguf_matrix(4, 4, std::span<const float>(attention_output_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(0, "ffn_norm.weight"),
+        tensor_f32_vector(std::span<const float>(feed_forward_norm_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(0, "ffn_gate.weight"),
+        tensor_f16_gguf_matrix(4, 6, std::span<const float>(gate_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(0, "ffn_up.weight"),
+        tensor_f16_gguf_matrix(4, 6, std::span<const float>(up_values))
+    ));
+    tensors.push_back(engine_tensor(
+        llama_block_tensor_name(0, "ffn_down.weight"),
+        tensor_f16_gguf_matrix(6, 4, std::span<const float>(down_values))
+    ));
+}
+
+EngineModel backend_feed_forward_fixture_model() {
+    std::vector<EngineTensor> tensors;
+    add_backend_feed_forward_fixture_tensors(tensors);
+    return tiny_bound_llama_model(backend_feed_forward_fixture_config(), std::move(tensors));
+}
+
+TensorStorage backend_feed_forward_fixture_input() {
+    const std::array<float, 8> input_values {
+        0.5F, -1.0F, 2.0F, 0.25F,
+        -0.75F, 1.5F, -0.5F, 2.25F,
+    };
+    return tensor_f32_matrix(2, 4, std::span<const float>(input_values));
+}
+
+void expect_model_attention_backend_weights(
+    const LlamaModelWeights& weights,
+    const LlamaModelAttentionBackendWeights& backend_weights,
+    BackendKind backend
+) {
+    expect(
+        backend_weights.blocks.size() == weights.blocks.size(),
+        "Llama model attention backend weight block count mismatch"
+    );
+    for (std::size_t block_index = 0; block_index < weights.blocks.size(); ++block_index) {
+        const auto& expected = weights.blocks[block_index].attention;
+        const auto& actual = backend_weights.blocks[block_index];
+        expect(actual.query_weight.backend() == backend, "Llama model attention query backend mismatch");
+        expect(actual.key_weight.backend() == backend, "Llama model attention key backend mismatch");
+        expect(actual.value_weight.backend() == backend, "Llama model attention value backend mismatch");
+        expect(actual.output_weight.backend() == backend, "Llama model attention output backend mismatch");
+        expect(
+            actual.query_weight.descriptor() == expected.query_weight.descriptor(),
+            "Llama model attention query backend descriptor mismatch"
+        );
+        expect(
+            actual.key_weight.descriptor() == expected.key_weight.descriptor(),
+            "Llama model attention key backend descriptor mismatch"
+        );
+        expect(
+            actual.value_weight.descriptor() == expected.value_weight.descriptor(),
+            "Llama model attention value backend descriptor mismatch"
+        );
+        expect(
+            actual.output_weight.descriptor() == expected.output_weight.descriptor(),
+            "Llama model attention output backend descriptor mismatch"
+        );
+    }
+}
+
+void expect_model_feed_forward_backend_weights(
+    const LlamaModelWeights& weights,
+    const LlamaModelFeedForwardBackendWeights& backend_weights,
+    BackendKind backend
+) {
+    expect(
+        backend_weights.blocks.size() == weights.blocks.size(),
+        "Llama model FFN backend weight block count mismatch"
+    );
+    for (std::size_t block_index = 0; block_index < weights.blocks.size(); ++block_index) {
+        const auto& expected = weights.blocks[block_index].feed_forward;
+        const auto& actual = backend_weights.blocks[block_index];
+        expect(actual.gate_weight.backend() == backend, "Llama model FFN gate backend mismatch");
+        expect(actual.up_weight.backend() == backend, "Llama model FFN up backend mismatch");
+        expect(actual.down_weight.backend() == backend, "Llama model FFN down backend mismatch");
+        expect(
+            actual.gate_weight.descriptor() == expected.gate_weight.descriptor(),
+            "Llama model FFN gate backend descriptor mismatch"
+        );
+        expect(
+            actual.up_weight.descriptor() == expected.up_weight.descriptor(),
+            "Llama model FFN up backend descriptor mismatch"
+        );
+        expect(
+            actual.down_weight.descriptor() == expected.down_weight.descriptor(),
+            "Llama model FFN down backend descriptor mismatch"
+        );
+    }
+}
+
+void test_runs_llama_attention_layer_with_cpu_backend_weight_buffers() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_attention_layer_weights_to_backend(
+        weights.blocks[0].attention,
+        BackendKind::cpu
+    );
+    const auto input = backend_feed_forward_fixture_input();
+
+    const auto expected = run_llama_attention_layer_f32(input, weights.blocks[0].attention, model.llama_config(), 1);
+    const auto output = run_llama_attention_layer_f32(input, backend_weights, model.llama_config(), 1);
+
+    expect(backend_weights.query_weight.backend() == BackendKind::cpu, "Llama attention CPU query buffer backend mismatch");
+    expect(backend_weights.key_weight.backend() == BackendKind::cpu, "Llama attention CPU key buffer backend mismatch");
+    expect(backend_weights.value_weight.backend() == BackendKind::cpu, "Llama attention CPU value buffer backend mismatch");
+    expect(backend_weights.output_weight.backend() == BackendKind::cpu, "Llama attention CPU output buffer backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "Llama attention CPU backend weight buffer output");
+}
+
+void test_runs_llama_feed_forward_layer_with_cpu_backend_weight_buffers() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_feed_forward_layer_weights_to_backend(
+        weights.blocks[0].feed_forward,
+        BackendKind::cpu
+    );
+    const auto input = backend_feed_forward_fixture_input();
+
+    const auto expected = run_llama_feed_forward_layer_f32(
+        input,
+        weights.blocks[0].feed_forward,
+        model.llama_config()
+    );
+    const auto output = run_llama_feed_forward_layer_f32(input, backend_weights, model.llama_config());
+
+    expect(backend_weights.gate_weight.backend() == BackendKind::cpu, "Llama FFN CPU gate buffer backend mismatch");
+    expect(backend_weights.up_weight.backend() == BackendKind::cpu, "Llama FFN CPU up buffer backend mismatch");
+    expect(backend_weights.down_weight.backend() == BackendKind::cpu, "Llama FFN CPU down buffer backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "Llama FFN CPU backend weight buffer output");
+}
+
 void test_binds_and_runs_llama_model_blocks_from_named_tensors() {
     auto config = tiny_feed_forward_layer_config();
     config.block_count = 2;
@@ -4171,6 +4571,142 @@ void test_binds_and_runs_llama_model_blocks_from_named_tensors() {
         0.000001F,
         "bound Llama model output value 1 mismatch"
     );
+}
+
+void test_copies_llama_model_attention_weights_to_cpu_backend_buffers() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    const auto backend_weights = copy_llama_model_attention_weights_to_backend(weights, BackendKind::cpu);
+
+    expect_model_attention_backend_weights(weights, backend_weights, BackendKind::cpu);
+    const auto input = backend_feed_forward_fixture_input();
+    const auto expected = run_llama_attention_layer_f32(
+        input,
+        weights.blocks[0].attention,
+        model.llama_config(),
+        1
+    );
+    const auto output = run_llama_attention_layer_f32(
+        input,
+        backend_weights.blocks[0],
+        model.llama_config(),
+        1
+    );
+    expect_f32_matrix_close(output, expected, 0.0F, "Llama model CPU attention backend weight output");
+}
+
+void test_matches_llama_attention_layer_with_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    const auto backend_weights = copy_llama_model_attention_weights_to_backend(weights, BackendKind::metal);
+
+    expect_model_attention_backend_weights(weights, backend_weights, BackendKind::metal);
+    const auto input = backend_feed_forward_fixture_input();
+    const auto expected = run_llama_attention_layer_f32(
+        input,
+        weights.blocks[0].attention,
+        model.llama_config(),
+        1
+    );
+    const auto output = run_llama_attention_layer_f32(
+        input,
+        backend_weights.blocks[0],
+        model.llama_config(),
+        1
+    );
+    expect_f32_matrix_close(output, expected, 2.0e-3F, "Llama model Metal attention backend weight output");
+}
+
+void test_reports_unavailable_llama_model_attention_backend_weight_copy_when_metal_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    try {
+        (void)copy_llama_model_attention_weights_to_backend(weights, BackendKind::metal);
+        throw TestFailure("Llama model Metal attention backend weight copy should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Llama model Metal attention backend weight copy unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Llama model Metal attention backend weight copy backend mismatch");
+    }
+}
+
+void test_copies_llama_model_feed_forward_weights_to_cpu_backend_buffers() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    const auto backend_weights = copy_llama_model_feed_forward_weights_to_backend(weights, BackendKind::cpu);
+
+    expect_model_feed_forward_backend_weights(weights, backend_weights, BackendKind::cpu);
+    const auto input = backend_feed_forward_fixture_input();
+    const auto expected = run_llama_feed_forward_layer_f32(
+        input,
+        weights.blocks[0].feed_forward,
+        model.llama_config()
+    );
+    const auto output = run_llama_feed_forward_layer_f32(
+        input,
+        backend_weights.blocks[0],
+        model.llama_config()
+    );
+    expect_f32_matrix_close(output, expected, 0.0F, "Llama model CPU FFN backend weight output");
+}
+
+void test_matches_llama_feed_forward_layer_with_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    const auto backend_weights = copy_llama_model_feed_forward_weights_to_backend(weights, BackendKind::metal);
+
+    expect_model_feed_forward_backend_weights(weights, backend_weights, BackendKind::metal);
+    const auto input = backend_feed_forward_fixture_input();
+    const auto expected = run_llama_feed_forward_layer_f32(
+        input,
+        weights.blocks[0].feed_forward,
+        model.llama_config()
+    );
+    const auto output = run_llama_feed_forward_layer_f32(
+        input,
+        backend_weights.blocks[0],
+        model.llama_config()
+    );
+    expect_f32_matrix_close(output, expected, 1.0e-3F, "Llama model Metal FFN backend weight output");
+}
+
+void test_reports_unavailable_llama_model_feed_forward_backend_weight_copy_when_metal_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    try {
+        (void)copy_llama_model_feed_forward_weights_to_backend(weights, BackendKind::metal);
+        throw TestFailure("Llama model Metal FFN backend weight copy should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Llama model Metal FFN backend weight copy unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Llama model Metal FFN backend weight copy backend mismatch");
+    }
 }
 
 void test_rejects_llama_model_weight_binding_missing_tensor() {
@@ -7011,8 +7547,24 @@ int main() {
             test_multiplies_f32_by_f16_gguf_weight_matrix_on_cpu_backend,
         },
         {
+            "copies tensor to and from CPU backend buffer",
+            test_copies_tensor_to_and_from_cpu_backend_buffer,
+        },
+        {
+            "multiplies F32 by CPU backend F16 GGUF weight buffer",
+            test_multiplies_f32_by_cpu_backend_f16_gguf_weight_buffer,
+        },
+        {
             "matches CPU F32 by F16 GGUF weight matmul on Metal backend",
             test_matches_cpu_f32_by_f16_gguf_weight_matmul_on_metal_backend,
+        },
+        {
+            "copies tensor to and from Metal backend buffer when available",
+            test_copies_tensor_to_and_from_metal_backend_buffer_when_available,
+        },
+        {
+            "multiplies F32 by Metal backend F16 GGUF weight buffer when available",
+            test_multiplies_f32_by_metal_backend_f16_gguf_weight_buffer_when_available,
         },
         {
             "reuses Metal F32 by F16 GGUF weight matmul state",
@@ -7021,6 +7573,10 @@ int main() {
         {
             "reports unavailable Metal backend for GGUF matmul when missing",
             test_reports_unavailable_metal_backend_for_gguf_matmul_when_missing,
+        },
+        {
+            "reports unavailable Metal backend buffer copy when missing",
+            test_reports_unavailable_metal_backend_buffer_copy_when_missing,
         },
         {"rejects F32xF16 matmul right dtype mismatch", test_rejects_f32_f16_matmul_right_dtype_mismatch},
         {"creates Llama KV cache", test_creates_llama_kv_cache},
@@ -7032,6 +7588,10 @@ int main() {
         {"rejects Llama KV cache context overflow", test_rejects_llama_kv_cache_context_overflow},
         {"rejects Llama KV cache key shape mismatch", test_rejects_llama_kv_cache_key_shape_mismatch},
         {"runs Llama attention layer with F16 weights", test_runs_llama_attention_layer_with_f16_weights},
+        {
+            "runs Llama attention layer with CPU backend weight buffers",
+            test_runs_llama_attention_layer_with_cpu_backend_weight_buffers,
+        },
         {"runs Llama attention layer with causal mask", test_runs_llama_attention_layer_with_causal_mask},
         {
             "runs Llama attention layer with KV cache matches no-cache",
@@ -7071,6 +7631,10 @@ int main() {
         },
         {"runs Llama FFN layer with F16 weights", test_runs_llama_feed_forward_layer_with_f16_weights},
         {
+            "runs Llama FFN layer with CPU backend weight buffers",
+            test_runs_llama_feed_forward_layer_with_cpu_backend_weight_buffers,
+        },
+        {
             "rejects Llama FFN layer projection shape mismatch",
             test_rejects_llama_feed_forward_layer_projection_shape_mismatch,
         },
@@ -7087,6 +7651,30 @@ int main() {
         {
             "binds and runs Llama model blocks from named tensors",
             test_binds_and_runs_llama_model_blocks_from_named_tensors,
+        },
+        {
+            "copies Llama model attention weights to CPU backend buffers",
+            test_copies_llama_model_attention_weights_to_cpu_backend_buffers,
+        },
+        {
+            "matches Llama attention layer with Metal backend weight buffers when available",
+            test_matches_llama_attention_layer_with_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "reports unavailable Llama model attention backend weight copy when Metal is missing",
+            test_reports_unavailable_llama_model_attention_backend_weight_copy_when_metal_missing,
+        },
+        {
+            "copies Llama model FFN weights to CPU backend buffers",
+            test_copies_llama_model_feed_forward_weights_to_cpu_backend_buffers,
+        },
+        {
+            "matches Llama FFN layer with Metal backend weight buffers when available",
+            test_matches_llama_feed_forward_layer_with_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "reports unavailable Llama model FFN backend weight copy when Metal is missing",
+            test_reports_unavailable_llama_model_feed_forward_backend_weight_copy_when_metal_missing,
         },
         {
             "rejects Llama model weight binding missing tensor",

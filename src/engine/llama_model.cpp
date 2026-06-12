@@ -185,6 +185,36 @@ LlamaModelWeights bind_llama_model_weights(const EngineModel& model) {
     };
 }
 
+LlamaModelAttentionBackendWeights copy_llama_model_attention_weights_to_backend(
+    const LlamaModelWeights& weights,
+    runtime::BackendKind backend
+) {
+    std::vector<LlamaAttentionLayerBackendWeights> blocks;
+    blocks.reserve(weights.blocks.size());
+    for (const auto& block : weights.blocks) {
+        blocks.push_back(copy_llama_attention_layer_weights_to_backend(block.attention, backend));
+    }
+
+    return LlamaModelAttentionBackendWeights {
+        .blocks = std::move(blocks),
+    };
+}
+
+LlamaModelFeedForwardBackendWeights copy_llama_model_feed_forward_weights_to_backend(
+    const LlamaModelWeights& weights,
+    runtime::BackendKind backend
+) {
+    std::vector<LlamaFeedForwardLayerBackendWeights> blocks;
+    blocks.reserve(weights.blocks.size());
+    for (const auto& block : weights.blocks) {
+        blocks.push_back(copy_llama_feed_forward_layer_weights_to_backend(block.feed_forward, backend));
+    }
+
+    return LlamaModelFeedForwardBackendWeights {
+        .blocks = std::move(blocks),
+    };
+}
+
 TensorStorage embed_llama_token_ids_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelWeights& weights,
