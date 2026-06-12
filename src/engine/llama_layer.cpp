@@ -701,6 +701,16 @@ LlamaFeedForwardLayerBackendWeights copy_llama_feed_forward_layer_weights_to_bac
     };
 }
 
+LlamaBlockBackendWeights copy_llama_block_weights_to_backend(
+    const LlamaBlockWeights& weights,
+    runtime::BackendKind backend
+) {
+    return LlamaBlockBackendWeights {
+        .attention = copy_llama_attention_layer_weights_to_backend(weights.attention, backend),
+        .feed_forward = copy_llama_feed_forward_layer_weights_to_backend(weights.feed_forward, backend),
+    };
+}
+
 TensorStorage run_llama_attention_layer_f32(
     const TensorStorage& input,
     const LlamaAttentionLayerWeights& weights,
@@ -794,6 +804,16 @@ TensorStorage run_llama_feed_forward_layer_f32(
 TensorStorage run_llama_block_f32(
     const TensorStorage& input,
     const LlamaBlockWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+) {
+    const auto attention_output = run_llama_attention_layer_f32(input, weights.attention, config, position);
+    return run_llama_feed_forward_layer_f32(attention_output, weights.feed_forward, config);
+}
+
+TensorStorage run_llama_block_f32(
+    const TensorStorage& input,
+    const LlamaBlockBackendWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position
 ) {

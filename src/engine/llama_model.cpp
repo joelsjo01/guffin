@@ -1,6 +1,7 @@
 #include "local_gguf_engine/engine/llama_model.hpp"
 
 #include "local_gguf_engine/engine/sampling.hpp"
+#include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
@@ -19,6 +20,7 @@ namespace {
 
 using tensor::DType;
 using tensor::Shape;
+using tensor::copy_tensor_to_backend;
 using tensor::TensorDescriptor;
 using tensor::TensorError;
 using tensor::TensorErrorCode;
@@ -86,11 +88,15 @@ void require_dimension(
     }
 }
 
+void require_f16_matrix_shape(const TensorDescriptor& descriptor, std::uint64_t rows, std::uint64_t columns) {
+    require_dtype(descriptor, DType::f16);
+    require_rank(descriptor, matrix_rank);
+    require_dimension(descriptor, 0, rows);
+    require_dimension(descriptor, 1, columns);
+}
+
 void require_f16_matrix_shape(const TensorStorage& storage, std::uint64_t rows, std::uint64_t columns) {
-    require_dtype(storage.descriptor(), DType::f16);
-    require_rank(storage.descriptor(), matrix_rank);
-    require_dimension(storage.descriptor(), 0, rows);
-    require_dimension(storage.descriptor(), 1, columns);
+    require_f16_matrix_shape(storage.descriptor(), rows, columns);
 }
 
 void require_f32_matrix_hidden(const TensorStorage& storage, std::uint64_t hidden) {
@@ -109,6 +115,14 @@ void require_positive_config_dimension(std::uint32_t value) {
     if (value == 0) {
         throw std::invalid_argument("Llama model config dimensions must be positive");
     }
+}
+
+[[nodiscard]] const TensorDescriptor& output_weight_descriptor(const TensorStorage& storage) noexcept {
+    return storage.descriptor();
+}
+
+[[nodiscard]] const TensorDescriptor& output_weight_descriptor(const tensor::BackendBuffer& buffer) noexcept {
+    return buffer.descriptor();
 }
 
 void require_generation_fits_context(std::size_t prompt_tokens, std::size_t max_new_tokens, std::uint32_t context_length) {
@@ -215,9 +229,38 @@ LlamaModelFeedForwardBackendWeights copy_llama_model_feed_forward_weights_to_bac
     };
 }
 
-TensorStorage embed_llama_token_ids_f32(
-    std::span<const std::uint32_t> token_ids,
+LlamaModelBlockBackendWeights copy_llama_model_block_weights_to_backend(
     const LlamaModelWeights& weights,
+    runtime::BackendKind backend
+) {
+    std::vector<LlamaBlockBackendWeights> blocks;
+    blocks.reserve(weights.blocks.size());
+    for (const auto& block : weights.blocks) {
+        blocks.push_back(copy_llama_block_weights_to_backend(block, backend));
+    }
+
+    return LlamaModelBlockBackendWeights {
+        .blocks = std::move(blocks),
+    };
+}
+
+LlamaModelLogitsBackendWeights copy_llama_model_logits_weights_to_backend(
+    const LlamaModelWeights& weights,
+    runtime::BackendKind backend
+) {
+    auto block_weights = copy_llama_model_block_weights_to_backend(weights, backend);
+    return LlamaModelLogitsBackendWeights {
+        .token_embedding_weight = weights.token_embedding_weight,
+        .output_norm_weight = weights.output_norm_weight,
+        .output_weight = copy_tensor_to_backend(weights.output_weight, backend),
+        .blocks = std::move(block_weights.blocks),
+    };
+}
+
+template <typename Weights>
+TensorStorage embed_llama_token_ids_f32_impl(
+    std::span<const std::uint32_t> token_ids,
+    const Weights& weights,
     const LlamaModelConfig& config
 ) {
     if (token_ids.empty()) {
@@ -251,19 +294,50 @@ TensorStorage embed_llama_token_ids_f32(
     return output;
 }
 
+TensorStorage embed_llama_token_ids_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config
+) {
+    return embed_llama_token_ids_f32_impl(token_ids, weights, config);
+}
+
+void require_llama_model_block_count(
+    std::size_t block_count,
+    std::uint32_t expected_block_count
+) {
+    if (block_count == 0) {
+        throw std::invalid_argument("Llama model must contain at least one block");
+    }
+
+    if (block_count != expected_block_count) {
+        throw std::invalid_argument("Llama model bound block count must match config block count");
+    }
+}
+
 tensor::TensorStorage run_llama_model_blocks_f32(
     const tensor::TensorStorage& input,
     const LlamaModelWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position
 ) {
-    if (weights.blocks.empty()) {
-        throw std::invalid_argument("Llama model must contain at least one block");
+    require_llama_model_block_count(weights.blocks.size(), config.block_count);
+
+    auto output = run_llama_block_f32(input, weights.blocks[0], config, position);
+    for (std::size_t block_index = 1; block_index < weights.blocks.size(); ++block_index) {
+        output = run_llama_block_f32(output, weights.blocks[block_index], config, position);
     }
 
-    if (weights.blocks.size() != config.block_count) {
-        throw std::invalid_argument("Llama model bound block count must match config block count");
-    }
+    return output;
+}
+
+tensor::TensorStorage run_llama_model_blocks_f32(
+    const tensor::TensorStorage& input,
+    const LlamaModelBlockBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+) {
+    require_llama_model_block_count(weights.blocks.size(), config.block_count);
 
     auto output = run_llama_block_f32(input, weights.blocks[0], config, position);
     for (std::size_t block_index = 1; block_index < weights.blocks.size(); ++block_index) {
@@ -280,13 +354,7 @@ tensor::TensorStorage run_llama_model_blocks_with_kv_cache_f32(
     std::uint64_t position,
     LlamaKVCache& cache
 ) {
-    if (weights.blocks.empty()) {
-        throw std::invalid_argument("Llama model must contain at least one block");
-    }
-
-    if (weights.blocks.size() != config.block_count) {
-        throw std::invalid_argument("Llama model bound block count must match config block count");
-    }
+    require_llama_model_block_count(weights.blocks.size(), config.block_count);
 
     if (cache.layers.size() != weights.blocks.size()) {
         throw std::invalid_argument("Llama KV cache layer count must match model block count");
@@ -306,9 +374,10 @@ tensor::TensorStorage run_llama_model_blocks_with_kv_cache_f32(
     return output;
 }
 
-TensorStorage project_llama_logits_f32(
+template <typename Weights>
+TensorStorage project_llama_logits_f32_impl(
     const TensorStorage& hidden_states,
-    const LlamaModelWeights& weights,
+    const Weights& weights,
     const LlamaModelConfig& config
 ) {
     require_positive_config_dimension(config.embedding_length);
@@ -318,10 +387,26 @@ TensorStorage project_llama_logits_f32(
     const auto vocab = static_cast<std::uint64_t>(config.vocab_size);
     require_f32_matrix_hidden(hidden_states, hidden);
     require_f32_vector_shape(weights.output_norm_weight, hidden);
-    require_f16_matrix_shape(weights.output_weight, hidden, vocab);
+    require_f16_matrix_shape(output_weight_descriptor(weights.output_weight), hidden, vocab);
 
     const auto normalized = rms_norm_f32(hidden_states, weights.output_norm_weight, config.rms_norm_epsilon);
     return matmul_f32_f16_gguf_weight(normalized, weights.output_weight);
+}
+
+TensorStorage project_llama_logits_f32(
+    const TensorStorage& hidden_states,
+    const LlamaModelWeights& weights,
+    const LlamaModelConfig& config
+) {
+    return project_llama_logits_f32_impl(hidden_states, weights, config);
+}
+
+TensorStorage project_llama_logits_f32(
+    const TensorStorage& hidden_states,
+    const LlamaModelLogitsBackendWeights& weights,
+    const LlamaModelConfig& config
+) {
+    return project_llama_logits_f32_impl(hidden_states, weights, config);
 }
 
 TensorStorage run_llama_model_logits_f32(
@@ -332,6 +417,19 @@ TensorStorage run_llama_model_logits_f32(
 ) {
     const auto embeddings = embed_llama_token_ids_f32(token_ids, weights, config);
     const auto hidden_states = run_llama_model_blocks_f32(embeddings, weights, config, position);
+    return project_llama_logits_f32(hidden_states, weights, config);
+}
+
+TensorStorage run_llama_model_logits_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelLogitsBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+) {
+    const auto embeddings = embed_llama_token_ids_f32_impl(token_ids, weights, config);
+    const auto hidden_states = run_llama_model_blocks_f32(embeddings, LlamaModelBlockBackendWeights {
+        .blocks = weights.blocks,
+    }, config, position);
     return project_llama_logits_f32(hidden_states, weights, config);
 }
 

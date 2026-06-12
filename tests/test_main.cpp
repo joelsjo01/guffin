@@ -61,9 +61,12 @@ using local_gguf_engine::benchmarks::parse_benchmark_args;
 using local_gguf_engine::engine::append_llama_kv_cache_layer_f32;
 using local_gguf_engine::engine::bind_llama_model_weights;
 using local_gguf_engine::engine::copy_llama_attention_layer_weights_to_backend;
+using local_gguf_engine::engine::copy_llama_block_weights_to_backend;
 using local_gguf_engine::engine::copy_llama_feed_forward_layer_weights_to_backend;
 using local_gguf_engine::engine::copy_llama_model_attention_weights_to_backend;
+using local_gguf_engine::engine::copy_llama_model_block_weights_to_backend;
 using local_gguf_engine::engine::copy_llama_model_feed_forward_weights_to_backend;
+using local_gguf_engine::engine::copy_llama_model_logits_weights_to_backend;
 using local_gguf_engine::engine::create_llama_kv_cache;
 using local_gguf_engine::engine::embed_llama_token_ids_f32;
 using local_gguf_engine::engine::EngineModel;
@@ -76,6 +79,7 @@ using local_gguf_engine::engine::generate_llama_sampled_tokens_f32;
 using local_gguf_engine::engine::generate_llama_sampled_tokens_with_kv_cache_f32;
 using local_gguf_engine::engine::LlamaAttentionLayerBackendWeights;
 using local_gguf_engine::engine::LlamaAttentionLayerWeights;
+using local_gguf_engine::engine::LlamaBlockBackendWeights;
 using local_gguf_engine::engine::LlamaBlockWeights;
 using local_gguf_engine::engine::LlamaFeedForwardLayerWeights;
 using local_gguf_engine::engine::LlamaKVCache;
@@ -83,7 +87,9 @@ using local_gguf_engine::engine::LlamaKVCacheLayer;
 using local_gguf_engine::engine::llama_kv_cache_layer_key_prefix_f32;
 using local_gguf_engine::engine::llama_kv_cache_layer_value_prefix_f32;
 using local_gguf_engine::engine::LlamaModelAttentionBackendWeights;
+using local_gguf_engine::engine::LlamaModelBlockBackendWeights;
 using local_gguf_engine::engine::LlamaModelFeedForwardBackendWeights;
+using local_gguf_engine::engine::LlamaModelLogitsBackendWeights;
 using local_gguf_engine::engine::LlamaModelConfig;
 using local_gguf_engine::engine::LlamaModelWeights;
 using local_gguf_engine::engine::ModelArchitecture;
@@ -4313,7 +4319,18 @@ LlamaModelConfig backend_feed_forward_fixture_config() {
 }
 
 void add_backend_feed_forward_fixture_tensors(std::vector<EngineTensor>& tensors) {
-    const std::array<float, 20> top_level_values {};
+    const std::array<float, 20> token_embedding_values {
+        0.5F, -1.0F, 1.5F, 0.25F, -0.75F,
+        1.0F, 0.5F, -0.25F, 1.25F, -1.5F,
+        -0.5F, 1.75F, 0.75F, -1.25F, 0.0F,
+        1.5F, -0.75F, 0.25F, 0.5F, 1.0F,
+    };
+    const std::array<float, 20> output_values {
+        0.25F, -0.5F, 1.0F, 0.75F, -1.25F,
+        1.5F, 0.375F, -0.875F, 0.125F, 0.5F,
+        -0.75F, 1.25F, 0.625F, -0.25F, 1.0F,
+        0.875F, -1.5F, 0.5F, 1.125F, -0.375F,
+    };
     const std::array<float, 4> attention_norm_values {1.0F, 1.0F, 1.0F, 1.0F};
     const std::array<float, 4> feed_forward_norm_values {1.0F, 0.75F, 1.25F, 0.5F};
     const std::array<float, 16> query_values {
@@ -4363,7 +4380,7 @@ void add_backend_feed_forward_fixture_tensors(std::vector<EngineTensor>& tensors
 
     tensors.push_back(engine_tensor(
         "token_embd.weight",
-        tensor_f16_gguf_matrix(4, 5, std::span<const float>(top_level_values))
+        tensor_f16_gguf_matrix(4, 5, std::span<const float>(token_embedding_values))
     ));
     tensors.push_back(engine_tensor(
         "output_norm.weight",
@@ -4371,7 +4388,7 @@ void add_backend_feed_forward_fixture_tensors(std::vector<EngineTensor>& tensors
     ));
     tensors.push_back(engine_tensor(
         "output.weight",
-        tensor_f16_gguf_matrix(4, 5, std::span<const float>(top_level_values))
+        tensor_f16_gguf_matrix(4, 5, std::span<const float>(output_values))
     ));
     tensors.push_back(engine_tensor(
         llama_block_tensor_name(0, "attn_norm.weight"),
@@ -4490,6 +4507,89 @@ void expect_model_feed_forward_backend_weights(
     }
 }
 
+void expect_block_backend_weights(
+    const LlamaBlockWeights& expected,
+    const LlamaBlockBackendWeights& actual,
+    BackendKind backend
+) {
+    expect(actual.attention.query_weight.backend() == backend, "Llama block attention query backend mismatch");
+    expect(actual.attention.key_weight.backend() == backend, "Llama block attention key backend mismatch");
+    expect(actual.attention.value_weight.backend() == backend, "Llama block attention value backend mismatch");
+    expect(actual.attention.output_weight.backend() == backend, "Llama block attention output backend mismatch");
+    expect(actual.feed_forward.gate_weight.backend() == backend, "Llama block FFN gate backend mismatch");
+    expect(actual.feed_forward.up_weight.backend() == backend, "Llama block FFN up backend mismatch");
+    expect(actual.feed_forward.down_weight.backend() == backend, "Llama block FFN down backend mismatch");
+    expect(
+        actual.attention.query_weight.descriptor() == expected.attention.query_weight.descriptor(),
+        "Llama block attention query backend descriptor mismatch"
+    );
+    expect(
+        actual.attention.key_weight.descriptor() == expected.attention.key_weight.descriptor(),
+        "Llama block attention key backend descriptor mismatch"
+    );
+    expect(
+        actual.attention.value_weight.descriptor() == expected.attention.value_weight.descriptor(),
+        "Llama block attention value backend descriptor mismatch"
+    );
+    expect(
+        actual.attention.output_weight.descriptor() == expected.attention.output_weight.descriptor(),
+        "Llama block attention output backend descriptor mismatch"
+    );
+    expect(
+        actual.feed_forward.gate_weight.descriptor() == expected.feed_forward.gate_weight.descriptor(),
+        "Llama block FFN gate backend descriptor mismatch"
+    );
+    expect(
+        actual.feed_forward.up_weight.descriptor() == expected.feed_forward.up_weight.descriptor(),
+        "Llama block FFN up backend descriptor mismatch"
+    );
+    expect(
+        actual.feed_forward.down_weight.descriptor() == expected.feed_forward.down_weight.descriptor(),
+        "Llama block FFN down backend descriptor mismatch"
+    );
+}
+
+void expect_model_block_backend_weights(
+    const LlamaModelWeights& weights,
+    const LlamaModelBlockBackendWeights& backend_weights,
+    BackendKind backend
+) {
+    expect(
+        backend_weights.blocks.size() == weights.blocks.size(),
+        "Llama model block backend weight block count mismatch"
+    );
+    for (std::size_t block_index = 0; block_index < weights.blocks.size(); ++block_index) {
+        expect_block_backend_weights(weights.blocks[block_index], backend_weights.blocks[block_index], backend);
+    }
+}
+
+void expect_model_logits_backend_weights(
+    const LlamaModelWeights& weights,
+    const LlamaModelLogitsBackendWeights& backend_weights,
+    BackendKind backend
+) {
+    expect(
+        &backend_weights.token_embedding_weight == &weights.token_embedding_weight,
+        "Llama model logits backend should borrow token embedding weight"
+    );
+    expect(
+        &backend_weights.output_norm_weight == &weights.output_norm_weight,
+        "Llama model logits backend should borrow output norm weight"
+    );
+    expect(backend_weights.output_weight.backend() == backend, "Llama model logits output backend mismatch");
+    expect(
+        backend_weights.output_weight.descriptor() == weights.output_weight.descriptor(),
+        "Llama model logits output backend descriptor mismatch"
+    );
+    expect(
+        backend_weights.blocks.size() == weights.blocks.size(),
+        "Llama model logits backend block count mismatch"
+    );
+    for (std::size_t block_index = 0; block_index < weights.blocks.size(); ++block_index) {
+        expect_block_backend_weights(weights.blocks[block_index], backend_weights.blocks[block_index], backend);
+    }
+}
+
 void test_runs_llama_attention_layer_with_cpu_backend_weight_buffers() {
     const auto model = backend_feed_forward_fixture_model();
     const auto weights = bind_llama_model_weights(model);
@@ -4529,6 +4629,19 @@ void test_runs_llama_feed_forward_layer_with_cpu_backend_weight_buffers() {
     expect(backend_weights.up_weight.backend() == BackendKind::cpu, "Llama FFN CPU up buffer backend mismatch");
     expect(backend_weights.down_weight.backend() == BackendKind::cpu, "Llama FFN CPU down buffer backend mismatch");
     expect_f32_matrix_close(output, expected, 0.0F, "Llama FFN CPU backend weight buffer output");
+}
+
+void test_runs_llama_block_with_cpu_backend_weight_buffers() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_block_weights_to_backend(weights.blocks[0], BackendKind::cpu);
+    const auto input = backend_feed_forward_fixture_input();
+
+    const auto expected = run_llama_block_f32(input, weights.blocks[0], model.llama_config(), 1);
+    const auto output = run_llama_block_f32(input, backend_weights, model.llama_config(), 1);
+
+    expect_block_backend_weights(weights.blocks[0], backend_weights, BackendKind::cpu);
+    expect_f32_matrix_close(output, expected, 0.0F, "Llama block CPU backend weight buffer output");
 }
 
 void test_binds_and_runs_llama_model_blocks_from_named_tensors() {
@@ -4687,6 +4800,139 @@ void test_matches_llama_feed_forward_layer_with_metal_backend_weight_buffers_whe
         model.llama_config()
     );
     expect_f32_matrix_close(output, expected, 1.0e-3F, "Llama model Metal FFN backend weight output");
+}
+
+void test_copies_llama_model_block_weights_to_cpu_backend_buffers() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    const auto backend_weights = copy_llama_model_block_weights_to_backend(weights, BackendKind::cpu);
+
+    expect_model_block_backend_weights(weights, backend_weights, BackendKind::cpu);
+    const auto input = backend_feed_forward_fixture_input();
+    const auto expected = run_llama_model_blocks_f32(input, weights, model.llama_config(), 1);
+    const auto output = run_llama_model_blocks_f32(input, backend_weights, model.llama_config(), 1);
+    expect_f32_matrix_close(output, expected, 0.0F, "Llama model CPU block backend weight output");
+}
+
+void test_matches_llama_model_blocks_with_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    const auto backend_weights = copy_llama_model_block_weights_to_backend(weights, BackendKind::metal);
+
+    expect_model_block_backend_weights(weights, backend_weights, BackendKind::metal);
+    const auto input = backend_feed_forward_fixture_input();
+    const auto expected = run_llama_model_blocks_f32(input, weights, model.llama_config(), 1);
+    const auto output = run_llama_model_blocks_f32(input, backend_weights, model.llama_config(), 1);
+    expect_f32_matrix_close(output, expected, 4.0e-3F, "Llama model Metal block backend weight output");
+}
+
+void test_reports_unavailable_llama_model_block_backend_weight_copy_when_metal_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    try {
+        (void)copy_llama_model_block_weights_to_backend(weights, BackendKind::metal);
+        throw TestFailure("Llama model Metal block backend weight copy should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Llama model Metal block backend weight copy unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Llama model Metal block backend weight copy backend mismatch");
+    }
+}
+
+void test_projects_llama_logits_with_cpu_backend_output_weight_buffer() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_logits_weights_to_backend(weights, BackendKind::cpu);
+    const auto hidden_states = backend_feed_forward_fixture_input();
+
+    const auto expected = project_llama_logits_f32(hidden_states, weights, model.llama_config());
+    const auto output = project_llama_logits_f32(hidden_states, backend_weights, model.llama_config());
+
+    expect_model_logits_backend_weights(weights, backend_weights, BackendKind::cpu);
+    expect_f32_matrix_close(output, expected, 0.0F, "Llama CPU logits backend output projection");
+}
+
+void test_runs_llama_model_logits_with_cpu_backend_weight_buffers() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_logits_weights_to_backend(weights, BackendKind::cpu);
+    const std::array<std::uint32_t, 2> token_ids {0, 3};
+
+    const auto expected = run_llama_model_logits_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        1
+    );
+    const auto output = run_llama_model_logits_f32(
+        std::span<const std::uint32_t>(token_ids),
+        backend_weights,
+        model.llama_config(),
+        1
+    );
+
+    expect_model_logits_backend_weights(weights, backend_weights, BackendKind::cpu);
+    expect_f32_matrix_close(output, expected, 0.0F, "Llama model CPU logits backend output");
+}
+
+void test_matches_llama_model_logits_with_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_logits_weights_to_backend(weights, BackendKind::metal);
+    const std::array<std::uint32_t, 2> token_ids {0, 3};
+
+    const auto expected = run_llama_model_logits_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        1
+    );
+    const auto output = run_llama_model_logits_f32(
+        std::span<const std::uint32_t>(token_ids),
+        backend_weights,
+        model.llama_config(),
+        1
+    );
+
+    expect_model_logits_backend_weights(weights, backend_weights, BackendKind::metal);
+    expect_f32_matrix_close(output, expected, 1.0e-2F, "Llama model Metal logits backend output");
+}
+
+void test_reports_unavailable_llama_model_logits_backend_weight_copy_when_metal_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    try {
+        (void)copy_llama_model_logits_weights_to_backend(weights, BackendKind::metal);
+        throw TestFailure("Llama model Metal logits backend weight copy should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Llama model Metal logits backend weight copy unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Llama model Metal logits backend weight copy backend mismatch");
+    }
 }
 
 void test_reports_unavailable_llama_model_feed_forward_backend_weight_copy_when_metal_missing() {
@@ -7645,6 +7891,10 @@ int main() {
         {"rejects Llama FFN layer invalid config", test_rejects_llama_feed_forward_layer_invalid_config},
         {"runs Llama block with F16 weights", test_runs_llama_block_with_f16_weights},
         {
+            "runs Llama block with CPU backend weight buffers",
+            test_runs_llama_block_with_cpu_backend_weight_buffers,
+        },
+        {
             "rejects Llama block attention projection shape mismatch",
             test_rejects_llama_block_attention_projection_shape_mismatch,
         },
@@ -7675,6 +7925,34 @@ int main() {
         {
             "reports unavailable Llama model FFN backend weight copy when Metal is missing",
             test_reports_unavailable_llama_model_feed_forward_backend_weight_copy_when_metal_missing,
+        },
+        {
+            "copies Llama model block weights to CPU backend buffers",
+            test_copies_llama_model_block_weights_to_cpu_backend_buffers,
+        },
+        {
+            "matches Llama model blocks with Metal backend weight buffers when available",
+            test_matches_llama_model_blocks_with_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "reports unavailable Llama model block backend weight copy when Metal is missing",
+            test_reports_unavailable_llama_model_block_backend_weight_copy_when_metal_missing,
+        },
+        {
+            "projects Llama logits with CPU backend output weight buffer",
+            test_projects_llama_logits_with_cpu_backend_output_weight_buffer,
+        },
+        {
+            "runs Llama model logits with CPU backend weight buffers",
+            test_runs_llama_model_logits_with_cpu_backend_weight_buffers,
+        },
+        {
+            "matches Llama model logits with Metal backend weight buffers when available",
+            test_matches_llama_model_logits_with_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "reports unavailable Llama model logits backend weight copy when Metal is missing",
+            test_reports_unavailable_llama_model_logits_backend_weight_copy_when_metal_missing,
         },
         {
             "rejects Llama model weight binding missing tensor",

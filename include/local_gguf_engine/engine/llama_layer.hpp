@@ -45,6 +45,11 @@ struct LlamaBlockWeights {
     LlamaFeedForwardLayerWeights feed_forward;
 };
 
+struct LlamaBlockBackendWeights {
+    LlamaAttentionLayerBackendWeights attention;
+    LlamaFeedForwardLayerBackendWeights feed_forward;
+};
+
 [[nodiscard]] LlamaAttentionLayerBackendWeights copy_llama_attention_layer_weights_to_backend(
     const LlamaAttentionLayerWeights& weights,
     runtime::BackendKind backend
@@ -52,6 +57,11 @@ struct LlamaBlockWeights {
 
 [[nodiscard]] LlamaFeedForwardLayerBackendWeights copy_llama_feed_forward_layer_weights_to_backend(
     const LlamaFeedForwardLayerWeights& weights,
+    runtime::BackendKind backend
+);
+
+[[nodiscard]] LlamaBlockBackendWeights copy_llama_block_weights_to_backend(
+    const LlamaBlockWeights& weights,
     runtime::BackendKind backend
 );
 
@@ -92,6 +102,13 @@ struct LlamaBlockWeights {
 [[nodiscard]] tensor::TensorStorage run_llama_block_f32(
     const tensor::TensorStorage& input,
     const LlamaBlockWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+);
+
+[[nodiscard]] tensor::TensorStorage run_llama_block_f32(
+    const tensor::TensorStorage& input,
+    const LlamaBlockBackendWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position
 );

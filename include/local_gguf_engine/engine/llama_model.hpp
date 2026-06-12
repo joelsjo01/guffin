@@ -29,12 +29,31 @@ struct LlamaModelFeedForwardBackendWeights {
     std::vector<LlamaFeedForwardLayerBackendWeights> blocks;
 };
 
+struct LlamaModelBlockBackendWeights {
+    std::vector<LlamaBlockBackendWeights> blocks;
+};
+
+struct LlamaModelLogitsBackendWeights {
+    const tensor::TensorStorage& token_embedding_weight;
+    const tensor::TensorStorage& output_norm_weight;
+    tensor::BackendBuffer output_weight;
+    std::vector<LlamaBlockBackendWeights> blocks;
+};
+
 [[nodiscard]] LlamaModelWeights bind_llama_model_weights(const EngineModel& model);
 [[nodiscard]] LlamaModelAttentionBackendWeights copy_llama_model_attention_weights_to_backend(
     const LlamaModelWeights& weights,
     runtime::BackendKind backend
 );
 [[nodiscard]] LlamaModelFeedForwardBackendWeights copy_llama_model_feed_forward_weights_to_backend(
+    const LlamaModelWeights& weights,
+    runtime::BackendKind backend
+);
+[[nodiscard]] LlamaModelBlockBackendWeights copy_llama_model_block_weights_to_backend(
+    const LlamaModelWeights& weights,
+    runtime::BackendKind backend
+);
+[[nodiscard]] LlamaModelLogitsBackendWeights copy_llama_model_logits_weights_to_backend(
     const LlamaModelWeights& weights,
     runtime::BackendKind backend
 );
@@ -48,6 +67,13 @@ struct LlamaModelFeedForwardBackendWeights {
 [[nodiscard]] tensor::TensorStorage run_llama_model_blocks_f32(
     const tensor::TensorStorage& input,
     const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+);
+
+[[nodiscard]] tensor::TensorStorage run_llama_model_blocks_f32(
+    const tensor::TensorStorage& input,
+    const LlamaModelBlockBackendWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position
 );
@@ -66,9 +92,22 @@ struct LlamaModelFeedForwardBackendWeights {
     const LlamaModelConfig& config
 );
 
+[[nodiscard]] tensor::TensorStorage project_llama_logits_f32(
+    const tensor::TensorStorage& hidden_states,
+    const LlamaModelLogitsBackendWeights& weights,
+    const LlamaModelConfig& config
+);
+
 [[nodiscard]] tensor::TensorStorage run_llama_model_logits_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+);
+
+[[nodiscard]] tensor::TensorStorage run_llama_model_logits_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelLogitsBackendWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position
 );
