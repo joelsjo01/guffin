@@ -9,7 +9,9 @@
 #include "local_gguf_engine/model_format/gguf_header.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
+#include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
+#include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
@@ -95,6 +97,9 @@ using local_gguf_engine::engine::sample_token_f32;
 using local_gguf_engine::engine::SamplingConfig;
 using local_gguf_engine::engine::SamplingState;
 using local_gguf_engine::engine::top_logit_tokens_f32;
+using local_gguf_engine::runtime::BackendError;
+using local_gguf_engine::runtime::BackendErrorCode;
+using local_gguf_engine::runtime::BackendKind;
 using local_gguf_engine::model_format::GGUFHeader;
 using local_gguf_engine::model_format::GGUFMetadataEntry;
 using local_gguf_engine::model_format::GGUFMetadataArray;
@@ -138,6 +143,8 @@ using local_gguf_engine::tensor::TensorError;
 using local_gguf_engine::tensor::TensorErrorCode;
 using local_gguf_engine::tensor::TensorDescriptor;
 using local_gguf_engine::tensor::TensorStorage;
+using local_gguf_engine::tensor::tensor_backend_is_available;
+using local_gguf_engine::tensor::tensor_backend_unavailable_reason;
 using local_gguf_engine::tensor::write_f16_from_f32;
 using local_gguf_engine::tensor::write_f32;
 using local_gguf_engine::tensor::ops::add_f32;
@@ -2929,6 +2936,133 @@ void test_multiplies_f32_by_f16_gguf_weight_matrix() {
     expect(read_f32(output, std::span<const std::uint64_t>(index_01)) == 60.0F, "F32xF16 GGUF matmul value 0,1 mismatch");
     expect(read_f32(output, std::span<const std::uint64_t>(index_10)) == 5.0F, "F32xF16 GGUF matmul value 1,0 mismatch");
     expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 50.0F, "F32xF16 GGUF matmul value 1,1 mismatch");
+}
+
+void test_multiplies_f32_by_f16_gguf_weight_matrix_on_cpu_backend() {
+    const std::array<float, 6> left_values {
+        1.0F, 1.0F, 1.0F,
+        2.0F, 0.0F, 1.0F,
+    };
+    const std::array<float, 6> right_values {
+        1.0F, 2.0F, 3.0F,
+        10.0F, 20.0F, 30.0F,
+    };
+    const auto left = tensor_f32_matrix(2, 3, std::span<const float>(left_values));
+    const auto right = tensor_f16_matrix(3, 2, std::span<const float>(right_values));
+
+    const auto output = matmul_f32_f16_gguf_weight(left, right, BackendKind::cpu);
+
+    const std::array<std::uint64_t, 2> index_00 {0, 0};
+    const std::array<std::uint64_t, 2> index_01 {0, 1};
+    const std::array<std::uint64_t, 2> index_10 {1, 0};
+    const std::array<std::uint64_t, 2> index_11 {1, 1};
+    expect(read_f32(output, std::span<const std::uint64_t>(index_00)) == 6.0F, "CPU backend GGUF matmul value 0,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_01)) == 60.0F, "CPU backend GGUF matmul value 0,1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_10)) == 5.0F, "CPU backend GGUF matmul value 1,0 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 50.0F, "CPU backend GGUF matmul value 1,1 mismatch");
+}
+
+void test_matches_cpu_f32_by_f16_gguf_weight_matmul_on_metal_backend() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 12> left_values {
+        0.5F, -1.0F, 2.0F, 3.5F,
+        -2.0F, 0.25F, 1.5F, -0.75F,
+        4.0F, -3.0F, 0.125F, 2.25F,
+    };
+    const std::array<float, 20> right_values {
+        0.25F, -0.5F, 1.0F, 2.0F, -1.5F,
+        1.25F, 0.75F, -2.0F, 0.5F, 3.0F,
+        -0.25F, 1.5F, 0.125F, -1.0F, 2.25F,
+        2.5F, -1.25F, 0.625F, 1.75F, -0.875F,
+    };
+    const auto left = tensor_f32_matrix(3, 4, std::span<const float>(left_values));
+    const auto right = tensor_f16_gguf_matrix(4, 5, std::span<const float>(right_values));
+
+    const auto cpu_output = matmul_f32_f16_gguf_weight(left, right, BackendKind::cpu);
+    const auto metal_output = matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
+
+    expect(metal_output.descriptor() == cpu_output.descriptor(), "Metal GGUF matmul descriptor mismatch");
+    for (std::uint64_t row = 0; row < 3; ++row) {
+        for (std::uint64_t column = 0; column < 5; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            expect_close(
+                read_f32(metal_output, std::span<const std::uint64_t>(index)),
+                read_f32(cpu_output, std::span<const std::uint64_t>(index)),
+                1.0e-3F,
+                "Metal GGUF matmul parity mismatch"
+            );
+        }
+    }
+}
+
+void test_reuses_metal_f32_by_f16_gguf_weight_matmul_state() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 8> left_values {
+        1.0F, -2.0F, 0.5F, 3.0F,
+        -1.5F, 0.25F, 2.0F, -0.75F,
+    };
+    const std::array<float, 12> right_values {
+        0.5F, -1.0F, 2.0F,
+        1.5F, 0.25F, -0.5F,
+        -2.5F, 0.75F, 1.25F,
+        0.125F, -1.75F, 2.25F,
+    };
+    const auto left = tensor_f32_matrix(2, 4, std::span<const float>(left_values));
+    const auto right = tensor_f16_gguf_matrix(4, 3, std::span<const float>(right_values));
+
+    const auto first = matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
+    const auto second = matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
+
+    expect(second.descriptor() == first.descriptor(), "reused Metal GGUF matmul descriptor mismatch");
+    for (std::uint64_t row = 0; row < 2; ++row) {
+        for (std::uint64_t column = 0; column < 3; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            expect_close(
+                read_f32(second, std::span<const std::uint64_t>(index)),
+                read_f32(first, std::span<const std::uint64_t>(index)),
+                0.0F,
+                "reused Metal GGUF matmul value mismatch"
+            );
+        }
+    }
+}
+
+void test_reports_unavailable_metal_backend_for_gguf_matmul_when_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 4> left_values {
+        1.0F, 2.0F,
+        3.0F, 4.0F,
+    };
+    const std::array<float, 4> right_values {
+        5.0F, 6.0F,
+        7.0F, 8.0F,
+    };
+    const auto left = tensor_f32_matrix(2, 2, std::span<const float>(left_values));
+    const auto right = tensor_f16_gguf_matrix(2, 2, std::span<const float>(right_values));
+
+    try {
+        (void)matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
+        throw TestFailure("Metal GGUF matmul should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Metal GGUF matmul unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Metal GGUF matmul unavailable backend mismatch");
+        expect(
+            !tensor_backend_unavailable_reason(BackendKind::metal).empty(),
+            "Metal backend unavailable reason should be non-empty"
+        );
+    }
 }
 
 void test_rejects_f32_f16_matmul_right_dtype_mismatch() {
@@ -6872,6 +7006,22 @@ int main() {
         {"rejects F32 matmul inner dimension mismatch", test_rejects_f32_matmul_inner_dimension_mismatch},
         {"multiplies F32 by F16 matrices into F32", test_multiplies_f32_by_f16_matrices_into_f32},
         {"multiplies F32 by F16 GGUF weight matrix", test_multiplies_f32_by_f16_gguf_weight_matrix},
+        {
+            "multiplies F32 by F16 GGUF weight matrix on CPU backend",
+            test_multiplies_f32_by_f16_gguf_weight_matrix_on_cpu_backend,
+        },
+        {
+            "matches CPU F32 by F16 GGUF weight matmul on Metal backend",
+            test_matches_cpu_f32_by_f16_gguf_weight_matmul_on_metal_backend,
+        },
+        {
+            "reuses Metal F32 by F16 GGUF weight matmul state",
+            test_reuses_metal_f32_by_f16_gguf_weight_matmul_state,
+        },
+        {
+            "reports unavailable Metal backend for GGUF matmul when missing",
+            test_reports_unavailable_metal_backend_for_gguf_matmul_when_missing,
+        },
         {"rejects F32xF16 matmul right dtype mismatch", test_rejects_f32_f16_matmul_right_dtype_mismatch},
         {"creates Llama KV cache", test_creates_llama_kv_cache},
         {"appends and reads Llama KV cache layer", test_appends_and_reads_llama_kv_cache_layer},

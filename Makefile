@@ -15,7 +15,10 @@ ENGINE_SOURCES := \
 	src/engine/sampling.cpp \
 	src/model_format/gguf_reader.cpp \
 	src/model_format/gguf_tensor_bridge.cpp \
+	src/runtime/backend_error.cpp \
 	src/tokenizer/tokenizer.cpp \
+	src/tensor/backend.cpp \
+	src/tensor/backends/metal_backend.mm \
 	src/tensor/dtype.cpp \
 	src/tensor/f16.cpp \
 	src/tensor/layout.cpp \
@@ -51,7 +54,8 @@ BENCHMARK_MAIN_SOURCES := \
 TEST_SOURCES := \
 	tests/test_main.cpp
 
-COMMON_FLAGS := -std=c++20 -Iinclude -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+COMMON_FLAGS := -std=c++20 -Iinclude -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fobjc-arc
+METAL_LDFLAGS := -framework Foundation -framework Metal
 DEBUG_FLAGS := -O0 -g
 RELEASE_FLAGS ?= -O3 -DNDEBUG -mcpu=apple-m4
 
@@ -80,19 +84,19 @@ run-benchmark: $(BENCHMARK_BINARY)
 
 $(TEST_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(BENCHMARK_SOURCES) $(TEST_SOURCES)
 	mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(BENCHMARK_SOURCES) $(TEST_SOURCES) -o $(TEST_BINARY)
+	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(BENCHMARK_SOURCES) $(TEST_SOURCES) $(METAL_LDFLAGS) -o $(TEST_BINARY)
 
 $(GGUF_INSPECT_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GGUF_INSPECT_SOURCES)
 	mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GGUF_INSPECT_SOURCES) -o $(GGUF_INSPECT_BINARY)
+	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GGUF_INSPECT_SOURCES) $(METAL_LDFLAGS) -o $(GGUF_INSPECT_BINARY)
 
 $(GENERATE_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GENERATE_SOURCES)
 	mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GENERATE_SOURCES) -o $(GENERATE_BINARY)
+	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GENERATE_SOURCES) $(METAL_LDFLAGS) -o $(GENERATE_BINARY)
 
 $(BENCHMARK_BINARY): $(ENGINE_SOURCES) $(BENCHMARK_SOURCES) $(BENCHMARK_MAIN_SOURCES)
 	mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(BENCHMARK_SOURCES) $(BENCHMARK_MAIN_SOURCES) -o $(BENCHMARK_BINARY)
+	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(BENCHMARK_SOURCES) $(BENCHMARK_MAIN_SOURCES) $(METAL_LDFLAGS) -o $(BENCHMARK_BINARY)
 
 clean:
 	rm -rf build

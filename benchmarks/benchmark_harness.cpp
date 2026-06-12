@@ -8,6 +8,9 @@
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
+#include "local_gguf_engine/runtime/backend_kind.hpp"
+#include "local_gguf_engine/tensor/backend.hpp"
+#include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
@@ -68,16 +71,21 @@ using model_format::GGUFMetadataSection;
 using model_format::GGUFMetadataValue;
 using model_format::GGUFMetadataValueType;
 using model_format::read_gguf_model_view;
+using runtime::BackendKind;
 using tensor::DType;
 using tensor::Shape;
 using tensor::TensorDescriptor;
 using tensor::TensorStorage;
+using tensor::f32_to_f16_bits;
+using tensor::tensor_backend_is_available;
+using tensor::tensor_backend_unavailable_reason;
 using tensor::write_f16_from_f32;
 using tensor::write_f32;
 using tensor::ops::add_f32;
 using tensor::ops::causal_scaled_dot_product_attention_f32;
 using tensor::ops::matmul_f32;
 using tensor::ops::matmul_f32_f16;
+using tensor::ops::matmul_f32_f16_gguf_weight;
 using tensor::ops::multiply_f32;
 using tensor::ops::rms_norm_f32;
 using tensor::ops::rope_f32;
@@ -177,6 +185,26 @@ template <typename Callable>
             const std::array<std::uint64_t, 2> index {row, column};
             const auto value = scale * static_cast<float>((row + 1) + (column % 7));
             write_f16_from_f32(storage, std::span<const std::uint64_t>(index), value);
+        }
+    }
+
+    return storage;
+}
+
+[[nodiscard]] TensorStorage make_f16_gguf_weight_matrix(
+    std::uint64_t rows,
+    std::uint64_t columns,
+    float scale
+) {
+    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f16));
+    auto bytes = storage.mutable_bytes();
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            const auto value = scale * static_cast<float>((row % 17) + 1 + (column % 11));
+            const auto bits = f32_to_f16_bits(value);
+            const auto byte_offset = static_cast<std::size_t>((column * rows + row) * sizeof(std::uint16_t));
+            bytes[byte_offset] = static_cast<std::uint8_t>(bits & 0xFFU);
+            bytes[byte_offset + 1] = static_cast<std::uint8_t>(bits >> 8U);
         }
     }
 
@@ -294,10 +322,94 @@ template <typename Callable>
     };
 }
 
+[[nodiscard]] std::string projection_benchmark_detail(
+    const TensorStorage& left,
+    const TensorStorage& right,
+    std::string_view backend,
+    std::string_view cost_scope
+) {
+    std::ostringstream stream;
+    stream << "left=[" << left.descriptor().shape.dimension(0)
+           << "," << left.descriptor().shape.dimension(1)
+           << "] right=[" << right.descriptor().shape.dimension(0)
+           << "," << right.descriptor().shape.dimension(1)
+           << "] dtype=F32/F16 layout=gguf-weight backend=" << backend
+           << " cost=" << cost_scope;
+    return stream.str();
+}
+
+void add_projection_backend_benchmarks(
+    BenchmarkReport& report,
+    std::string_view label,
+    const TensorStorage& left,
+    const TensorStorage& right,
+    bool metal_available
+) {
+    report.measurements.push_back(measure(
+        "tensor.matmul_f32_f16_gguf_weight.cpu." + std::string(label),
+        report.config.iterations,
+        projection_benchmark_detail(left, right, "cpu", "compute+allocation"),
+        [&left, &right]() {
+            const auto output = matmul_f32_f16_gguf_weight(left, right, BackendKind::cpu);
+            return IterationMeasurement {
+                .bytes_processed = left.bytes().size() + right.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+
+    if (!metal_available) {
+        return;
+    }
+
+    report.measurements.push_back(measure(
+        "tensor.matmul_f32_f16_gguf_weight.metal." + std::string(label),
+        report.config.iterations,
+        projection_benchmark_detail(
+            left,
+            right,
+            "metal",
+            "input-copy+dispatch+output-copy cached-pipeline"
+        ),
+        [&left, &right]() {
+            const auto output = matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
+            return IterationMeasurement {
+                .bytes_processed = left.bytes().size() + right.bytes().size() + output.bytes().size(),
+                .checksum = checksum_f32(sum_f32(output)),
+            };
+        }
+    ));
+}
+
+void add_unavailable_metal_projection_benchmark(BenchmarkReport& report) {
+    report.measurements.push_back(BenchmarkMeasurement {
+        .name = "tensor.matmul_f32_f16_gguf_weight.metal.unavailable",
+        .iterations = 0,
+        .total_ms = 0.0,
+        .min_ms = 0.0,
+        .max_ms = 0.0,
+        .bytes_processed = 0,
+        .checksum = 0,
+        .detail = tensor_backend_unavailable_reason(BackendKind::metal),
+    });
+}
+
+void warm_up_metal_projection_backend() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto left = make_f32_matrix(1, 4, 0.01F);
+    const auto right = make_f16_gguf_weight_matrix(4, 4, 0.02F);
+    (void)matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
+}
+
 void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     constexpr std::uint64_t add_element_count = 4096;
     constexpr std::uint64_t copy_element_count = 16 * 1024;
     constexpr std::uint64_t matmul_size = 64;
+    constexpr std::uint64_t focused_hidden = 576;
+    constexpr std::uint64_t focused_ffn = 1536;
 
     const auto add_descriptor = TensorDescriptor::from(Shape::from({add_element_count}), DType::f32);
     const auto copy_descriptor = TensorDescriptor::from(Shape::from({copy_element_count}), DType::f32);
@@ -307,6 +419,13 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     const auto matmul_left = make_f32_matrix(matmul_size, matmul_size, 0.01F);
     const auto matmul_right = make_f32_matrix(matmul_size, matmul_size, 0.02F);
     const auto matmul_right_f16 = make_f16_matrix(matmul_size, matmul_size, 0.02F);
+    const auto projection_small_left = make_f32_matrix(8, matmul_size, 0.01F);
+    const auto projection_small_weight = make_f16_gguf_weight_matrix(matmul_size, matmul_size, 0.02F);
+    const auto projection_next_token_left = make_f32_matrix(1, focused_hidden, 0.001F);
+    const auto projection_hidden_weight =
+        make_f16_gguf_weight_matrix(focused_hidden, focused_hidden, 0.0005F);
+    const auto projection_prefill_left = make_f32_matrix(8, focused_hidden, 0.001F);
+    const auto projection_ffn_weight = make_f16_gguf_weight_matrix(focused_hidden, focused_ffn, 0.00025F);
     const auto rms_norm_weight = make_f32_storage(matmul_size, 1.0F);
     const auto attention_query = make_f32_matrix(matmul_size, matmul_size, 0.01F);
     const auto attention_key = make_f32_matrix(matmul_size, matmul_size, 0.02F);
@@ -383,6 +502,10 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
             cache
         );
         cached_next_token_caches.push_back(std::move(cache));
+    }
+    const auto metal_available = tensor_backend_is_available(BackendKind::metal);
+    if (metal_available) {
+        warm_up_metal_projection_backend();
     }
 
     report.measurements.push_back(measure(
@@ -475,6 +598,38 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
             };
         }
     ));
+
+    add_projection_backend_benchmarks(
+        report,
+        "small_prefill",
+        projection_small_left,
+        projection_small_weight,
+        metal_available
+    );
+    add_projection_backend_benchmarks(
+        report,
+        "next_token_hidden",
+        projection_next_token_left,
+        projection_hidden_weight,
+        metal_available
+    );
+    add_projection_backend_benchmarks(
+        report,
+        "prefill_hidden",
+        projection_prefill_left,
+        projection_hidden_weight,
+        metal_available
+    );
+    add_projection_backend_benchmarks(
+        report,
+        "next_token_ffn",
+        projection_next_token_left,
+        projection_ffn_weight,
+        metal_available
+    );
+    if (!metal_available) {
+        add_unavailable_metal_projection_benchmark(report);
+    }
 
     report.measurements.push_back(measure(
         "tensor.rms_norm_f32",
