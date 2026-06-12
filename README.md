@@ -45,6 +45,46 @@ make generate
 ./build/debug/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "Hello" 8
 ```
 
+## Run A Model
+
+Put local GGUF files under `models/`. Model files are ignored by Git.
+
+For the current SmolLM2 F16 target, build the release generator:
+
+```bash
+make MODE=release generate
+```
+
+Run with the CLI's default sampled settings:
+
+```bash
+./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "What is the capital of France?" 64
+```
+
+Run deterministic greedy/argmax generation:
+
+```bash
+./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "What is the capital of France?" 32 --greedy
+```
+
+Or use zero temperature for the same argmax path:
+
+```bash
+./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "What is the capital of France?" 32 --temperature 0
+```
+
+Sampling controls are engine-owned and deterministic when `--seed` is set:
+
+```bash
+./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "Write a haiku about rain." 64 --temperature 0.7 --top-k 40 --top-p 0.9 --repeat-penalty 1.1 --seed 1
+```
+
+To inspect prompt formatting, token IDs, and first-token logits:
+
+```bash
+./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "Hello" 1 --debug-first-token
+```
+
 Build the benchmark scaffold with:
 
 ```bash
