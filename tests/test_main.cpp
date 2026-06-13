@@ -179,6 +179,7 @@ using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight_to_backend;
 using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight_triple_to_backend;
 using local_gguf_engine::tensor::ops::mean_square_f32;
 using local_gguf_engine::tensor::ops::multiply_f32;
+using local_gguf_engine::tensor::ops::residual_gated_silu_projection_f32_f16_gguf_weight_to_backend;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rms_f32;
 using local_gguf_engine::tensor::ops::rope_f32;
@@ -3241,6 +3242,83 @@ void test_runs_gated_silu_projection_to_cpu_backend_buffer() {
     expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer gated SiLU projection output");
 }
 
+void test_runs_residual_gated_silu_projection_to_cpu_backend_buffer() {
+    const std::array<float, 6> input_values {
+        0.5F, -1.0F, 2.0F,
+        -0.75F, 1.5F, -0.25F,
+    };
+    const std::array<float, 4> attention_values {
+        1.25F, -0.5F,
+        -0.75F, 0.875F,
+    };
+    const std::array<float, 6> attention_output_weight_values {
+        0.25F, -0.5F, 0.75F,
+        1.0F, -0.25F, 0.5F,
+    };
+    const std::array<float, 3> norm_values {1.0F, 0.75F, 1.25F};
+    const std::array<float, 12> gate_values {
+        0.25F, -0.5F, 0.75F, 1.0F,
+        -1.0F, 0.125F, 0.375F, -0.625F,
+        0.5F, 1.25F, -0.75F, 0.25F,
+    };
+    const std::array<float, 12> up_values {
+        -0.125F, 0.625F, 0.5F, -1.0F,
+        0.75F, -0.25F, 1.5F, 0.125F,
+        1.0F, 0.25F, -1.25F, 0.5F,
+    };
+    const std::array<float, 12> down_values {
+        0.5F, -0.25F, 0.125F,
+        -0.5F, 1.0F, 0.625F,
+        0.25F, 0.375F, -0.75F,
+        1.5F, -1.0F, 0.5F,
+    };
+    const auto input = tensor_f32_matrix(2, 3, std::span<const float>(input_values));
+    const auto attention_output = tensor_f32_matrix(2, 2, std::span<const float>(attention_values));
+    const auto attention_output_weight =
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(attention_output_weight_values));
+    const auto norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    const auto gate_weight = tensor_f16_gguf_matrix(3, 4, std::span<const float>(gate_values));
+    const auto up_weight = tensor_f16_gguf_matrix(3, 4, std::span<const float>(up_values));
+    const auto down_weight = tensor_f16_gguf_matrix(4, 3, std::span<const float>(down_values));
+    const auto input_buffer = copy_tensor_to_backend(input, BackendKind::cpu);
+    const auto attention_output_buffer = copy_tensor_to_backend(attention_output, BackendKind::cpu);
+    const auto attention_output_weight_buffer = copy_tensor_to_backend(attention_output_weight, BackendKind::cpu);
+    const auto norm_buffer = copy_tensor_to_backend(norm_weight, BackendKind::cpu);
+    const auto gate_buffer = copy_tensor_to_backend(gate_weight, BackendKind::cpu);
+    const auto up_buffer = copy_tensor_to_backend(up_weight, BackendKind::cpu);
+    const auto down_buffer = copy_tensor_to_backend(down_weight, BackendKind::cpu);
+
+    const auto output_buffer = residual_gated_silu_projection_f32_f16_gguf_weight_to_backend(
+        input_buffer,
+        attention_output_buffer,
+        attention_output_weight_buffer,
+        norm_buffer,
+        gate_buffer,
+        up_buffer,
+        down_buffer,
+        0.25F
+    );
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto attention_projected = matmul_f32_f16_gguf_weight(
+        attention_output,
+        attention_output_weight,
+        BackendKind::cpu
+    );
+    const auto attention_residual = add_f32(input, attention_projected);
+    const auto normalized = rms_norm_f32(attention_residual, norm_weight, 0.25F);
+    const auto gate = matmul_f32_f16_gguf_weight(normalized, gate_weight, BackendKind::cpu);
+    const auto up = matmul_f32_f16_gguf_weight(normalized, up_weight, BackendKind::cpu);
+    const auto projected = matmul_f32_f16_gguf_weight(
+        multiply_f32(silu_f32(gate), up),
+        down_weight,
+        BackendKind::cpu
+    );
+    const auto expected = add_f32(attention_residual, projected);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU residual gated SiLU output backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer residual gated SiLU output");
+}
+
 void test_matches_cpu_f32_by_f16_gguf_weight_matmul_on_metal_backend() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -3544,6 +3622,87 @@ void test_runs_gated_silu_projection_to_metal_backend_buffer_when_available() {
 
     expect(output_buffer.backend() == BackendKind::metal, "Metal gated SiLU projection output backend mismatch");
     expect_f32_matrix_close(output, expected, 1.0e-3F, "Metal backend-buffer gated SiLU projection output");
+}
+
+void test_runs_residual_gated_silu_projection_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 6> input_values {
+        0.5F, -1.0F, 2.0F,
+        -0.75F, 1.5F, -0.25F,
+    };
+    const std::array<float, 4> attention_values {
+        1.25F, -0.5F,
+        -0.75F, 0.875F,
+    };
+    const std::array<float, 6> attention_output_weight_values {
+        0.25F, -0.5F, 0.75F,
+        1.0F, -0.25F, 0.5F,
+    };
+    const std::array<float, 3> norm_values {1.0F, 0.75F, 1.25F};
+    const std::array<float, 12> gate_values {
+        0.25F, -0.5F, 0.75F, 1.0F,
+        -1.0F, 0.125F, 0.375F, -0.625F,
+        0.5F, 1.25F, -0.75F, 0.25F,
+    };
+    const std::array<float, 12> up_values {
+        -0.125F, 0.625F, 0.5F, -1.0F,
+        0.75F, -0.25F, 1.5F, 0.125F,
+        1.0F, 0.25F, -1.25F, 0.5F,
+    };
+    const std::array<float, 12> down_values {
+        0.5F, -0.25F, 0.125F,
+        -0.5F, 1.0F, 0.625F,
+        0.25F, 0.375F, -0.75F,
+        1.5F, -1.0F, 0.5F,
+    };
+    const auto input = tensor_f32_matrix(2, 3, std::span<const float>(input_values));
+    const auto attention_output = tensor_f32_matrix(2, 2, std::span<const float>(attention_values));
+    const auto attention_output_weight =
+        tensor_f16_gguf_matrix(2, 3, std::span<const float>(attention_output_weight_values));
+    const auto norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
+    const auto gate_weight = tensor_f16_gguf_matrix(3, 4, std::span<const float>(gate_values));
+    const auto up_weight = tensor_f16_gguf_matrix(3, 4, std::span<const float>(up_values));
+    const auto down_weight = tensor_f16_gguf_matrix(4, 3, std::span<const float>(down_values));
+    const auto input_buffer = copy_tensor_to_backend(input, BackendKind::metal);
+    const auto attention_output_buffer = copy_tensor_to_backend(attention_output, BackendKind::metal);
+    const auto attention_output_weight_buffer = copy_tensor_to_backend(attention_output_weight, BackendKind::metal);
+    const auto norm_buffer = copy_tensor_to_backend(norm_weight, BackendKind::metal);
+    const auto gate_buffer = copy_tensor_to_backend(gate_weight, BackendKind::metal);
+    const auto up_buffer = copy_tensor_to_backend(up_weight, BackendKind::metal);
+    const auto down_buffer = copy_tensor_to_backend(down_weight, BackendKind::metal);
+
+    const auto output_buffer = residual_gated_silu_projection_f32_f16_gguf_weight_to_backend(
+        input_buffer,
+        attention_output_buffer,
+        attention_output_weight_buffer,
+        norm_buffer,
+        gate_buffer,
+        up_buffer,
+        down_buffer,
+        0.25F
+    );
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto attention_projected = matmul_f32_f16_gguf_weight(
+        attention_output,
+        attention_output_weight,
+        BackendKind::cpu
+    );
+    const auto attention_residual = add_f32(input, attention_projected);
+    const auto normalized = rms_norm_f32(attention_residual, norm_weight, 0.25F);
+    const auto gate = matmul_f32_f16_gguf_weight(normalized, gate_weight, BackendKind::cpu);
+    const auto up = matmul_f32_f16_gguf_weight(normalized, up_weight, BackendKind::cpu);
+    const auto projected = matmul_f32_f16_gguf_weight(
+        multiply_f32(silu_f32(gate), up),
+        down_weight,
+        BackendKind::cpu
+    );
+    const auto expected = add_f32(attention_residual, projected);
+
+    expect(output_buffer.backend() == BackendKind::metal, "Metal residual gated SiLU output backend mismatch");
+    expect_f32_matrix_close(output, expected, 1.0e-3F, "Metal backend-buffer residual gated SiLU output");
 }
 
 void test_reports_unavailable_metal_backend_for_gguf_matmul_when_missing() {
@@ -4875,9 +5034,14 @@ void expect_model_feed_forward_backend_weights(
     for (std::size_t block_index = 0; block_index < weights.blocks.size(); ++block_index) {
         const auto& expected = weights.blocks[block_index].feed_forward;
         const auto& actual = backend_weights.blocks[block_index];
+        expect(actual.feed_forward_norm_weight_buffer.backend() == backend, "Llama model FFN norm backend mismatch");
         expect(actual.gate_weight.backend() == backend, "Llama model FFN gate backend mismatch");
         expect(actual.up_weight.backend() == backend, "Llama model FFN up backend mismatch");
         expect(actual.down_weight.backend() == backend, "Llama model FFN down backend mismatch");
+        expect(
+            actual.feed_forward_norm_weight_buffer.descriptor() == expected.feed_forward_norm_weight.descriptor(),
+            "Llama model FFN norm backend descriptor mismatch"
+        );
         expect(
             actual.gate_weight.descriptor() == expected.gate_weight.descriptor(),
             "Llama model FFN gate backend descriptor mismatch"
@@ -4902,6 +5066,7 @@ void expect_block_backend_weights(
     expect(actual.attention.key_weight.backend() == backend, "Llama block attention key backend mismatch");
     expect(actual.attention.value_weight.backend() == backend, "Llama block attention value backend mismatch");
     expect(actual.attention.output_weight.backend() == backend, "Llama block attention output backend mismatch");
+    expect(actual.feed_forward.feed_forward_norm_weight_buffer.backend() == backend, "Llama block FFN norm backend mismatch");
     expect(actual.feed_forward.gate_weight.backend() == backend, "Llama block FFN gate backend mismatch");
     expect(actual.feed_forward.up_weight.backend() == backend, "Llama block FFN up backend mismatch");
     expect(actual.feed_forward.down_weight.backend() == backend, "Llama block FFN down backend mismatch");
@@ -4920,6 +5085,11 @@ void expect_block_backend_weights(
     expect(
         actual.attention.output_weight.descriptor() == expected.attention.output_weight.descriptor(),
         "Llama block attention output backend descriptor mismatch"
+    );
+    expect(
+        actual.feed_forward.feed_forward_norm_weight_buffer.descriptor()
+            == expected.feed_forward.feed_forward_norm_weight.descriptor(),
+        "Llama block FFN norm backend descriptor mismatch"
     );
     expect(
         actual.feed_forward.gate_weight.descriptor() == expected.feed_forward.gate_weight.descriptor(),
@@ -8706,6 +8876,10 @@ int main() {
             test_runs_gated_silu_projection_to_cpu_backend_buffer,
         },
         {
+            "runs residual gated SiLU projection to CPU backend buffer",
+            test_runs_residual_gated_silu_projection_to_cpu_backend_buffer,
+        },
+        {
             "matches CPU F32 by F16 GGUF weight matmul on Metal backend",
             test_matches_cpu_f32_by_f16_gguf_weight_matmul_on_metal_backend,
         },
@@ -8732,6 +8906,10 @@ int main() {
         {
             "runs gated SiLU projection to Metal backend buffer when available",
             test_runs_gated_silu_projection_to_metal_backend_buffer_when_available,
+        },
+        {
+            "runs residual gated SiLU projection to Metal backend buffer when available",
+            test_runs_residual_gated_silu_projection_to_metal_backend_buffer_when_available,
         },
         {
             "reuses Metal F32 by F16 GGUF weight matmul state",

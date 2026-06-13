@@ -4,6 +4,7 @@
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
+#include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "../ops/validation.hpp"
 
 #import <Foundation/Foundation.h>
@@ -69,6 +70,50 @@ kernel void silu_multiply_f32_kernel(
     const float value = gate[gid];
     output[gid] = (value / (1.0f + exp(-value))) * up[gid];
 }
+
+kernel void add_f32_kernel(
+    const device float* left [[buffer(0)]],
+    const device float* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant ElementwiseDimensions& dims [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= dims.elements) {
+        return;
+    }
+
+    output[gid] = left[gid] + right[gid];
+}
+
+struct RMSNormDimensions {
+    uint rows;
+    uint hidden;
+    float epsilon;
+};
+
+kernel void rms_norm_f32_kernel(
+    const device float* input [[buffer(0)]],
+    const device float* weight [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant RMSNormDimensions& dims [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= dims.rows) {
+        return;
+    }
+
+    float sum_squares = 0.0f;
+    const uint row_offset = row * dims.hidden;
+    for (uint column = 0; column < dims.hidden; ++column) {
+        const float value = input[row_offset + column];
+        sum_squares += value * value;
+    }
+
+    const float inverse_rms = rsqrt((sum_squares / float(dims.hidden)) + dims.epsilon);
+    for (uint column = 0; column < dims.hidden; ++column) {
+        output[row_offset + column] = input[row_offset + column] * inverse_rms * weight[column];
+    }
+}
 )metal";
 
 struct MatmulDimensions {
@@ -81,10 +126,18 @@ struct ElementwiseDimensions {
     std::uint32_t elements = 0;
 };
 
+struct RMSNormDimensions {
+    std::uint32_t rows = 0;
+    std::uint32_t hidden = 0;
+    float epsilon = 0.0F;
+};
+
 struct MatmulPipelineState {
     id<MTLDevice> device = nil;
     id<MTLComputePipelineState> matmul_pipeline = nil;
     id<MTLComputePipelineState> silu_multiply_pipeline = nil;
+    id<MTLComputePipelineState> add_pipeline = nil;
+    id<MTLComputePipelineState> rms_norm_pipeline = nil;
     id<MTLCommandQueue> queue = nil;
 
     MatmulPipelineState();
@@ -268,6 +321,72 @@ void require_gated_silu_projection_f32_f16_gguf_weight_operands(
     }
 }
 
+void require_f32_vector_descriptor(const TensorDescriptor& descriptor) {
+    constexpr std::size_t vector_rank = 1;
+    ops::require_f32_descriptor(descriptor);
+    if (descriptor.shape.rank() != vector_rank) {
+        throw TensorError(
+            TensorErrorCode::invalid_shape_rank,
+            static_cast<std::uint64_t>(vector_rank),
+            static_cast<std::uint64_t>(descriptor.shape.rank())
+        );
+    }
+}
+
+void require_positive_epsilon(float epsilon) {
+    if (!(epsilon > 0.0F)) {
+        throw std::invalid_argument("RMSNorm epsilon must be positive");
+    }
+}
+
+void require_residual_gated_silu_projection_f32_f16_gguf_weight_operands(
+    const TensorDescriptor& input,
+    const TensorDescriptor& attention_output,
+    const TensorDescriptor& attention_output_weight,
+    const TensorDescriptor& feed_forward_norm_weight,
+    const TensorDescriptor& gate_weight,
+    const TensorDescriptor& up_weight,
+    const TensorDescriptor& down_weight,
+    float epsilon
+) {
+    ops::require_f32_descriptor(input);
+    ops::require_f32_descriptor(attention_output);
+    require_matrix_descriptor(input);
+    require_matrix_descriptor(attention_output);
+
+    const auto token_count = input.shape.dimension(0);
+    const auto attention_token_count = attention_output.shape.dimension(0);
+    if (token_count != attention_token_count) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, token_count, attention_token_count);
+    }
+
+    require_f32_f16_matmul_gguf_weight_operands(attention_output, attention_output_weight);
+    const auto hidden = input.shape.dimension(1);
+    const auto attention_output_columns = attention_output_weight.shape.dimension(1);
+    if (hidden != attention_output_columns) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, hidden, attention_output_columns);
+    }
+
+    require_f32_vector_descriptor(feed_forward_norm_weight);
+    const auto norm_hidden = feed_forward_norm_weight.shape.dimension(0);
+    if (hidden != norm_hidden) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, hidden, norm_hidden);
+    }
+
+    require_gated_silu_projection_f32_f16_gguf_weight_operands(
+        input,
+        gate_weight,
+        up_weight,
+        down_weight
+    );
+    const auto down_columns = down_weight.shape.dimension(1);
+    if (hidden != down_columns) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, hidden, down_columns);
+    }
+
+    require_positive_epsilon(epsilon);
+}
+
 void require_f32_f16_matmul_gguf_weight_triple_operands(
     const TensorDescriptor& left,
     const TensorDescriptor& first_right,
@@ -353,6 +472,41 @@ MatmulPipelineState::MatmulPipelineState() {
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal SiLU multiply pipeline creation failed: "
                 + ns_error_message(silu_multiply_pipeline_error, "unknown error")
+        );
+    }
+
+    id<MTLFunction> add_function = [library newFunctionWithName:@"add_f32_kernel"];
+    if (add_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal add kernel function was not found"
+        );
+    }
+
+    NSError* add_pipeline_error = nil;
+    add_pipeline = [device newComputePipelineStateWithFunction:add_function error:&add_pipeline_error];
+    if (add_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal add pipeline creation failed: " + ns_error_message(add_pipeline_error, "unknown error")
+        );
+    }
+
+    id<MTLFunction> rms_norm_function = [library newFunctionWithName:@"rms_norm_f32_kernel"];
+    if (rms_norm_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal RMSNorm kernel function was not found"
+        );
+    }
+
+    NSError* rms_norm_pipeline_error = nil;
+    rms_norm_pipeline = [device newComputePipelineStateWithFunction:rms_norm_function
+                                                             error:&rms_norm_pipeline_error];
+    if (rms_norm_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal RMSNorm pipeline creation failed: " + ns_error_message(rms_norm_pipeline_error, "unknown error")
         );
     }
 
@@ -839,6 +993,240 @@ MatmulPipelineState::MatmulPipelineState() {
     );
 }
 
+[[nodiscard]] BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
+    const MetalBackendBufferStorage& input,
+    const MetalBackendBufferStorage& attention_output,
+    const MetalBackendBufferStorage& attention_output_weight,
+    const MetalBackendBufferStorage& feed_forward_norm_weight,
+    const MetalBackendBufferStorage& gate_weight,
+    const MetalBackendBufferStorage& up_weight,
+    const MetalBackendBufferStorage& down_weight,
+    float epsilon
+) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto rows = input.descriptor().shape.dimension(0);
+    const auto hidden = input.descriptor().shape.dimension(1);
+    const auto attention_output_width = attention_output.descriptor().shape.dimension(1);
+    const auto feed_forward = gate_weight.descriptor().shape.dimension(1);
+    const MatmulDimensions attention_output_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .shared = require_u32_dimension(attention_output_width, "attention_output_width"),
+        .columns = require_u32_dimension(hidden, "hidden"),
+    };
+    const MatmulDimensions gate_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .shared = require_u32_dimension(hidden, "hidden"),
+        .columns = require_u32_dimension(feed_forward, "feed_forward"),
+    };
+    const MatmulDimensions down_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .shared = require_u32_dimension(feed_forward, "feed_forward"),
+        .columns = require_u32_dimension(hidden, "hidden"),
+    };
+    const auto hidden_descriptor = TensorDescriptor::from(Shape::from({rows, hidden}), DType::f32);
+    const auto feed_forward_descriptor = TensorDescriptor::from(Shape::from({rows, feed_forward}), DType::f32);
+    const ElementwiseDimensions hidden_elementwise_dims {
+        .elements = require_u32_dimension(hidden_descriptor.element_count, "hidden_elements"),
+    };
+    const ElementwiseDimensions feed_forward_elementwise_dims {
+        .elements = require_u32_dimension(feed_forward_descriptor.element_count, "feed_forward_elements"),
+    };
+    const RMSNormDimensions rms_norm_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .hidden = require_u32_dimension(hidden, "hidden"),
+        .epsilon = epsilon,
+    };
+
+    id<MTLBuffer> attention_projected_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> attention_residual_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> normalized_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> gate_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(feed_forward_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> up_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(feed_forward_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> gated_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(feed_forward_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> feed_forward_projected_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> output_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> attention_output_dims_buffer = [state.device newBufferWithBytes:&attention_output_dims
+                                                                           length:sizeof(MatmulDimensions)
+                                                                          options:MTLResourceStorageModeShared];
+    id<MTLBuffer> gate_dims_buffer = [state.device newBufferWithBytes:&gate_dims
+                                                               length:sizeof(MatmulDimensions)
+                                                              options:MTLResourceStorageModeShared];
+    id<MTLBuffer> down_dims_buffer = [state.device newBufferWithBytes:&down_dims
+                                                               length:sizeof(MatmulDimensions)
+                                                              options:MTLResourceStorageModeShared];
+    id<MTLBuffer> hidden_elementwise_dims_buffer = [state.device newBufferWithBytes:&hidden_elementwise_dims
+                                                                             length:sizeof(ElementwiseDimensions)
+                                                                            options:MTLResourceStorageModeShared];
+    id<MTLBuffer> feed_forward_elementwise_dims_buffer =
+        [state.device newBufferWithBytes:&feed_forward_elementwise_dims
+                                  length:sizeof(ElementwiseDimensions)
+                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> rms_norm_dims_buffer = [state.device newBufferWithBytes:&rms_norm_dims
+                                                                   length:sizeof(RMSNormDimensions)
+                                                                  options:MTLResourceStorageModeShared];
+    if (attention_projected_buffer == nil || attention_residual_buffer == nil || normalized_buffer == nil
+        || gate_buffer == nil || up_buffer == nil || gated_buffer == nil || feed_forward_projected_buffer == nil
+        || output_buffer == nil || attention_output_dims_buffer == nil || gate_dims_buffer == nil
+        || down_dims_buffer == nil || hidden_elementwise_dims_buffer == nil
+        || feed_forward_elementwise_dims_buffer == nil || rms_norm_dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal residual gated SiLU projection buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    if (command_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal residual gated SiLU projection command buffer creation failed"
+        );
+    }
+
+    auto encode_matmul = [&](
+        id<MTLBuffer> left_buffer,
+        id<MTLBuffer> right_buffer,
+        id<MTLBuffer> matmul_output_buffer,
+        id<MTLBuffer> dims_buffer,
+        std::uint64_t output_rows,
+        std::uint64_t output_columns_for_dispatch
+    ) {
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal residual gated SiLU projection matmul command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.matmul_pipeline];
+        [encoder setBuffer:left_buffer offset:0 atIndex:0];
+        [encoder setBuffer:right_buffer offset:0 atIndex:1];
+        [encoder setBuffer:matmul_output_buffer offset:0 atIndex:2];
+        [encoder setBuffer:dims_buffer offset:0 atIndex:3];
+
+        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
+        const auto threadgroup_rows = static_cast<NSUInteger>((output_rows + 15U) / 16U);
+        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder endEncoding];
+    };
+
+    auto encode_add = [&](id<MTLBuffer> left_buffer, id<MTLBuffer> right_buffer, id<MTLBuffer> add_output_buffer) {
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal residual gated SiLU projection add command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.add_pipeline];
+        [encoder setBuffer:left_buffer offset:0 atIndex:0];
+        [encoder setBuffer:right_buffer offset:0 atIndex:1];
+        [encoder setBuffer:add_output_buffer offset:0 atIndex:2];
+        [encoder setBuffer:hidden_elementwise_dims_buffer offset:0 atIndex:3];
+
+        const MTLSize threads_per_threadgroup = MTLSizeMake(256, 1, 1);
+        const auto threadgroup_count = static_cast<NSUInteger>((hidden_descriptor.element_count + 255U) / 256U);
+        const MTLSize threadgroups = MTLSizeMake(threadgroup_count, 1, 1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder endEncoding];
+    };
+
+    encode_matmul(
+        attention_output.buffer(),
+        attention_output_weight.buffer(),
+        attention_projected_buffer,
+        attention_output_dims_buffer,
+        rows,
+        hidden
+    );
+    encode_add(input.buffer(), attention_projected_buffer, attention_residual_buffer);
+
+    id<MTLComputeCommandEncoder> rms_norm_encoder = [command_buffer computeCommandEncoder];
+    if (rms_norm_encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal residual gated SiLU projection RMSNorm command encoding failed"
+        );
+    }
+    [rms_norm_encoder setComputePipelineState:state.rms_norm_pipeline];
+    [rms_norm_encoder setBuffer:attention_residual_buffer offset:0 atIndex:0];
+    [rms_norm_encoder setBuffer:feed_forward_norm_weight.buffer() offset:0 atIndex:1];
+    [rms_norm_encoder setBuffer:normalized_buffer offset:0 atIndex:2];
+    [rms_norm_encoder setBuffer:rms_norm_dims_buffer offset:0 atIndex:3];
+
+    const MTLSize rms_norm_threads_per_threadgroup = MTLSizeMake(64, 1, 1);
+    const auto rms_norm_threadgroup_count = static_cast<NSUInteger>((rows + 63U) / 64U);
+    const MTLSize rms_norm_threadgroups = MTLSizeMake(rms_norm_threadgroup_count, 1, 1);
+    [rms_norm_encoder dispatchThreadgroups:rms_norm_threadgroups
+                     threadsPerThreadgroup:rms_norm_threads_per_threadgroup];
+    [rms_norm_encoder endEncoding];
+
+    encode_matmul(normalized_buffer, gate_weight.buffer(), gate_buffer, gate_dims_buffer, rows, feed_forward);
+    encode_matmul(normalized_buffer, up_weight.buffer(), up_buffer, gate_dims_buffer, rows, feed_forward);
+
+    id<MTLComputeCommandEncoder> silu_encoder = [command_buffer computeCommandEncoder];
+    if (silu_encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal residual gated SiLU projection activation command encoding failed"
+        );
+    }
+    [silu_encoder setComputePipelineState:state.silu_multiply_pipeline];
+    [silu_encoder setBuffer:gate_buffer offset:0 atIndex:0];
+    [silu_encoder setBuffer:up_buffer offset:0 atIndex:1];
+    [silu_encoder setBuffer:gated_buffer offset:0 atIndex:2];
+    [silu_encoder setBuffer:feed_forward_elementwise_dims_buffer offset:0 atIndex:3];
+
+    const MTLSize activation_threads_per_threadgroup = MTLSizeMake(256, 1, 1);
+    const auto activation_threadgroup_count = static_cast<NSUInteger>(
+        (feed_forward_descriptor.element_count + 255U) / 256U
+    );
+    const MTLSize activation_threadgroups = MTLSizeMake(activation_threadgroup_count, 1, 1);
+    [silu_encoder dispatchThreadgroups:activation_threadgroups
+                 threadsPerThreadgroup:activation_threads_per_threadgroup];
+    [silu_encoder endEncoding];
+
+    encode_matmul(gated_buffer, down_weight.buffer(), feed_forward_projected_buffer, down_dims_buffer, rows, hidden);
+    encode_add(attention_residual_buffer, feed_forward_projected_buffer, output_buffer);
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal residual gated SiLU projection command failed: "
+                + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return detail::make_backend_buffer(
+        std::make_shared<MetalBackendBufferStorage>(hidden_descriptor, output_buffer)
+    );
+}
+
 }  // namespace
 
 bool is_available() noexcept {
@@ -1269,6 +1657,117 @@ BackendBuffer gated_silu_projection_f32_f16_gguf_weight_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         left.backend(),
         "unsupported backend buffers for gated SiLU projection"
+    );
+}
+
+BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_to_backend(
+    const BackendBuffer& input,
+    const BackendBuffer& attention_output,
+    const BackendBuffer& attention_output_weight,
+    const BackendBuffer& feed_forward_norm_weight,
+    const BackendBuffer& gate_weight,
+    const BackendBuffer& up_weight,
+    const BackendBuffer& down_weight,
+    float epsilon
+) {
+    backends::metal::require_residual_gated_silu_projection_f32_f16_gguf_weight_operands(
+        input.descriptor(),
+        attention_output.descriptor(),
+        attention_output_weight.descriptor(),
+        feed_forward_norm_weight.descriptor(),
+        gate_weight.descriptor(),
+        up_weight.descriptor(),
+        down_weight.descriptor(),
+        epsilon
+    );
+    backends::metal::require_same_backend(input.backend(), attention_output.backend(), "residual gated SiLU projection");
+    backends::metal::require_same_backend(
+        input.backend(),
+        attention_output_weight.backend(),
+        "residual gated SiLU projection"
+    );
+    backends::metal::require_same_backend(
+        input.backend(),
+        feed_forward_norm_weight.backend(),
+        "residual gated SiLU projection"
+    );
+    backends::metal::require_same_backend(input.backend(), gate_weight.backend(), "residual gated SiLU projection");
+    backends::metal::require_same_backend(input.backend(), up_weight.backend(), "residual gated SiLU projection");
+    backends::metal::require_same_backend(input.backend(), down_weight.backend(), "residual gated SiLU projection");
+
+    switch (input.backend()) {
+        case runtime::BackendKind::cpu: {
+            const auto& input_storage = backends::metal::require_cpu_backend_buffer(
+                backend_buffer_storage(input)
+            ).storage();
+            const auto& attention_output_storage = backends::metal::require_cpu_backend_buffer(
+                backend_buffer_storage(attention_output)
+            ).storage();
+            const auto& attention_output_weight_storage = backends::metal::require_cpu_backend_buffer(
+                backend_buffer_storage(attention_output_weight)
+            ).storage();
+            const auto& feed_forward_norm_weight_storage = backends::metal::require_cpu_backend_buffer(
+                backend_buffer_storage(feed_forward_norm_weight)
+            ).storage();
+            const auto& gate_storage = backends::metal::require_cpu_backend_buffer(
+                backend_buffer_storage(gate_weight)
+            ).storage();
+            const auto& up_storage = backends::metal::require_cpu_backend_buffer(
+                backend_buffer_storage(up_weight)
+            ).storage();
+            const auto& down_storage = backends::metal::require_cpu_backend_buffer(
+                backend_buffer_storage(down_weight)
+            ).storage();
+
+            const auto attention_projected = matmul_f32_f16_gguf_weight(
+                attention_output_storage,
+                attention_output_weight_storage,
+                runtime::BackendKind::cpu
+            );
+            const auto attention_residual = add_f32(input_storage, attention_projected);
+            const auto normalized = rms_norm_f32(
+                attention_residual,
+                feed_forward_norm_weight_storage,
+                epsilon
+            );
+            const auto gate = matmul_f32_f16_gguf_weight(
+                normalized,
+                gate_storage,
+                runtime::BackendKind::cpu
+            );
+            const auto up = matmul_f32_f16_gguf_weight(
+                normalized,
+                up_storage,
+                runtime::BackendKind::cpu
+            );
+            const auto gated = multiply_f32(silu_f32(gate), up);
+            const auto feed_forward_projected = matmul_f32_f16_gguf_weight(
+                gated,
+                down_storage,
+                runtime::BackendKind::cpu
+            );
+            const auto output = add_f32(attention_residual, feed_forward_projected);
+            return copy_tensor_to_backend(output, runtime::BackendKind::cpu);
+        }
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(input)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(attention_output)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(attention_output_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(feed_forward_norm_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(gate_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(up_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(down_weight)),
+                    epsilon
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        input.backend(),
+        "unsupported backend buffers for residual gated SiLU projection"
     );
 }
 

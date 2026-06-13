@@ -524,7 +524,7 @@ void add_unavailable_metal_feed_forward_backend_benchmark(BenchmarkReport& repor
 [[nodiscard]] std::size_t llama_feed_forward_weight_bytes(
     const LlamaFeedForwardLayerBackendWeights& weights
 ) noexcept {
-    return weights.feed_forward_norm_weight.bytes().size()
+    return backend_buffer_byte_count(weights.feed_forward_norm_weight_buffer)
         + backend_buffer_byte_count(weights.gate_weight)
         + backend_buffer_byte_count(weights.up_weight)
         + backend_buffer_byte_count(weights.down_weight);
@@ -1181,7 +1181,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     report.measurements.push_back(measure(
         "engine.llama_model_blocks_with_kv_cache_f32.cpu_buffered",
         report.config.iterations,
-        "input=[7,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=cpu preloaded-projections fused-qkv fused-ffn cache_prefill",
+        "input=[7,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=cpu preloaded-projections fused-qkv fused-block-tail cache_prefill",
         [
             &llama_cached_model_block_prefill_input,
             &llama_model_cpu_block_backend_weights,
@@ -1240,7 +1240,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     report.measurements.push_back(measure(
         "engine.llama_model_blocks_with_kv_cache_decode_f32.cpu_buffered",
         report.config.iterations,
-        "input=[1,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=cpu preloaded-projections fused-qkv fused-ffn cache_prefilled=7",
+        "input=[1,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=cpu preloaded-projections fused-qkv fused-block-tail cache_prefilled=7",
         [
             &llama_cached_model_block_decode_input,
             &llama_model_cpu_block_backend_weights,
@@ -1305,7 +1305,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     report.measurements.push_back(measure(
         "engine.llama_model_logits_f32.cpu_buffered",
         report.config.iterations,
-        "tokens=8 hidden=64 vocab=1024 blocks=2 dtype=F32/F16 backend=cpu preloaded-projections fused-qkv fused-ffn",
+        "tokens=8 hidden=64 vocab=1024 blocks=2 dtype=F32/F16 backend=cpu preloaded-projections fused-qkv fused-block-tail",
         [&llama_token_ids, &llama_model_cpu_backend_weights, &llama_model_blocks_config]() {
             const auto output = run_llama_model_logits_f32(
                 std::span<const std::uint32_t>(llama_token_ids),
@@ -1359,7 +1359,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     report.measurements.push_back(measure(
         "engine.llama_next_token_argmax_f32.cpu_buffered",
         report.config.iterations,
-        "tokens=8 hidden=64 vocab=1024 blocks=2 backend=cpu preloaded-projections fused-qkv fused-ffn sampler=argmax",
+        "tokens=8 hidden=64 vocab=1024 blocks=2 backend=cpu preloaded-projections fused-qkv fused-block-tail sampler=argmax",
         [&llama_token_ids, &llama_model_cpu_backend_weights, &llama_model_blocks_config]() {
             const auto token = run_llama_model_next_token_argmax_f32(
                 std::span<const std::uint32_t>(llama_token_ids),
@@ -1403,7 +1403,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     report.measurements.push_back(measure(
         "engine.llama_next_token_sampled_f32.cpu_buffered",
         report.config.iterations,
-        "tokens=8 hidden=64 vocab=1024 blocks=2 backend=cpu preloaded-projections fused-qkv fused-ffn sampler=temp0.7/top-k40/top-p0.9/repeat1.1",
+        "tokens=8 hidden=64 vocab=1024 blocks=2 backend=cpu preloaded-projections fused-qkv fused-block-tail sampler=temp0.7/top-k40/top-p0.9/repeat1.1",
         [&llama_token_ids, &llama_model_cpu_backend_weights, &llama_model_blocks_config, &llama_sampling]() {
             SamplingState sampling_state(llama_sampling.seed);
             const auto token = run_llama_model_next_token_sampled_f32(
@@ -1497,7 +1497,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         report.measurements.push_back(measure(
             "engine.llama_model_blocks_with_kv_cache_f32.metal_buffered",
             report.config.iterations,
-            "input=[7,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=metal preloaded-projections fused-qkv fused-ffn cache_prefill",
+            "input=[7,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=metal preloaded-projections fused-qkv fused-block-tail cache_prefill",
             [
                 &llama_cached_model_block_prefill_input,
                 &llama_model_metal_block_backend_weights,
@@ -1525,7 +1525,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         report.measurements.push_back(measure(
             "engine.llama_model_blocks_with_kv_cache_decode_f32.metal_buffered",
             report.config.iterations,
-            "input=[1,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=metal preloaded-projections fused-qkv fused-ffn cache_prefilled=7",
+            "input=[1,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=metal preloaded-projections fused-qkv fused-block-tail cache_prefilled=7",
             [
                 &llama_cached_model_block_decode_input,
                 &llama_model_metal_block_backend_weights,
@@ -1556,7 +1556,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         report.measurements.push_back(measure(
             "engine.llama_model_logits_f32.metal_buffered",
             report.config.iterations,
-            "tokens=8 hidden=64 vocab=1024 blocks=2 dtype=F32/F16 backend=metal preloaded-projections fused-qkv fused-ffn",
+            "tokens=8 hidden=64 vocab=1024 blocks=2 dtype=F32/F16 backend=metal preloaded-projections fused-qkv fused-block-tail",
             [&llama_token_ids, &llama_model_metal_backend_weights, &llama_model_blocks_config]() {
                 const auto output = run_llama_model_logits_f32(
                     std::span<const std::uint32_t>(llama_token_ids),
@@ -1577,7 +1577,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         report.measurements.push_back(measure(
             "engine.llama_next_token_argmax_f32.metal_buffered",
             report.config.iterations,
-            "tokens=8 hidden=64 vocab=1024 blocks=2 backend=metal preloaded-projections fused-qkv fused-ffn sampler=argmax",
+            "tokens=8 hidden=64 vocab=1024 blocks=2 backend=metal preloaded-projections fused-qkv fused-block-tail sampler=argmax",
             [&llama_token_ids, &llama_model_metal_backend_weights, &llama_model_blocks_config]() {
                 const auto token = run_llama_model_next_token_argmax_f32(
                     std::span<const std::uint32_t>(llama_token_ids),
@@ -1597,7 +1597,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         report.measurements.push_back(measure(
             "engine.llama_next_token_sampled_f32.metal_buffered",
             report.config.iterations,
-            "tokens=8 hidden=64 vocab=1024 blocks=2 backend=metal preloaded-projections fused-qkv fused-ffn sampler=temp0.7/top-k40/top-p0.9/repeat1.1",
+            "tokens=8 hidden=64 vocab=1024 blocks=2 backend=metal preloaded-projections fused-qkv fused-block-tail sampler=temp0.7/top-k40/top-p0.9/repeat1.1",
             [&llama_token_ids, &llama_model_metal_backend_weights, &llama_model_blocks_config, &llama_sampling]() {
                 SamplingState sampling_state(llama_sampling.seed);
                 const auto token = run_llama_model_next_token_sampled_f32(

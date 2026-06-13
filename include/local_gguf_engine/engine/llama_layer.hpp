@@ -35,6 +35,7 @@ struct LlamaFeedForwardLayerWeights {
 
 struct LlamaFeedForwardLayerBackendWeights {
     const tensor::TensorStorage& feed_forward_norm_weight;
+    tensor::BackendBuffer feed_forward_norm_weight_buffer;
     tensor::BackendBuffer gate_weight;
     tensor::BackendBuffer up_weight;
     tensor::BackendBuffer down_weight;

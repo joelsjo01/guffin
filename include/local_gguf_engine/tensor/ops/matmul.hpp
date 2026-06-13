@@ -40,5 +40,15 @@ struct F32F16GGUFWeightTripleMatmulBackendBuffers {
     const BackendBuffer& up_weight,
     const BackendBuffer& down_weight
 );
+[[nodiscard]] BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_to_backend(
+    const BackendBuffer& input,
+    const BackendBuffer& attention_output,
+    const BackendBuffer& attention_output_weight,
+    const BackendBuffer& feed_forward_norm_weight,
+    const BackendBuffer& gate_weight,
+    const BackendBuffer& up_weight,
+    const BackendBuffer& down_weight,
+    float epsilon
+);
 
 }  // namespace local_gguf_engine::tensor::ops
