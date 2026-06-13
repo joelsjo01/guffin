@@ -86,6 +86,14 @@ struct LlamaModelLogitsBackendWeights {
     LlamaKVCache& cache
 );
 
+[[nodiscard]] tensor::TensorStorage run_llama_model_blocks_with_kv_cache_f32(
+    const tensor::TensorStorage& input,
+    const LlamaModelBlockBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCache& cache
+);
+
 [[nodiscard]] tensor::TensorStorage project_llama_logits_f32(
     const tensor::TensorStorage& hidden_states,
     const LlamaModelWeights& weights,

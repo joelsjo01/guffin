@@ -171,9 +171,12 @@ using local_gguf_engine::tensor::ops::copy_f32;
 using local_gguf_engine::tensor::ops::F32MatrixColumnView;
 using local_gguf_engine::tensor::ops::F32RoPEMatrixColumnView;
 using local_gguf_engine::tensor::ops::fill_f32;
+using local_gguf_engine::tensor::ops::gated_silu_projection_f32_f16_gguf_weight_to_backend;
 using local_gguf_engine::tensor::ops::matmul_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_f16;
 using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight;
+using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight_to_backend;
+using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight_triple_to_backend;
 using local_gguf_engine::tensor::ops::mean_square_f32;
 using local_gguf_engine::tensor::ops::multiply_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
@@ -182,6 +185,7 @@ using local_gguf_engine::tensor::ops::rope_f32;
 using local_gguf_engine::tensor::ops::rope_f32_with_position_start;
 using local_gguf_engine::tensor::ops::scaled_dot_product_attention_f32;
 using local_gguf_engine::tensor::ops::silu_f32;
+using local_gguf_engine::tensor::ops::silu_multiply_f32_to_backend;
 using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::sum_f32;
 using local_gguf_engine::tensor::ops::sum_squares_f32;
@@ -242,6 +246,38 @@ void expect_f32_matrix_close(
                 message
             );
         }
+    }
+}
+
+void expect_llama_kv_cache_close(
+    const LlamaKVCache& actual,
+    const LlamaKVCache& expected,
+    float tolerance,
+    std::string_view message
+) {
+    expect(actual.layers.size() == expected.layers.size(), std::string(message) + " layer count mismatch");
+    expect(actual.context_length == expected.context_length, std::string(message) + " context length mismatch");
+    expect(actual.key_width == expected.key_width, std::string(message) + " key width mismatch");
+    expect(actual.value_width == expected.value_width, std::string(message) + " value width mismatch");
+
+    for (std::size_t layer_index = 0; layer_index < actual.layers.size(); ++layer_index) {
+        const auto prefix = std::string(message) + " layer " + std::to_string(layer_index);
+        expect(
+            actual.layers[layer_index].filled_token_count == expected.layers[layer_index].filled_token_count,
+            prefix + " filled token count mismatch"
+        );
+        expect_f32_matrix_close(
+            actual.layers[layer_index].key,
+            expected.layers[layer_index].key,
+            tolerance,
+            prefix + " key cache"
+        );
+        expect_f32_matrix_close(
+            actual.layers[layer_index].value,
+            expected.layers[layer_index].value,
+            tolerance,
+            prefix + " value cache"
+        );
     }
 }
 
@@ -3050,6 +3086,161 @@ void test_multiplies_f32_by_cpu_backend_f16_gguf_weight_buffer() {
     expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 50.0F, "CPU buffered GGUF matmul value 1,1 mismatch");
 }
 
+void test_multiplies_backend_f32_by_backend_f16_gguf_weight_to_cpu_backend_buffer() {
+    const std::array<float, 6> left_values {
+        1.0F, 1.0F, 1.0F,
+        2.0F, 0.0F, 1.0F,
+    };
+    const std::array<float, 6> right_values {
+        1.0F, 2.0F, 3.0F,
+        10.0F, 20.0F, 30.0F,
+    };
+    const auto left = tensor_f32_matrix(2, 3, std::span<const float>(left_values));
+    const auto right = tensor_f16_gguf_matrix(3, 2, std::span<const float>(right_values));
+    const auto left_buffer = copy_tensor_to_backend(left, BackendKind::cpu);
+    const auto right_buffer = copy_tensor_to_backend(right, BackendKind::cpu);
+
+    const auto output_buffer = matmul_f32_f16_gguf_weight_to_backend(left_buffer, right_buffer);
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = matmul_f32_f16_gguf_weight(left, right, BackendKind::cpu);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU backend-buffer GGUF matmul output backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer GGUF matmul output");
+}
+
+void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers() {
+    const std::array<float, 6> left_values {
+        0.5F, -1.0F, 2.0F,
+        -0.75F, 1.5F, -0.25F,
+    };
+    const std::array<float, 6> first_values {
+        0.25F, -0.5F,
+        1.0F, 0.75F,
+        -1.25F, 0.5F,
+    };
+    const std::array<float, 12> second_values {
+        -0.125F, 0.625F, 0.5F, -1.0F,
+        0.75F, -0.25F, 1.5F, 0.125F,
+        1.0F, 0.25F, -1.25F, 0.5F,
+    };
+    const std::array<float, 3> third_values {
+        1.5F,
+        -0.25F,
+        0.375F,
+    };
+    const auto left = tensor_f32_matrix(2, 3, std::span<const float>(left_values));
+    const auto first_right = tensor_f16_gguf_matrix(3, 2, std::span<const float>(first_values));
+    const auto second_right = tensor_f16_gguf_matrix(3, 4, std::span<const float>(second_values));
+    const auto third_right = tensor_f16_gguf_matrix(3, 1, std::span<const float>(third_values));
+    const auto left_buffer = copy_tensor_to_backend(left, BackendKind::cpu);
+    const auto first_buffer = copy_tensor_to_backend(first_right, BackendKind::cpu);
+    const auto second_buffer = copy_tensor_to_backend(second_right, BackendKind::cpu);
+    const auto third_buffer = copy_tensor_to_backend(third_right, BackendKind::cpu);
+
+    const auto outputs = matmul_f32_f16_gguf_weight_triple_to_backend(
+        left_buffer,
+        first_buffer,
+        second_buffer,
+        third_buffer
+    );
+    const auto first_output = copy_tensor_from_backend(outputs.first);
+    const auto second_output = copy_tensor_from_backend(outputs.second);
+    const auto third_output = copy_tensor_from_backend(outputs.third);
+
+    expect(outputs.first.backend() == BackendKind::cpu, "CPU triple matmul first output backend mismatch");
+    expect(outputs.second.backend() == BackendKind::cpu, "CPU triple matmul second output backend mismatch");
+    expect(outputs.third.backend() == BackendKind::cpu, "CPU triple matmul third output backend mismatch");
+    expect_f32_matrix_close(
+        first_output,
+        matmul_f32_f16_gguf_weight(left, first_right, BackendKind::cpu),
+        0.0F,
+        "CPU triple matmul first output"
+    );
+    expect_f32_matrix_close(
+        second_output,
+        matmul_f32_f16_gguf_weight(left, second_right, BackendKind::cpu),
+        0.0F,
+        "CPU triple matmul second output"
+    );
+    expect_f32_matrix_close(
+        third_output,
+        matmul_f32_f16_gguf_weight(left, third_right, BackendKind::cpu),
+        0.0F,
+        "CPU triple matmul third output"
+    );
+}
+
+void test_applies_silu_multiply_to_cpu_backend_buffers() {
+    const std::array<float, 6> gate_values {
+        -2.0F, -1.0F, 0.0F,
+        0.5F, 1.0F, 2.0F,
+    };
+    const std::array<float, 6> up_values {
+        0.25F, -0.5F, 1.0F,
+        1.5F, -2.0F, 0.75F,
+    };
+    const auto gate = tensor_f32_matrix(2, 3, std::span<const float>(gate_values));
+    const auto up = tensor_f32_matrix(2, 3, std::span<const float>(up_values));
+    const auto gate_buffer = copy_tensor_to_backend(gate, BackendKind::cpu);
+    const auto up_buffer = copy_tensor_to_backend(up, BackendKind::cpu);
+
+    const auto output_buffer = silu_multiply_f32_to_backend(gate_buffer, up_buffer);
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = multiply_f32(silu_f32(gate), up);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU SiLU multiply output backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer SiLU multiply output");
+}
+
+void test_runs_gated_silu_projection_to_cpu_backend_buffer() {
+    const std::array<float, 6> left_values {
+        0.5F, -1.0F, 2.0F,
+        -0.75F, 1.5F, -0.25F,
+    };
+    const std::array<float, 12> gate_values {
+        0.25F, -0.5F, 0.75F, 1.0F,
+        -1.0F, 0.125F, 0.375F, -0.625F,
+        0.5F, 1.25F, -0.75F, 0.25F,
+    };
+    const std::array<float, 12> up_values {
+        -0.125F, 0.625F, 0.5F, -1.0F,
+        0.75F, -0.25F, 1.5F, 0.125F,
+        1.0F, 0.25F, -1.25F, 0.5F,
+    };
+    const std::array<float, 8> down_values {
+        0.5F, -0.25F,
+        -0.5F, 1.0F,
+        0.25F, 0.375F,
+        1.5F, -1.0F,
+    };
+    const auto left = tensor_f32_matrix(2, 3, std::span<const float>(left_values));
+    const auto gate_weight = tensor_f16_gguf_matrix(3, 4, std::span<const float>(gate_values));
+    const auto up_weight = tensor_f16_gguf_matrix(3, 4, std::span<const float>(up_values));
+    const auto down_weight = tensor_f16_gguf_matrix(4, 2, std::span<const float>(down_values));
+    const auto left_buffer = copy_tensor_to_backend(left, BackendKind::cpu);
+    const auto gate_buffer = copy_tensor_to_backend(gate_weight, BackendKind::cpu);
+    const auto up_buffer = copy_tensor_to_backend(up_weight, BackendKind::cpu);
+    const auto down_buffer = copy_tensor_to_backend(down_weight, BackendKind::cpu);
+
+    const auto output_buffer = gated_silu_projection_f32_f16_gguf_weight_to_backend(
+        left_buffer,
+        gate_buffer,
+        up_buffer,
+        down_buffer
+    );
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto gate = matmul_f32_f16_gguf_weight(left, gate_weight, BackendKind::cpu);
+    const auto up = matmul_f32_f16_gguf_weight(left, up_weight, BackendKind::cpu);
+    const auto expected = matmul_f32_f16_gguf_weight(
+        multiply_f32(silu_f32(gate), up),
+        down_weight,
+        BackendKind::cpu
+    );
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU gated SiLU projection output backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer gated SiLU projection output");
+}
+
 void test_matches_cpu_f32_by_f16_gguf_weight_matmul_on_metal_backend() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -3179,6 +3370,180 @@ void test_multiplies_f32_by_metal_backend_f16_gguf_weight_buffer_when_available(
             );
         }
     }
+}
+
+void test_multiplies_backend_f32_by_backend_f16_gguf_weight_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 12> left_values {
+        0.5F, -1.0F, 2.0F, 3.5F,
+        -2.0F, 0.25F, 1.5F, -0.75F,
+        4.0F, -3.0F, 0.125F, 2.25F,
+    };
+    const std::array<float, 20> right_values {
+        0.25F, -0.5F, 1.0F, 2.0F, -1.5F,
+        1.25F, 0.75F, -2.0F, 0.5F, 3.0F,
+        -0.25F, 1.5F, 0.125F, -1.0F, 2.25F,
+        2.5F, -1.25F, 0.625F, 1.75F, -0.875F,
+    };
+    const auto left = tensor_f32_matrix(3, 4, std::span<const float>(left_values));
+    const auto right = tensor_f16_gguf_matrix(4, 5, std::span<const float>(right_values));
+    const auto left_buffer = copy_tensor_to_backend(left, BackendKind::metal);
+    const auto right_buffer = copy_tensor_to_backend(right, BackendKind::metal);
+
+    const auto output_buffer = matmul_f32_f16_gguf_weight_to_backend(left_buffer, right_buffer);
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = matmul_f32_f16_gguf_weight(left, right, BackendKind::cpu);
+
+    expect(output_buffer.backend() == BackendKind::metal, "Metal backend-buffer GGUF matmul output backend mismatch");
+    expect_f32_matrix_close(output, expected, 1.0e-3F, "Metal backend-buffer GGUF matmul output");
+}
+
+void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_metal_backend_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 6> left_values {
+        0.5F, -1.0F, 2.0F,
+        -0.75F, 1.5F, -0.25F,
+    };
+    const std::array<float, 6> first_values {
+        0.25F, -0.5F,
+        1.0F, 0.75F,
+        -1.25F, 0.5F,
+    };
+    const std::array<float, 12> second_values {
+        -0.125F, 0.625F, 0.5F, -1.0F,
+        0.75F, -0.25F, 1.5F, 0.125F,
+        1.0F, 0.25F, -1.25F, 0.5F,
+    };
+    const std::array<float, 3> third_values {
+        1.5F,
+        -0.25F,
+        0.375F,
+    };
+    const auto left = tensor_f32_matrix(2, 3, std::span<const float>(left_values));
+    const auto first_right = tensor_f16_gguf_matrix(3, 2, std::span<const float>(first_values));
+    const auto second_right = tensor_f16_gguf_matrix(3, 4, std::span<const float>(second_values));
+    const auto third_right = tensor_f16_gguf_matrix(3, 1, std::span<const float>(third_values));
+    const auto left_buffer = copy_tensor_to_backend(left, BackendKind::metal);
+    const auto first_buffer = copy_tensor_to_backend(first_right, BackendKind::metal);
+    const auto second_buffer = copy_tensor_to_backend(second_right, BackendKind::metal);
+    const auto third_buffer = copy_tensor_to_backend(third_right, BackendKind::metal);
+
+    const auto outputs = matmul_f32_f16_gguf_weight_triple_to_backend(
+        left_buffer,
+        first_buffer,
+        second_buffer,
+        third_buffer
+    );
+    const auto first_output = copy_tensor_from_backend(outputs.first);
+    const auto second_output = copy_tensor_from_backend(outputs.second);
+    const auto third_output = copy_tensor_from_backend(outputs.third);
+
+    expect(outputs.first.backend() == BackendKind::metal, "Metal triple matmul first output backend mismatch");
+    expect(outputs.second.backend() == BackendKind::metal, "Metal triple matmul second output backend mismatch");
+    expect(outputs.third.backend() == BackendKind::metal, "Metal triple matmul third output backend mismatch");
+    expect_f32_matrix_close(
+        first_output,
+        matmul_f32_f16_gguf_weight(left, first_right, BackendKind::cpu),
+        1.0e-3F,
+        "Metal triple matmul first output"
+    );
+    expect_f32_matrix_close(
+        second_output,
+        matmul_f32_f16_gguf_weight(left, second_right, BackendKind::cpu),
+        1.0e-3F,
+        "Metal triple matmul second output"
+    );
+    expect_f32_matrix_close(
+        third_output,
+        matmul_f32_f16_gguf_weight(left, third_right, BackendKind::cpu),
+        1.0e-3F,
+        "Metal triple matmul third output"
+    );
+}
+
+void test_applies_silu_multiply_to_metal_backend_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 6> gate_values {
+        -2.0F, -1.0F, 0.0F,
+        0.5F, 1.0F, 2.0F,
+    };
+    const std::array<float, 6> up_values {
+        0.25F, -0.5F, 1.0F,
+        1.5F, -2.0F, 0.75F,
+    };
+    const auto gate = tensor_f32_matrix(2, 3, std::span<const float>(gate_values));
+    const auto up = tensor_f32_matrix(2, 3, std::span<const float>(up_values));
+    const auto gate_buffer = copy_tensor_to_backend(gate, BackendKind::metal);
+    const auto up_buffer = copy_tensor_to_backend(up, BackendKind::metal);
+
+    const auto output_buffer = silu_multiply_f32_to_backend(gate_buffer, up_buffer);
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = multiply_f32(silu_f32(gate), up);
+
+    expect(output_buffer.backend() == BackendKind::metal, "Metal SiLU multiply output backend mismatch");
+    expect_f32_matrix_close(output, expected, 1.0e-5F, "Metal backend-buffer SiLU multiply output");
+}
+
+void test_runs_gated_silu_projection_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 6> left_values {
+        0.5F, -1.0F, 2.0F,
+        -0.75F, 1.5F, -0.25F,
+    };
+    const std::array<float, 12> gate_values {
+        0.25F, -0.5F, 0.75F, 1.0F,
+        -1.0F, 0.125F, 0.375F, -0.625F,
+        0.5F, 1.25F, -0.75F, 0.25F,
+    };
+    const std::array<float, 12> up_values {
+        -0.125F, 0.625F, 0.5F, -1.0F,
+        0.75F, -0.25F, 1.5F, 0.125F,
+        1.0F, 0.25F, -1.25F, 0.5F,
+    };
+    const std::array<float, 8> down_values {
+        0.5F, -0.25F,
+        -0.5F, 1.0F,
+        0.25F, 0.375F,
+        1.5F, -1.0F,
+    };
+    const auto left = tensor_f32_matrix(2, 3, std::span<const float>(left_values));
+    const auto gate_weight = tensor_f16_gguf_matrix(3, 4, std::span<const float>(gate_values));
+    const auto up_weight = tensor_f16_gguf_matrix(3, 4, std::span<const float>(up_values));
+    const auto down_weight = tensor_f16_gguf_matrix(4, 2, std::span<const float>(down_values));
+    const auto left_buffer = copy_tensor_to_backend(left, BackendKind::metal);
+    const auto gate_buffer = copy_tensor_to_backend(gate_weight, BackendKind::metal);
+    const auto up_buffer = copy_tensor_to_backend(up_weight, BackendKind::metal);
+    const auto down_buffer = copy_tensor_to_backend(down_weight, BackendKind::metal);
+
+    const auto output_buffer = gated_silu_projection_f32_f16_gguf_weight_to_backend(
+        left_buffer,
+        gate_buffer,
+        up_buffer,
+        down_buffer
+    );
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto gate = matmul_f32_f16_gguf_weight(left, gate_weight, BackendKind::cpu);
+    const auto up = matmul_f32_f16_gguf_weight(left, up_weight, BackendKind::cpu);
+    const auto expected = matmul_f32_f16_gguf_weight(
+        multiply_f32(silu_f32(gate), up),
+        down_weight,
+        BackendKind::cpu
+    );
+
+    expect(output_buffer.backend() == BackendKind::metal, "Metal gated SiLU projection output backend mismatch");
+    expect_f32_matrix_close(output, expected, 1.0e-3F, "Metal backend-buffer gated SiLU projection output");
 }
 
 void test_reports_unavailable_metal_backend_for_gguf_matmul_when_missing() {
@@ -4443,6 +4808,26 @@ TensorStorage backend_feed_forward_fixture_input() {
     return tensor_f32_matrix(2, 4, std::span<const float>(input_values));
 }
 
+EngineModel backend_cached_model_blocks_fixture_model() {
+    auto config = tiny_feed_forward_layer_config();
+    config.block_count = 2;
+    std::vector<EngineTensor> tensors;
+    add_tiny_llama_top_level_tensors(tensors);
+    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
+    add_tiny_llama_block_tensors(tensors, 1, 0.5F, false, true);
+    return tiny_bound_llama_model(config, std::move(tensors));
+}
+
+TensorStorage backend_cached_model_blocks_first_input() {
+    const std::array<float, 2> input_values {3.0F, 4.0F};
+    return tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+}
+
+TensorStorage backend_cached_model_blocks_second_input() {
+    const std::array<float, 2> input_values {30.0F, 40.0F};
+    return tensor_f32_matrix(1, 2, std::span<const float>(input_values));
+}
+
 void expect_model_attention_backend_weights(
     const LlamaModelWeights& weights,
     const LlamaModelAttentionBackendWeights& backend_weights,
@@ -4708,6 +5093,108 @@ void test_runs_llama_block_with_cpu_backend_weight_buffers() {
     expect_f32_matrix_close(output, expected, 0.0F, "Llama block CPU backend weight buffer output");
 }
 
+void test_runs_llama_block_with_kv_cache_and_cpu_backend_weight_buffers() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_block_weights_to_backend(weights.blocks[0], BackendKind::cpu);
+    const std::array<float, 4> first_input_values {
+        0.5F, -1.0F, 2.0F, 0.25F,
+    };
+    const std::array<float, 4> second_input_values {
+        -0.75F, 1.5F, -0.5F, 2.25F,
+    };
+    const auto first_input = tensor_f32_matrix(1, 4, std::span<const float>(first_input_values));
+    const auto second_input = tensor_f32_matrix(1, 4, std::span<const float>(second_input_values));
+    auto expected_cache = create_llama_kv_cache(model.llama_config());
+    auto backend_cache = create_llama_kv_cache(model.llama_config());
+
+    (void)run_llama_block_with_kv_cache_f32(
+        first_input,
+        weights.blocks[0],
+        model.llama_config(),
+        0,
+        expected_cache.layers[0]
+    );
+    const auto expected = run_llama_block_with_kv_cache_f32(
+        second_input,
+        weights.blocks[0],
+        model.llama_config(),
+        1,
+        expected_cache.layers[0]
+    );
+    (void)run_llama_block_with_kv_cache_f32(
+        first_input,
+        backend_weights,
+        model.llama_config(),
+        0,
+        backend_cache.layers[0]
+    );
+    const auto output = run_llama_block_with_kv_cache_f32(
+        second_input,
+        backend_weights,
+        model.llama_config(),
+        1,
+        backend_cache.layers[0]
+    );
+
+    expect_block_backend_weights(weights.blocks[0], backend_weights, BackendKind::cpu);
+    expect_f32_matrix_close(output, expected, 1.0e-4F, "Llama CPU backend cached block output");
+    expect_llama_kv_cache_close(backend_cache, expected_cache, 1.0e-5F, "Llama CPU backend cached block cache");
+}
+
+void test_matches_llama_block_with_kv_cache_and_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_block_weights_to_backend(weights.blocks[0], BackendKind::metal);
+    const std::array<float, 4> first_input_values {
+        0.5F, -1.0F, 2.0F, 0.25F,
+    };
+    const std::array<float, 4> second_input_values {
+        -0.75F, 1.5F, -0.5F, 2.25F,
+    };
+    const auto first_input = tensor_f32_matrix(1, 4, std::span<const float>(first_input_values));
+    const auto second_input = tensor_f32_matrix(1, 4, std::span<const float>(second_input_values));
+    auto expected_cache = create_llama_kv_cache(model.llama_config());
+    auto backend_cache = create_llama_kv_cache(model.llama_config());
+
+    (void)run_llama_block_with_kv_cache_f32(
+        first_input,
+        weights.blocks[0],
+        model.llama_config(),
+        0,
+        expected_cache.layers[0]
+    );
+    const auto expected = run_llama_block_with_kv_cache_f32(
+        second_input,
+        weights.blocks[0],
+        model.llama_config(),
+        1,
+        expected_cache.layers[0]
+    );
+    (void)run_llama_block_with_kv_cache_f32(
+        first_input,
+        backend_weights,
+        model.llama_config(),
+        0,
+        backend_cache.layers[0]
+    );
+    const auto output = run_llama_block_with_kv_cache_f32(
+        second_input,
+        backend_weights,
+        model.llama_config(),
+        1,
+        backend_cache.layers[0]
+    );
+
+    expect_block_backend_weights(weights.blocks[0], backend_weights, BackendKind::metal);
+    expect_f32_matrix_close(output, expected, 2.0e-2F, "Llama Metal backend cached block output");
+    expect_llama_kv_cache_close(backend_cache, expected_cache, 1.0e-2F, "Llama Metal backend cached block cache");
+}
+
 void test_binds_and_runs_llama_model_blocks_from_named_tensors() {
     auto config = tiny_feed_forward_layer_config();
     config.block_count = 2;
@@ -4961,6 +5448,119 @@ void test_matches_llama_model_blocks_with_metal_backend_weight_buffers_when_avai
     const auto expected = run_llama_model_blocks_f32(input, weights, model.llama_config(), 1);
     const auto output = run_llama_model_blocks_f32(input, backend_weights, model.llama_config(), 1);
     expect_f32_matrix_close(output, expected, 4.0e-3F, "Llama model Metal block backend weight output");
+}
+
+void test_runs_llama_model_blocks_with_kv_cache_and_cpu_backend_weight_buffers() {
+    const auto model = backend_cached_model_blocks_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_block_weights_to_backend(weights, BackendKind::cpu);
+    const auto first_input = backend_cached_model_blocks_first_input();
+    const auto second_input = backend_cached_model_blocks_second_input();
+    auto expected_cache = create_llama_kv_cache(model.llama_config());
+    auto backend_cache = create_llama_kv_cache(model.llama_config());
+
+    (void)run_llama_model_blocks_with_kv_cache_f32(
+        first_input,
+        weights,
+        model.llama_config(),
+        0,
+        expected_cache
+    );
+    const auto expected = run_llama_model_blocks_with_kv_cache_f32(
+        second_input,
+        weights,
+        model.llama_config(),
+        1,
+        expected_cache
+    );
+    (void)run_llama_model_blocks_with_kv_cache_f32(
+        first_input,
+        backend_weights,
+        model.llama_config(),
+        0,
+        backend_cache
+    );
+    const auto output = run_llama_model_blocks_with_kv_cache_f32(
+        second_input,
+        backend_weights,
+        model.llama_config(),
+        1,
+        backend_cache
+    );
+
+    expect_model_block_backend_weights(weights, backend_weights, BackendKind::cpu);
+    expect_f32_matrix_close(output, expected, 1.0e-4F, "Llama model CPU backend cached blocks output");
+    expect_llama_kv_cache_close(backend_cache, expected_cache, 1.0e-5F, "Llama model CPU backend cached blocks cache");
+}
+
+void test_matches_llama_model_blocks_with_kv_cache_and_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_cached_model_blocks_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_block_weights_to_backend(weights, BackendKind::metal);
+    const auto first_input = backend_cached_model_blocks_first_input();
+    const auto second_input = backend_cached_model_blocks_second_input();
+    auto expected_cache = create_llama_kv_cache(model.llama_config());
+    auto backend_cache = create_llama_kv_cache(model.llama_config());
+
+    (void)run_llama_model_blocks_with_kv_cache_f32(
+        first_input,
+        weights,
+        model.llama_config(),
+        0,
+        expected_cache
+    );
+    const auto expected = run_llama_model_blocks_with_kv_cache_f32(
+        second_input,
+        weights,
+        model.llama_config(),
+        1,
+        expected_cache
+    );
+    (void)run_llama_model_blocks_with_kv_cache_f32(
+        first_input,
+        backend_weights,
+        model.llama_config(),
+        0,
+        backend_cache
+    );
+    const auto output = run_llama_model_blocks_with_kv_cache_f32(
+        second_input,
+        backend_weights,
+        model.llama_config(),
+        1,
+        backend_cache
+    );
+
+    expect_model_block_backend_weights(weights, backend_weights, BackendKind::metal);
+    expect_f32_matrix_close(output, expected, 5.0e-2F, "Llama model Metal backend cached blocks output");
+    expect_llama_kv_cache_close(backend_cache, expected_cache, 2.0e-2F, "Llama model Metal backend cached blocks cache");
+}
+
+void test_reports_unavailable_llama_model_blocks_with_kv_cache_backend_weight_copy_when_metal_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_cached_model_blocks_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    try {
+        (void)copy_llama_model_block_weights_to_backend(weights, BackendKind::metal);
+        throw TestFailure("Llama model cached-block Metal backend weight copy should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Llama model cached-block Metal backend weight copy unavailable error code mismatch"
+        );
+        expect(
+            error.backend() == BackendKind::metal,
+            "Llama model cached-block Metal backend weight copy backend mismatch"
+        );
+    }
 }
 
 void test_reports_unavailable_llama_model_block_backend_weight_copy_when_metal_missing() {
@@ -8090,6 +8690,22 @@ int main() {
             test_multiplies_f32_by_cpu_backend_f16_gguf_weight_buffer,
         },
         {
+            "multiplies backend F32 by backend F16 GGUF weight to CPU backend buffer",
+            test_multiplies_backend_f32_by_backend_f16_gguf_weight_to_cpu_backend_buffer,
+        },
+        {
+            "multiplies backend F32 by three backend F16 GGUF weights to CPU backend buffers",
+            test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers,
+        },
+        {
+            "applies SiLU multiply to CPU backend buffers",
+            test_applies_silu_multiply_to_cpu_backend_buffers,
+        },
+        {
+            "runs gated SiLU projection to CPU backend buffer",
+            test_runs_gated_silu_projection_to_cpu_backend_buffer,
+        },
+        {
             "matches CPU F32 by F16 GGUF weight matmul on Metal backend",
             test_matches_cpu_f32_by_f16_gguf_weight_matmul_on_metal_backend,
         },
@@ -8100,6 +8716,22 @@ int main() {
         {
             "multiplies F32 by Metal backend F16 GGUF weight buffer when available",
             test_multiplies_f32_by_metal_backend_f16_gguf_weight_buffer_when_available,
+        },
+        {
+            "multiplies backend F32 by backend F16 GGUF weight to Metal backend buffer when available",
+            test_multiplies_backend_f32_by_backend_f16_gguf_weight_to_metal_backend_buffer_when_available,
+        },
+        {
+            "multiplies backend F32 by three backend F16 GGUF weights to Metal backend buffers when available",
+            test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_metal_backend_buffers_when_available,
+        },
+        {
+            "applies SiLU multiply to Metal backend buffers when available",
+            test_applies_silu_multiply_to_metal_backend_buffers_when_available,
+        },
+        {
+            "runs gated SiLU projection to Metal backend buffer when available",
+            test_runs_gated_silu_projection_to_metal_backend_buffer_when_available,
         },
         {
             "reuses Metal F32 by F16 GGUF weight matmul state",
@@ -8188,6 +8820,14 @@ int main() {
             test_runs_llama_block_with_cpu_backend_weight_buffers,
         },
         {
+            "runs Llama block with KV cache and CPU backend weight buffers",
+            test_runs_llama_block_with_kv_cache_and_cpu_backend_weight_buffers,
+        },
+        {
+            "matches Llama block with KV cache and Metal backend weight buffers when available",
+            test_matches_llama_block_with_kv_cache_and_metal_backend_weight_buffers_when_available,
+        },
+        {
             "rejects Llama block attention projection shape mismatch",
             test_rejects_llama_block_attention_projection_shape_mismatch,
         },
@@ -8230,6 +8870,18 @@ int main() {
         {
             "matches Llama model blocks with Metal backend weight buffers when available",
             test_matches_llama_model_blocks_with_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "runs Llama model blocks with KV cache and CPU backend weight buffers",
+            test_runs_llama_model_blocks_with_kv_cache_and_cpu_backend_weight_buffers,
+        },
+        {
+            "matches Llama model blocks with KV cache and Metal backend weight buffers when available",
+            test_matches_llama_model_blocks_with_kv_cache_and_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "reports unavailable Llama model blocks with KV cache backend weight copy when Metal is missing",
+            test_reports_unavailable_llama_model_blocks_with_kv_cache_backend_weight_copy_when_metal_missing,
         },
         {
             "reports unavailable Llama model block backend weight copy when Metal is missing",

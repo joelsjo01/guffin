@@ -129,4 +129,12 @@ struct LlamaBlockBackendWeights {
     LlamaKVCacheLayer& cache
 );
 
+[[nodiscard]] tensor::TensorStorage run_llama_block_with_kv_cache_f32(
+    const tensor::TensorStorage& input,
+    const LlamaBlockBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCacheLayer& cache
+);
+
 }  // namespace local_gguf_engine::engine

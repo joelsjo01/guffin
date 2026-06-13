@@ -7,6 +7,8 @@
 
 namespace local_gguf_engine::tensor {
 
+class BackendBuffer;
+
 namespace detail {
 
 class BackendBufferStorage {
@@ -16,6 +18,8 @@ public:
     [[nodiscard]] virtual runtime::BackendKind backend() const noexcept = 0;
     [[nodiscard]] virtual const TensorDescriptor& descriptor() const noexcept = 0;
 };
+
+[[nodiscard]] BackendBuffer make_backend_buffer(std::shared_ptr<BackendBufferStorage> storage);
 
 }  // namespace detail
 
@@ -30,6 +34,7 @@ private:
     friend BackendBuffer copy_tensor_to_backend(const TensorStorage&, runtime::BackendKind);
     friend TensorStorage copy_tensor_from_backend(const BackendBuffer&);
     friend const detail::BackendBufferStorage& backend_buffer_storage(const BackendBuffer&) noexcept;
+    friend BackendBuffer detail::make_backend_buffer(std::shared_ptr<detail::BackendBufferStorage>);
 
     std::shared_ptr<detail::BackendBufferStorage> storage_;
 };
