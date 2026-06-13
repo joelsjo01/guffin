@@ -107,6 +107,7 @@ using local_gguf_engine::engine::run_llama_model_logits_f32;
 using local_gguf_engine::engine::run_llama_model_logits_with_kv_cache_f32;
 using local_gguf_engine::engine::run_llama_model_next_token_argmax_f32;
 using local_gguf_engine::engine::run_llama_model_next_token_argmax_with_kv_cache_f32;
+using local_gguf_engine::engine::run_llama_model_next_token_sampled_f32;
 using local_gguf_engine::engine::sample_argmax_token_f32;
 using local_gguf_engine::engine::sample_token_f32;
 using local_gguf_engine::engine::SamplingConfig;
@@ -5750,6 +5751,164 @@ void test_rejects_llama_next_token_empty_token_ids() {
     }
 }
 
+void test_runs_llama_next_token_argmax_with_cpu_backend_weight_buffers() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_logits_weights_to_backend(weights, BackendKind::cpu);
+    const std::array<std::uint32_t, 1> token_ids {0};
+
+    const auto expected = run_llama_model_next_token_argmax_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        0
+    );
+    const auto token = run_llama_model_next_token_argmax_f32(
+        std::span<const std::uint32_t>(token_ids),
+        backend_weights,
+        model.llama_config(),
+        0
+    );
+
+    expect_model_logits_backend_weights(weights, backend_weights, BackendKind::cpu);
+    expect(token == expected, "Llama CPU backend next-token argmax should match CPU reference");
+    expect(token == 2, "Llama CPU backend next-token argmax token mismatch");
+}
+
+void test_runs_llama_next_token_sampled_with_cpu_backend_weight_buffers() {
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_logits_weights_to_backend(weights, BackendKind::cpu);
+    const std::array<std::uint32_t, 1> token_ids {0};
+    const SamplingConfig sampling {
+        .temperature = 10.0F,
+        .top_k = 2,
+        .seed = 0,
+    };
+    SamplingState expected_state(sampling.seed);
+    SamplingState backend_state(sampling.seed);
+
+    const auto expected = run_llama_model_next_token_sampled_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        0,
+        sampling,
+        expected_state,
+        std::span<const std::uint32_t>(token_ids)
+    );
+    const auto token = run_llama_model_next_token_sampled_f32(
+        std::span<const std::uint32_t>(token_ids),
+        backend_weights,
+        model.llama_config(),
+        0,
+        sampling,
+        backend_state,
+        std::span<const std::uint32_t>(token_ids)
+    );
+
+    expect_model_logits_backend_weights(weights, backend_weights, BackendKind::cpu);
+    expect(token == expected, "Llama CPU backend next-token sampled output should match CPU reference");
+    expect(token == 1, "Llama CPU backend next-token sampled token mismatch");
+}
+
+void test_matches_llama_next_token_argmax_with_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_logits_weights_to_backend(weights, BackendKind::metal);
+    const std::array<std::uint32_t, 1> token_ids {0};
+
+    const auto expected = run_llama_model_next_token_argmax_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        0
+    );
+    const auto token = run_llama_model_next_token_argmax_f32(
+        std::span<const std::uint32_t>(token_ids),
+        backend_weights,
+        model.llama_config(),
+        0
+    );
+
+    expect_model_logits_backend_weights(weights, backend_weights, BackendKind::metal);
+    expect(token == expected, "Llama Metal backend next-token argmax should match CPU reference");
+}
+
+void test_matches_llama_next_token_sampled_with_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_logits_weights_to_backend(weights, BackendKind::metal);
+    const std::array<std::uint32_t, 1> token_ids {0};
+    const SamplingConfig sampling {
+        .temperature = 1.0F,
+        .top_p = 0.01F,
+        .seed = 17,
+    };
+    SamplingState expected_state(sampling.seed);
+    SamplingState backend_state(sampling.seed);
+
+    const auto expected = run_llama_model_next_token_sampled_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        0,
+        sampling,
+        expected_state,
+        std::span<const std::uint32_t>(token_ids)
+    );
+    const auto token = run_llama_model_next_token_sampled_f32(
+        std::span<const std::uint32_t>(token_ids),
+        backend_weights,
+        model.llama_config(),
+        0,
+        sampling,
+        backend_state,
+        std::span<const std::uint32_t>(token_ids)
+    );
+
+    expect_model_logits_backend_weights(weights, backend_weights, BackendKind::metal);
+    expect(token == expected, "Llama Metal backend next-token sampled output should match CPU reference");
+}
+
+void test_reports_unavailable_llama_next_token_backend_weight_copy_when_metal_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto config = tiny_logits_config();
+    config.block_count = 1;
+    const auto model = tiny_argmax_generation_model(config);
+    const auto weights = bind_llama_model_weights(model);
+
+    try {
+        (void)copy_llama_model_logits_weights_to_backend(weights, BackendKind::metal);
+        throw TestFailure("Llama next-token Metal backend weight copy should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Llama next-token Metal backend weight copy unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Llama next-token Metal backend weight copy backend mismatch");
+    }
+}
+
 void test_generates_llama_argmax_tokens() {
     auto config = tiny_logits_config();
     config.block_count = 1;
@@ -8012,6 +8171,26 @@ int main() {
         {"rejects sampling invalid repetition penalty", test_rejects_sampling_invalid_repetition_penalty},
         {"runs Llama next-token argmax from token IDs", test_runs_llama_next_token_argmax_from_token_ids},
         {"rejects Llama next-token empty token IDs", test_rejects_llama_next_token_empty_token_ids},
+        {
+            "runs Llama next-token argmax with CPU backend weight buffers",
+            test_runs_llama_next_token_argmax_with_cpu_backend_weight_buffers,
+        },
+        {
+            "runs Llama next-token sampled with CPU backend weight buffers",
+            test_runs_llama_next_token_sampled_with_cpu_backend_weight_buffers,
+        },
+        {
+            "matches Llama next-token argmax with Metal backend weight buffers when available",
+            test_matches_llama_next_token_argmax_with_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "matches Llama next-token sampled with Metal backend weight buffers when available",
+            test_matches_llama_next_token_sampled_with_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "reports unavailable Llama next-token backend weight copy when Metal is missing",
+            test_reports_unavailable_llama_next_token_backend_weight_copy_when_metal_missing,
+        },
         {"generates Llama argmax tokens", test_generates_llama_argmax_tokens},
         {"generates Llama argmax tokens stops at token", test_generates_llama_argmax_tokens_stops_at_token},
         {

@@ -127,6 +127,13 @@ struct LlamaModelLogitsBackendWeights {
     std::uint64_t position
 );
 
+[[nodiscard]] std::uint32_t run_llama_model_next_token_argmax_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelLogitsBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+);
+
 [[nodiscard]] std::uint32_t run_llama_model_next_token_argmax_with_kv_cache_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelWeights& weights,
@@ -138,6 +145,16 @@ struct LlamaModelLogitsBackendWeights {
 [[nodiscard]] std::uint32_t run_llama_model_next_token_sampled_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    const SamplingConfig& sampling,
+    SamplingState& sampling_state,
+    std::span<const std::uint32_t> repetition_token_ids = {}
+);
+
+[[nodiscard]] std::uint32_t run_llama_model_next_token_sampled_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelLogitsBackendWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position,
     const SamplingConfig& sampling,

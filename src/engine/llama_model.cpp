@@ -461,6 +461,16 @@ std::uint32_t run_llama_model_next_token_argmax_f32(
     return sample_argmax_token_f32(logits);
 }
 
+std::uint32_t run_llama_model_next_token_argmax_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelLogitsBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+) {
+    const auto logits = run_llama_model_logits_f32(token_ids, weights, config, position);
+    return sample_argmax_token_f32(logits);
+}
+
 std::uint32_t run_llama_model_next_token_argmax_with_kv_cache_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelWeights& weights,
@@ -475,6 +485,19 @@ std::uint32_t run_llama_model_next_token_argmax_with_kv_cache_f32(
 std::uint32_t run_llama_model_next_token_sampled_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    const SamplingConfig& sampling,
+    SamplingState& sampling_state,
+    std::span<const std::uint32_t> repetition_token_ids
+) {
+    const auto logits = run_llama_model_logits_f32(token_ids, weights, config, position);
+    return sample_token_f32(logits, sampling, sampling_state, repetition_token_ids);
+}
+
+std::uint32_t run_llama_model_next_token_sampled_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelLogitsBackendWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position,
     const SamplingConfig& sampling,
