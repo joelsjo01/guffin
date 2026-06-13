@@ -65,7 +65,7 @@ else
 	CXXFLAGS := $(COMMON_FLAGS) $(DEBUG_FLAGS)
 endif
 
-.PHONY: test release-test gguf-inspect generate benchmark run-benchmark clean
+.PHONY: test release-test gguf-inspect generate benchmark bench run-benchmark clean
 
 test: $(TEST_BINARY) $(GGUF_INSPECT_BINARY) $(GENERATE_BINARY) $(BENCHMARK_BINARY)
 	./$(TEST_BINARY)
@@ -78,6 +78,8 @@ gguf-inspect: $(GGUF_INSPECT_BINARY)
 generate: $(GENERATE_BINARY)
 
 benchmark: $(BENCHMARK_BINARY)
+
+bench: benchmark
 
 run-benchmark: $(BENCHMARK_BINARY)
 	./$(BENCHMARK_BINARY)

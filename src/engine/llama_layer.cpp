@@ -575,6 +575,99 @@ void accumulate_cached_attention_projection_f32(
     }
 }
 
+[[nodiscard]] TensorStorage materialize_cached_attention_output_f32(
+    const TensorStorage& query,
+    const LlamaKVCacheLayer& cache,
+    const LlamaModelConfig& config,
+    std::uint64_t token_count,
+    std::uint64_t cached_token_count,
+    std::uint64_t position_start,
+    float scale
+) {
+    const auto head_count = static_cast<std::uint64_t>(config.attention_head_count);
+    const auto kv_head_count = static_cast<std::uint64_t>(config.attention_head_count_kv);
+    const auto key_length = static_cast<std::uint64_t>(config.attention_key_length);
+    const auto value_length = static_cast<std::uint64_t>(config.attention_value_length);
+    const auto attention_output_width = head_count * value_length;
+    const auto kv_group_size = head_count / kv_head_count;
+    std::vector<float> value_accumulator(static_cast<std::size_t>(value_length));
+    auto attention_output = TensorStorage::allocate(
+        TensorDescriptor::from(Shape::from({token_count, attention_output_width}), DType::f32)
+    );
+
+    for (std::uint64_t head = 0; head < head_count; ++head) {
+        const auto kv_head = head / kv_group_size;
+        const auto query_first_column = head * key_length;
+        const auto key_first_column = kv_head * key_length;
+        const auto value_first_column = kv_head * value_length;
+        const auto output_first_column = head * value_length;
+
+        for (std::uint64_t query_row = 0; query_row < token_count; ++query_row) {
+            for (auto& value : value_accumulator) {
+                value = 0.0F;
+            }
+
+            float max_score = -std::numeric_limits<float>::infinity();
+            float denominator = 0.0F;
+            const auto last_visible_key_row = position_start + query_row;
+
+            for (std::uint64_t key_row = 0; key_row < cached_token_count; ++key_row) {
+                if (key_row > last_visible_key_row) {
+                    continue;
+                }
+
+                const auto score = cached_attention_score_f32(
+                    query,
+                    cache,
+                    query_row,
+                    key_row,
+                    query_first_column,
+                    key_first_column,
+                    key_length,
+                    position_start,
+                    config.rope_dimension_count,
+                    config.rope_freq_base,
+                    scale
+                );
+
+                if (score > max_score) {
+                    const auto rescale = std::isfinite(max_score) ? std::exp(max_score - score) : 0.0F;
+                    denominator *= rescale;
+                    for (auto& value : value_accumulator) {
+                        value *= rescale;
+                    }
+                    max_score = score;
+                }
+
+                const auto weight = std::exp(score - max_score);
+                denominator += weight;
+                for (std::uint64_t value_column = 0; value_column < value_length; ++value_column) {
+                    value_accumulator[static_cast<std::size_t>(value_column)] += weight * read_f32_column_window(
+                        cache.value,
+                        key_row,
+                        value_first_column,
+                        value_column
+                    );
+                }
+            }
+
+            if (!(denominator > 0.0F)) {
+                throw std::invalid_argument("Llama cached attention row has no visible keys");
+            }
+
+            for (std::uint64_t value_column = 0; value_column < value_length; ++value_column) {
+                write_f32_linear(
+                    attention_output,
+                    query_row * attention_output_width + output_first_column + value_column,
+                    value_accumulator[static_cast<std::size_t>(value_column)] / denominator
+                );
+            }
+        }
+    }
+
+    return attention_output;
+}
+
 template <typename Weights>
 [[nodiscard]] TensorStorage run_llama_attention_layer_impl(
     const TensorStorage& input,
@@ -642,6 +735,60 @@ template <typename Weights>
         write_f32_columns(attention_output, head * value_length, head_output);
     }
 
+    const auto projected = matmul_f32_f16_gguf_weight(attention_output, weights.output_weight);
+    return add_f32(input, projected);
+}
+
+template <typename Weights>
+[[nodiscard]] TensorStorage run_llama_attention_layer_with_kv_cache_backend_impl(
+    const TensorStorage& input,
+    const Weights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCacheLayer& cache
+) {
+    require_supported_config(config);
+
+    const auto token_count = input.descriptor().shape.dimension(0);
+    const auto hidden = static_cast<std::uint64_t>(config.embedding_length);
+    const auto head_count = static_cast<std::uint64_t>(config.attention_head_count);
+    const auto kv_head_count = static_cast<std::uint64_t>(config.attention_head_count_kv);
+    const auto key_length = static_cast<std::uint64_t>(config.attention_key_length);
+    const auto value_length = static_cast<std::uint64_t>(config.attention_value_length);
+    const auto query_width = head_count * key_length;
+    const auto key_width = kv_head_count * key_length;
+    const auto value_width = kv_head_count * value_length;
+    const auto attention_output_width = head_count * value_length;
+
+    require_f32_matrix_shape(input, token_count, hidden);
+    require_f32_vector_shape(weights.attention_norm_weight, hidden);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.query_weight), hidden, query_width);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.key_weight), hidden, key_width);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.value_weight), hidden, value_width);
+    require_f16_matrix_shape(projection_weight_descriptor(weights.output_weight), attention_output_width, hidden);
+
+    const auto attention_query_position_start = query_position_start(position, token_count);
+    if (cache.filled_token_count != attention_query_position_start) {
+        throw std::invalid_argument("Llama KV cache append position must match filled token count");
+    }
+
+    const auto normalized = rms_norm_f32(input, weights.attention_norm_weight, config.rms_norm_epsilon);
+    const auto query = matmul_f32_f16_gguf_weight(normalized, weights.query_weight);
+    const auto key = matmul_f32_f16_gguf_weight(normalized, weights.key_weight);
+    const auto value = matmul_f32_f16_gguf_weight(normalized, weights.value_weight);
+
+    append_rotated_key_value_to_cache_f32(cache, key, value, config, attention_query_position_start);
+    const auto cached_token_count = cache.filled_token_count;
+    const auto attention_scale = 1.0F / std::sqrt(static_cast<float>(key_length));
+    const auto attention_output = materialize_cached_attention_output_f32(
+        query,
+        cache,
+        config,
+        token_count,
+        cached_token_count,
+        attention_query_position_start,
+        attention_scale
+    );
     const auto projected = matmul_f32_f16_gguf_weight(attention_output, weights.output_weight);
     return add_f32(input, projected);
 }
@@ -783,6 +930,16 @@ TensorStorage run_llama_attention_layer_with_kv_cache_f32(
         attention_scale
     );
     return add_f32(input, projected);
+}
+
+TensorStorage run_llama_attention_layer_with_kv_cache_f32(
+    const TensorStorage& input,
+    const LlamaAttentionLayerBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaKVCacheLayer& cache
+) {
+    return run_llama_attention_layer_with_kv_cache_backend_impl(input, weights, config, position, cache);
 }
 
 TensorStorage run_llama_feed_forward_layer_f32(

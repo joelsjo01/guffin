@@ -4610,6 +4610,69 @@ void test_runs_llama_attention_layer_with_cpu_backend_weight_buffers() {
     expect_f32_matrix_close(output, expected, 0.0F, "Llama attention CPU backend weight buffer output");
 }
 
+void test_runs_llama_attention_layer_with_kv_cache_and_cpu_backend_weight_buffers() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_attention_layer_weights_to_backend(
+        weights.blocks[0].attention,
+        BackendKind::cpu
+    );
+    const std::array<float, 4> first_input_values {
+        0.5F, -1.0F, 2.0F, 0.25F,
+    };
+    const std::array<float, 4> second_input_values {
+        -0.75F, 1.5F, -0.5F, 2.25F,
+    };
+    const auto first_input = tensor_f32_matrix(1, 4, std::span<const float>(first_input_values));
+    const auto second_input = tensor_f32_matrix(1, 4, std::span<const float>(second_input_values));
+    auto expected_cache = create_llama_kv_cache(model.llama_config());
+    auto backend_cache = create_llama_kv_cache(model.llama_config());
+
+    (void)run_llama_attention_layer_with_kv_cache_f32(
+        first_input,
+        weights.blocks[0].attention,
+        model.llama_config(),
+        0,
+        expected_cache.layers[0]
+    );
+    const auto expected = run_llama_attention_layer_with_kv_cache_f32(
+        second_input,
+        weights.blocks[0].attention,
+        model.llama_config(),
+        1,
+        expected_cache.layers[0]
+    );
+    (void)run_llama_attention_layer_with_kv_cache_f32(
+        first_input,
+        backend_weights,
+        model.llama_config(),
+        0,
+        backend_cache.layers[0]
+    );
+    const auto output = run_llama_attention_layer_with_kv_cache_f32(
+        second_input,
+        backend_weights,
+        model.llama_config(),
+        1,
+        backend_cache.layers[0]
+    );
+
+    expect(backend_cache.layers[0].filled_token_count == 2, "Llama CPU backend cached attention fill mismatch");
+    expect_f32_matrix_close(output, expected, 1.0e-5F, "Llama CPU backend cached attention output");
+    expect_f32_matrix_close(
+        backend_cache.layers[0].key,
+        expected_cache.layers[0].key,
+        1.0e-5F,
+        "Llama CPU backend cached attention key cache"
+    );
+    expect_f32_matrix_close(
+        backend_cache.layers[0].value,
+        expected_cache.layers[0].value,
+        1.0e-5F,
+        "Llama CPU backend cached attention value cache"
+    );
+}
+
 void test_runs_llama_feed_forward_layer_with_cpu_backend_weight_buffers() {
     const auto model = backend_feed_forward_fixture_model();
     const auto weights = bind_llama_model_weights(model);
@@ -4735,6 +4798,73 @@ void test_matches_llama_attention_layer_with_metal_backend_weight_buffers_when_a
         1
     );
     expect_f32_matrix_close(output, expected, 2.0e-3F, "Llama model Metal attention backend weight output");
+}
+
+void test_matches_llama_attention_layer_with_kv_cache_and_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_attention_layer_weights_to_backend(
+        weights.blocks[0].attention,
+        BackendKind::metal
+    );
+    const std::array<float, 4> first_input_values {
+        0.5F, -1.0F, 2.0F, 0.25F,
+    };
+    const std::array<float, 4> second_input_values {
+        -0.75F, 1.5F, -0.5F, 2.25F,
+    };
+    const auto first_input = tensor_f32_matrix(1, 4, std::span<const float>(first_input_values));
+    const auto second_input = tensor_f32_matrix(1, 4, std::span<const float>(second_input_values));
+    auto expected_cache = create_llama_kv_cache(model.llama_config());
+    auto backend_cache = create_llama_kv_cache(model.llama_config());
+
+    (void)run_llama_attention_layer_with_kv_cache_f32(
+        first_input,
+        weights.blocks[0].attention,
+        model.llama_config(),
+        0,
+        expected_cache.layers[0]
+    );
+    const auto expected = run_llama_attention_layer_with_kv_cache_f32(
+        second_input,
+        weights.blocks[0].attention,
+        model.llama_config(),
+        1,
+        expected_cache.layers[0]
+    );
+    (void)run_llama_attention_layer_with_kv_cache_f32(
+        first_input,
+        backend_weights,
+        model.llama_config(),
+        0,
+        backend_cache.layers[0]
+    );
+    const auto output = run_llama_attention_layer_with_kv_cache_f32(
+        second_input,
+        backend_weights,
+        model.llama_config(),
+        1,
+        backend_cache.layers[0]
+    );
+
+    expect(backend_cache.layers[0].filled_token_count == 2, "Llama Metal backend cached attention fill mismatch");
+    expect_f32_matrix_close(output, expected, 1.0e-2F, "Llama Metal backend cached attention output");
+    expect_f32_matrix_close(
+        backend_cache.layers[0].key,
+        expected_cache.layers[0].key,
+        1.0e-2F,
+        "Llama Metal backend cached attention key cache"
+    );
+    expect_f32_matrix_close(
+        backend_cache.layers[0].value,
+        expected_cache.layers[0].value,
+        1.0e-2F,
+        "Llama Metal backend cached attention value cache"
+    );
 }
 
 void test_reports_unavailable_llama_model_attention_backend_weight_copy_when_metal_missing() {
@@ -7997,6 +8127,10 @@ int main() {
             "runs Llama attention layer with CPU backend weight buffers",
             test_runs_llama_attention_layer_with_cpu_backend_weight_buffers,
         },
+        {
+            "runs Llama attention layer with KV cache and CPU backend weight buffers",
+            test_runs_llama_attention_layer_with_kv_cache_and_cpu_backend_weight_buffers,
+        },
         {"runs Llama attention layer with causal mask", test_runs_llama_attention_layer_with_causal_mask},
         {
             "runs Llama attention layer with KV cache matches no-cache",
@@ -8068,6 +8202,10 @@ int main() {
         {
             "matches Llama attention layer with Metal backend weight buffers when available",
             test_matches_llama_attention_layer_with_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "matches Llama attention layer with KV cache and Metal backend weight buffers when available",
+            test_matches_llama_attention_layer_with_kv_cache_and_metal_backend_weight_buffers_when_available,
         },
         {
             "reports unavailable Llama model attention backend weight copy when Metal is missing",
