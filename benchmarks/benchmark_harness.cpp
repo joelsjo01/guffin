@@ -41,6 +41,56 @@
 #include <utility>
 #include <vector>
 
+namespace local_gguf_engine::tensor::backends::metal {
+
+void benchmark_noop_dispatch();
+
+std::array<local_gguf_engine::tensor::BackendBuffer, 3>
+benchmark_llama_cached_decode_attention_frontend_to_backend(
+    const local_gguf_engine::tensor::BackendBuffer& input,
+    const local_gguf_engine::tensor::BackendBuffer& attention_norm_weight,
+    const local_gguf_engine::tensor::BackendBuffer& query_weight,
+    const local_gguf_engine::tensor::BackendBuffer& key_weight,
+    const local_gguf_engine::tensor::BackendBuffer& value_weight,
+    local_gguf_engine::tensor::BackendBuffer& cache_key,
+    local_gguf_engine::tensor::BackendBuffer& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base,
+    float rms_norm_epsilon
+);
+
+local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_attention_output_to_backend(
+    const local_gguf_engine::tensor::BackendBuffer& query,
+    const local_gguf_engine::tensor::BackendBuffer& cache_key,
+    const local_gguf_engine::tensor::BackendBuffer& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base,
+    float scale
+);
+
+local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_block_tail_to_backend(
+    const local_gguf_engine::tensor::BackendBuffer& input,
+    const local_gguf_engine::tensor::BackendBuffer& attention_output,
+    const local_gguf_engine::tensor::BackendBuffer& attention_output_weight,
+    const local_gguf_engine::tensor::BackendBuffer& feed_forward_norm_weight,
+    const local_gguf_engine::tensor::BackendBuffer& gate_weight,
+    const local_gguf_engine::tensor::BackendBuffer& up_weight,
+    const local_gguf_engine::tensor::BackendBuffer& down_weight,
+    float rms_norm_epsilon
+);
+
+}  // namespace local_gguf_engine::tensor::backends::metal
+
 namespace local_gguf_engine::benchmarks {
 
 namespace {
@@ -86,6 +136,7 @@ using model_format::GGUFMetadataValue;
 using model_format::GGUFMetadataValueType;
 using model_format::read_gguf_model_view;
 using runtime::BackendKind;
+using tensor::BackendBuffer;
 using tensor::copy_tensor_to_backend;
 using tensor::DType;
 using tensor::Shape;
@@ -631,6 +682,392 @@ void warm_up_metal_projection_backend() {
     const auto left = make_f32_matrix(1, 4, 0.01F);
     const auto right = make_f16_gguf_weight_matrix(4, 4, 0.02F);
     (void)matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
+}
+
+[[nodiscard]] std::string focused_resident_kv_decode_detail(
+    std::string_view stage,
+    std::string_view backend,
+    std::uint64_t cache_length,
+    std::uint64_t blocks,
+    std::string_view cost_scope
+) {
+    std::ostringstream stream;
+    stream << "input=[1,576] blocks=" << blocks
+           << " heads=9 kv_heads=3 key=64 value=64 ffn=1536 backend=" << backend
+           << " resident-kv cache_prefilled=" << cache_length
+           << " stage=" << stage
+           << " cost=" << cost_scope;
+    return stream.str();
+}
+
+[[nodiscard]] LlamaBackendKVCache make_prefilled_focused_backend_kv_cache(
+    const LlamaModelConfig& config,
+    BackendKind backend,
+    std::uint64_t filled_token_count,
+    const TensorStorage& key_storage,
+    const TensorStorage& value_storage
+) {
+    auto cache = create_llama_backend_kv_cache(config, backend);
+    for (auto& layer : cache.layers) {
+        layer.key = copy_tensor_to_backend(key_storage, backend);
+        layer.value = copy_tensor_to_backend(value_storage, backend);
+        layer.filled_token_count = filled_token_count;
+    }
+    return cache;
+}
+
+void add_unavailable_metal_focused_resident_kv_decode_stage_benchmark(BenchmarkReport& report) {
+    report.measurements.push_back(BenchmarkMeasurement {
+        .name = "engine.llama_cached_decode_stage_sweep.metal_buffered.unavailable",
+        .iterations = 0,
+        .total_ms = 0.0,
+        .min_ms = 0.0,
+        .max_ms = 0.0,
+        .bytes_processed = 0,
+        .checksum = 0,
+        .detail = tensor_backend_unavailable_reason(BackendKind::metal),
+    });
+}
+
+void add_focused_resident_kv_decode_stage_benchmarks(BenchmarkReport& report, bool metal_available) {
+    constexpr std::uint64_t hidden = 576;
+    constexpr std::uint64_t feed_forward = 1536;
+    constexpr std::uint64_t head_count = 9;
+    constexpr std::uint64_t kv_head_count = 3;
+    constexpr std::uint64_t key_length = 64;
+    constexpr std::uint64_t value_length = 64;
+    constexpr std::uint64_t context_length = 4096;
+    constexpr std::uint64_t vocab_size = 16;
+    constexpr float rms_norm_epsilon = 0.00001F;
+    constexpr float rope_freq_base = 10000.0F;
+    constexpr float attention_scale = 0.125F;
+    const std::array<std::uint64_t, 5> cache_lengths {7, 64, 256, 1024, 2048};
+
+    const auto decode_input = make_f32_matrix(1, hidden, 0.0005F);
+    const auto attention_norm_weight = make_f32_storage(hidden, 1.0F);
+    const auto query_weight = make_f16_gguf_weight_matrix(hidden, head_count * key_length, 0.00012F);
+    const auto key_weight = make_f16_gguf_weight_matrix(hidden, kv_head_count * key_length, 0.00014F);
+    const auto value_weight = make_f16_gguf_weight_matrix(hidden, kv_head_count * value_length, 0.00016F);
+    const auto output_weight = make_f16_gguf_weight_matrix(head_count * value_length, hidden, 0.00011F);
+    const auto feed_forward_norm_weight = make_f32_storage(hidden, 1.0F);
+    const auto gate_weight = make_f16_gguf_weight_matrix(hidden, feed_forward, 0.00007F);
+    const auto up_weight = make_f16_gguf_weight_matrix(hidden, feed_forward, 0.00008F);
+    const auto down_weight = make_f16_gguf_weight_matrix(feed_forward, hidden, 0.00006F);
+    const auto token_embedding_weight = make_f16_gguf_weight_matrix(hidden, vocab_size, 0.00003F);
+    const auto final_norm_weight = make_f32_storage(hidden, 1.0F);
+    const auto logits_weight = make_f16_gguf_weight_matrix(hidden, vocab_size, 0.00004F);
+    const auto query_fixture = make_f32_matrix(1, head_count * key_length, 0.00023F);
+    const auto attention_output_fixture = make_f32_matrix(1, head_count * value_length, 0.00019F);
+    const auto cache_key_storage = make_f32_matrix(context_length, kv_head_count * key_length, 0.00009F);
+    const auto cache_value_storage = make_f32_matrix(context_length, kv_head_count * value_length, 0.00007F);
+
+    LlamaModelConfig focused_config {
+        .context_length = static_cast<std::uint32_t>(context_length),
+        .embedding_length = static_cast<std::uint32_t>(hidden),
+        .block_count = 2,
+        .feed_forward_length = static_cast<std::uint32_t>(feed_forward),
+        .attention_head_count = static_cast<std::uint32_t>(head_count),
+        .attention_head_count_kv = static_cast<std::uint32_t>(kv_head_count),
+        .attention_key_length = static_cast<std::uint32_t>(key_length),
+        .attention_value_length = static_cast<std::uint32_t>(value_length),
+        .rope_dimension_count = static_cast<std::uint32_t>(key_length),
+        .vocab_size = static_cast<std::uint32_t>(vocab_size),
+        .rope_freq_base = rope_freq_base,
+        .rms_norm_epsilon = rms_norm_epsilon,
+    };
+    const LlamaAttentionLayerWeights attention_weights {
+        .attention_norm_weight = attention_norm_weight,
+        .query_weight = query_weight,
+        .key_weight = key_weight,
+        .value_weight = value_weight,
+        .output_weight = output_weight,
+    };
+    const LlamaFeedForwardLayerWeights feed_forward_weights {
+        .feed_forward_norm_weight = feed_forward_norm_weight,
+        .gate_weight = gate_weight,
+        .up_weight = up_weight,
+        .down_weight = down_weight,
+    };
+    const LlamaBlockWeights block_weights {
+        .attention = attention_weights,
+        .feed_forward = feed_forward_weights,
+    };
+    const LlamaModelWeights model_weights {
+        .token_embedding_weight = token_embedding_weight,
+        .output_norm_weight = final_norm_weight,
+        .output_weight = logits_weight,
+        .blocks = {block_weights, block_weights},
+    };
+    const auto cpu_backend_weights = copy_llama_model_block_weights_to_backend(model_weights, BackendKind::cpu);
+
+    for (const auto cache_length : cache_lengths) {
+        std::vector<LlamaBackendKVCache> cpu_decode_caches;
+        cpu_decode_caches.reserve(report.config.iterations);
+        for (std::size_t index = 0; index < report.config.iterations; ++index) {
+            cpu_decode_caches.push_back(make_prefilled_focused_backend_kv_cache(
+                focused_config,
+                BackendKind::cpu,
+                cache_length,
+                cache_key_storage,
+                cache_value_storage
+            ));
+        }
+
+        report.measurements.push_back(measure(
+            "engine.llama_model_blocks_with_backend_kv_cache_decode_f32.cpu_buffered.focused_cache_"
+                + std::to_string(cache_length),
+            report.config.iterations,
+            focused_resident_kv_decode_detail(
+                "full_model_decode",
+                "cpu",
+                cache_length,
+                focused_config.block_count,
+                "model-resident fused-cached-block one-readback"
+            ),
+            [
+                &decode_input,
+                &cpu_backend_weights,
+                &focused_config,
+                &cpu_decode_caches,
+                cache_index = std::size_t {0},
+                cache_length
+            ]() mutable {
+                auto& cache = cpu_decode_caches[cache_index];
+                ++cache_index;
+                const auto output = run_llama_model_blocks_with_kv_cache_f32(
+                    decode_input,
+                    cpu_backend_weights,
+                    focused_config,
+                    cache_length,
+                    cache
+                );
+                return IterationMeasurement {
+                    .bytes_processed = decode_input.bytes().size()
+                        + llama_backend_kv_cache_bytes(cache)
+                        + llama_model_block_weight_bytes(cpu_backend_weights)
+                        + output.bytes().size(),
+                    .checksum = checksum_f32(sum_f32(output)) ^ llama_backend_kv_cache_fill_checksum(cache),
+                };
+            }
+        ));
+    }
+
+    if (!metal_available) {
+        add_unavailable_metal_focused_resident_kv_decode_stage_benchmark(report);
+        return;
+    }
+
+    const auto metal_backend_weights = copy_llama_model_block_weights_to_backend(model_weights, BackendKind::metal);
+    const auto input_buffer = copy_tensor_to_backend(decode_input, BackendKind::metal);
+    const auto query_buffer = copy_tensor_to_backend(query_fixture, BackendKind::metal);
+    const auto attention_output_buffer = copy_tensor_to_backend(attention_output_fixture, BackendKind::metal);
+
+    report.measurements.push_back(measure(
+        "tensor.metal_noop_dispatch",
+        report.config.iterations,
+        "backend=metal stage=noop cost=command-buffer+one-empty-dispatch",
+        []() {
+            tensor::backends::metal::benchmark_noop_dispatch();
+            return IterationMeasurement {
+                .bytes_processed = 0,
+                .checksum = 1,
+            };
+        }
+    ));
+
+    for (const auto cache_length : cache_lengths) {
+        std::vector<LlamaBackendKVCache> metal_decode_caches;
+        metal_decode_caches.reserve(report.config.iterations);
+        for (std::size_t index = 0; index < report.config.iterations; ++index) {
+            metal_decode_caches.push_back(make_prefilled_focused_backend_kv_cache(
+                focused_config,
+                BackendKind::metal,
+                cache_length,
+                cache_key_storage,
+                cache_value_storage
+            ));
+        }
+        auto front_end_cache = make_prefilled_focused_backend_kv_cache(
+            focused_config,
+            BackendKind::metal,
+            cache_length,
+            cache_key_storage,
+            cache_value_storage
+        );
+        auto attention_cache = make_prefilled_focused_backend_kv_cache(
+            focused_config,
+            BackendKind::metal,
+            cache_length + 1,
+            cache_key_storage,
+            cache_value_storage
+        );
+
+        report.measurements.push_back(measure(
+            "engine.llama_model_blocks_with_backend_kv_cache_decode_f32.metal_buffered.focused_cache_"
+                + std::to_string(cache_length),
+            report.config.iterations,
+            focused_resident_kv_decode_detail(
+                "full_model_decode",
+                "metal",
+                cache_length,
+                focused_config.block_count,
+                "model-resident fused-cached-block one-readback"
+            ),
+            [
+                &decode_input,
+                &metal_backend_weights,
+                &focused_config,
+                &metal_decode_caches,
+                cache_index = std::size_t {0},
+                cache_length
+            ]() mutable {
+                auto& cache = metal_decode_caches[cache_index];
+                ++cache_index;
+                const auto output = run_llama_model_blocks_with_kv_cache_f32(
+                    decode_input,
+                    metal_backend_weights,
+                    focused_config,
+                    cache_length,
+                    cache
+                );
+                return IterationMeasurement {
+                    .bytes_processed = decode_input.bytes().size()
+                        + llama_backend_kv_cache_bytes(cache)
+                        + llama_model_block_weight_bytes(metal_backend_weights)
+                        + output.bytes().size(),
+                    .checksum = checksum_f32(sum_f32(output)) ^ llama_backend_kv_cache_fill_checksum(cache),
+                };
+            }
+        ));
+
+        report.measurements.push_back(measure(
+            "engine.llama_cached_decode_attention_frontend_f32.metal_buffered.focused_cache_"
+                + std::to_string(cache_length),
+            report.config.iterations,
+            focused_resident_kv_decode_detail(
+                "attention_frontend",
+                "metal",
+                cache_length,
+                1,
+                "RMSNorm+QKV+KV-append one-command-buffer no-readback"
+            ),
+            [
+                &input_buffer,
+                &metal_backend_weights,
+                &front_end_cache,
+                cache_length
+            ]() {
+                const auto& block = metal_backend_weights.blocks[0];
+                auto outputs = tensor::backends::metal::benchmark_llama_cached_decode_attention_frontend_to_backend(
+                    input_buffer,
+                    block.attention.attention_norm_weight_buffer,
+                    block.attention.query_weight,
+                    block.attention.key_weight,
+                    block.attention.value_weight,
+                    front_end_cache.layers[0].key,
+                    front_end_cache.layers[0].value,
+                    cache_length,
+                    head_count,
+                    kv_head_count,
+                    key_length,
+                    value_length,
+                    key_length,
+                    rope_freq_base,
+                    rms_norm_epsilon
+                );
+                front_end_cache.layers[0].filled_token_count = cache_length + 1;
+                return IterationMeasurement {
+                    .bytes_processed = backend_buffer_byte_count(input_buffer)
+                        + llama_attention_weight_bytes(block.attention)
+                        + llama_backend_kv_cache_bytes(front_end_cache)
+                        + outputs[0].descriptor().byte_count
+                        + outputs[1].descriptor().byte_count
+                        + outputs[2].descriptor().byte_count,
+                    .checksum = outputs[0].descriptor().byte_count
+                        ^ (outputs[1].descriptor().byte_count << 1U)
+                        ^ (outputs[2].descriptor().byte_count << 2U)
+                        ^ llama_backend_kv_cache_fill_checksum(front_end_cache),
+                };
+            }
+        ));
+
+        report.measurements.push_back(measure(
+            "engine.llama_cached_decode_attention_output_f32.metal_buffered.focused_cache_"
+                + std::to_string(cache_length),
+            report.config.iterations,
+            focused_resident_kv_decode_detail(
+                "cached_attention_output",
+                "metal",
+                cache_length,
+                1,
+                "attention-output-only no-append no-readback"
+            ),
+            [
+                &query_buffer,
+                &attention_cache,
+                cache_length
+            ]() {
+                const auto output = tensor::backends::metal::benchmark_llama_cached_decode_attention_output_to_backend(
+                    query_buffer,
+                    attention_cache.layers[0].key,
+                    attention_cache.layers[0].value,
+                    cache_length,
+                    head_count,
+                    kv_head_count,
+                    key_length,
+                    value_length,
+                    key_length,
+                    rope_freq_base,
+                    attention_scale
+                );
+                return IterationMeasurement {
+                    .bytes_processed = backend_buffer_byte_count(query_buffer)
+                        + llama_backend_kv_cache_bytes(attention_cache)
+                        + backend_buffer_byte_count(output),
+                    .checksum = output.descriptor().byte_count
+                        ^ llama_backend_kv_cache_fill_checksum(attention_cache),
+                };
+            }
+        ));
+
+        report.measurements.push_back(measure(
+            "engine.llama_cached_decode_block_tail_f32.metal_buffered.focused_cache_"
+                + std::to_string(cache_length),
+            report.config.iterations,
+            focused_resident_kv_decode_detail(
+                "block_tail",
+                "metal",
+                cache_length,
+                1,
+                "attention-output-projection+residual+FFN no-readback"
+            ),
+            [
+                &input_buffer,
+                &attention_output_buffer,
+                &metal_backend_weights
+            ]() {
+                const auto& block = metal_backend_weights.blocks[0];
+                const auto output = tensor::backends::metal::benchmark_llama_cached_decode_block_tail_to_backend(
+                    input_buffer,
+                    attention_output_buffer,
+                    block.attention.output_weight,
+                    block.feed_forward.feed_forward_norm_weight_buffer,
+                    block.feed_forward.gate_weight,
+                    block.feed_forward.up_weight,
+                    block.feed_forward.down_weight,
+                    rms_norm_epsilon
+                );
+                return IterationMeasurement {
+                    .bytes_processed = backend_buffer_byte_count(input_buffer)
+                        + backend_buffer_byte_count(attention_output_buffer)
+                        + llama_feed_forward_weight_bytes(block.feed_forward)
+                        + backend_buffer_byte_count(block.attention.output_weight)
+                        + backend_buffer_byte_count(output),
+                    .checksum = output.descriptor().byte_count,
+                };
+            }
+        ));
+    }
 }
 
 void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
@@ -1799,6 +2236,8 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         add_unavailable_metal_cached_model_block_backend_benchmark(report);
         add_unavailable_metal_backend_kv_cached_model_block_backend_benchmark(report);
     }
+
+    add_focused_resident_kv_decode_stage_benchmarks(report, metal_available);
 
     report.measurements.push_back(measure(
         "engine.llama_kv_cache_prefill_f32",
