@@ -1,5 +1,6 @@
 #pragma once
 
+#include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
 #include <cstdint>
@@ -48,6 +49,22 @@ struct F32RoPEMatrixColumnView {
     F32MatrixColumnView value,
     float scale,
     std::uint64_t query_position_start
+);
+
+[[nodiscard]] BackendBuffer llama_cached_attention_f32_to_backend(
+    const BackendBuffer& query,
+    const BackendBuffer& key,
+    const BackendBuffer& value,
+    BackendBuffer& cache_key,
+    BackendBuffer& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base,
+    float scale
 );
 
 }  // namespace local_gguf_engine::tensor::ops

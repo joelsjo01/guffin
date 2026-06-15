@@ -60,6 +60,7 @@ using local_gguf_engine::benchmarks::format_benchmark_report;
 using local_gguf_engine::benchmarks::parse_benchmark_args;
 using local_gguf_engine::engine::append_llama_kv_cache_layer_f32;
 using local_gguf_engine::engine::bind_llama_model_weights;
+using local_gguf_engine::engine::copy_llama_backend_kv_cache_to_cpu;
 using local_gguf_engine::engine::copy_llama_attention_layer_weights_to_backend;
 using local_gguf_engine::engine::copy_llama_block_weights_to_backend;
 using local_gguf_engine::engine::copy_llama_feed_forward_layer_weights_to_backend;
@@ -68,6 +69,7 @@ using local_gguf_engine::engine::copy_llama_model_block_weights_to_backend;
 using local_gguf_engine::engine::copy_llama_model_feed_forward_weights_to_backend;
 using local_gguf_engine::engine::copy_llama_model_logits_weights_to_backend;
 using local_gguf_engine::engine::create_llama_kv_cache;
+using local_gguf_engine::engine::create_llama_backend_kv_cache;
 using local_gguf_engine::engine::embed_llama_token_ids_f32;
 using local_gguf_engine::engine::EngineModel;
 using local_gguf_engine::engine::EngineModelError;
@@ -172,6 +174,7 @@ using local_gguf_engine::tensor::ops::F32MatrixColumnView;
 using local_gguf_engine::tensor::ops::F32RoPEMatrixColumnView;
 using local_gguf_engine::tensor::ops::fill_f32;
 using local_gguf_engine::tensor::ops::gated_silu_projection_f32_f16_gguf_weight_to_backend;
+using local_gguf_engine::tensor::ops::llama_cached_attention_f32_to_backend;
 using local_gguf_engine::tensor::ops::matmul_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_f16;
 using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight;
@@ -3705,6 +3708,155 @@ void test_runs_residual_gated_silu_projection_to_metal_backend_buffer_when_avail
     expect_f32_matrix_close(output, expected, 1.0e-3F, "Metal backend-buffer residual gated SiLU output");
 }
 
+void test_runs_llama_cached_attention_to_cpu_backend_buffer() {
+    const std::array<float, 2> query_values {1.0F, 0.0F};
+    const std::array<float, 2> key_values {0.5F, -1.0F};
+    const std::array<float, 2> value_values {2.0F, -3.0F};
+    const auto query = tensor_f32_matrix(1, 2, std::span<const float>(query_values));
+    const auto key = tensor_f32_matrix(1, 2, std::span<const float>(key_values));
+    const auto value = tensor_f32_matrix(1, 2, std::span<const float>(value_values));
+    const auto cache_descriptor = TensorDescriptor::from(Shape::from({4, 2}), DType::f32);
+    auto cache_key_buffer = copy_tensor_to_backend(TensorStorage::allocate(cache_descriptor), BackendKind::cpu);
+    auto cache_value_buffer = copy_tensor_to_backend(TensorStorage::allocate(cache_descriptor), BackendKind::cpu);
+
+    const auto output_buffer = llama_cached_attention_f32_to_backend(
+        copy_tensor_to_backend(query, BackendKind::cpu),
+        copy_tensor_to_backend(key, BackendKind::cpu),
+        copy_tensor_to_backend(value, BackendKind::cpu),
+        cache_key_buffer,
+        cache_value_buffer,
+        0,
+        1,
+        1,
+        2,
+        2,
+        2,
+        10000.0F,
+        1.0F
+    );
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto cache_key = copy_tensor_from_backend(cache_key_buffer);
+    const auto cache_value = copy_tensor_from_backend(cache_value_buffer);
+    auto expected_cache_key = TensorStorage::allocate(cache_descriptor);
+    auto expected_cache_value = TensorStorage::allocate(cache_descriptor);
+    const std::array<std::uint64_t, 2> row0_col0 {0, 0};
+    const std::array<std::uint64_t, 2> row0_col1 {0, 1};
+    write_f32(expected_cache_key, std::span<const std::uint64_t>(row0_col0), 0.5F);
+    write_f32(expected_cache_key, std::span<const std::uint64_t>(row0_col1), -1.0F);
+    write_f32(expected_cache_value, std::span<const std::uint64_t>(row0_col0), 2.0F);
+    write_f32(expected_cache_value, std::span<const std::uint64_t>(row0_col1), -3.0F);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU Llama cached attention output backend mismatch");
+    expect_f32_matrix_close(output, value, 1.0e-6F, "CPU backend Llama cached attention output");
+    expect_f32_matrix_close(cache_key, expected_cache_key, 1.0e-6F, "CPU backend Llama cached attention key cache");
+    expect_f32_matrix_close(cache_value, expected_cache_value, 1.0e-6F, "CPU backend Llama cached attention value cache");
+}
+
+void test_matches_llama_cached_attention_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 2> query0_values {0.5F, -0.25F};
+    const std::array<float, 2> key0_values {1.0F, 0.5F};
+    const std::array<float, 2> value0_values {2.0F, -1.0F};
+    const std::array<float, 2> query1_values {0.25F, 0.75F};
+    const std::array<float, 2> key1_values {-0.5F, 1.25F};
+    const std::array<float, 2> value1_values {0.5F, 3.0F};
+    const auto query0 = tensor_f32_matrix(1, 2, std::span<const float>(query0_values));
+    const auto key0 = tensor_f32_matrix(1, 2, std::span<const float>(key0_values));
+    const auto value0 = tensor_f32_matrix(1, 2, std::span<const float>(value0_values));
+    const auto query1 = tensor_f32_matrix(1, 2, std::span<const float>(query1_values));
+    const auto key1 = tensor_f32_matrix(1, 2, std::span<const float>(key1_values));
+    const auto value1 = tensor_f32_matrix(1, 2, std::span<const float>(value1_values));
+    const auto cache_descriptor = TensorDescriptor::from(Shape::from({4, 2}), DType::f32);
+    auto cpu_cache_key = copy_tensor_to_backend(TensorStorage::allocate(cache_descriptor), BackendKind::cpu);
+    auto cpu_cache_value = copy_tensor_to_backend(TensorStorage::allocate(cache_descriptor), BackendKind::cpu);
+    auto metal_cache_key = copy_tensor_to_backend(TensorStorage::allocate(cache_descriptor), BackendKind::metal);
+    auto metal_cache_value = copy_tensor_to_backend(TensorStorage::allocate(cache_descriptor), BackendKind::metal);
+
+    (void)llama_cached_attention_f32_to_backend(
+        copy_tensor_to_backend(query0, BackendKind::cpu),
+        copy_tensor_to_backend(key0, BackendKind::cpu),
+        copy_tensor_to_backend(value0, BackendKind::cpu),
+        cpu_cache_key,
+        cpu_cache_value,
+        0,
+        1,
+        1,
+        2,
+        2,
+        2,
+        10000.0F,
+        1.0F
+    );
+    const auto cpu_output_buffer = llama_cached_attention_f32_to_backend(
+        copy_tensor_to_backend(query1, BackendKind::cpu),
+        copy_tensor_to_backend(key1, BackendKind::cpu),
+        copy_tensor_to_backend(value1, BackendKind::cpu),
+        cpu_cache_key,
+        cpu_cache_value,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        10000.0F,
+        1.0F
+    );
+    (void)llama_cached_attention_f32_to_backend(
+        copy_tensor_to_backend(query0, BackendKind::metal),
+        copy_tensor_to_backend(key0, BackendKind::metal),
+        copy_tensor_to_backend(value0, BackendKind::metal),
+        metal_cache_key,
+        metal_cache_value,
+        0,
+        1,
+        1,
+        2,
+        2,
+        2,
+        10000.0F,
+        1.0F
+    );
+    const auto metal_output_buffer = llama_cached_attention_f32_to_backend(
+        copy_tensor_to_backend(query1, BackendKind::metal),
+        copy_tensor_to_backend(key1, BackendKind::metal),
+        copy_tensor_to_backend(value1, BackendKind::metal),
+        metal_cache_key,
+        metal_cache_value,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        10000.0F,
+        1.0F
+    );
+
+    expect(metal_output_buffer.backend() == BackendKind::metal, "Metal Llama cached attention output backend mismatch");
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_output_buffer),
+        copy_tensor_from_backend(cpu_output_buffer),
+        1.0e-4F,
+        "Metal backend Llama cached attention output"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_cache_key),
+        copy_tensor_from_backend(cpu_cache_key),
+        1.0e-4F,
+        "Metal backend Llama cached attention key cache"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_cache_value),
+        copy_tensor_from_backend(cpu_cache_value),
+        1.0e-4F,
+        "Metal backend Llama cached attention value cache"
+    );
+}
+
 void test_reports_unavailable_metal_backend_for_gguf_matmul_when_missing() {
     if (tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -5708,6 +5860,125 @@ void test_matches_llama_model_blocks_with_kv_cache_and_metal_backend_weight_buff
     expect_model_block_backend_weights(weights, backend_weights, BackendKind::metal);
     expect_f32_matrix_close(output, expected, 5.0e-2F, "Llama model Metal backend cached blocks output");
     expect_llama_kv_cache_close(backend_cache, expected_cache, 2.0e-2F, "Llama model Metal backend cached blocks cache");
+}
+
+void test_runs_llama_model_blocks_with_backend_kv_cache_and_cpu_backend_weight_buffers() {
+    const auto model = backend_cached_model_blocks_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_block_weights_to_backend(weights, BackendKind::cpu);
+    const auto first_input = backend_cached_model_blocks_first_input();
+    const auto second_input = backend_cached_model_blocks_second_input();
+    auto expected_cache = create_llama_kv_cache(model.llama_config());
+    auto backend_cache = create_llama_backend_kv_cache(model.llama_config(), BackendKind::cpu);
+
+    (void)run_llama_model_blocks_with_kv_cache_f32(
+        first_input,
+        weights,
+        model.llama_config(),
+        0,
+        expected_cache
+    );
+    const auto expected = run_llama_model_blocks_with_kv_cache_f32(
+        second_input,
+        weights,
+        model.llama_config(),
+        1,
+        expected_cache
+    );
+    (void)run_llama_model_blocks_with_kv_cache_f32(
+        first_input,
+        backend_weights,
+        model.llama_config(),
+        0,
+        backend_cache
+    );
+    const auto output = run_llama_model_blocks_with_kv_cache_f32(
+        second_input,
+        backend_weights,
+        model.llama_config(),
+        1,
+        backend_cache
+    );
+
+    expect_model_block_backend_weights(weights, backend_weights, BackendKind::cpu);
+    expect(backend_cache.backend == BackendKind::cpu, "Llama backend KV cache CPU backend mismatch");
+    expect_f32_matrix_close(output, expected, 1.0e-4F, "Llama model CPU backend resident-KV cached blocks output");
+    expect_llama_kv_cache_close(
+        copy_llama_backend_kv_cache_to_cpu(backend_cache),
+        expected_cache,
+        1.0e-5F,
+        "Llama model CPU backend resident-KV cached blocks cache"
+    );
+}
+
+void test_matches_llama_model_blocks_with_backend_kv_cache_and_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_cached_model_blocks_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_model_block_weights_to_backend(weights, BackendKind::metal);
+    const auto first_input = backend_cached_model_blocks_first_input();
+    const auto second_input = backend_cached_model_blocks_second_input();
+    auto expected_cache = create_llama_kv_cache(model.llama_config());
+    auto backend_cache = create_llama_backend_kv_cache(model.llama_config(), BackendKind::metal);
+
+    (void)run_llama_model_blocks_with_kv_cache_f32(
+        first_input,
+        weights,
+        model.llama_config(),
+        0,
+        expected_cache
+    );
+    const auto expected = run_llama_model_blocks_with_kv_cache_f32(
+        second_input,
+        weights,
+        model.llama_config(),
+        1,
+        expected_cache
+    );
+    (void)run_llama_model_blocks_with_kv_cache_f32(
+        first_input,
+        backend_weights,
+        model.llama_config(),
+        0,
+        backend_cache
+    );
+    const auto output = run_llama_model_blocks_with_kv_cache_f32(
+        second_input,
+        backend_weights,
+        model.llama_config(),
+        1,
+        backend_cache
+    );
+
+    expect_model_block_backend_weights(weights, backend_weights, BackendKind::metal);
+    expect(backend_cache.backend == BackendKind::metal, "Llama backend KV cache Metal backend mismatch");
+    expect_f32_matrix_close(output, expected, 5.0e-2F, "Llama model Metal backend resident-KV cached blocks output");
+    expect_llama_kv_cache_close(
+        copy_llama_backend_kv_cache_to_cpu(backend_cache),
+        expected_cache,
+        2.0e-2F,
+        "Llama model Metal backend resident-KV cached blocks cache"
+    );
+}
+
+void test_reports_unavailable_llama_backend_kv_cache_creation_when_metal_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    try {
+        (void)create_llama_backend_kv_cache(backend_cached_model_blocks_fixture_model().llama_config(), BackendKind::metal);
+        throw TestFailure("Llama backend KV cache creation should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Llama backend KV cache creation unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Llama backend KV cache creation backend mismatch");
+    }
 }
 
 void test_reports_unavailable_llama_model_blocks_with_kv_cache_backend_weight_copy_when_metal_missing() {
@@ -8912,6 +9183,14 @@ int main() {
             test_runs_residual_gated_silu_projection_to_metal_backend_buffer_when_available,
         },
         {
+            "runs Llama cached attention to CPU backend buffer",
+            test_runs_llama_cached_attention_to_cpu_backend_buffer,
+        },
+        {
+            "matches Llama cached attention to Metal backend buffer when available",
+            test_matches_llama_cached_attention_to_metal_backend_buffer_when_available,
+        },
+        {
             "reuses Metal F32 by F16 GGUF weight matmul state",
             test_reuses_metal_f32_by_f16_gguf_weight_matmul_state,
         },
@@ -9056,6 +9335,18 @@ int main() {
         {
             "matches Llama model blocks with KV cache and Metal backend weight buffers when available",
             test_matches_llama_model_blocks_with_kv_cache_and_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "runs Llama model blocks with backend KV cache and CPU backend weight buffers",
+            test_runs_llama_model_blocks_with_backend_kv_cache_and_cpu_backend_weight_buffers,
+        },
+        {
+            "matches Llama model blocks with backend KV cache and Metal backend weight buffers when available",
+            test_matches_llama_model_blocks_with_backend_kv_cache_and_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "reports unavailable Llama backend KV cache creation when Metal is missing",
+            test_reports_unavailable_llama_backend_kv_cache_creation_when_metal_missing,
         },
         {
             "reports unavailable Llama model blocks with KV cache backend weight copy when Metal is missing",

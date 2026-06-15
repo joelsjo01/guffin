@@ -128,6 +128,61 @@ LlamaKVCache create_llama_kv_cache(const LlamaModelConfig& config) {
     };
 }
 
+LlamaBackendKVCache create_llama_backend_kv_cache(
+    const LlamaModelConfig& config,
+    runtime::BackendKind backend
+) {
+    require_positive_config_dimension(config.context_length);
+    require_positive_config_dimension(config.block_count);
+    require_positive_config_dimension(config.attention_head_count_kv);
+    require_positive_config_dimension(config.attention_key_length);
+    require_positive_config_dimension(config.attention_value_length);
+
+    const auto context_length = static_cast<std::uint64_t>(config.context_length);
+    const auto kv_head_count = static_cast<std::uint64_t>(config.attention_head_count_kv);
+    const auto key_width = kv_head_count * static_cast<std::uint64_t>(config.attention_key_length);
+    const auto value_width = kv_head_count * static_cast<std::uint64_t>(config.attention_value_length);
+    const auto key_template = allocate_cache_tensor(context_length, key_width);
+    const auto value_template = allocate_cache_tensor(context_length, value_width);
+
+    std::vector<LlamaBackendKVCacheLayer> layers;
+    layers.reserve(config.block_count);
+    for (std::uint32_t block_index = 0; block_index < config.block_count; ++block_index) {
+        layers.push_back(LlamaBackendKVCacheLayer {
+            .key = tensor::copy_tensor_to_backend(key_template, backend),
+            .value = tensor::copy_tensor_to_backend(value_template, backend),
+            .filled_token_count = 0,
+        });
+    }
+
+    return LlamaBackendKVCache {
+        .layers = std::move(layers),
+        .context_length = context_length,
+        .key_width = key_width,
+        .value_width = value_width,
+        .backend = backend,
+    };
+}
+
+LlamaKVCache copy_llama_backend_kv_cache_to_cpu(const LlamaBackendKVCache& cache) {
+    std::vector<LlamaKVCacheLayer> layers;
+    layers.reserve(cache.layers.size());
+    for (const auto& layer : cache.layers) {
+        layers.push_back(LlamaKVCacheLayer {
+            .key = tensor::copy_tensor_from_backend(layer.key),
+            .value = tensor::copy_tensor_from_backend(layer.value),
+            .filled_token_count = layer.filled_token_count,
+        });
+    }
+
+    return LlamaKVCache {
+        .layers = std::move(layers),
+        .context_length = cache.context_length,
+        .key_width = cache.key_width,
+        .value_width = cache.value_width,
+    };
+}
+
 void append_llama_kv_cache_layer_f32(
     LlamaKVCacheLayer& layer,
     const TensorStorage& key_rows,

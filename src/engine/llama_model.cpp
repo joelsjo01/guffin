@@ -401,6 +401,33 @@ tensor::TensorStorage run_llama_model_blocks_with_kv_cache_f32(
     return output;
 }
 
+tensor::TensorStorage run_llama_model_blocks_with_kv_cache_f32(
+    const tensor::TensorStorage& input,
+    const LlamaModelBlockBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaBackendKVCache& cache
+) {
+    require_llama_model_block_count(weights.blocks.size(), config.block_count);
+
+    if (cache.layers.size() != weights.blocks.size()) {
+        throw std::invalid_argument("Llama KV cache layer count must match model block count");
+    }
+
+    auto output = run_llama_block_with_kv_cache_f32(input, weights.blocks[0], config, position, cache.layers[0]);
+    for (std::size_t block_index = 1; block_index < weights.blocks.size(); ++block_index) {
+        output = run_llama_block_with_kv_cache_f32(
+            output,
+            weights.blocks[block_index],
+            config,
+            position,
+            cache.layers[block_index]
+        );
+    }
+
+    return output;
+}
+
 template <typename Weights>
 TensorStorage project_llama_logits_f32_impl(
     const TensorStorage& hidden_states,

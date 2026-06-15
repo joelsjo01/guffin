@@ -2,6 +2,7 @@
 
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
+#include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
@@ -10,6 +11,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -114,6 +116,156 @@ kernel void rms_norm_f32_kernel(
         output[row_offset + column] = input[row_offset + column] * inverse_rms * weight[column];
     }
 }
+
+struct LlamaCachedAttentionDimensions {
+    uint token_count;
+    uint cache_position;
+    uint cached_token_count;
+    uint head_count;
+    uint kv_head_count;
+    uint key_length;
+    uint value_length;
+    uint rope_dimension_count;
+    float frequency_base;
+    float scale;
+};
+
+inline float llama_rope_angle(
+    uint position,
+    uint pair_offset,
+    uint rope_dimension_count,
+    float frequency_base
+) {
+    return float(position) / pow(frequency_base, float(pair_offset) / float(rope_dimension_count));
+}
+
+kernel void llama_cached_kv_append_f32_kernel(
+    const device float* key [[buffer(0)]],
+    const device float* value [[buffer(1)]],
+    device float* cache_key [[buffer(2)]],
+    device float* cache_value [[buffer(3)]],
+    constant LlamaCachedAttentionDimensions& dims [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint column = gid.x;
+    const uint row = gid.y;
+    if (row >= dims.token_count) {
+        return;
+    }
+
+    const uint key_width = dims.kv_head_count * dims.key_length;
+    const uint value_width = dims.kv_head_count * dims.value_length;
+    const uint cache_row = dims.cache_position + row;
+
+    if (column < key_width) {
+        const uint head_column = column % dims.key_length;
+        float output_value = key[row * key_width + column];
+
+        if (head_column < dims.rope_dimension_count) {
+            const uint pair_column = head_column - (head_column % 2);
+            const uint head_first_column = column - head_column;
+            const uint first_index = row * key_width + head_first_column + pair_column;
+            const float first = key[first_index];
+            const float second = key[first_index + 1];
+            const float angle = llama_rope_angle(
+                cache_row,
+                pair_column,
+                dims.rope_dimension_count,
+                dims.frequency_base
+            );
+            const float angle_cos = cos(angle);
+            const float angle_sin = sin(angle);
+
+            output_value = head_column == pair_column
+                ? first * angle_cos - second * angle_sin
+                : first * angle_sin + second * angle_cos;
+        }
+
+        cache_key[cache_row * key_width + column] = output_value;
+    }
+
+    if (column < value_width) {
+        cache_value[cache_row * value_width + column] = value[row * value_width + column];
+    }
+}
+
+kernel void llama_cached_attention_output_f32_kernel(
+    const device float* query [[buffer(0)]],
+    const device float* cache_key [[buffer(1)]],
+    const device float* cache_value [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant LlamaCachedAttentionDimensions& dims [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint output_column = gid.x;
+    const uint query_row = gid.y;
+    const uint output_width = dims.head_count * dims.value_length;
+    if (query_row >= dims.token_count || output_column >= output_width) {
+        return;
+    }
+
+    const uint key_width = dims.kv_head_count * dims.key_length;
+    const uint value_width = dims.kv_head_count * dims.value_length;
+    const uint query_width = dims.head_count * dims.key_length;
+    const uint kv_group_size = dims.head_count / dims.kv_head_count;
+    const uint head = output_column / dims.value_length;
+    const uint value_column = output_column % dims.value_length;
+    const uint kv_head = head / kv_group_size;
+    const uint query_first_column = head * dims.key_length;
+    const uint key_first_column = kv_head * dims.key_length;
+    const uint value_first_column = kv_head * dims.value_length;
+    const uint query_position = dims.cache_position + query_row;
+
+    float max_score = -3.402823466e+38f;
+    uint has_score = 0;
+    float denominator = 0.0f;
+    float accumulator = 0.0f;
+
+    for (uint key_row = 0; key_row < dims.cached_token_count; ++key_row) {
+        if (key_row > query_position) {
+            continue;
+        }
+
+        float dot = 0.0f;
+        for (uint column = 0; column < dims.key_length; ++column) {
+            float query_value = query[query_row * query_width + query_first_column + column];
+            if (column < dims.rope_dimension_count) {
+                const uint pair_column = column - (column % 2);
+                const uint first_index = query_row * query_width + query_first_column + pair_column;
+                const float first = query[first_index];
+                const float second = query[first_index + 1];
+                const float angle = llama_rope_angle(
+                    query_position,
+                    pair_column,
+                    dims.rope_dimension_count,
+                    dims.frequency_base
+                );
+                const float angle_cos = cos(angle);
+                const float angle_sin = sin(angle);
+                query_value = column == pair_column
+                    ? first * angle_cos - second * angle_sin
+                    : first * angle_sin + second * angle_cos;
+            }
+
+            dot += query_value * cache_key[key_row * key_width + key_first_column + column];
+        }
+
+        const float score = dot * dims.scale;
+        if (score > max_score) {
+            const float rescale = has_score == 0 ? 0.0f : exp(max_score - score);
+            denominator *= rescale;
+            accumulator *= rescale;
+            max_score = score;
+            has_score = 1;
+        }
+
+        const float weight = exp(score - max_score);
+        denominator += weight;
+        accumulator += weight * cache_value[key_row * value_width + value_first_column + value_column];
+    }
+
+    output[query_row * output_width + output_column] = accumulator / denominator;
+}
 )metal";
 
 struct MatmulDimensions {
@@ -132,12 +284,27 @@ struct RMSNormDimensions {
     float epsilon = 0.0F;
 };
 
+struct LlamaCachedAttentionDimensions {
+    std::uint32_t token_count = 0;
+    std::uint32_t cache_position = 0;
+    std::uint32_t cached_token_count = 0;
+    std::uint32_t head_count = 0;
+    std::uint32_t kv_head_count = 0;
+    std::uint32_t key_length = 0;
+    std::uint32_t value_length = 0;
+    std::uint32_t rope_dimension_count = 0;
+    float frequency_base = 0.0F;
+    float scale = 0.0F;
+};
+
 struct MatmulPipelineState {
     id<MTLDevice> device = nil;
     id<MTLComputePipelineState> matmul_pipeline = nil;
     id<MTLComputePipelineState> silu_multiply_pipeline = nil;
     id<MTLComputePipelineState> add_pipeline = nil;
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
+    id<MTLComputePipelineState> llama_cached_kv_append_pipeline = nil;
+    id<MTLComputePipelineState> llama_cached_attention_output_pipeline = nil;
     id<MTLCommandQueue> queue = nil;
 
     MatmulPipelineState();
@@ -339,6 +506,18 @@ void require_positive_epsilon(float epsilon) {
     }
 }
 
+void require_positive_finite_scale(float scale) {
+    if (!(scale > 0.0F) || !std::isfinite(scale)) {
+        throw std::invalid_argument("attention scale must be positive and finite");
+    }
+}
+
+void require_positive_frequency_base(float frequency_base) {
+    if (!(frequency_base > 0.0F)) {
+        throw std::invalid_argument("RoPE frequency base must be positive");
+    }
+}
+
 void require_residual_gated_silu_projection_f32_f16_gguf_weight_operands(
     const TensorDescriptor& input,
     const TensorDescriptor& attention_output,
@@ -387,6 +566,87 @@ void require_residual_gated_silu_projection_f32_f16_gguf_weight_operands(
     require_positive_epsilon(epsilon);
 }
 
+void require_llama_cached_attention_f32_operands(
+    const TensorDescriptor& query,
+    const TensorDescriptor& key,
+    const TensorDescriptor& value,
+    const TensorDescriptor& cache_key,
+    const TensorDescriptor& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base,
+    float scale
+) {
+    ops::require_f32_descriptor(query);
+    ops::require_f32_descriptor(key);
+    ops::require_f32_descriptor(value);
+    ops::require_f32_descriptor(cache_key);
+    ops::require_f32_descriptor(cache_value);
+    require_matrix_descriptor(query);
+    require_matrix_descriptor(key);
+    require_matrix_descriptor(value);
+    require_matrix_descriptor(cache_key);
+    require_matrix_descriptor(cache_value);
+
+    if (head_count == 0 || kv_head_count == 0 || key_length == 0 || value_length == 0) {
+        throw std::invalid_argument("Llama cached attention dimensions must be positive");
+    }
+    if (head_count % kv_head_count != 0) {
+        throw std::invalid_argument("Llama attention head count must be divisible by KV head count");
+    }
+    if (rope_dimension_count == 0 || rope_dimension_count % 2 != 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 2, rope_dimension_count);
+    }
+    if (rope_dimension_count > key_length) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_length, rope_dimension_count);
+    }
+    require_positive_frequency_base(frequency_base);
+    require_positive_finite_scale(scale);
+
+    const auto token_count = query.shape.dimension(0);
+    if (token_count == 0) {
+        throw std::invalid_argument("Llama cached attention input rows must be positive");
+    }
+    const auto query_width = head_count * key_length;
+    const auto key_width = kv_head_count * key_length;
+    const auto value_width = kv_head_count * value_length;
+    const auto key_rows = key.shape.dimension(0);
+    const auto value_rows = value.shape.dimension(0);
+    if (key_rows != token_count) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, token_count, key_rows);
+    }
+    if (value_rows != token_count) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, token_count, value_rows);
+    }
+    if (query.shape.dimension(1) != query_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, query_width, query.shape.dimension(1));
+    }
+    if (key.shape.dimension(1) != key_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_width, key.shape.dimension(1));
+    }
+    if (value.shape.dimension(1) != value_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, value_width, value.shape.dimension(1));
+    }
+    if (cache_key.shape.dimension(1) != key_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_width, cache_key.shape.dimension(1));
+    }
+    if (cache_value.shape.dimension(1) != value_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, value_width, cache_value.shape.dimension(1));
+    }
+
+    const auto cache_capacity = cache_key.shape.dimension(0);
+    if (cache_value.shape.dimension(0) != cache_capacity) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, cache_capacity, cache_value.shape.dimension(0));
+    }
+    if (cache_position > cache_capacity || token_count > cache_capacity - cache_position) {
+        throw std::invalid_argument("Llama backend KV cache append would exceed context length");
+    }
+}
+
 void require_f32_f16_matmul_gguf_weight_triple_operands(
     const TensorDescriptor& left,
     const TensorDescriptor& first_right,
@@ -396,6 +656,18 @@ void require_f32_f16_matmul_gguf_weight_triple_operands(
     require_f32_f16_matmul_gguf_weight_operands(left, first_right);
     require_f32_f16_matmul_gguf_weight_operands(left, second_right);
     require_f32_f16_matmul_gguf_weight_operands(left, third_right);
+}
+
+[[nodiscard]] float read_f32_linear(const TensorStorage& storage, std::uint64_t linear_index) {
+    float value = 0.0F;
+    const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
+    std::memcpy(&value, storage.bytes().data() + byte_offset, sizeof(float));
+    return value;
+}
+
+void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float value) {
+    const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
+    std::memcpy(storage.mutable_bytes().data() + byte_offset, &value, sizeof(float));
 }
 
 [[nodiscard]] const CpuBackendBufferStorage& require_cpu_backend_buffer(
@@ -507,6 +779,48 @@ MatmulPipelineState::MatmulPipelineState() {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal RMSNorm pipeline creation failed: " + ns_error_message(rms_norm_pipeline_error, "unknown error")
+        );
+    }
+
+    id<MTLFunction> llama_cached_kv_append_function =
+        [library newFunctionWithName:@"llama_cached_kv_append_f32_kernel"];
+    if (llama_cached_kv_append_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached KV append kernel function was not found"
+        );
+    }
+
+    NSError* llama_cached_kv_append_pipeline_error = nil;
+    llama_cached_kv_append_pipeline =
+        [device newComputePipelineStateWithFunction:llama_cached_kv_append_function
+                                              error:&llama_cached_kv_append_pipeline_error];
+    if (llama_cached_kv_append_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached KV append pipeline creation failed: "
+                + ns_error_message(llama_cached_kv_append_pipeline_error, "unknown error")
+        );
+    }
+
+    id<MTLFunction> llama_cached_attention_output_function =
+        [library newFunctionWithName:@"llama_cached_attention_output_f32_kernel"];
+    if (llama_cached_attention_output_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached attention output kernel function was not found"
+        );
+    }
+
+    NSError* llama_cached_attention_output_pipeline_error = nil;
+    llama_cached_attention_output_pipeline =
+        [device newComputePipelineStateWithFunction:llama_cached_attention_output_function
+                                              error:&llama_cached_attention_output_pipeline_error];
+    if (llama_cached_attention_output_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached attention output pipeline creation failed: "
+                + ns_error_message(llama_cached_attention_output_pipeline_error, "unknown error")
         );
     }
 
@@ -1227,6 +1541,299 @@ MatmulPipelineState::MatmulPipelineState() {
     );
 }
 
+[[nodiscard]] double llama_rope_angle(
+    std::uint64_t position,
+    std::uint64_t pair_offset,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    const auto exponent = static_cast<double>(pair_offset) / static_cast<double>(rope_dimension_count);
+    return static_cast<double>(position) / std::pow(static_cast<double>(frequency_base), exponent);
+}
+
+[[nodiscard]] float read_rope_f32_columns(
+    const TensorStorage& storage,
+    std::uint64_t row,
+    std::uint64_t first_column,
+    std::uint64_t column,
+    std::uint64_t position,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    const auto columns = storage.descriptor().shape.dimension(1);
+    if (column >= rope_dimension_count) {
+        return read_f32_linear(storage, row * columns + first_column + column);
+    }
+
+    const auto pair_offset = column - (column % 2);
+    const auto angle = llama_rope_angle(position, pair_offset, rope_dimension_count, frequency_base);
+    const auto angle_cos = static_cast<float>(std::cos(angle));
+    const auto angle_sin = static_cast<float>(std::sin(angle));
+    const auto first = read_f32_linear(storage, row * columns + first_column + pair_offset);
+    const auto second = read_f32_linear(storage, row * columns + first_column + pair_offset + 1);
+
+    if (column == pair_offset) {
+        return first * angle_cos - second * angle_sin;
+    }
+
+    return first * angle_sin + second * angle_cos;
+}
+
+void append_llama_cached_kv_to_tensors_f32(
+    TensorStorage& cache_key,
+    TensorStorage& cache_value,
+    const TensorStorage& key,
+    const TensorStorage& value,
+    std::uint64_t cache_position,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    const auto token_count = key.descriptor().shape.dimension(0);
+    const auto key_width = kv_head_count * key_length;
+    const auto value_width = kv_head_count * value_length;
+
+    for (std::uint64_t row = 0; row < token_count; ++row) {
+        const auto cache_row = cache_position + row;
+        for (std::uint64_t kv_head = 0; kv_head < kv_head_count; ++kv_head) {
+            const auto first_column = kv_head * key_length;
+            for (std::uint64_t column = 0; column < key_length; ++column) {
+                write_f32_linear(
+                    cache_key,
+                    cache_row * key_width + first_column + column,
+                    read_rope_f32_columns(
+                        key,
+                        row,
+                        first_column,
+                        column,
+                        cache_row,
+                        rope_dimension_count,
+                        frequency_base
+                    )
+                );
+            }
+        }
+
+        for (std::uint64_t column = 0; column < value_width; ++column) {
+            write_f32_linear(
+                cache_value,
+                cache_row * value_width + column,
+                read_f32_linear(value, row * value_width + column)
+            );
+        }
+    }
+}
+
+[[nodiscard]] TensorStorage materialize_llama_cached_attention_output_f32(
+    const TensorStorage& query,
+    const TensorStorage& cache_key,
+    const TensorStorage& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t cached_token_count,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base,
+    float scale
+) {
+    const auto token_count = query.descriptor().shape.dimension(0);
+    const auto query_width = head_count * key_length;
+    const auto key_width = kv_head_count * key_length;
+    const auto value_width = kv_head_count * value_length;
+    const auto output_width = head_count * value_length;
+    const auto kv_group_size = head_count / kv_head_count;
+    auto output = TensorStorage::allocate(TensorDescriptor::from(Shape::from({token_count, output_width}), DType::f32));
+
+    for (std::uint64_t head = 0; head < head_count; ++head) {
+        const auto kv_head = head / kv_group_size;
+        const auto query_first_column = head * key_length;
+        const auto key_first_column = kv_head * key_length;
+        const auto value_first_column = kv_head * value_length;
+        const auto output_first_column = head * value_length;
+
+        for (std::uint64_t query_row = 0; query_row < token_count; ++query_row) {
+            const auto query_position = cache_position + query_row;
+            for (std::uint64_t value_column = 0; value_column < value_length; ++value_column) {
+                float max_score = -std::numeric_limits<float>::infinity();
+                float denominator = 0.0F;
+                float accumulator = 0.0F;
+
+                for (std::uint64_t key_row = 0; key_row < cached_token_count; ++key_row) {
+                    if (key_row > query_position) {
+                        continue;
+                    }
+
+                    float dot = 0.0F;
+                    for (std::uint64_t column = 0; column < key_length; ++column) {
+                        dot += read_rope_f32_columns(
+                            query,
+                            query_row,
+                            query_first_column,
+                            column,
+                            query_position,
+                            rope_dimension_count,
+                            frequency_base
+                        ) * read_f32_linear(cache_key, key_row * key_width + key_first_column + column);
+                    }
+
+                    const auto score = dot * scale;
+                    if (score > max_score) {
+                        const auto rescale = std::isfinite(max_score) ? std::exp(max_score - score) : 0.0F;
+                        denominator *= rescale;
+                        accumulator *= rescale;
+                        max_score = score;
+                    }
+
+                    const auto weight = std::exp(score - max_score);
+                    denominator += weight;
+                    accumulator += weight * read_f32_linear(
+                        cache_value,
+                        key_row * value_width + value_first_column + value_column
+                    );
+                }
+
+                if (!(denominator > 0.0F)) {
+                    throw std::invalid_argument("Llama cached attention row has no visible keys");
+                }
+                write_f32_linear(
+                    output,
+                    query_row * output_width + output_first_column + value_column,
+                    accumulator / denominator
+                );
+            }
+        }
+    }
+
+    (void)query_width;
+    return output;
+}
+
+[[nodiscard]] BackendBuffer llama_cached_attention_f32_with_metal_buffers(
+    const MetalBackendBufferStorage& query,
+    const MetalBackendBufferStorage& key,
+    const MetalBackendBufferStorage& value,
+    const MetalBackendBufferStorage& cache_key,
+    const MetalBackendBufferStorage& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base,
+    float scale
+) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto token_count = query.descriptor().shape.dimension(0);
+    const auto key_width = kv_head_count * key_length;
+    const auto value_width = kv_head_count * value_length;
+    const auto output_width = head_count * value_length;
+    const auto cached_token_count = cache_position + token_count;
+    const LlamaCachedAttentionDimensions dims {
+        .token_count = require_u32_dimension(token_count, "token_count"),
+        .cache_position = require_u32_dimension(cache_position, "cache_position"),
+        .cached_token_count = require_u32_dimension(cached_token_count, "cached_token_count"),
+        .head_count = require_u32_dimension(head_count, "head_count"),
+        .kv_head_count = require_u32_dimension(kv_head_count, "kv_head_count"),
+        .key_length = require_u32_dimension(key_length, "key_length"),
+        .value_length = require_u32_dimension(value_length, "value_length"),
+        .rope_dimension_count = require_u32_dimension(rope_dimension_count, "rope_dimension_count"),
+        .frequency_base = frequency_base,
+        .scale = scale,
+    };
+    const auto output_descriptor = TensorDescriptor::from(Shape::from({token_count, output_width}), DType::f32);
+
+    id<MTLBuffer> output_buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(
+                                      output_descriptor.byte_count
+                                   )
+                                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(LlamaCachedAttentionDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (output_buffer == nil || dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached attention buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    if (command_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached attention command buffer creation failed"
+        );
+    }
+
+    id<MTLComputeCommandEncoder> append_encoder = [command_buffer computeCommandEncoder];
+    if (append_encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached KV append command encoding failed"
+        );
+    }
+    [append_encoder setComputePipelineState:state.llama_cached_kv_append_pipeline];
+    [append_encoder setBuffer:key.buffer() offset:0 atIndex:0];
+    [append_encoder setBuffer:value.buffer() offset:0 atIndex:1];
+    [append_encoder setBuffer:cache_key.buffer() offset:0 atIndex:2];
+    [append_encoder setBuffer:cache_value.buffer() offset:0 atIndex:3];
+    [append_encoder setBuffer:dims_buffer offset:0 atIndex:4];
+
+    const auto append_columns = key_width > value_width ? key_width : value_width;
+    const MTLSize append_threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+    const MTLSize append_threadgroups = MTLSizeMake(
+        static_cast<NSUInteger>((append_columns + 15U) / 16U),
+        static_cast<NSUInteger>((token_count + 15U) / 16U),
+        1
+    );
+    [append_encoder dispatchThreadgroups:append_threadgroups threadsPerThreadgroup:append_threads_per_threadgroup];
+    [append_encoder endEncoding];
+
+    id<MTLComputeCommandEncoder> attention_encoder = [command_buffer computeCommandEncoder];
+    if (attention_encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached attention output command encoding failed"
+        );
+    }
+    [attention_encoder setComputePipelineState:state.llama_cached_attention_output_pipeline];
+    [attention_encoder setBuffer:query.buffer() offset:0 atIndex:0];
+    [attention_encoder setBuffer:cache_key.buffer() offset:0 atIndex:1];
+    [attention_encoder setBuffer:cache_value.buffer() offset:0 atIndex:2];
+    [attention_encoder setBuffer:output_buffer offset:0 atIndex:3];
+    [attention_encoder setBuffer:dims_buffer offset:0 atIndex:4];
+
+    const MTLSize attention_threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+    const MTLSize attention_threadgroups = MTLSizeMake(
+        static_cast<NSUInteger>((output_width + 15U) / 16U),
+        static_cast<NSUInteger>((token_count + 15U) / 16U),
+        1
+    );
+    [attention_encoder dispatchThreadgroups:attention_threadgroups
+                      threadsPerThreadgroup:attention_threads_per_threadgroup];
+    [attention_encoder endEncoding];
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached attention command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return detail::make_backend_buffer(
+        std::make_shared<MetalBackendBufferStorage>(output_descriptor, output_buffer)
+    );
+}
+
 }  // namespace
 
 bool is_available() noexcept {
@@ -1768,6 +2375,107 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         input.backend(),
         "unsupported backend buffers for residual gated SiLU projection"
+    );
+}
+
+BackendBuffer llama_cached_attention_f32_to_backend(
+    const BackendBuffer& query,
+    const BackendBuffer& key,
+    const BackendBuffer& value,
+    BackendBuffer& cache_key,
+    BackendBuffer& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base,
+    float scale
+) {
+    backends::metal::require_llama_cached_attention_f32_operands(
+        query.descriptor(),
+        key.descriptor(),
+        value.descriptor(),
+        cache_key.descriptor(),
+        cache_value.descriptor(),
+        cache_position,
+        head_count,
+        kv_head_count,
+        key_length,
+        value_length,
+        rope_dimension_count,
+        frequency_base,
+        scale
+    );
+    backends::metal::require_same_backend(query.backend(), key.backend(), "Llama cached attention");
+    backends::metal::require_same_backend(query.backend(), value.backend(), "Llama cached attention");
+    backends::metal::require_same_backend(query.backend(), cache_key.backend(), "Llama cached attention");
+    backends::metal::require_same_backend(query.backend(), cache_value.backend(), "Llama cached attention");
+
+    switch (query.backend()) {
+        case runtime::BackendKind::cpu: {
+            const auto query_storage = copy_tensor_from_backend(query);
+            const auto key_storage = copy_tensor_from_backend(key);
+            const auto value_storage = copy_tensor_from_backend(value);
+            auto cache_key_storage = copy_tensor_from_backend(cache_key);
+            auto cache_value_storage = copy_tensor_from_backend(cache_value);
+
+            backends::metal::append_llama_cached_kv_to_tensors_f32(
+                cache_key_storage,
+                cache_value_storage,
+                key_storage,
+                value_storage,
+                cache_position,
+                kv_head_count,
+                key_length,
+                value_length,
+                rope_dimension_count,
+                frequency_base
+            );
+            const auto output = backends::metal::materialize_llama_cached_attention_output_f32(
+                query_storage,
+                cache_key_storage,
+                cache_value_storage,
+                cache_position,
+                cache_position + query_storage.descriptor().shape.dimension(0),
+                head_count,
+                kv_head_count,
+                key_length,
+                value_length,
+                rope_dimension_count,
+                frequency_base,
+                scale
+            );
+
+            cache_key = copy_tensor_to_backend(cache_key_storage, runtime::BackendKind::cpu);
+            cache_value = copy_tensor_to_backend(cache_value_storage, runtime::BackendKind::cpu);
+            return copy_tensor_to_backend(output, runtime::BackendKind::cpu);
+        }
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::llama_cached_attention_f32_with_metal_buffers(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(query)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(key)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(value)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(cache_key)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(cache_value)),
+                    cache_position,
+                    head_count,
+                    kv_head_count,
+                    key_length,
+                    value_length,
+                    rope_dimension_count,
+                    frequency_base,
+                    scale
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        query.backend(),
+        "unsupported backend buffers for Llama cached attention"
     );
 }
 
