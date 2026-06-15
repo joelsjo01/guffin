@@ -30,6 +30,7 @@ constexpr const char* matmul_f32_f16_gguf_weight_source = R"metal(
 using namespace metal;
 
 constant uint llama_cached_decode_attention_thread_count = 256;
+constant uint llama_cached_decode_block_tail_thread_count = 256;
 
 struct MatmulDimensions {
     uint rows;
@@ -159,6 +160,13 @@ struct LlamaCachedAttentionDimensions {
     uint rope_dimension_count;
     float frequency_base;
     float scale;
+};
+
+struct LlamaCachedDecodeBlockTailDimensions {
+    uint hidden;
+    uint attention_output_width;
+    uint feed_forward;
+    float epsilon;
 };
 
 inline float llama_rope_angle(
@@ -399,6 +407,73 @@ kernel void llama_cached_decode_attention_output_f32_kernel(
 
     (void)query_width;
 }
+
+kernel void llama_cached_decode_attention_residual_norm_f32_kernel(
+    const device float* input [[buffer(0)]],
+    const device float* attention_output [[buffer(1)]],
+    const device half* attention_output_weight [[buffer(2)]],
+    const device float* feed_forward_norm_weight [[buffer(3)]],
+    device float* attention_residual [[buffer(4)]],
+    device float* feed_forward_normalized [[buffer(5)]],
+    constant LlamaCachedDecodeBlockTailDimensions& dims [[buffer(6)]],
+    threadgroup float* scratch [[threadgroup(0)]],
+    uint thread_index [[thread_index_in_threadgroup]]
+) {
+    threadgroup float* residual_scratch = scratch;
+    threadgroup float* reductions = scratch + dims.hidden;
+
+    float local_sum_squares = 0.0f;
+    for (uint column = thread_index; column < dims.hidden; column += llama_cached_decode_block_tail_thread_count) {
+        float projected = 0.0f;
+        for (uint inner = 0; inner < dims.attention_output_width; ++inner) {
+            projected += attention_output[inner] * float(attention_output_weight[column * dims.attention_output_width + inner]);
+        }
+
+        const float residual = input[column] + projected;
+        residual_scratch[column] = residual;
+        local_sum_squares += residual * residual;
+    }
+
+    reductions[thread_index] = local_sum_squares;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = llama_cached_decode_block_tail_thread_count / 2; stride > 0; stride >>= 1) {
+        if (thread_index < stride) {
+            reductions[thread_index] += reductions[thread_index + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float inverse_rms = rsqrt((reductions[0] / float(dims.hidden)) + dims.epsilon);
+    for (uint column = thread_index; column < dims.hidden; column += llama_cached_decode_block_tail_thread_count) {
+        const float residual = residual_scratch[column];
+        attention_residual[column] = residual;
+        feed_forward_normalized[column] = residual * inverse_rms * feed_forward_norm_weight[column];
+    }
+}
+
+kernel void llama_cached_decode_ffn_gate_up_silu_f32_kernel(
+    const device float* feed_forward_normalized [[buffer(0)]],
+    const device half* gate_weight [[buffer(1)]],
+    const device half* up_weight [[buffer(2)]],
+    device float* gated [[buffer(3)]],
+    constant LlamaCachedDecodeBlockTailDimensions& dims [[buffer(4)]],
+    uint column [[thread_position_in_grid]]
+) {
+    if (column >= dims.feed_forward) {
+        return;
+    }
+
+    float gate_sum = 0.0f;
+    float up_sum = 0.0f;
+    const uint weight_offset = column * dims.hidden;
+    for (uint inner = 0; inner < dims.hidden; ++inner) {
+        const float value = feed_forward_normalized[inner];
+        gate_sum += value * float(gate_weight[weight_offset + inner]);
+        up_sum += value * float(up_weight[weight_offset + inner]);
+    }
+
+    gated[column] = (gate_sum / (1.0f + exp(-gate_sum))) * up_sum;
+}
 )metal";
 
 struct MatmulDimensions {
@@ -431,6 +506,14 @@ struct LlamaCachedAttentionDimensions {
 };
 
 constexpr std::uint64_t llama_cached_decode_attention_thread_count = 256;
+constexpr std::uint64_t llama_cached_decode_block_tail_thread_count = 256;
+
+struct LlamaCachedDecodeBlockTailDimensions {
+    std::uint32_t hidden = 0;
+    std::uint32_t attention_output_width = 0;
+    std::uint32_t feed_forward = 0;
+    float epsilon = 0.0F;
+};
 
 struct LlamaCachedBlockScratchBuffers {
     id<MTLBuffer> attention_normalized = nil;
@@ -456,6 +539,8 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> llama_cached_kv_append_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_attention_output_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_decode_attention_output_pipeline = nil;
+    id<MTLComputePipelineState> llama_cached_decode_attention_residual_norm_pipeline = nil;
+    id<MTLComputePipelineState> llama_cached_decode_ffn_gate_up_silu_pipeline = nil;
     id<MTLCommandQueue> queue = nil;
     std::mutex llama_cached_block_scratch_mutex;
     LlamaCachedBlockScratchBuffers llama_cached_block_scratch;
@@ -1148,6 +1233,48 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> llama_cached_decode_attention_residual_norm_function =
+        [library newFunctionWithName:@"llama_cached_decode_attention_residual_norm_f32_kernel"];
+    if (llama_cached_decode_attention_residual_norm_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached decode attention residual norm kernel function was not found"
+        );
+    }
+
+    NSError* llama_cached_decode_attention_residual_norm_pipeline_error = nil;
+    llama_cached_decode_attention_residual_norm_pipeline =
+        [device newComputePipelineStateWithFunction:llama_cached_decode_attention_residual_norm_function
+                                              error:&llama_cached_decode_attention_residual_norm_pipeline_error];
+    if (llama_cached_decode_attention_residual_norm_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached decode attention residual norm pipeline creation failed: "
+                + ns_error_message(llama_cached_decode_attention_residual_norm_pipeline_error, "unknown error")
+        );
+    }
+
+    id<MTLFunction> llama_cached_decode_ffn_gate_up_silu_function =
+        [library newFunctionWithName:@"llama_cached_decode_ffn_gate_up_silu_f32_kernel"];
+    if (llama_cached_decode_ffn_gate_up_silu_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached decode FFN gate/up SiLU kernel function was not found"
+        );
+    }
+
+    NSError* llama_cached_decode_ffn_gate_up_silu_pipeline_error = nil;
+    llama_cached_decode_ffn_gate_up_silu_pipeline =
+        [device newComputePipelineStateWithFunction:llama_cached_decode_ffn_gate_up_silu_function
+                                              error:&llama_cached_decode_ffn_gate_up_silu_pipeline_error];
+    if (llama_cached_decode_ffn_gate_up_silu_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached decode FFN gate/up SiLU pipeline creation failed: "
+                + ns_error_message(llama_cached_decode_ffn_gate_up_silu_pipeline_error, "unknown error")
+        );
+    }
+
     queue = [device newCommandQueue];
     if (queue == nil) {
         throw metal_error(
@@ -1233,6 +1360,248 @@ void encode_llama_cached_attention_output(
     );
     [encoder dispatchThreadgroups:attention_threadgroups
             threadsPerThreadgroup:attention_threads_per_threadgroup];
+}
+
+[[nodiscard]] std::uint64_t llama_cached_decode_block_tail_scratch_byte_count(
+    const LlamaCachedDecodeBlockTailDimensions& dims
+) noexcept {
+    return (static_cast<std::uint64_t>(dims.hidden) + llama_cached_decode_block_tail_thread_count) * sizeof(float);
+}
+
+[[nodiscard]] bool can_use_llama_cached_decode_block_tail_kernels(
+    const MatmulPipelineState& state,
+    std::uint64_t rows,
+    const LlamaCachedDecodeBlockTailDimensions& dims
+) {
+    if (rows != 1 || dims.hidden == 0 || dims.attention_output_width == 0 || dims.feed_forward == 0) {
+        return false;
+    }
+
+    const auto residual_norm_thread_limit = static_cast<std::uint64_t>(
+        [state.llama_cached_decode_attention_residual_norm_pipeline maxTotalThreadsPerThreadgroup]
+    );
+    const auto gate_up_thread_limit = static_cast<std::uint64_t>(
+        [state.llama_cached_decode_ffn_gate_up_silu_pipeline maxTotalThreadsPerThreadgroup]
+    );
+    if (residual_norm_thread_limit < llama_cached_decode_block_tail_thread_count
+        || gate_up_thread_limit < llama_cached_decode_block_tail_thread_count) {
+        return false;
+    }
+
+    const auto threadgroup_memory_limit = static_cast<std::uint64_t>([state.device maxThreadgroupMemoryLength]);
+    return llama_cached_decode_block_tail_scratch_byte_count(dims) <= threadgroup_memory_limit;
+}
+
+void encode_llama_cached_block_tail(
+    MatmulPipelineState& state,
+    id<MTLCommandBuffer> command_buffer,
+    id<MTLBuffer> input_buffer,
+    id<MTLBuffer> attention_output_buffer,
+    id<MTLBuffer> attention_output_weight_buffer,
+    id<MTLBuffer> feed_forward_norm_weight_buffer,
+    id<MTLBuffer> gate_weight_buffer,
+    id<MTLBuffer> up_weight_buffer,
+    id<MTLBuffer> down_weight_buffer,
+    id<MTLBuffer> attention_residual_buffer,
+    id<MTLBuffer> feed_forward_normalized_buffer,
+    id<MTLBuffer> gate_buffer,
+    id<MTLBuffer> up_buffer,
+    id<MTLBuffer> gated_buffer,
+    id<MTLBuffer> output_buffer,
+    const RMSNormDimensions& rms_norm_dims,
+    const MatmulDimensions& attention_output_dims,
+    const MatmulDimensions& gate_dims,
+    const MatmulDimensions& down_dims,
+    const ElementwiseDimensions& feed_forward_elementwise_dims,
+    std::uint64_t rows,
+    std::uint64_t hidden,
+    std::uint64_t attention_output_width,
+    std::uint64_t feed_forward,
+    float rms_norm_epsilon,
+    const char* error_context
+) {
+    const LlamaCachedDecodeBlockTailDimensions decode_tail_dims {
+        .hidden = require_u32_dimension(hidden, "hidden"),
+        .attention_output_width = require_u32_dimension(attention_output_width, "attention_output_width"),
+        .feed_forward = require_u32_dimension(feed_forward, "feed_forward"),
+        .epsilon = rms_norm_epsilon,
+    };
+
+    auto encode_matmul_add = [&](
+        id<MTLBuffer> left_buffer,
+        id<MTLBuffer> right_buffer,
+        id<MTLBuffer> residual_buffer,
+        id<MTLBuffer> matmul_output_buffer,
+        const MatmulDimensions& dims,
+        std::uint64_t output_columns_for_dispatch
+    ) {
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + error_context + " matmul-add command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.matmul_add_pipeline];
+        [encoder setBuffer:left_buffer offset:0 atIndex:0];
+        [encoder setBuffer:right_buffer offset:0 atIndex:1];
+        [encoder setBuffer:residual_buffer offset:0 atIndex:2];
+        [encoder setBuffer:matmul_output_buffer offset:0 atIndex:3];
+        [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:4];
+
+        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
+        const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
+        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder endEncoding];
+    };
+
+    if (can_use_llama_cached_decode_block_tail_kernels(state, rows, decode_tail_dims)) {
+        id<MTLComputeCommandEncoder> residual_norm_encoder = [command_buffer computeCommandEncoder];
+        if (residual_norm_encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + error_context + " decode residual norm command encoding failed"
+            );
+        }
+
+        [residual_norm_encoder setComputePipelineState:state.llama_cached_decode_attention_residual_norm_pipeline];
+        [residual_norm_encoder setBuffer:input_buffer offset:0 atIndex:0];
+        [residual_norm_encoder setBuffer:attention_output_buffer offset:0 atIndex:1];
+        [residual_norm_encoder setBuffer:attention_output_weight_buffer offset:0 atIndex:2];
+        [residual_norm_encoder setBuffer:feed_forward_norm_weight_buffer offset:0 atIndex:3];
+        [residual_norm_encoder setBuffer:attention_residual_buffer offset:0 atIndex:4];
+        [residual_norm_encoder setBuffer:feed_forward_normalized_buffer offset:0 atIndex:5];
+        [residual_norm_encoder setBytes:&decode_tail_dims
+                                 length:sizeof(LlamaCachedDecodeBlockTailDimensions)
+                                atIndex:6];
+        [residual_norm_encoder setThreadgroupMemoryLength:static_cast<NSUInteger>(
+            llama_cached_decode_block_tail_scratch_byte_count(decode_tail_dims)
+        )
+                                                   atIndex:0];
+        [residual_norm_encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                              threadsPerThreadgroup:MTLSizeMake(
+                                  static_cast<NSUInteger>(llama_cached_decode_block_tail_thread_count),
+                                  1,
+                                  1
+                              )];
+        [residual_norm_encoder endEncoding];
+
+        id<MTLComputeCommandEncoder> gate_up_encoder = [command_buffer computeCommandEncoder];
+        if (gate_up_encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + error_context + " decode gate/up command encoding failed"
+            );
+        }
+
+        [gate_up_encoder setComputePipelineState:state.llama_cached_decode_ffn_gate_up_silu_pipeline];
+        [gate_up_encoder setBuffer:feed_forward_normalized_buffer offset:0 atIndex:0];
+        [gate_up_encoder setBuffer:gate_weight_buffer offset:0 atIndex:1];
+        [gate_up_encoder setBuffer:up_weight_buffer offset:0 atIndex:2];
+        [gate_up_encoder setBuffer:gated_buffer offset:0 atIndex:3];
+        [gate_up_encoder setBytes:&decode_tail_dims
+                           length:sizeof(LlamaCachedDecodeBlockTailDimensions)
+                          atIndex:4];
+        [gate_up_encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((feed_forward + 255U) / 256U), 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(
+                            static_cast<NSUInteger>(llama_cached_decode_block_tail_thread_count),
+                            1,
+                            1
+                        )];
+        [gate_up_encoder endEncoding];
+
+        encode_matmul_add(gated_buffer, down_weight_buffer, attention_residual_buffer, output_buffer, down_dims, hidden);
+        return;
+    }
+
+    auto encode_rms_norm = [&](id<MTLBuffer> source, id<MTLBuffer> weight, id<MTLBuffer> output) {
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + error_context + " RMSNorm command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.rms_norm_pipeline];
+        [encoder setBuffer:source offset:0 atIndex:0];
+        [encoder setBuffer:weight offset:0 atIndex:1];
+        [encoder setBuffer:output offset:0 atIndex:2];
+        [encoder setBytes:&rms_norm_dims length:sizeof(RMSNormDimensions) atIndex:3];
+
+        const MTLSize threads_per_threadgroup = MTLSizeMake(64, 1, 1);
+        const MTLSize threadgroups = MTLSizeMake(static_cast<NSUInteger>((rows + 63U) / 64U), 1, 1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder endEncoding];
+    };
+
+    auto encode_matmul = [&](
+        id<MTLBuffer> left_buffer,
+        id<MTLBuffer> right_buffer,
+        id<MTLBuffer> matmul_output_buffer,
+        const MatmulDimensions& dims,
+        std::uint64_t output_columns_for_dispatch
+    ) {
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + error_context + " matmul command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.matmul_pipeline];
+        [encoder setBuffer:left_buffer offset:0 atIndex:0];
+        [encoder setBuffer:right_buffer offset:0 atIndex:1];
+        [encoder setBuffer:matmul_output_buffer offset:0 atIndex:2];
+        [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:3];
+
+        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
+        const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
+        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder endEncoding];
+    };
+
+    encode_matmul_add(
+        attention_output_buffer,
+        attention_output_weight_buffer,
+        input_buffer,
+        attention_residual_buffer,
+        attention_output_dims,
+        hidden
+    );
+    encode_rms_norm(attention_residual_buffer, feed_forward_norm_weight_buffer, feed_forward_normalized_buffer);
+    encode_matmul(feed_forward_normalized_buffer, gate_weight_buffer, gate_buffer, gate_dims, feed_forward);
+    encode_matmul(feed_forward_normalized_buffer, up_weight_buffer, up_buffer, gate_dims, feed_forward);
+
+    id<MTLComputeCommandEncoder> silu_encoder = [command_buffer computeCommandEncoder];
+    if (silu_encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            std::string("Metal ") + error_context + " activation command encoding failed"
+        );
+    }
+    [silu_encoder setComputePipelineState:state.silu_multiply_pipeline];
+    [silu_encoder setBuffer:gate_buffer offset:0 atIndex:0];
+    [silu_encoder setBuffer:up_buffer offset:0 atIndex:1];
+    [silu_encoder setBuffer:gated_buffer offset:0 atIndex:2];
+    [silu_encoder setBytes:&feed_forward_elementwise_dims length:sizeof(ElementwiseDimensions) atIndex:3];
+
+    const MTLSize activation_threads_per_threadgroup = MTLSizeMake(256, 1, 1);
+    const auto activation_threadgroup_count = static_cast<NSUInteger>(
+        (static_cast<std::uint64_t>(feed_forward_elementwise_dims.elements) + 255U) / 256U
+    );
+    const MTLSize activation_threadgroups = MTLSizeMake(activation_threadgroup_count, 1, 1);
+    [silu_encoder dispatchThreadgroups:activation_threadgroups
+                 threadsPerThreadgroup:activation_threads_per_threadgroup];
+    [silu_encoder endEncoding];
+
+    encode_matmul_add(gated_buffer, down_weight_buffer, attention_residual_buffer, output_buffer, down_dims, hidden);
 }
 
 [[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight_with_metal_right_buffer(
@@ -2407,37 +2776,6 @@ void append_llama_cached_kv_to_tensors_f32(
         [encoder endEncoding];
     };
 
-    auto encode_matmul_add = [&](
-        id<MTLBuffer> left_buffer,
-        id<MTLBuffer> right_buffer,
-        id<MTLBuffer> residual_buffer,
-        id<MTLBuffer> matmul_output_buffer,
-        const MatmulDimensions& dims,
-        std::uint64_t output_columns_for_dispatch
-    ) {
-        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-        if (encoder == nil) {
-            throw metal_error(
-                runtime::BackendErrorCode::metal_execution_failed,
-                "Metal Llama cached block matmul-add command encoding failed"
-            );
-        }
-
-        [encoder setComputePipelineState:state.matmul_add_pipeline];
-        [encoder setBuffer:left_buffer offset:0 atIndex:0];
-        [encoder setBuffer:right_buffer offset:0 atIndex:1];
-        [encoder setBuffer:residual_buffer offset:0 atIndex:2];
-        [encoder setBuffer:matmul_output_buffer offset:0 atIndex:3];
-        [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:4];
-
-        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
-        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
-        const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
-        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
-        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
-        [encoder endEncoding];
-    };
-
     encode_rms_norm(input.buffer(), attention_norm_weight.buffer(), attention_normalized_buffer);
     encode_matmul(attention_normalized_buffer, query_weight.buffer(), query_buffer, query_dims, query_width);
     encode_matmul(attention_normalized_buffer, key_weight.buffer(), key_buffer, key_dims, key_width);
@@ -2486,45 +2824,34 @@ void append_llama_cached_kv_to_tensors_f32(
     );
     [attention_encoder endEncoding];
 
-    encode_matmul_add(
+    encode_llama_cached_block_tail(
+        state,
+        command_buffer,
+        input.buffer(),
         attention_output_buffer,
         attention_output_weight.buffer(),
-        input.buffer(),
-        attention_residual_buffer,
-        attention_output_dims,
-        hidden
-    );
-    encode_rms_norm(
-        attention_residual_buffer,
         feed_forward_norm_weight.buffer(),
-        feed_forward_normalized_buffer
+        gate_weight.buffer(),
+        up_weight.buffer(),
+        down_weight.buffer(),
+        attention_residual_buffer,
+        feed_forward_normalized_buffer,
+        gate_buffer,
+        up_buffer,
+        gated_buffer,
+        output_buffer,
+        rms_norm_dims,
+        attention_output_dims,
+        gate_dims,
+        down_dims,
+        feed_forward_elementwise_dims,
+        rows,
+        hidden,
+        attention_output_width,
+        feed_forward,
+        rms_norm_epsilon,
+        "Llama cached block tail"
     );
-    encode_matmul(feed_forward_normalized_buffer, gate_weight.buffer(), gate_buffer, gate_dims, feed_forward);
-    encode_matmul(feed_forward_normalized_buffer, up_weight.buffer(), up_buffer, gate_dims, feed_forward);
-
-    id<MTLComputeCommandEncoder> silu_encoder = [command_buffer computeCommandEncoder];
-    if (silu_encoder == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal Llama cached block activation command encoding failed"
-        );
-    }
-    [silu_encoder setComputePipelineState:state.silu_multiply_pipeline];
-    [silu_encoder setBuffer:gate_buffer offset:0 atIndex:0];
-    [silu_encoder setBuffer:up_buffer offset:0 atIndex:1];
-    [silu_encoder setBuffer:gated_buffer offset:0 atIndex:2];
-    [silu_encoder setBytes:&feed_forward_elementwise_dims length:sizeof(ElementwiseDimensions) atIndex:3];
-
-    const MTLSize activation_threads_per_threadgroup = MTLSizeMake(256, 1, 1);
-    const auto activation_threadgroup_count = static_cast<NSUInteger>(
-        (feed_forward_descriptor.element_count + 255U) / 256U
-    );
-    const MTLSize activation_threadgroups = MTLSizeMake(activation_threadgroup_count, 1, 1);
-    [silu_encoder dispatchThreadgroups:activation_threadgroups
-                 threadsPerThreadgroup:activation_threads_per_threadgroup];
-    [silu_encoder endEncoding];
-
-    encode_matmul_add(gated_buffer, down_weight.buffer(), attention_residual_buffer, output_buffer, down_dims, hidden);
 
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
@@ -2568,6 +2895,350 @@ void benchmark_noop_dispatch() {
             throw metal_error(
                 runtime::BackendErrorCode::metal_execution_failed,
                 "Metal benchmark no-op command failed: " + ns_error_message(execution_error, "unknown error")
+            );
+        }
+    }
+}
+
+BackendBuffer benchmark_llama_cached_decode_attention_norm_to_backend(
+    const BackendBuffer& input,
+    const BackendBuffer& attention_norm_weight,
+    float rms_norm_epsilon
+) {
+    @autoreleasepool {
+        require_same_backend(input.backend(), runtime::BackendKind::metal, "benchmark attention norm");
+        require_same_backend(input.backend(), attention_norm_weight.backend(), "benchmark attention norm");
+        ops::require_f32_descriptor(input.descriptor());
+        require_matrix_descriptor(input.descriptor());
+        require_f32_vector_descriptor(attention_norm_weight.descriptor());
+        require_positive_epsilon(rms_norm_epsilon);
+
+        const auto rows = input.descriptor().shape.dimension(0);
+        const auto hidden = input.descriptor().shape.dimension(1);
+        if (rows == 0) {
+            throw std::invalid_argument("benchmark attention norm input rows must be positive");
+        }
+        if (attention_norm_weight.descriptor().shape.dimension(0) != hidden) {
+            throw TensorError(
+                TensorErrorCode::tensor_shape_mismatch,
+                hidden,
+                attention_norm_weight.descriptor().shape.dimension(0)
+            );
+        }
+
+        auto& state = shared_matmul_pipeline_state();
+        const auto output_descriptor = TensorDescriptor::from(Shape::from({rows, hidden}), DType::f32);
+        const RMSNormDimensions rms_norm_dims {
+            .rows = require_u32_dimension(rows, "rows"),
+            .hidden = require_u32_dimension(hidden, "hidden"),
+            .epsilon = rms_norm_epsilon,
+        };
+
+        std::lock_guard<std::mutex> scratch_lock(state.llama_cached_block_scratch_mutex);
+        auto& scratch = state.llama_cached_block_scratch;
+        id<MTLBuffer> output_buffer = reusable_scratch_buffer(
+            state.device,
+            scratch.attention_normalized,
+            output_descriptor.byte_count,
+            "benchmark_attention_norm"
+        );
+
+        id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+        if (command_buffer == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark attention norm command buffer creation failed"
+            );
+        }
+
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark attention norm command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.rms_norm_pipeline];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(input)).buffer() offset:0 atIndex:0];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(attention_norm_weight)).buffer()
+                    offset:0
+                   atIndex:1];
+        [encoder setBuffer:output_buffer offset:0 atIndex:2];
+        [encoder setBytes:&rms_norm_dims length:sizeof(RMSNormDimensions) atIndex:3];
+        [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((rows + 63U) / 64U), 1, 1)
+                 threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        [encoder endEncoding];
+
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+        if ([command_buffer status] == MTLCommandBufferStatusError) {
+            NSError* execution_error = [command_buffer error];
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark attention norm command failed: "
+                    + ns_error_message(execution_error, "unknown error")
+            );
+        }
+
+        return detail::make_backend_buffer(
+            std::make_shared<MetalBackendBufferStorage>(output_descriptor, output_buffer)
+        );
+    }
+}
+
+std::array<BackendBuffer, 3> benchmark_llama_cached_decode_qkv_projection_to_backend(
+    const BackendBuffer& input,
+    const BackendBuffer& query_weight,
+    const BackendBuffer& key_weight,
+    const BackendBuffer& value_weight
+) {
+    @autoreleasepool {
+        require_same_backend(input.backend(), runtime::BackendKind::metal, "benchmark QKV projection");
+        require_same_backend(input.backend(), query_weight.backend(), "benchmark QKV projection");
+        require_same_backend(input.backend(), key_weight.backend(), "benchmark QKV projection");
+        require_same_backend(input.backend(), value_weight.backend(), "benchmark QKV projection");
+        require_f32_f16_matmul_gguf_weight_operands(input.descriptor(), query_weight.descriptor());
+        require_f32_f16_matmul_gguf_weight_operands(input.descriptor(), key_weight.descriptor());
+        require_f32_f16_matmul_gguf_weight_operands(input.descriptor(), value_weight.descriptor());
+
+        const auto rows = input.descriptor().shape.dimension(0);
+        const auto hidden = input.descriptor().shape.dimension(1);
+        const auto query_width = query_weight.descriptor().shape.dimension(1);
+        const auto key_width = key_weight.descriptor().shape.dimension(1);
+        const auto value_width = value_weight.descriptor().shape.dimension(1);
+        if (rows == 0) {
+            throw std::invalid_argument("benchmark QKV projection input rows must be positive");
+        }
+
+        auto& state = shared_matmul_pipeline_state();
+        const auto query_descriptor = TensorDescriptor::from(Shape::from({rows, query_width}), DType::f32);
+        const auto key_descriptor = TensorDescriptor::from(Shape::from({rows, key_width}), DType::f32);
+        const auto value_descriptor = TensorDescriptor::from(Shape::from({rows, value_width}), DType::f32);
+        const MatmulDimensions query_dims {
+            .rows = require_u32_dimension(rows, "rows"),
+            .shared = require_u32_dimension(hidden, "hidden"),
+            .columns = require_u32_dimension(query_width, "query_width"),
+        };
+        const MatmulDimensions key_dims {
+            .rows = require_u32_dimension(rows, "rows"),
+            .shared = require_u32_dimension(hidden, "hidden"),
+            .columns = require_u32_dimension(key_width, "key_width"),
+        };
+        const MatmulDimensions value_dims {
+            .rows = require_u32_dimension(rows, "rows"),
+            .shared = require_u32_dimension(hidden, "hidden"),
+            .columns = require_u32_dimension(value_width, "value_width"),
+        };
+
+        std::lock_guard<std::mutex> scratch_lock(state.llama_cached_block_scratch_mutex);
+        auto& scratch = state.llama_cached_block_scratch;
+        id<MTLBuffer> query_buffer = reusable_scratch_buffer(
+            state.device,
+            scratch.query,
+            query_descriptor.byte_count,
+            "benchmark_query"
+        );
+        id<MTLBuffer> key_buffer = reusable_scratch_buffer(
+            state.device,
+            scratch.key,
+            key_descriptor.byte_count,
+            "benchmark_key"
+        );
+        id<MTLBuffer> value_buffer = reusable_scratch_buffer(
+            state.device,
+            scratch.value,
+            value_descriptor.byte_count,
+            "benchmark_value"
+        );
+
+        id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+        if (command_buffer == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark QKV projection command buffer creation failed"
+            );
+        }
+
+        auto encode_matmul = [&](
+            const BackendBuffer& right,
+            id<MTLBuffer> output_buffer,
+            const MatmulDimensions& dims,
+            std::uint64_t output_columns
+        ) {
+            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+            if (encoder == nil) {
+                throw metal_error(
+                    runtime::BackendErrorCode::metal_execution_failed,
+                    "Metal benchmark QKV projection matmul encoding failed"
+                );
+            }
+
+            [encoder setComputePipelineState:state.matmul_pipeline];
+            [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(input)).buffer()
+                        offset:0
+                       atIndex:0];
+            [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(right)).buffer() offset:0 atIndex:1];
+            [encoder setBuffer:output_buffer offset:0 atIndex:2];
+            [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:3];
+            [encoder dispatchThreadgroups:MTLSizeMake(
+                                                static_cast<NSUInteger>((output_columns + 15U) / 16U),
+                                                static_cast<NSUInteger>((rows + 15U) / 16U),
+                                                1
+                                            )
+                     threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+            [encoder endEncoding];
+        };
+
+        encode_matmul(query_weight, query_buffer, query_dims, query_width);
+        encode_matmul(key_weight, key_buffer, key_dims, key_width);
+        encode_matmul(value_weight, value_buffer, value_dims, value_width);
+
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+        if ([command_buffer status] == MTLCommandBufferStatusError) {
+            NSError* execution_error = [command_buffer error];
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark QKV projection command failed: "
+                    + ns_error_message(execution_error, "unknown error")
+            );
+        }
+
+        return std::array<BackendBuffer, 3> {
+            detail::make_backend_buffer(std::make_shared<MetalBackendBufferStorage>(query_descriptor, query_buffer)),
+            detail::make_backend_buffer(std::make_shared<MetalBackendBufferStorage>(key_descriptor, key_buffer)),
+            detail::make_backend_buffer(std::make_shared<MetalBackendBufferStorage>(value_descriptor, value_buffer)),
+        };
+    }
+}
+
+void benchmark_llama_cached_decode_kv_append_to_backend(
+    const BackendBuffer& key,
+    const BackendBuffer& value,
+    BackendBuffer& cache_key,
+    BackendBuffer& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    @autoreleasepool {
+        require_same_backend(key.backend(), runtime::BackendKind::metal, "benchmark KV append");
+        require_same_backend(key.backend(), value.backend(), "benchmark KV append");
+        require_same_backend(key.backend(), cache_key.backend(), "benchmark KV append");
+        require_same_backend(key.backend(), cache_value.backend(), "benchmark KV append");
+        ops::require_f32_descriptor(key.descriptor());
+        ops::require_f32_descriptor(value.descriptor());
+        ops::require_f32_descriptor(cache_key.descriptor());
+        ops::require_f32_descriptor(cache_value.descriptor());
+        require_matrix_descriptor(key.descriptor());
+        require_matrix_descriptor(value.descriptor());
+        require_matrix_descriptor(cache_key.descriptor());
+        require_matrix_descriptor(cache_value.descriptor());
+        require_positive_frequency_base(frequency_base);
+
+        const auto rows = key.descriptor().shape.dimension(0);
+        const auto key_width = kv_head_count * key_length;
+        const auto value_width = kv_head_count * value_length;
+        if (rows == 0) {
+            throw std::invalid_argument("benchmark KV append input rows must be positive");
+        }
+        if (kv_head_count == 0 || key_length == 0 || value_length == 0) {
+            throw std::invalid_argument("benchmark KV append dimensions must be positive");
+        }
+        if (rope_dimension_count == 0 || rope_dimension_count % 2 != 0 || rope_dimension_count > key_length) {
+            throw TensorError(TensorErrorCode::invalid_shape_dimension, key_length, rope_dimension_count);
+        }
+        if (value.descriptor().shape.dimension(0) != rows) {
+            throw TensorError(TensorErrorCode::tensor_shape_mismatch, rows, value.descriptor().shape.dimension(0));
+        }
+        if (key.descriptor().shape.dimension(1) != key_width) {
+            throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_width, key.descriptor().shape.dimension(1));
+        }
+        if (value.descriptor().shape.dimension(1) != value_width) {
+            throw TensorError(TensorErrorCode::tensor_shape_mismatch, value_width, value.descriptor().shape.dimension(1));
+        }
+        if (cache_key.descriptor().shape.dimension(1) != key_width) {
+            throw TensorError(
+                TensorErrorCode::tensor_shape_mismatch,
+                key_width,
+                cache_key.descriptor().shape.dimension(1)
+            );
+        }
+        if (cache_value.descriptor().shape.dimension(1) != value_width) {
+            throw TensorError(
+                TensorErrorCode::tensor_shape_mismatch,
+                value_width,
+                cache_value.descriptor().shape.dimension(1)
+            );
+        }
+        if (cache_key.descriptor().shape.dimension(0) != cache_value.descriptor().shape.dimension(0)) {
+            throw TensorError(
+                TensorErrorCode::tensor_shape_mismatch,
+                cache_key.descriptor().shape.dimension(0),
+                cache_value.descriptor().shape.dimension(0)
+            );
+        }
+        if (cache_position > cache_key.descriptor().shape.dimension(0)
+            || rows > cache_key.descriptor().shape.dimension(0) - cache_position) {
+            throw std::invalid_argument("benchmark KV append would exceed context length");
+        }
+
+        auto& state = shared_matmul_pipeline_state();
+        const LlamaCachedAttentionDimensions attention_dims {
+            .token_count = require_u32_dimension(rows, "token_count"),
+            .cache_position = require_u32_dimension(cache_position, "cache_position"),
+            .cached_token_count = require_u32_dimension(cache_position + rows, "cached_token_count"),
+            .head_count = require_u32_dimension(kv_head_count, "head_count"),
+            .kv_head_count = require_u32_dimension(kv_head_count, "kv_head_count"),
+            .key_length = require_u32_dimension(key_length, "key_length"),
+            .value_length = require_u32_dimension(value_length, "value_length"),
+            .rope_dimension_count = require_u32_dimension(rope_dimension_count, "rope_dimension_count"),
+            .frequency_base = frequency_base,
+            .scale = 1.0F,
+        };
+
+        id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+        if (command_buffer == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark KV append command buffer creation failed"
+            );
+        }
+
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark KV append command encoding failed"
+            );
+        }
+        [encoder setComputePipelineState:state.llama_cached_kv_append_pipeline];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(key)).buffer() offset:0 atIndex:0];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(value)).buffer() offset:0 atIndex:1];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(cache_key)).buffer() offset:0 atIndex:2];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(cache_value)).buffer() offset:0 atIndex:3];
+        [encoder setBytes:&attention_dims length:sizeof(LlamaCachedAttentionDimensions) atIndex:4];
+        const auto append_columns = key_width > value_width ? key_width : value_width;
+        [encoder dispatchThreadgroups:MTLSizeMake(
+                                            static_cast<NSUInteger>((append_columns + 15U) / 16U),
+                                            static_cast<NSUInteger>((rows + 15U) / 16U),
+                                            1
+                                        )
+                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        [encoder endEncoding];
+
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+        if ([command_buffer status] == MTLCommandBufferStatusError) {
+            NSError* execution_error = [command_buffer error];
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark KV append command failed: "
+                    + ns_error_message(execution_error, "unknown error")
             );
         }
     }
@@ -3054,47 +3725,289 @@ BackendBuffer benchmark_llama_cached_decode_block_tail_to_backend(
             );
         }
 
-        auto encode_rms_norm = [&](id<MTLBuffer> source, id<MTLBuffer> weight, id<MTLBuffer> output) {
+        const auto& input_storage = require_metal_backend_buffer(backend_buffer_storage(input));
+        const auto& attention_output_storage = require_metal_backend_buffer(backend_buffer_storage(attention_output));
+        encode_llama_cached_block_tail(
+            state,
+            command_buffer,
+            input_storage.buffer(),
+            attention_output_storage.buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(attention_output_weight)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(feed_forward_norm_weight)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(gate_weight)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(up_weight)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(down_weight)).buffer(),
+            attention_residual_buffer,
+            feed_forward_normalized_buffer,
+            gate_buffer,
+            up_buffer,
+            gated_buffer,
+            output_buffer,
+            rms_norm_dims,
+            attention_output_dims,
+            gate_dims,
+            down_dims,
+            feed_forward_elementwise_dims,
+            rows,
+            hidden,
+            attention_output_width,
+            feed_forward,
+            rms_norm_epsilon,
+            "benchmark cached block tail"
+        );
+
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+        if ([command_buffer status] == MTLCommandBufferStatusError) {
+            NSError* execution_error = [command_buffer error];
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark cached block tail command failed: "
+                    + ns_error_message(execution_error, "unknown error")
+            );
+        }
+
+        return detail::make_backend_buffer(
+            std::make_shared<MetalBackendBufferStorage>(hidden_descriptor, output_buffer)
+        );
+    }
+}
+
+BackendBuffer benchmark_llama_cached_decode_attention_residual_to_backend(
+    const BackendBuffer& input,
+    const BackendBuffer& attention_output,
+    const BackendBuffer& attention_output_weight
+) {
+    @autoreleasepool {
+        require_same_backend(input.backend(), runtime::BackendKind::metal, "benchmark attention residual");
+        require_same_backend(input.backend(), attention_output.backend(), "benchmark attention residual");
+        require_same_backend(input.backend(), attention_output_weight.backend(), "benchmark attention residual");
+        ops::require_f32_descriptor(input.descriptor());
+        ops::require_f32_descriptor(attention_output.descriptor());
+        require_matrix_descriptor(input.descriptor());
+        require_matrix_descriptor(attention_output.descriptor());
+        require_f32_f16_matmul_gguf_weight_operands(
+            attention_output.descriptor(),
+            attention_output_weight.descriptor()
+        );
+
+        const auto rows = input.descriptor().shape.dimension(0);
+        const auto hidden = input.descriptor().shape.dimension(1);
+        const auto attention_rows = attention_output.descriptor().shape.dimension(0);
+        const auto attention_output_width = attention_output.descriptor().shape.dimension(1);
+        if (rows == 0) {
+            throw std::invalid_argument("benchmark attention residual input rows must be positive");
+        }
+        if (attention_rows != rows) {
+            throw TensorError(TensorErrorCode::tensor_shape_mismatch, rows, attention_rows);
+        }
+        if (attention_output_weight.descriptor().shape.dimension(1) != hidden) {
+            throw TensorError(
+                TensorErrorCode::tensor_shape_mismatch,
+                hidden,
+                attention_output_weight.descriptor().shape.dimension(1)
+            );
+        }
+
+        auto& state = shared_matmul_pipeline_state();
+        const auto output_descriptor = TensorDescriptor::from(Shape::from({rows, hidden}), DType::f32);
+        const MatmulDimensions attention_output_dims {
+            .rows = require_u32_dimension(rows, "rows"),
+            .shared = require_u32_dimension(attention_output_width, "attention_output_width"),
+            .columns = require_u32_dimension(hidden, "hidden"),
+        };
+
+        std::lock_guard<std::mutex> scratch_lock(state.llama_cached_block_scratch_mutex);
+        auto& scratch = state.llama_cached_block_scratch;
+        id<MTLBuffer> output_buffer = reusable_scratch_buffer(
+            state.device,
+            scratch.attention_residual,
+            output_descriptor.byte_count,
+            "benchmark_attention_residual"
+        );
+
+        id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+        if (command_buffer == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark attention residual command buffer creation failed"
+            );
+        }
+
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark attention residual command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.matmul_add_pipeline];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(attention_output)).buffer()
+                    offset:0
+                   atIndex:0];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(attention_output_weight)).buffer()
+                    offset:0
+                   atIndex:1];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(input)).buffer() offset:0 atIndex:2];
+        [encoder setBuffer:output_buffer offset:0 atIndex:3];
+        [encoder setBytes:&attention_output_dims length:sizeof(MatmulDimensions) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(
+                                            static_cast<NSUInteger>((hidden + 15U) / 16U),
+                                            static_cast<NSUInteger>((rows + 15U) / 16U),
+                                            1
+                                        )
+                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        [encoder endEncoding];
+
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+        if ([command_buffer status] == MTLCommandBufferStatusError) {
+            NSError* execution_error = [command_buffer error];
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark attention residual command failed: "
+                    + ns_error_message(execution_error, "unknown error")
+            );
+        }
+
+        return detail::make_backend_buffer(
+            std::make_shared<MetalBackendBufferStorage>(output_descriptor, output_buffer)
+        );
+    }
+}
+
+BackendBuffer benchmark_llama_cached_decode_ffn_gate_up_to_backend(
+    const BackendBuffer& attention_residual,
+    const BackendBuffer& feed_forward_norm_weight,
+    const BackendBuffer& gate_weight,
+    const BackendBuffer& up_weight,
+    float rms_norm_epsilon
+) {
+    @autoreleasepool {
+        require_same_backend(attention_residual.backend(), runtime::BackendKind::metal, "benchmark FFN gate/up");
+        require_same_backend(attention_residual.backend(), feed_forward_norm_weight.backend(), "benchmark FFN gate/up");
+        require_same_backend(attention_residual.backend(), gate_weight.backend(), "benchmark FFN gate/up");
+        require_same_backend(attention_residual.backend(), up_weight.backend(), "benchmark FFN gate/up");
+        ops::require_f32_descriptor(attention_residual.descriptor());
+        require_matrix_descriptor(attention_residual.descriptor());
+        require_f32_vector_descriptor(feed_forward_norm_weight.descriptor());
+        require_f32_f16_matmul_gguf_weight_operands(attention_residual.descriptor(), gate_weight.descriptor());
+        require_f32_f16_matmul_gguf_weight_operands(attention_residual.descriptor(), up_weight.descriptor());
+        require_positive_epsilon(rms_norm_epsilon);
+
+        const auto rows = attention_residual.descriptor().shape.dimension(0);
+        const auto hidden = attention_residual.descriptor().shape.dimension(1);
+        const auto feed_forward = gate_weight.descriptor().shape.dimension(1);
+        if (rows == 0) {
+            throw std::invalid_argument("benchmark FFN gate/up input rows must be positive");
+        }
+        if (feed_forward_norm_weight.descriptor().shape.dimension(0) != hidden) {
+            throw TensorError(
+                TensorErrorCode::tensor_shape_mismatch,
+                hidden,
+                feed_forward_norm_weight.descriptor().shape.dimension(0)
+            );
+        }
+        if (up_weight.descriptor().shape.dimension(1) != feed_forward) {
+            throw TensorError(
+                TensorErrorCode::tensor_shape_mismatch,
+                feed_forward,
+                up_weight.descriptor().shape.dimension(1)
+            );
+        }
+
+        auto& state = shared_matmul_pipeline_state();
+        const auto hidden_descriptor = TensorDescriptor::from(Shape::from({rows, hidden}), DType::f32);
+        const auto feed_forward_descriptor = TensorDescriptor::from(Shape::from({rows, feed_forward}), DType::f32);
+        const RMSNormDimensions rms_norm_dims {
+            .rows = require_u32_dimension(rows, "rows"),
+            .hidden = require_u32_dimension(hidden, "hidden"),
+            .epsilon = rms_norm_epsilon,
+        };
+        const MatmulDimensions gate_dims {
+            .rows = require_u32_dimension(rows, "rows"),
+            .shared = require_u32_dimension(hidden, "hidden"),
+            .columns = require_u32_dimension(feed_forward, "feed_forward"),
+        };
+        const ElementwiseDimensions feed_forward_elementwise_dims {
+            .elements = require_u32_dimension(feed_forward_descriptor.element_count, "feed_forward_elements"),
+        };
+
+        std::lock_guard<std::mutex> scratch_lock(state.llama_cached_block_scratch_mutex);
+        auto& scratch = state.llama_cached_block_scratch;
+        id<MTLBuffer> normalized_buffer = reusable_scratch_buffer(
+            state.device,
+            scratch.feed_forward_normalized,
+            hidden_descriptor.byte_count,
+            "benchmark_ffn_norm"
+        );
+        id<MTLBuffer> gate_buffer = reusable_scratch_buffer(
+            state.device,
+            scratch.gate,
+            feed_forward_descriptor.byte_count,
+            "benchmark_gate"
+        );
+        id<MTLBuffer> up_buffer = reusable_scratch_buffer(
+            state.device,
+            scratch.up,
+            feed_forward_descriptor.byte_count,
+            "benchmark_up"
+        );
+        id<MTLBuffer> gated_buffer = reusable_scratch_buffer(
+            state.device,
+            scratch.gated,
+            feed_forward_descriptor.byte_count,
+            "benchmark_gated"
+        );
+
+        id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+        if (command_buffer == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark FFN gate/up command buffer creation failed"
+            );
+        }
+
+        auto encode_rms_norm = [&]() {
             id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
             if (encoder == nil) {
                 throw metal_error(
                     runtime::BackendErrorCode::metal_execution_failed,
-                    "Metal benchmark cached block tail RMSNorm encoding failed"
+                    "Metal benchmark FFN gate/up RMSNorm encoding failed"
                 );
             }
 
             [encoder setComputePipelineState:state.rms_norm_pipeline];
-            [encoder setBuffer:source offset:0 atIndex:0];
-            [encoder setBuffer:weight offset:0 atIndex:1];
-            [encoder setBuffer:output offset:0 atIndex:2];
+            [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(attention_residual)).buffer()
+                        offset:0
+                       atIndex:0];
+            [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(feed_forward_norm_weight)).buffer()
+                        offset:0
+                       atIndex:1];
+            [encoder setBuffer:normalized_buffer offset:0 atIndex:2];
             [encoder setBytes:&rms_norm_dims length:sizeof(RMSNormDimensions) atIndex:3];
             [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((rows + 63U) / 64U), 1, 1)
                      threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
             [encoder endEncoding];
         };
 
-        auto encode_matmul = [&](
-            id<MTLBuffer> left_buffer,
-            id<MTLBuffer> right_buffer,
-            id<MTLBuffer> matmul_output_buffer,
-            const MatmulDimensions& dims,
-            std::uint64_t output_columns
-        ) {
+        auto encode_matmul = [&](const BackendBuffer& right, id<MTLBuffer> output_buffer) {
             id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
             if (encoder == nil) {
                 throw metal_error(
                     runtime::BackendErrorCode::metal_execution_failed,
-                    "Metal benchmark cached block tail matmul encoding failed"
+                    "Metal benchmark FFN gate/up matmul encoding failed"
                 );
             }
 
             [encoder setComputePipelineState:state.matmul_pipeline];
-            [encoder setBuffer:left_buffer offset:0 atIndex:0];
-            [encoder setBuffer:right_buffer offset:0 atIndex:1];
-            [encoder setBuffer:matmul_output_buffer offset:0 atIndex:2];
-            [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:3];
+            [encoder setBuffer:normalized_buffer offset:0 atIndex:0];
+            [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(right)).buffer() offset:0 atIndex:1];
+            [encoder setBuffer:output_buffer offset:0 atIndex:2];
+            [encoder setBytes:&gate_dims length:sizeof(MatmulDimensions) atIndex:3];
             [encoder dispatchThreadgroups:MTLSizeMake(
-                                                static_cast<NSUInteger>((output_columns + 15U) / 16U),
+                                                static_cast<NSUInteger>((feed_forward + 15U) / 16U),
                                                 static_cast<NSUInteger>((rows + 15U) / 16U),
                                                 1
                                             )
@@ -3102,72 +4015,15 @@ BackendBuffer benchmark_llama_cached_decode_block_tail_to_backend(
             [encoder endEncoding];
         };
 
-        auto encode_matmul_add = [&](
-            id<MTLBuffer> left_buffer,
-            id<MTLBuffer> right_buffer,
-            id<MTLBuffer> residual_buffer,
-            id<MTLBuffer> matmul_output_buffer,
-            const MatmulDimensions& dims,
-            std::uint64_t output_columns
-        ) {
-            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-            if (encoder == nil) {
-                throw metal_error(
-                    runtime::BackendErrorCode::metal_execution_failed,
-                    "Metal benchmark cached block tail matmul-add encoding failed"
-                );
-            }
-
-            [encoder setComputePipelineState:state.matmul_add_pipeline];
-            [encoder setBuffer:left_buffer offset:0 atIndex:0];
-            [encoder setBuffer:right_buffer offset:0 atIndex:1];
-            [encoder setBuffer:residual_buffer offset:0 atIndex:2];
-            [encoder setBuffer:matmul_output_buffer offset:0 atIndex:3];
-            [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:4];
-            [encoder dispatchThreadgroups:MTLSizeMake(
-                                                static_cast<NSUInteger>((output_columns + 15U) / 16U),
-                                                static_cast<NSUInteger>((rows + 15U) / 16U),
-                                                1
-                                            )
-                     threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-            [encoder endEncoding];
-        };
-
-        const auto& input_storage = require_metal_backend_buffer(backend_buffer_storage(input));
-        const auto& attention_output_storage = require_metal_backend_buffer(backend_buffer_storage(attention_output));
-        encode_matmul_add(
-            attention_output_storage.buffer(),
-            require_metal_backend_buffer(backend_buffer_storage(attention_output_weight)).buffer(),
-            input_storage.buffer(),
-            attention_residual_buffer,
-            attention_output_dims,
-            hidden
-        );
-        encode_rms_norm(
-            attention_residual_buffer,
-            require_metal_backend_buffer(backend_buffer_storage(feed_forward_norm_weight)).buffer(),
-            feed_forward_normalized_buffer
-        );
-        encode_matmul(
-            feed_forward_normalized_buffer,
-            require_metal_backend_buffer(backend_buffer_storage(gate_weight)).buffer(),
-            gate_buffer,
-            gate_dims,
-            feed_forward
-        );
-        encode_matmul(
-            feed_forward_normalized_buffer,
-            require_metal_backend_buffer(backend_buffer_storage(up_weight)).buffer(),
-            up_buffer,
-            gate_dims,
-            feed_forward
-        );
+        encode_rms_norm();
+        encode_matmul(gate_weight, gate_buffer);
+        encode_matmul(up_weight, up_buffer);
 
         id<MTLComputeCommandEncoder> silu_encoder = [command_buffer computeCommandEncoder];
         if (silu_encoder == nil) {
             throw metal_error(
                 runtime::BackendErrorCode::metal_execution_failed,
-                "Metal benchmark cached block tail activation encoding failed"
+                "Metal benchmark FFN gate/up activation encoding failed"
             );
         }
         [silu_encoder setComputePipelineState:state.silu_multiply_pipeline];
@@ -3185,14 +4041,105 @@ BackendBuffer benchmark_llama_cached_decode_block_tail_to_backend(
                      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         [silu_encoder endEncoding];
 
-        encode_matmul_add(
-            gated_buffer,
-            require_metal_backend_buffer(backend_buffer_storage(down_weight)).buffer(),
-            attention_residual_buffer,
-            output_buffer,
-            down_dims,
-            hidden
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];
+        if ([command_buffer status] == MTLCommandBufferStatusError) {
+            NSError* execution_error = [command_buffer error];
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark FFN gate/up command failed: "
+                    + ns_error_message(execution_error, "unknown error")
+            );
+        }
+
+        return detail::make_backend_buffer(
+            std::make_shared<MetalBackendBufferStorage>(feed_forward_descriptor, gated_buffer)
         );
+    }
+}
+
+BackendBuffer benchmark_llama_cached_decode_ffn_down_to_backend(
+    const BackendBuffer& gated,
+    const BackendBuffer& attention_residual,
+    const BackendBuffer& down_weight
+) {
+    @autoreleasepool {
+        require_same_backend(gated.backend(), runtime::BackendKind::metal, "benchmark FFN down");
+        require_same_backend(gated.backend(), attention_residual.backend(), "benchmark FFN down");
+        require_same_backend(gated.backend(), down_weight.backend(), "benchmark FFN down");
+        ops::require_f32_descriptor(gated.descriptor());
+        ops::require_f32_descriptor(attention_residual.descriptor());
+        require_matrix_descriptor(gated.descriptor());
+        require_matrix_descriptor(attention_residual.descriptor());
+        require_f32_f16_matmul_gguf_weight_operands(gated.descriptor(), down_weight.descriptor());
+
+        const auto rows = gated.descriptor().shape.dimension(0);
+        const auto feed_forward = gated.descriptor().shape.dimension(1);
+        const auto residual_rows = attention_residual.descriptor().shape.dimension(0);
+        const auto hidden = attention_residual.descriptor().shape.dimension(1);
+        if (rows == 0) {
+            throw std::invalid_argument("benchmark FFN down input rows must be positive");
+        }
+        if (residual_rows != rows) {
+            throw TensorError(TensorErrorCode::tensor_shape_mismatch, rows, residual_rows);
+        }
+        if (down_weight.descriptor().shape.dimension(1) != hidden) {
+            throw TensorError(
+                TensorErrorCode::tensor_shape_mismatch,
+                hidden,
+                down_weight.descriptor().shape.dimension(1)
+            );
+        }
+
+        auto& state = shared_matmul_pipeline_state();
+        const auto output_descriptor = TensorDescriptor::from(Shape::from({rows, hidden}), DType::f32);
+        const MatmulDimensions down_dims {
+            .rows = require_u32_dimension(rows, "rows"),
+            .shared = require_u32_dimension(feed_forward, "feed_forward"),
+            .columns = require_u32_dimension(hidden, "hidden"),
+        };
+
+        id<MTLBuffer> output_buffer =
+            [state.device newBufferWithLength:static_cast<NSUInteger>(output_descriptor.byte_count)
+                                      options:MTLResourceStorageModeShared];
+        if (output_buffer == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark FFN down output buffer allocation failed"
+            );
+        }
+
+        id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+        if (command_buffer == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark FFN down command buffer creation failed"
+            );
+        }
+
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal benchmark FFN down command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.matmul_add_pipeline];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(gated)).buffer() offset:0 atIndex:0];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(down_weight)).buffer() offset:0 atIndex:1];
+        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(attention_residual)).buffer()
+                    offset:0
+                   atIndex:2];
+        [encoder setBuffer:output_buffer offset:0 atIndex:3];
+        [encoder setBytes:&down_dims length:sizeof(MatmulDimensions) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(
+                                            static_cast<NSUInteger>((hidden + 15U) / 16U),
+                                            static_cast<NSUInteger>((rows + 15U) / 16U),
+                                            1
+                                        )
+                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        [encoder endEncoding];
 
         [command_buffer commit];
         [command_buffer waitUntilCompleted];
@@ -3200,13 +4147,13 @@ BackendBuffer benchmark_llama_cached_decode_block_tail_to_backend(
             NSError* execution_error = [command_buffer error];
             throw metal_error(
                 runtime::BackendErrorCode::metal_execution_failed,
-                "Metal benchmark cached block tail command failed: "
+                "Metal benchmark FFN down command failed: "
                     + ns_error_message(execution_error, "unknown error")
             );
         }
 
         return detail::make_backend_buffer(
-            std::make_shared<MetalBackendBufferStorage>(hidden_descriptor, output_buffer)
+            std::make_shared<MetalBackendBufferStorage>(output_descriptor, output_buffer)
         );
     }
 }

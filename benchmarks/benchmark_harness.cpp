@@ -45,6 +45,33 @@ namespace local_gguf_engine::tensor::backends::metal {
 
 void benchmark_noop_dispatch();
 
+local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_attention_norm_to_backend(
+    const local_gguf_engine::tensor::BackendBuffer& input,
+    const local_gguf_engine::tensor::BackendBuffer& attention_norm_weight,
+    float rms_norm_epsilon
+);
+
+std::array<local_gguf_engine::tensor::BackendBuffer, 3>
+benchmark_llama_cached_decode_qkv_projection_to_backend(
+    const local_gguf_engine::tensor::BackendBuffer& input,
+    const local_gguf_engine::tensor::BackendBuffer& query_weight,
+    const local_gguf_engine::tensor::BackendBuffer& key_weight,
+    const local_gguf_engine::tensor::BackendBuffer& value_weight
+);
+
+void benchmark_llama_cached_decode_kv_append_to_backend(
+    const local_gguf_engine::tensor::BackendBuffer& key,
+    const local_gguf_engine::tensor::BackendBuffer& value,
+    local_gguf_engine::tensor::BackendBuffer& cache_key,
+    local_gguf_engine::tensor::BackendBuffer& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+);
+
 std::array<local_gguf_engine::tensor::BackendBuffer, 3>
 benchmark_llama_cached_decode_attention_frontend_to_backend(
     const local_gguf_engine::tensor::BackendBuffer& input,
@@ -87,6 +114,26 @@ local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_block_tai
     const local_gguf_engine::tensor::BackendBuffer& up_weight,
     const local_gguf_engine::tensor::BackendBuffer& down_weight,
     float rms_norm_epsilon
+);
+
+local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_attention_residual_to_backend(
+    const local_gguf_engine::tensor::BackendBuffer& input,
+    const local_gguf_engine::tensor::BackendBuffer& attention_output,
+    const local_gguf_engine::tensor::BackendBuffer& attention_output_weight
+);
+
+local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_ffn_gate_up_to_backend(
+    const local_gguf_engine::tensor::BackendBuffer& attention_residual,
+    const local_gguf_engine::tensor::BackendBuffer& feed_forward_norm_weight,
+    const local_gguf_engine::tensor::BackendBuffer& gate_weight,
+    const local_gguf_engine::tensor::BackendBuffer& up_weight,
+    float rms_norm_epsilon
+);
+
+local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_ffn_down_to_backend(
+    const local_gguf_engine::tensor::BackendBuffer& gated,
+    const local_gguf_engine::tensor::BackendBuffer& attention_residual,
+    const local_gguf_engine::tensor::BackendBuffer& down_weight
 );
 
 }  // namespace local_gguf_engine::tensor::backends::metal
@@ -757,7 +804,11 @@ void add_focused_resident_kv_decode_stage_benchmarks(BenchmarkReport& report, bo
     const auto final_norm_weight = make_f32_storage(hidden, 1.0F);
     const auto logits_weight = make_f16_gguf_weight_matrix(hidden, vocab_size, 0.00004F);
     const auto query_fixture = make_f32_matrix(1, head_count * key_length, 0.00023F);
+    const auto key_fixture = make_f32_matrix(1, kv_head_count * key_length, 0.00017F);
+    const auto value_fixture = make_f32_matrix(1, kv_head_count * value_length, 0.00018F);
     const auto attention_output_fixture = make_f32_matrix(1, head_count * value_length, 0.00019F);
+    const auto attention_residual_fixture = make_f32_matrix(1, hidden, 0.00021F);
+    const auto gated_fixture = make_f32_matrix(1, feed_forward, 0.00010F);
     const auto cache_key_storage = make_f32_matrix(context_length, kv_head_count * key_length, 0.00009F);
     const auto cache_value_storage = make_f32_matrix(context_length, kv_head_count * value_length, 0.00007F);
 
@@ -860,7 +911,12 @@ void add_focused_resident_kv_decode_stage_benchmarks(BenchmarkReport& report, bo
     const auto metal_backend_weights = copy_llama_model_block_weights_to_backend(model_weights, BackendKind::metal);
     const auto input_buffer = copy_tensor_to_backend(decode_input, BackendKind::metal);
     const auto query_buffer = copy_tensor_to_backend(query_fixture, BackendKind::metal);
+    const auto key_buffer = copy_tensor_to_backend(key_fixture, BackendKind::metal);
+    const auto value_buffer = copy_tensor_to_backend(value_fixture, BackendKind::metal);
     const auto attention_output_buffer = copy_tensor_to_backend(attention_output_fixture, BackendKind::metal);
+    const auto attention_residual_buffer = copy_tensor_to_backend(attention_residual_fixture, BackendKind::metal);
+    const auto gated_buffer = copy_tensor_to_backend(gated_fixture, BackendKind::metal);
+    const auto short_decode_cache_length = cache_lengths.front();
 
     report.measurements.push_back(measure(
         "tensor.metal_noop_dispatch",
@@ -871,6 +927,264 @@ void add_focused_resident_kv_decode_stage_benchmarks(BenchmarkReport& report, bo
             return IterationMeasurement {
                 .bytes_processed = 0,
                 .checksum = 1,
+            };
+        }
+    ));
+
+    auto append_cache = make_prefilled_focused_backend_kv_cache(
+        focused_config,
+        BackendKind::metal,
+        short_decode_cache_length,
+        cache_key_storage,
+        cache_value_storage
+    );
+    {
+        const auto& block = metal_backend_weights.blocks[0];
+        (void)tensor::backends::metal::benchmark_llama_cached_decode_attention_norm_to_backend(
+            input_buffer,
+            block.attention.attention_norm_weight_buffer,
+            rms_norm_epsilon
+        );
+        (void)tensor::backends::metal::benchmark_llama_cached_decode_qkv_projection_to_backend(
+            input_buffer,
+            block.attention.query_weight,
+            block.attention.key_weight,
+            block.attention.value_weight
+        );
+        auto warmup_append_cache = make_prefilled_focused_backend_kv_cache(
+            focused_config,
+            BackendKind::metal,
+            short_decode_cache_length,
+            cache_key_storage,
+            cache_value_storage
+        );
+        tensor::backends::metal::benchmark_llama_cached_decode_kv_append_to_backend(
+            key_buffer,
+            value_buffer,
+            warmup_append_cache.layers[0].key,
+            warmup_append_cache.layers[0].value,
+            short_decode_cache_length,
+            kv_head_count,
+            key_length,
+            value_length,
+            key_length,
+            rope_freq_base
+        );
+        (void)tensor::backends::metal::benchmark_llama_cached_decode_attention_residual_to_backend(
+            input_buffer,
+            attention_output_buffer,
+            block.attention.output_weight
+        );
+        (void)tensor::backends::metal::benchmark_llama_cached_decode_ffn_gate_up_to_backend(
+            attention_residual_buffer,
+            block.feed_forward.feed_forward_norm_weight_buffer,
+            block.feed_forward.gate_weight,
+            block.feed_forward.up_weight,
+            rms_norm_epsilon
+        );
+        (void)tensor::backends::metal::benchmark_llama_cached_decode_ffn_down_to_backend(
+            gated_buffer,
+            attention_residual_buffer,
+            block.feed_forward.down_weight
+        );
+    }
+
+    report.measurements.push_back(measure(
+        "engine.llama_cached_decode_attention_norm_f32.metal_buffered.focused",
+        report.config.iterations,
+        focused_resident_kv_decode_detail(
+            "attention_norm",
+            "metal",
+            short_decode_cache_length,
+            1,
+            "RMSNorm one-dispatch no-readback"
+        ),
+        [
+            &input_buffer,
+            &metal_backend_weights
+        ]() {
+            const auto& block = metal_backend_weights.blocks[0];
+            const auto output = tensor::backends::metal::benchmark_llama_cached_decode_attention_norm_to_backend(
+                input_buffer,
+                block.attention.attention_norm_weight_buffer,
+                rms_norm_epsilon
+            );
+            return IterationMeasurement {
+                .bytes_processed = backend_buffer_byte_count(input_buffer)
+                    + backend_buffer_byte_count(block.attention.attention_norm_weight_buffer)
+                    + backend_buffer_byte_count(output),
+                .checksum = output.descriptor().byte_count,
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_cached_decode_qkv_projection_f32.metal_buffered.focused",
+        report.config.iterations,
+        focused_resident_kv_decode_detail(
+            "qkv_projection",
+            "metal",
+            short_decode_cache_length,
+            1,
+            "Q/K/V matmuls one-command-buffer no-readback"
+        ),
+        [
+            &input_buffer,
+            &metal_backend_weights
+        ]() {
+            const auto& block = metal_backend_weights.blocks[0];
+            const auto outputs = tensor::backends::metal::benchmark_llama_cached_decode_qkv_projection_to_backend(
+                input_buffer,
+                block.attention.query_weight,
+                block.attention.key_weight,
+                block.attention.value_weight
+            );
+            return IterationMeasurement {
+                .bytes_processed = backend_buffer_byte_count(input_buffer)
+                    + backend_buffer_byte_count(block.attention.query_weight)
+                    + backend_buffer_byte_count(block.attention.key_weight)
+                    + backend_buffer_byte_count(block.attention.value_weight)
+                    + outputs[0].descriptor().byte_count
+                    + outputs[1].descriptor().byte_count
+                    + outputs[2].descriptor().byte_count,
+                .checksum = outputs[0].descriptor().byte_count
+                    ^ (outputs[1].descriptor().byte_count << 1U)
+                    ^ (outputs[2].descriptor().byte_count << 2U),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_cached_decode_kv_append_f32.metal_buffered.focused_cache_"
+            + std::to_string(short_decode_cache_length),
+        report.config.iterations,
+        focused_resident_kv_decode_detail(
+            "kv_append",
+            "metal",
+            short_decode_cache_length,
+            1,
+            "RoPE-key+KV-append one-dispatch no-readback"
+        ),
+        [
+            &key_buffer,
+            &value_buffer,
+            &append_cache,
+            short_decode_cache_length
+        ]() {
+            tensor::backends::metal::benchmark_llama_cached_decode_kv_append_to_backend(
+                key_buffer,
+                value_buffer,
+                append_cache.layers[0].key,
+                append_cache.layers[0].value,
+                short_decode_cache_length,
+                kv_head_count,
+                key_length,
+                value_length,
+                key_length,
+                rope_freq_base
+            );
+            append_cache.layers[0].filled_token_count = short_decode_cache_length + 1;
+            return IterationMeasurement {
+                .bytes_processed = backend_buffer_byte_count(key_buffer)
+                    + backend_buffer_byte_count(value_buffer)
+                    + llama_backend_kv_cache_bytes(append_cache),
+                .checksum = llama_backend_kv_cache_fill_checksum(append_cache)
+                    ^ backend_buffer_byte_count(append_cache.layers[0].key),
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_cached_decode_attention_residual_f32.metal_buffered.focused",
+        report.config.iterations,
+        focused_resident_kv_decode_detail(
+            "attention_residual",
+            "metal",
+            short_decode_cache_length,
+            1,
+            "attention-output-projection+residual one-dispatch no-readback"
+        ),
+        [
+            &input_buffer,
+            &attention_output_buffer,
+            &metal_backend_weights
+        ]() {
+            const auto& block = metal_backend_weights.blocks[0];
+            const auto output = tensor::backends::metal::benchmark_llama_cached_decode_attention_residual_to_backend(
+                input_buffer,
+                attention_output_buffer,
+                block.attention.output_weight
+            );
+            return IterationMeasurement {
+                .bytes_processed = backend_buffer_byte_count(input_buffer)
+                    + backend_buffer_byte_count(attention_output_buffer)
+                    + backend_buffer_byte_count(block.attention.output_weight)
+                    + backend_buffer_byte_count(output),
+                .checksum = output.descriptor().byte_count,
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_cached_decode_ffn_gate_up_f32.metal_buffered.focused",
+        report.config.iterations,
+        focused_resident_kv_decode_detail(
+            "ffn_gate_up_silu",
+            "metal",
+            short_decode_cache_length,
+            1,
+            "FFN RMSNorm+gate/up+SiLU one-command-buffer no-readback"
+        ),
+        [
+            &attention_residual_buffer,
+            &metal_backend_weights
+        ]() {
+            const auto& block = metal_backend_weights.blocks[0];
+            const auto output = tensor::backends::metal::benchmark_llama_cached_decode_ffn_gate_up_to_backend(
+                attention_residual_buffer,
+                block.feed_forward.feed_forward_norm_weight_buffer,
+                block.feed_forward.gate_weight,
+                block.feed_forward.up_weight,
+                rms_norm_epsilon
+            );
+            return IterationMeasurement {
+                .bytes_processed = backend_buffer_byte_count(attention_residual_buffer)
+                    + backend_buffer_byte_count(block.feed_forward.feed_forward_norm_weight_buffer)
+                    + backend_buffer_byte_count(block.feed_forward.gate_weight)
+                    + backend_buffer_byte_count(block.feed_forward.up_weight)
+                    + backend_buffer_byte_count(output),
+                .checksum = output.descriptor().byte_count,
+            };
+        }
+    ));
+
+    report.measurements.push_back(measure(
+        "engine.llama_cached_decode_ffn_down_f32.metal_buffered.focused",
+        report.config.iterations,
+        focused_resident_kv_decode_detail(
+            "ffn_down_residual",
+            "metal",
+            short_decode_cache_length,
+            1,
+            "FFN down-projection+residual one-dispatch no-readback"
+        ),
+        [
+            &gated_buffer,
+            &attention_residual_buffer,
+            &metal_backend_weights
+        ]() {
+            const auto& block = metal_backend_weights.blocks[0];
+            const auto output = tensor::backends::metal::benchmark_llama_cached_decode_ffn_down_to_backend(
+                gated_buffer,
+                attention_residual_buffer,
+                block.feed_forward.down_weight
+            );
+            return IterationMeasurement {
+                .bytes_processed = backend_buffer_byte_count(gated_buffer)
+                    + backend_buffer_byte_count(attention_residual_buffer)
+                    + backend_buffer_byte_count(block.feed_forward.down_weight)
+                    + backend_buffer_byte_count(output),
+                .checksum = output.descriptor().byte_count,
             };
         }
     ));
