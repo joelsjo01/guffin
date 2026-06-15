@@ -7,6 +7,7 @@
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 
 #include <cstddef>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -20,11 +21,13 @@ namespace {
 
 using tensor::DType;
 using tensor::Shape;
+using tensor::copy_tensor_from_backend;
 using tensor::copy_tensor_to_backend;
 using tensor::TensorDescriptor;
 using tensor::TensorError;
 using tensor::TensorErrorCode;
 using tensor::TensorStorage;
+using tensor::ops::llama_cached_block_f32_to_backend;
 using tensor::ops::matmul_f32_f16_gguf_weight;
 using tensor::ops::rms_norm_f32;
 
@@ -105,6 +108,12 @@ void require_f32_matrix_hidden(const TensorStorage& storage, std::uint64_t hidde
     require_dimension(storage.descriptor(), 1, hidden);
 }
 
+void require_f32_matrix_hidden(const TensorDescriptor& descriptor, std::uint64_t hidden) {
+    require_dtype(descriptor, DType::f32);
+    require_rank(descriptor, matrix_rank);
+    require_dimension(descriptor, 1, hidden);
+}
+
 void require_f32_vector_shape(const TensorStorage& storage, std::uint64_t length) {
     require_dtype(storage.descriptor(), DType::f32);
     require_rank(storage.descriptor(), vector_rank);
@@ -115,6 +124,52 @@ void require_positive_config_dimension(std::uint32_t value) {
     if (value == 0) {
         throw std::invalid_argument("Llama model config dimensions must be positive");
     }
+}
+
+void require_backend_cache_append_window(
+    const LlamaBackendKVCacheLayer& cache,
+    runtime::BackendKind backend,
+    std::uint64_t position,
+    std::uint64_t row_count,
+    std::uint64_t key_width,
+    std::uint64_t value_width
+) {
+    if (cache.key.backend() != backend || cache.value.backend() != backend) {
+        throw std::invalid_argument("Llama backend KV cache buffers must use the model block backend");
+    }
+
+    require_dtype(cache.key.descriptor(), DType::f32);
+    require_dtype(cache.value.descriptor(), DType::f32);
+    require_rank(cache.key.descriptor(), matrix_rank);
+    require_rank(cache.value.descriptor(), matrix_rank);
+    require_dimension(cache.key.descriptor(), 1, key_width);
+    require_dimension(cache.value.descriptor(), 1, value_width);
+    require_dimension(cache.value.descriptor(), 0, cache.key.descriptor().shape.dimension(0));
+
+    if (position != cache.filled_token_count) {
+        throw std::invalid_argument("Llama KV cache append position must match filled token count");
+    }
+
+    if (row_count == 0) {
+        throw std::invalid_argument("Llama KV cache append rows must be positive");
+    }
+
+    const auto capacity = cache.key.descriptor().shape.dimension(0);
+    if (cache.filled_token_count > capacity || row_count > capacity - cache.filled_token_count) {
+        throw std::invalid_argument("Llama KV cache append would exceed context length");
+    }
+}
+
+[[nodiscard]] std::uint64_t query_position_start(std::uint64_t final_position, std::uint64_t token_count) {
+    if (token_count == 0) {
+        throw std::invalid_argument("Llama cached model block input rows must be positive");
+    }
+
+    if (final_position < token_count - 1) {
+        throw std::invalid_argument("Llama attention position must cover input rows");
+    }
+
+    return final_position - (token_count - 1);
 }
 
 [[nodiscard]] const TensorDescriptor& output_weight_descriptor(const TensorStorage& storage) noexcept {
@@ -153,6 +208,76 @@ void require_generation_fits_context(std::size_t prompt_tokens, std::size_t max_
 void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float value) {
     const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
     std::memcpy(storage.mutable_bytes().data() + byte_offset, &value, sizeof(float));
+}
+
+[[nodiscard]] tensor::BackendBuffer run_llama_backend_cached_block_to_backend_f32(
+    const tensor::BackendBuffer& input,
+    const LlamaBlockBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaBackendKVCacheLayer& cache
+) {
+    require_positive_config_dimension(config.embedding_length);
+    require_positive_config_dimension(config.attention_head_count);
+    require_positive_config_dimension(config.attention_head_count_kv);
+    require_positive_config_dimension(config.attention_key_length);
+    require_positive_config_dimension(config.attention_value_length);
+
+    if (config.attention_head_count % config.attention_head_count_kv != 0) {
+        throw std::invalid_argument("Llama attention head count must be divisible by KV head count");
+    }
+
+    const auto hidden = static_cast<std::uint64_t>(config.embedding_length);
+    const auto head_count = static_cast<std::uint64_t>(config.attention_head_count);
+    const auto kv_head_count = static_cast<std::uint64_t>(config.attention_head_count_kv);
+    const auto key_length = static_cast<std::uint64_t>(config.attention_key_length);
+    const auto value_length = static_cast<std::uint64_t>(config.attention_value_length);
+    const auto key_width = kv_head_count * key_length;
+    const auto value_width = kv_head_count * value_length;
+    const auto token_count = input.descriptor().shape.dimension(0);
+    const auto backend = weights.attention.query_weight.backend();
+
+    require_f32_matrix_hidden(input.descriptor(), hidden);
+    if (input.backend() != backend) {
+        throw std::invalid_argument("Llama cached model block input buffer must use the block backend");
+    }
+
+    const auto attention_query_position_start = query_position_start(position, token_count);
+    require_backend_cache_append_window(
+        cache,
+        backend,
+        attention_query_position_start,
+        token_count,
+        key_width,
+        value_width
+    );
+
+    const auto attention_scale = 1.0F / std::sqrt(static_cast<float>(key_length));
+    auto output = llama_cached_block_f32_to_backend(
+        input,
+        weights.attention.attention_norm_weight_buffer,
+        weights.attention.query_weight,
+        weights.attention.key_weight,
+        weights.attention.value_weight,
+        cache.key,
+        cache.value,
+        weights.attention.output_weight,
+        weights.feed_forward.feed_forward_norm_weight_buffer,
+        weights.feed_forward.gate_weight,
+        weights.feed_forward.up_weight,
+        weights.feed_forward.down_weight,
+        attention_query_position_start,
+        head_count,
+        kv_head_count,
+        key_length,
+        value_length,
+        config.rope_dimension_count,
+        config.rope_freq_base,
+        attention_scale,
+        config.rms_norm_epsilon
+    );
+    cache.filled_token_count += token_count;
+    return output;
 }
 
 [[nodiscard]] LlamaBlockWeights bind_llama_block_weights(const EngineModel& model, std::uint32_t block_index) {
@@ -414,9 +539,14 @@ tensor::TensorStorage run_llama_model_blocks_with_kv_cache_f32(
         throw std::invalid_argument("Llama KV cache layer count must match model block count");
     }
 
-    auto output = run_llama_block_with_kv_cache_f32(input, weights.blocks[0], config, position, cache.layers[0]);
-    for (std::size_t block_index = 1; block_index < weights.blocks.size(); ++block_index) {
-        output = run_llama_block_with_kv_cache_f32(
+    const auto backend = weights.blocks[0].attention.query_weight.backend();
+    if (cache.backend != backend) {
+        throw std::invalid_argument("Llama backend KV cache must use the model block backend");
+    }
+
+    auto output = copy_tensor_to_backend(input, backend);
+    for (std::size_t block_index = 0; block_index < weights.blocks.size(); ++block_index) {
+        output = run_llama_backend_cached_block_to_backend_f32(
             output,
             weights.blocks[block_index],
             config,
@@ -425,7 +555,7 @@ tensor::TensorStorage run_llama_model_blocks_with_kv_cache_f32(
         );
     }
 
-    return output;
+    return copy_tensor_from_backend(output);
 }
 
 template <typename Weights>
