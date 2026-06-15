@@ -6044,7 +6044,11 @@ void test_matches_llama_model_blocks_with_backend_kv_cache_and_metal_backend_wei
     const auto model = backend_cached_model_blocks_fixture_model();
     const auto weights = bind_llama_model_weights(model);
     const auto backend_weights = copy_llama_model_block_weights_to_backend(weights, BackendKind::metal);
-    const auto first_input = backend_cached_model_blocks_first_input();
+    const std::array<float, 4> prefill_input_values {
+        3.0F, 4.0F,
+        5.0F, 6.0F,
+    };
+    const auto first_input = tensor_f32_matrix(2, 2, std::span<const float>(prefill_input_values));
     const auto second_input = backend_cached_model_blocks_second_input();
     auto expected_cache = create_llama_kv_cache(model.llama_config());
     auto backend_cache = create_llama_backend_kv_cache(model.llama_config(), BackendKind::metal);
@@ -6053,28 +6057,28 @@ void test_matches_llama_model_blocks_with_backend_kv_cache_and_metal_backend_wei
         first_input,
         weights,
         model.llama_config(),
-        0,
+        1,
         expected_cache
     );
     const auto expected = run_llama_model_blocks_with_kv_cache_f32(
         second_input,
         weights,
         model.llama_config(),
-        1,
+        2,
         expected_cache
     );
     (void)run_llama_model_blocks_with_kv_cache_f32(
         first_input,
         backend_weights,
         model.llama_config(),
-        0,
+        1,
         backend_cache
     );
     const auto output = run_llama_model_blocks_with_kv_cache_f32(
         second_input,
         backend_weights,
         model.llama_config(),
-        1,
+        2,
         backend_cache
     );
 

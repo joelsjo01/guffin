@@ -15,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -52,6 +53,29 @@ kernel void matmul_f32_f16_gguf_weight_kernel(
     }
 
     output[row * dims.columns + column] = sum;
+}
+
+kernel void matmul_f32_f16_gguf_weight_add_kernel(
+    const device float* left [[buffer(0)]],
+    const device half* right [[buffer(1)]],
+    const device float* residual [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant MatmulDimensions& dims [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint column = gid.x;
+    const uint row = gid.y;
+    if (row >= dims.rows || column >= dims.columns) {
+        return;
+    }
+
+    float sum = 0.0f;
+    for (uint inner = 0; inner < dims.shared; ++inner) {
+        sum += left[row * dims.shared + inner] * float(right[column * dims.shared + inner]);
+    }
+
+    const uint output_index = row * dims.columns + column;
+    output[output_index] = residual[output_index] + sum;
 }
 
 struct ElementwiseDimensions {
@@ -297,15 +321,31 @@ struct LlamaCachedAttentionDimensions {
     float scale = 0.0F;
 };
 
+struct LlamaCachedBlockScratchBuffers {
+    id<MTLBuffer> attention_normalized = nil;
+    id<MTLBuffer> query = nil;
+    id<MTLBuffer> key = nil;
+    id<MTLBuffer> value = nil;
+    id<MTLBuffer> attention_output = nil;
+    id<MTLBuffer> attention_residual = nil;
+    id<MTLBuffer> feed_forward_normalized = nil;
+    id<MTLBuffer> gate = nil;
+    id<MTLBuffer> up = nil;
+    id<MTLBuffer> gated = nil;
+};
+
 struct MatmulPipelineState {
     id<MTLDevice> device = nil;
     id<MTLComputePipelineState> matmul_pipeline = nil;
+    id<MTLComputePipelineState> matmul_add_pipeline = nil;
     id<MTLComputePipelineState> silu_multiply_pipeline = nil;
     id<MTLComputePipelineState> add_pipeline = nil;
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_kv_append_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_attention_output_pipeline = nil;
     id<MTLCommandQueue> queue = nil;
+    std::mutex llama_cached_block_scratch_mutex;
+    LlamaCachedBlockScratchBuffers llama_cached_block_scratch;
 
     MatmulPipelineState();
 };
@@ -380,6 +420,26 @@ private:
     const std::string& detail
 ) {
     return runtime::BackendError(code, runtime::BackendKind::metal, detail);
+}
+
+[[nodiscard]] id<MTLBuffer> reusable_scratch_buffer(
+    id<MTLDevice> device,
+    __strong id<MTLBuffer>& buffer,
+    std::uint64_t byte_count,
+    const char* label
+) {
+    const auto length = static_cast<NSUInteger>(byte_count);
+    if (buffer == nil || [buffer length] < length) {
+        buffer = [device newBufferWithLength:length options:MTLResourceStorageModeShared];
+        if (buffer == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal Llama cached block scratch buffer allocation failed: ") + label
+            );
+        }
+    }
+
+    return buffer;
 }
 
 [[nodiscard]] id<MTLDevice> metal_device_or_throw() {
@@ -818,6 +878,26 @@ MatmulPipelineState::MatmulPipelineState() {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal matmul pipeline creation failed: " + ns_error_message(pipeline_error, "unknown error")
+        );
+    }
+
+    id<MTLFunction> matmul_add_function =
+        [library newFunctionWithName:@"matmul_f32_f16_gguf_weight_add_kernel"];
+    if (matmul_add_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal matmul-add kernel function was not found"
+        );
+    }
+
+    NSError* matmul_add_pipeline_error = nil;
+    matmul_add_pipeline = [device newComputePipelineStateWithFunction:matmul_add_function
+                                                                error:&matmul_add_pipeline_error];
+    if (matmul_add_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal matmul-add pipeline creation failed: "
+                + ns_error_message(matmul_add_pipeline_error, "unknown error")
         );
     }
 
@@ -2014,91 +2094,39 @@ void append_llama_cached_kv_to_tensors_f32(
         .shared = require_u32_dimension(feed_forward, "feed_forward"),
         .columns = require_u32_dimension(hidden, "hidden"),
     };
-    const ElementwiseDimensions hidden_elementwise_dims {
-        .elements = require_u32_dimension(hidden_descriptor.element_count, "hidden_elements"),
-    };
     const ElementwiseDimensions feed_forward_elementwise_dims {
         .elements = require_u32_dimension(feed_forward_descriptor.element_count, "feed_forward_elements"),
     };
 
+    std::lock_guard<std::mutex> scratch_lock(state.llama_cached_block_scratch_mutex);
+    auto& scratch = state.llama_cached_block_scratch;
+    // The fused block waits before returning, so intra-block work buffers can be
+    // reused across calls. The returned output buffer stays per-call owned
+    // because it may become the next layer's input.
     id<MTLBuffer> attention_normalized_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
+        reusable_scratch_buffer(state.device, scratch.attention_normalized, hidden_descriptor.byte_count, "attention_norm");
     id<MTLBuffer> query_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(query_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
+        reusable_scratch_buffer(state.device, scratch.query, query_descriptor.byte_count, "query");
     id<MTLBuffer> key_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(key_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
+        reusable_scratch_buffer(state.device, scratch.key, key_descriptor.byte_count, "key");
     id<MTLBuffer> value_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(value_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
+        reusable_scratch_buffer(state.device, scratch.value, value_descriptor.byte_count, "value");
     id<MTLBuffer> attention_output_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(attention_output_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
-    id<MTLBuffer> attention_projected_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
+        reusable_scratch_buffer(state.device, scratch.attention_output, attention_output_descriptor.byte_count, "attention_output");
     id<MTLBuffer> attention_residual_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
+        reusable_scratch_buffer(state.device, scratch.attention_residual, hidden_descriptor.byte_count, "attention_residual");
     id<MTLBuffer> feed_forward_normalized_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
+        reusable_scratch_buffer(state.device, scratch.feed_forward_normalized, hidden_descriptor.byte_count, "ffn_norm");
     id<MTLBuffer> gate_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(feed_forward_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
+        reusable_scratch_buffer(state.device, scratch.gate, feed_forward_descriptor.byte_count, "gate");
     id<MTLBuffer> up_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(feed_forward_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
+        reusable_scratch_buffer(state.device, scratch.up, feed_forward_descriptor.byte_count, "up");
     id<MTLBuffer> gated_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(feed_forward_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
-    id<MTLBuffer> feed_forward_projected_buffer =
-        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
-                                  options:MTLResourceStorageModeShared];
+        reusable_scratch_buffer(state.device, scratch.gated, feed_forward_descriptor.byte_count, "gated");
     id<MTLBuffer> output_buffer =
         [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
                                   options:MTLResourceStorageModeShared];
-    id<MTLBuffer> rms_norm_dims_buffer = [state.device newBufferWithBytes:&rms_norm_dims
-                                                                   length:sizeof(RMSNormDimensions)
-                                                                  options:MTLResourceStorageModeShared];
-    id<MTLBuffer> query_dims_buffer = [state.device newBufferWithBytes:&query_dims
-                                                                length:sizeof(MatmulDimensions)
-                                                               options:MTLResourceStorageModeShared];
-    id<MTLBuffer> key_dims_buffer = [state.device newBufferWithBytes:&key_dims
-                                                              length:sizeof(MatmulDimensions)
-                                                             options:MTLResourceStorageModeShared];
-    id<MTLBuffer> value_dims_buffer = [state.device newBufferWithBytes:&value_dims
-                                                                length:sizeof(MatmulDimensions)
-                                                               options:MTLResourceStorageModeShared];
-    id<MTLBuffer> attention_dims_buffer = [state.device newBufferWithBytes:&attention_dims
-                                                                    length:sizeof(LlamaCachedAttentionDimensions)
-                                                                   options:MTLResourceStorageModeShared];
-    id<MTLBuffer> attention_output_dims_buffer = [state.device newBufferWithBytes:&attention_output_dims
-                                                                           length:sizeof(MatmulDimensions)
-                                                                          options:MTLResourceStorageModeShared];
-    id<MTLBuffer> gate_dims_buffer = [state.device newBufferWithBytes:&gate_dims
-                                                               length:sizeof(MatmulDimensions)
-                                                              options:MTLResourceStorageModeShared];
-    id<MTLBuffer> down_dims_buffer = [state.device newBufferWithBytes:&down_dims
-                                                               length:sizeof(MatmulDimensions)
-                                                              options:MTLResourceStorageModeShared];
-    id<MTLBuffer> hidden_elementwise_dims_buffer = [state.device newBufferWithBytes:&hidden_elementwise_dims
-                                                                             length:sizeof(ElementwiseDimensions)
-                                                                            options:MTLResourceStorageModeShared];
-    id<MTLBuffer> feed_forward_elementwise_dims_buffer =
-        [state.device newBufferWithBytes:&feed_forward_elementwise_dims
-                                  length:sizeof(ElementwiseDimensions)
-                                 options:MTLResourceStorageModeShared];
-    if (attention_normalized_buffer == nil || query_buffer == nil || key_buffer == nil || value_buffer == nil
-        || attention_output_buffer == nil || attention_projected_buffer == nil || attention_residual_buffer == nil
-        || feed_forward_normalized_buffer == nil || gate_buffer == nil || up_buffer == nil || gated_buffer == nil
-        || feed_forward_projected_buffer == nil || output_buffer == nil || rms_norm_dims_buffer == nil
-        || query_dims_buffer == nil || key_dims_buffer == nil || value_dims_buffer == nil
-        || attention_dims_buffer == nil || attention_output_dims_buffer == nil || gate_dims_buffer == nil
-        || down_dims_buffer == nil || hidden_elementwise_dims_buffer == nil
-        || feed_forward_elementwise_dims_buffer == nil) {
+    if (output_buffer == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal Llama cached block buffer allocation failed"
@@ -2126,7 +2154,7 @@ void append_llama_cached_kv_to_tensors_f32(
         [encoder setBuffer:source offset:0 atIndex:0];
         [encoder setBuffer:weight offset:0 atIndex:1];
         [encoder setBuffer:output offset:0 atIndex:2];
-        [encoder setBuffer:rms_norm_dims_buffer offset:0 atIndex:3];
+        [encoder setBytes:&rms_norm_dims length:sizeof(RMSNormDimensions) atIndex:3];
 
         const MTLSize threads_per_threadgroup = MTLSizeMake(64, 1, 1);
         const MTLSize threadgroups = MTLSizeMake(static_cast<NSUInteger>((rows + 63U) / 64U), 1, 1);
@@ -2138,7 +2166,7 @@ void append_llama_cached_kv_to_tensors_f32(
         id<MTLBuffer> left_buffer,
         id<MTLBuffer> right_buffer,
         id<MTLBuffer> matmul_output_buffer,
-        id<MTLBuffer> dims_buffer,
+        const MatmulDimensions& dims,
         std::uint64_t output_columns_for_dispatch
     ) {
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
@@ -2153,7 +2181,7 @@ void append_llama_cached_kv_to_tensors_f32(
         [encoder setBuffer:left_buffer offset:0 atIndex:0];
         [encoder setBuffer:right_buffer offset:0 atIndex:1];
         [encoder setBuffer:matmul_output_buffer offset:0 atIndex:2];
-        [encoder setBuffer:dims_buffer offset:0 atIndex:3];
+        [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:3];
 
         const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
         const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
@@ -2163,32 +2191,41 @@ void append_llama_cached_kv_to_tensors_f32(
         [encoder endEncoding];
     };
 
-    auto encode_add = [&](id<MTLBuffer> left_buffer, id<MTLBuffer> right_buffer, id<MTLBuffer> add_output_buffer) {
+    auto encode_matmul_add = [&](
+        id<MTLBuffer> left_buffer,
+        id<MTLBuffer> right_buffer,
+        id<MTLBuffer> residual_buffer,
+        id<MTLBuffer> matmul_output_buffer,
+        const MatmulDimensions& dims,
+        std::uint64_t output_columns_for_dispatch
+    ) {
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
         if (encoder == nil) {
             throw metal_error(
                 runtime::BackendErrorCode::metal_execution_failed,
-                "Metal Llama cached block add command encoding failed"
+                "Metal Llama cached block matmul-add command encoding failed"
             );
         }
 
-        [encoder setComputePipelineState:state.add_pipeline];
+        [encoder setComputePipelineState:state.matmul_add_pipeline];
         [encoder setBuffer:left_buffer offset:0 atIndex:0];
         [encoder setBuffer:right_buffer offset:0 atIndex:1];
-        [encoder setBuffer:add_output_buffer offset:0 atIndex:2];
-        [encoder setBuffer:hidden_elementwise_dims_buffer offset:0 atIndex:3];
+        [encoder setBuffer:residual_buffer offset:0 atIndex:2];
+        [encoder setBuffer:matmul_output_buffer offset:0 atIndex:3];
+        [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:4];
 
-        const MTLSize threads_per_threadgroup = MTLSizeMake(256, 1, 1);
-        const auto threadgroup_count = static_cast<NSUInteger>((hidden_descriptor.element_count + 255U) / 256U);
-        const MTLSize threadgroups = MTLSizeMake(threadgroup_count, 1, 1);
+        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
+        const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
+        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
         [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
         [encoder endEncoding];
     };
 
     encode_rms_norm(input.buffer(), attention_norm_weight.buffer(), attention_normalized_buffer);
-    encode_matmul(attention_normalized_buffer, query_weight.buffer(), query_buffer, query_dims_buffer, query_width);
-    encode_matmul(attention_normalized_buffer, key_weight.buffer(), key_buffer, key_dims_buffer, key_width);
-    encode_matmul(attention_normalized_buffer, value_weight.buffer(), value_buffer, value_dims_buffer, value_width);
+    encode_matmul(attention_normalized_buffer, query_weight.buffer(), query_buffer, query_dims, query_width);
+    encode_matmul(attention_normalized_buffer, key_weight.buffer(), key_buffer, key_dims, key_width);
+    encode_matmul(attention_normalized_buffer, value_weight.buffer(), value_buffer, value_dims, value_width);
 
     id<MTLComputeCommandEncoder> append_encoder = [command_buffer computeCommandEncoder];
     if (append_encoder == nil) {
@@ -2202,7 +2239,7 @@ void append_llama_cached_kv_to_tensors_f32(
     [append_encoder setBuffer:value_buffer offset:0 atIndex:1];
     [append_encoder setBuffer:cache_key.buffer() offset:0 atIndex:2];
     [append_encoder setBuffer:cache_value.buffer() offset:0 atIndex:3];
-    [append_encoder setBuffer:attention_dims_buffer offset:0 atIndex:4];
+    [append_encoder setBytes:&attention_dims length:sizeof(LlamaCachedAttentionDimensions) atIndex:4];
 
     const auto append_columns = key_width > value_width ? key_width : value_width;
     const MTLSize append_threads_per_threadgroup = MTLSizeMake(16, 16, 1);
@@ -2226,7 +2263,7 @@ void append_llama_cached_kv_to_tensors_f32(
     [attention_encoder setBuffer:cache_key.buffer() offset:0 atIndex:1];
     [attention_encoder setBuffer:cache_value.buffer() offset:0 atIndex:2];
     [attention_encoder setBuffer:attention_output_buffer offset:0 atIndex:3];
-    [attention_encoder setBuffer:attention_dims_buffer offset:0 atIndex:4];
+    [attention_encoder setBytes:&attention_dims length:sizeof(LlamaCachedAttentionDimensions) atIndex:4];
 
     const MTLSize attention_threads_per_threadgroup = MTLSizeMake(16, 16, 1);
     const MTLSize attention_threadgroups = MTLSizeMake(
@@ -2238,21 +2275,21 @@ void append_llama_cached_kv_to_tensors_f32(
                       threadsPerThreadgroup:attention_threads_per_threadgroup];
     [attention_encoder endEncoding];
 
-    encode_matmul(
+    encode_matmul_add(
         attention_output_buffer,
         attention_output_weight.buffer(),
-        attention_projected_buffer,
-        attention_output_dims_buffer,
+        input.buffer(),
+        attention_residual_buffer,
+        attention_output_dims,
         hidden
     );
-    encode_add(input.buffer(), attention_projected_buffer, attention_residual_buffer);
     encode_rms_norm(
         attention_residual_buffer,
         feed_forward_norm_weight.buffer(),
         feed_forward_normalized_buffer
     );
-    encode_matmul(feed_forward_normalized_buffer, gate_weight.buffer(), gate_buffer, gate_dims_buffer, feed_forward);
-    encode_matmul(feed_forward_normalized_buffer, up_weight.buffer(), up_buffer, gate_dims_buffer, feed_forward);
+    encode_matmul(feed_forward_normalized_buffer, gate_weight.buffer(), gate_buffer, gate_dims, feed_forward);
+    encode_matmul(feed_forward_normalized_buffer, up_weight.buffer(), up_buffer, gate_dims, feed_forward);
 
     id<MTLComputeCommandEncoder> silu_encoder = [command_buffer computeCommandEncoder];
     if (silu_encoder == nil) {
@@ -2265,7 +2302,7 @@ void append_llama_cached_kv_to_tensors_f32(
     [silu_encoder setBuffer:gate_buffer offset:0 atIndex:0];
     [silu_encoder setBuffer:up_buffer offset:0 atIndex:1];
     [silu_encoder setBuffer:gated_buffer offset:0 atIndex:2];
-    [silu_encoder setBuffer:feed_forward_elementwise_dims_buffer offset:0 atIndex:3];
+    [silu_encoder setBytes:&feed_forward_elementwise_dims length:sizeof(ElementwiseDimensions) atIndex:3];
 
     const MTLSize activation_threads_per_threadgroup = MTLSizeMake(256, 1, 1);
     const auto activation_threadgroup_count = static_cast<NSUInteger>(
@@ -2276,8 +2313,7 @@ void append_llama_cached_kv_to_tensors_f32(
                  threadsPerThreadgroup:activation_threads_per_threadgroup];
     [silu_encoder endEncoding];
 
-    encode_matmul(gated_buffer, down_weight.buffer(), feed_forward_projected_buffer, down_dims_buffer, hidden);
-    encode_add(attention_residual_buffer, feed_forward_projected_buffer, output_buffer);
+    encode_matmul_add(gated_buffer, down_weight.buffer(), attention_residual_buffer, output_buffer, down_dims, hidden);
 
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
