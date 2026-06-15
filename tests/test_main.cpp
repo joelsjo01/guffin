@@ -5151,10 +5151,15 @@ void expect_model_attention_backend_weights(
     for (std::size_t block_index = 0; block_index < weights.blocks.size(); ++block_index) {
         const auto& expected = weights.blocks[block_index].attention;
         const auto& actual = backend_weights.blocks[block_index];
+        expect(actual.attention_norm_weight_buffer.backend() == backend, "Llama model attention norm backend mismatch");
         expect(actual.query_weight.backend() == backend, "Llama model attention query backend mismatch");
         expect(actual.key_weight.backend() == backend, "Llama model attention key backend mismatch");
         expect(actual.value_weight.backend() == backend, "Llama model attention value backend mismatch");
         expect(actual.output_weight.backend() == backend, "Llama model attention output backend mismatch");
+        expect(
+            actual.attention_norm_weight_buffer.descriptor() == expected.attention_norm_weight.descriptor(),
+            "Llama model attention norm backend descriptor mismatch"
+        );
         expect(
             actual.query_weight.descriptor() == expected.query_weight.descriptor(),
             "Llama model attention query backend descriptor mismatch"
@@ -5214,6 +5219,7 @@ void expect_block_backend_weights(
     const LlamaBlockBackendWeights& actual,
     BackendKind backend
 ) {
+    expect(actual.attention.attention_norm_weight_buffer.backend() == backend, "Llama block attention norm backend mismatch");
     expect(actual.attention.query_weight.backend() == backend, "Llama block attention query backend mismatch");
     expect(actual.attention.key_weight.backend() == backend, "Llama block attention key backend mismatch");
     expect(actual.attention.value_weight.backend() == backend, "Llama block attention value backend mismatch");
@@ -5222,6 +5228,11 @@ void expect_block_backend_weights(
     expect(actual.feed_forward.gate_weight.backend() == backend, "Llama block FFN gate backend mismatch");
     expect(actual.feed_forward.up_weight.backend() == backend, "Llama block FFN up backend mismatch");
     expect(actual.feed_forward.down_weight.backend() == backend, "Llama block FFN down backend mismatch");
+    expect(
+        actual.attention.attention_norm_weight_buffer.descriptor()
+            == expected.attention.attention_norm_weight.descriptor(),
+        "Llama block attention norm backend descriptor mismatch"
+    );
     expect(
         actual.attention.query_weight.descriptor() == expected.attention.query_weight.descriptor(),
         "Llama block attention query backend descriptor mismatch"
@@ -5515,6 +5526,120 @@ void test_matches_llama_block_with_kv_cache_and_metal_backend_weight_buffers_whe
     expect_block_backend_weights(weights.blocks[0], backend_weights, BackendKind::metal);
     expect_f32_matrix_close(output, expected, 2.0e-2F, "Llama Metal backend cached block output");
     expect_llama_kv_cache_close(backend_cache, expected_cache, 1.0e-2F, "Llama Metal backend cached block cache");
+}
+
+void test_runs_llama_block_with_backend_kv_cache_and_cpu_backend_weight_buffers() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_block_weights_to_backend(weights.blocks[0], BackendKind::cpu);
+    const std::array<float, 4> first_input_values {
+        0.5F, -1.0F, 2.0F, 0.25F,
+    };
+    const std::array<float, 4> second_input_values {
+        -0.75F, 1.5F, -0.5F, 2.25F,
+    };
+    const auto first_input = tensor_f32_matrix(1, 4, std::span<const float>(first_input_values));
+    const auto second_input = tensor_f32_matrix(1, 4, std::span<const float>(second_input_values));
+    auto expected_cache = create_llama_kv_cache(model.llama_config());
+    auto backend_cache = create_llama_backend_kv_cache(model.llama_config(), BackendKind::cpu);
+
+    (void)run_llama_block_with_kv_cache_f32(
+        first_input,
+        weights.blocks[0],
+        model.llama_config(),
+        0,
+        expected_cache.layers[0]
+    );
+    const auto expected = run_llama_block_with_kv_cache_f32(
+        second_input,
+        weights.blocks[0],
+        model.llama_config(),
+        1,
+        expected_cache.layers[0]
+    );
+    (void)run_llama_block_with_kv_cache_f32(
+        first_input,
+        backend_weights,
+        model.llama_config(),
+        0,
+        backend_cache.layers[0]
+    );
+    const auto output = run_llama_block_with_kv_cache_f32(
+        second_input,
+        backend_weights,
+        model.llama_config(),
+        1,
+        backend_cache.layers[0]
+    );
+
+    expect_block_backend_weights(weights.blocks[0], backend_weights, BackendKind::cpu);
+    expect(backend_cache.backend == BackendKind::cpu, "Llama block backend KV cache CPU backend mismatch");
+    expect_f32_matrix_close(output, expected, 1.0e-4F, "Llama CPU backend resident-KV cached block output");
+    expect_llama_kv_cache_close(
+        copy_llama_backend_kv_cache_to_cpu(backend_cache),
+        expected_cache,
+        1.0e-5F,
+        "Llama CPU backend resident-KV cached block cache"
+    );
+}
+
+void test_matches_llama_block_with_backend_kv_cache_and_metal_backend_weight_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto backend_weights = copy_llama_block_weights_to_backend(weights.blocks[0], BackendKind::metal);
+    const std::array<float, 4> first_input_values {
+        0.5F, -1.0F, 2.0F, 0.25F,
+    };
+    const std::array<float, 4> second_input_values {
+        -0.75F, 1.5F, -0.5F, 2.25F,
+    };
+    const auto first_input = tensor_f32_matrix(1, 4, std::span<const float>(first_input_values));
+    const auto second_input = tensor_f32_matrix(1, 4, std::span<const float>(second_input_values));
+    auto expected_cache = create_llama_kv_cache(model.llama_config());
+    auto backend_cache = create_llama_backend_kv_cache(model.llama_config(), BackendKind::metal);
+
+    (void)run_llama_block_with_kv_cache_f32(
+        first_input,
+        weights.blocks[0],
+        model.llama_config(),
+        0,
+        expected_cache.layers[0]
+    );
+    const auto expected = run_llama_block_with_kv_cache_f32(
+        second_input,
+        weights.blocks[0],
+        model.llama_config(),
+        1,
+        expected_cache.layers[0]
+    );
+    (void)run_llama_block_with_kv_cache_f32(
+        first_input,
+        backend_weights,
+        model.llama_config(),
+        0,
+        backend_cache.layers[0]
+    );
+    const auto output = run_llama_block_with_kv_cache_f32(
+        second_input,
+        backend_weights,
+        model.llama_config(),
+        1,
+        backend_cache.layers[0]
+    );
+
+    expect_block_backend_weights(weights.blocks[0], backend_weights, BackendKind::metal);
+    expect(backend_cache.backend == BackendKind::metal, "Llama block backend KV cache Metal backend mismatch");
+    expect_f32_matrix_close(output, expected, 5.0e-2F, "Llama Metal backend resident-KV cached block output");
+    expect_llama_kv_cache_close(
+        copy_llama_backend_kv_cache_to_cpu(backend_cache),
+        expected_cache,
+        2.0e-2F,
+        "Llama Metal backend resident-KV cached block cache"
+    );
 }
 
 void test_binds_and_runs_llama_model_blocks_from_named_tensors() {
@@ -9283,6 +9408,14 @@ int main() {
         {
             "matches Llama block with KV cache and Metal backend weight buffers when available",
             test_matches_llama_block_with_kv_cache_and_metal_backend_weight_buffers_when_available,
+        },
+        {
+            "runs Llama block with backend KV cache and CPU backend weight buffers",
+            test_runs_llama_block_with_backend_kv_cache_and_cpu_backend_weight_buffers,
+        },
+        {
+            "matches Llama block with backend KV cache and Metal backend weight buffers when available",
+            test_matches_llama_block_with_backend_kv_cache_and_metal_backend_weight_buffers_when_available,
         },
         {
             "rejects Llama block attention projection shape mismatch",

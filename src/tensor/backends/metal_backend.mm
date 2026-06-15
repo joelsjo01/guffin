@@ -647,6 +647,99 @@ void require_llama_cached_attention_f32_operands(
     }
 }
 
+void require_llama_cached_block_f32_operands(
+    const TensorDescriptor& input,
+    const TensorDescriptor& attention_norm_weight,
+    const TensorDescriptor& query_weight,
+    const TensorDescriptor& key_weight,
+    const TensorDescriptor& value_weight,
+    const TensorDescriptor& cache_key,
+    const TensorDescriptor& cache_value,
+    const TensorDescriptor& attention_output_weight,
+    const TensorDescriptor& feed_forward_norm_weight,
+    const TensorDescriptor& gate_weight,
+    const TensorDescriptor& up_weight,
+    const TensorDescriptor& down_weight,
+    std::uint64_t cache_position,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base,
+    float attention_scale,
+    float rms_norm_epsilon
+) {
+    ops::require_f32_descriptor(input);
+    require_matrix_descriptor(input);
+    const auto token_count = input.shape.dimension(0);
+    const auto hidden = input.shape.dimension(1);
+    if (token_count == 0) {
+        throw std::invalid_argument("Llama cached block input rows must be positive");
+    }
+
+    require_f32_vector_descriptor(attention_norm_weight);
+    if (attention_norm_weight.shape.dimension(0) != hidden) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, hidden, attention_norm_weight.shape.dimension(0));
+    }
+
+    if (head_count == 0 || kv_head_count == 0 || key_length == 0 || value_length == 0) {
+        throw std::invalid_argument("Llama cached block attention dimensions must be positive");
+    }
+    if (head_count % kv_head_count != 0) {
+        throw std::invalid_argument("Llama attention head count must be divisible by KV head count");
+    }
+
+    const auto query_width = head_count * key_length;
+    const auto key_width = kv_head_count * key_length;
+    const auto value_width = kv_head_count * value_length;
+    const auto attention_output_width = head_count * value_length;
+    require_f32_f16_matmul_gguf_weight_operands(input, query_weight);
+    require_f32_f16_matmul_gguf_weight_operands(input, key_weight);
+    require_f32_f16_matmul_gguf_weight_operands(input, value_weight);
+    if (query_weight.shape.dimension(1) != query_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, query_width, query_weight.shape.dimension(1));
+    }
+    if (key_weight.shape.dimension(1) != key_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_width, key_weight.shape.dimension(1));
+    }
+    if (value_weight.shape.dimension(1) != value_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, value_width, value_weight.shape.dimension(1));
+    }
+
+    const auto query_descriptor = TensorDescriptor::from(Shape::from({token_count, query_width}), DType::f32);
+    const auto key_descriptor = TensorDescriptor::from(Shape::from({token_count, key_width}), DType::f32);
+    const auto value_descriptor = TensorDescriptor::from(Shape::from({token_count, value_width}), DType::f32);
+    require_llama_cached_attention_f32_operands(
+        query_descriptor,
+        key_descriptor,
+        value_descriptor,
+        cache_key,
+        cache_value,
+        cache_position,
+        head_count,
+        kv_head_count,
+        key_length,
+        value_length,
+        rope_dimension_count,
+        frequency_base,
+        attention_scale
+    );
+
+    const auto attention_output_descriptor =
+        TensorDescriptor::from(Shape::from({token_count, attention_output_width}), DType::f32);
+    require_residual_gated_silu_projection_f32_f16_gguf_weight_operands(
+        input,
+        attention_output_descriptor,
+        attention_output_weight,
+        feed_forward_norm_weight,
+        gate_weight,
+        up_weight,
+        down_weight,
+        rms_norm_epsilon
+    );
+}
+
 void require_f32_f16_matmul_gguf_weight_triple_operands(
     const TensorDescriptor& left,
     const TensorDescriptor& first_right,
@@ -1834,6 +1927,374 @@ void append_llama_cached_kv_to_tensors_f32(
     );
 }
 
+[[nodiscard]] BackendBuffer llama_cached_block_f32_with_metal_buffers(
+    const MetalBackendBufferStorage& input,
+    const MetalBackendBufferStorage& attention_norm_weight,
+    const MetalBackendBufferStorage& query_weight,
+    const MetalBackendBufferStorage& key_weight,
+    const MetalBackendBufferStorage& value_weight,
+    const MetalBackendBufferStorage& cache_key,
+    const MetalBackendBufferStorage& cache_value,
+    const MetalBackendBufferStorage& attention_output_weight,
+    const MetalBackendBufferStorage& feed_forward_norm_weight,
+    const MetalBackendBufferStorage& gate_weight,
+    const MetalBackendBufferStorage& up_weight,
+    const MetalBackendBufferStorage& down_weight,
+    std::uint64_t cache_position,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base,
+    float attention_scale,
+    float rms_norm_epsilon
+) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto rows = input.descriptor().shape.dimension(0);
+    const auto hidden = input.descriptor().shape.dimension(1);
+    const auto query_width = head_count * key_length;
+    const auto key_width = kv_head_count * key_length;
+    const auto value_width = kv_head_count * value_length;
+    const auto attention_output_width = head_count * value_length;
+    const auto feed_forward = gate_weight.descriptor().shape.dimension(1);
+    const auto cached_token_count = cache_position + rows;
+    const auto hidden_descriptor = TensorDescriptor::from(Shape::from({rows, hidden}), DType::f32);
+    const auto query_descriptor = TensorDescriptor::from(Shape::from({rows, query_width}), DType::f32);
+    const auto key_descriptor = TensorDescriptor::from(Shape::from({rows, key_width}), DType::f32);
+    const auto value_descriptor = TensorDescriptor::from(Shape::from({rows, value_width}), DType::f32);
+    const auto attention_output_descriptor =
+        TensorDescriptor::from(Shape::from({rows, attention_output_width}), DType::f32);
+    const auto feed_forward_descriptor = TensorDescriptor::from(Shape::from({rows, feed_forward}), DType::f32);
+    const RMSNormDimensions rms_norm_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .hidden = require_u32_dimension(hidden, "hidden"),
+        .epsilon = rms_norm_epsilon,
+    };
+    const MatmulDimensions query_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .shared = require_u32_dimension(hidden, "hidden"),
+        .columns = require_u32_dimension(query_width, "query_width"),
+    };
+    const MatmulDimensions key_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .shared = require_u32_dimension(hidden, "hidden"),
+        .columns = require_u32_dimension(key_width, "key_width"),
+    };
+    const MatmulDimensions value_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .shared = require_u32_dimension(hidden, "hidden"),
+        .columns = require_u32_dimension(value_width, "value_width"),
+    };
+    const LlamaCachedAttentionDimensions attention_dims {
+        .token_count = require_u32_dimension(rows, "token_count"),
+        .cache_position = require_u32_dimension(cache_position, "cache_position"),
+        .cached_token_count = require_u32_dimension(cached_token_count, "cached_token_count"),
+        .head_count = require_u32_dimension(head_count, "head_count"),
+        .kv_head_count = require_u32_dimension(kv_head_count, "kv_head_count"),
+        .key_length = require_u32_dimension(key_length, "key_length"),
+        .value_length = require_u32_dimension(value_length, "value_length"),
+        .rope_dimension_count = require_u32_dimension(rope_dimension_count, "rope_dimension_count"),
+        .frequency_base = frequency_base,
+        .scale = attention_scale,
+    };
+    const MatmulDimensions attention_output_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .shared = require_u32_dimension(attention_output_width, "attention_output_width"),
+        .columns = require_u32_dimension(hidden, "hidden"),
+    };
+    const MatmulDimensions gate_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .shared = require_u32_dimension(hidden, "hidden"),
+        .columns = require_u32_dimension(feed_forward, "feed_forward"),
+    };
+    const MatmulDimensions down_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .shared = require_u32_dimension(feed_forward, "feed_forward"),
+        .columns = require_u32_dimension(hidden, "hidden"),
+    };
+    const ElementwiseDimensions hidden_elementwise_dims {
+        .elements = require_u32_dimension(hidden_descriptor.element_count, "hidden_elements"),
+    };
+    const ElementwiseDimensions feed_forward_elementwise_dims {
+        .elements = require_u32_dimension(feed_forward_descriptor.element_count, "feed_forward_elements"),
+    };
+
+    id<MTLBuffer> attention_normalized_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> query_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(query_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> key_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(key_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> value_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(value_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> attention_output_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(attention_output_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> attention_projected_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> attention_residual_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> feed_forward_normalized_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> gate_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(feed_forward_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> up_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(feed_forward_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> gated_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(feed_forward_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> feed_forward_projected_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> output_buffer =
+        [state.device newBufferWithLength:static_cast<NSUInteger>(hidden_descriptor.byte_count)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> rms_norm_dims_buffer = [state.device newBufferWithBytes:&rms_norm_dims
+                                                                   length:sizeof(RMSNormDimensions)
+                                                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> query_dims_buffer = [state.device newBufferWithBytes:&query_dims
+                                                                length:sizeof(MatmulDimensions)
+                                                               options:MTLResourceStorageModeShared];
+    id<MTLBuffer> key_dims_buffer = [state.device newBufferWithBytes:&key_dims
+                                                              length:sizeof(MatmulDimensions)
+                                                             options:MTLResourceStorageModeShared];
+    id<MTLBuffer> value_dims_buffer = [state.device newBufferWithBytes:&value_dims
+                                                                length:sizeof(MatmulDimensions)
+                                                               options:MTLResourceStorageModeShared];
+    id<MTLBuffer> attention_dims_buffer = [state.device newBufferWithBytes:&attention_dims
+                                                                    length:sizeof(LlamaCachedAttentionDimensions)
+                                                                   options:MTLResourceStorageModeShared];
+    id<MTLBuffer> attention_output_dims_buffer = [state.device newBufferWithBytes:&attention_output_dims
+                                                                           length:sizeof(MatmulDimensions)
+                                                                          options:MTLResourceStorageModeShared];
+    id<MTLBuffer> gate_dims_buffer = [state.device newBufferWithBytes:&gate_dims
+                                                               length:sizeof(MatmulDimensions)
+                                                              options:MTLResourceStorageModeShared];
+    id<MTLBuffer> down_dims_buffer = [state.device newBufferWithBytes:&down_dims
+                                                               length:sizeof(MatmulDimensions)
+                                                              options:MTLResourceStorageModeShared];
+    id<MTLBuffer> hidden_elementwise_dims_buffer = [state.device newBufferWithBytes:&hidden_elementwise_dims
+                                                                             length:sizeof(ElementwiseDimensions)
+                                                                            options:MTLResourceStorageModeShared];
+    id<MTLBuffer> feed_forward_elementwise_dims_buffer =
+        [state.device newBufferWithBytes:&feed_forward_elementwise_dims
+                                  length:sizeof(ElementwiseDimensions)
+                                 options:MTLResourceStorageModeShared];
+    if (attention_normalized_buffer == nil || query_buffer == nil || key_buffer == nil || value_buffer == nil
+        || attention_output_buffer == nil || attention_projected_buffer == nil || attention_residual_buffer == nil
+        || feed_forward_normalized_buffer == nil || gate_buffer == nil || up_buffer == nil || gated_buffer == nil
+        || feed_forward_projected_buffer == nil || output_buffer == nil || rms_norm_dims_buffer == nil
+        || query_dims_buffer == nil || key_dims_buffer == nil || value_dims_buffer == nil
+        || attention_dims_buffer == nil || attention_output_dims_buffer == nil || gate_dims_buffer == nil
+        || down_dims_buffer == nil || hidden_elementwise_dims_buffer == nil
+        || feed_forward_elementwise_dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached block buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    if (command_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached block command buffer creation failed"
+        );
+    }
+
+    auto encode_rms_norm = [&](id<MTLBuffer> source, id<MTLBuffer> weight, id<MTLBuffer> output) {
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal Llama cached block RMSNorm command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.rms_norm_pipeline];
+        [encoder setBuffer:source offset:0 atIndex:0];
+        [encoder setBuffer:weight offset:0 atIndex:1];
+        [encoder setBuffer:output offset:0 atIndex:2];
+        [encoder setBuffer:rms_norm_dims_buffer offset:0 atIndex:3];
+
+        const MTLSize threads_per_threadgroup = MTLSizeMake(64, 1, 1);
+        const MTLSize threadgroups = MTLSizeMake(static_cast<NSUInteger>((rows + 63U) / 64U), 1, 1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder endEncoding];
+    };
+
+    auto encode_matmul = [&](
+        id<MTLBuffer> left_buffer,
+        id<MTLBuffer> right_buffer,
+        id<MTLBuffer> matmul_output_buffer,
+        id<MTLBuffer> dims_buffer,
+        std::uint64_t output_columns_for_dispatch
+    ) {
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal Llama cached block matmul command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.matmul_pipeline];
+        [encoder setBuffer:left_buffer offset:0 atIndex:0];
+        [encoder setBuffer:right_buffer offset:0 atIndex:1];
+        [encoder setBuffer:matmul_output_buffer offset:0 atIndex:2];
+        [encoder setBuffer:dims_buffer offset:0 atIndex:3];
+
+        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
+        const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
+        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder endEncoding];
+    };
+
+    auto encode_add = [&](id<MTLBuffer> left_buffer, id<MTLBuffer> right_buffer, id<MTLBuffer> add_output_buffer) {
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal Llama cached block add command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.add_pipeline];
+        [encoder setBuffer:left_buffer offset:0 atIndex:0];
+        [encoder setBuffer:right_buffer offset:0 atIndex:1];
+        [encoder setBuffer:add_output_buffer offset:0 atIndex:2];
+        [encoder setBuffer:hidden_elementwise_dims_buffer offset:0 atIndex:3];
+
+        const MTLSize threads_per_threadgroup = MTLSizeMake(256, 1, 1);
+        const auto threadgroup_count = static_cast<NSUInteger>((hidden_descriptor.element_count + 255U) / 256U);
+        const MTLSize threadgroups = MTLSizeMake(threadgroup_count, 1, 1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder endEncoding];
+    };
+
+    encode_rms_norm(input.buffer(), attention_norm_weight.buffer(), attention_normalized_buffer);
+    encode_matmul(attention_normalized_buffer, query_weight.buffer(), query_buffer, query_dims_buffer, query_width);
+    encode_matmul(attention_normalized_buffer, key_weight.buffer(), key_buffer, key_dims_buffer, key_width);
+    encode_matmul(attention_normalized_buffer, value_weight.buffer(), value_buffer, value_dims_buffer, value_width);
+
+    id<MTLComputeCommandEncoder> append_encoder = [command_buffer computeCommandEncoder];
+    if (append_encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached block KV append command encoding failed"
+        );
+    }
+    [append_encoder setComputePipelineState:state.llama_cached_kv_append_pipeline];
+    [append_encoder setBuffer:key_buffer offset:0 atIndex:0];
+    [append_encoder setBuffer:value_buffer offset:0 atIndex:1];
+    [append_encoder setBuffer:cache_key.buffer() offset:0 atIndex:2];
+    [append_encoder setBuffer:cache_value.buffer() offset:0 atIndex:3];
+    [append_encoder setBuffer:attention_dims_buffer offset:0 atIndex:4];
+
+    const auto append_columns = key_width > value_width ? key_width : value_width;
+    const MTLSize append_threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+    const MTLSize append_threadgroups = MTLSizeMake(
+        static_cast<NSUInteger>((append_columns + 15U) / 16U),
+        static_cast<NSUInteger>((rows + 15U) / 16U),
+        1
+    );
+    [append_encoder dispatchThreadgroups:append_threadgroups threadsPerThreadgroup:append_threads_per_threadgroup];
+    [append_encoder endEncoding];
+
+    id<MTLComputeCommandEncoder> attention_encoder = [command_buffer computeCommandEncoder];
+    if (attention_encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached block attention command encoding failed"
+        );
+    }
+    [attention_encoder setComputePipelineState:state.llama_cached_attention_output_pipeline];
+    [attention_encoder setBuffer:query_buffer offset:0 atIndex:0];
+    [attention_encoder setBuffer:cache_key.buffer() offset:0 atIndex:1];
+    [attention_encoder setBuffer:cache_value.buffer() offset:0 atIndex:2];
+    [attention_encoder setBuffer:attention_output_buffer offset:0 atIndex:3];
+    [attention_encoder setBuffer:attention_dims_buffer offset:0 atIndex:4];
+
+    const MTLSize attention_threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+    const MTLSize attention_threadgroups = MTLSizeMake(
+        static_cast<NSUInteger>((attention_output_width + 15U) / 16U),
+        static_cast<NSUInteger>((rows + 15U) / 16U),
+        1
+    );
+    [attention_encoder dispatchThreadgroups:attention_threadgroups
+                      threadsPerThreadgroup:attention_threads_per_threadgroup];
+    [attention_encoder endEncoding];
+
+    encode_matmul(
+        attention_output_buffer,
+        attention_output_weight.buffer(),
+        attention_projected_buffer,
+        attention_output_dims_buffer,
+        hidden
+    );
+    encode_add(input.buffer(), attention_projected_buffer, attention_residual_buffer);
+    encode_rms_norm(
+        attention_residual_buffer,
+        feed_forward_norm_weight.buffer(),
+        feed_forward_normalized_buffer
+    );
+    encode_matmul(feed_forward_normalized_buffer, gate_weight.buffer(), gate_buffer, gate_dims_buffer, feed_forward);
+    encode_matmul(feed_forward_normalized_buffer, up_weight.buffer(), up_buffer, gate_dims_buffer, feed_forward);
+
+    id<MTLComputeCommandEncoder> silu_encoder = [command_buffer computeCommandEncoder];
+    if (silu_encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached block activation command encoding failed"
+        );
+    }
+    [silu_encoder setComputePipelineState:state.silu_multiply_pipeline];
+    [silu_encoder setBuffer:gate_buffer offset:0 atIndex:0];
+    [silu_encoder setBuffer:up_buffer offset:0 atIndex:1];
+    [silu_encoder setBuffer:gated_buffer offset:0 atIndex:2];
+    [silu_encoder setBuffer:feed_forward_elementwise_dims_buffer offset:0 atIndex:3];
+
+    const MTLSize activation_threads_per_threadgroup = MTLSizeMake(256, 1, 1);
+    const auto activation_threadgroup_count = static_cast<NSUInteger>(
+        (feed_forward_descriptor.element_count + 255U) / 256U
+    );
+    const MTLSize activation_threadgroups = MTLSizeMake(activation_threadgroup_count, 1, 1);
+    [silu_encoder dispatchThreadgroups:activation_threadgroups
+                 threadsPerThreadgroup:activation_threads_per_threadgroup];
+    [silu_encoder endEncoding];
+
+    encode_matmul(gated_buffer, down_weight.buffer(), feed_forward_projected_buffer, down_dims_buffer, hidden);
+    encode_add(attention_residual_buffer, feed_forward_projected_buffer, output_buffer);
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached block command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return detail::make_backend_buffer(
+        std::make_shared<MetalBackendBufferStorage>(hidden_descriptor, output_buffer)
+    );
+}
+
 }  // namespace
 
 bool is_available() noexcept {
@@ -2476,6 +2937,137 @@ BackendBuffer llama_cached_attention_f32_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         query.backend(),
         "unsupported backend buffers for Llama cached attention"
+    );
+}
+
+BackendBuffer llama_cached_block_f32_to_backend(
+    const BackendBuffer& input,
+    const BackendBuffer& attention_norm_weight,
+    const BackendBuffer& query_weight,
+    const BackendBuffer& key_weight,
+    const BackendBuffer& value_weight,
+    BackendBuffer& cache_key,
+    BackendBuffer& cache_value,
+    const BackendBuffer& attention_output_weight,
+    const BackendBuffer& feed_forward_norm_weight,
+    const BackendBuffer& gate_weight,
+    const BackendBuffer& up_weight,
+    const BackendBuffer& down_weight,
+    std::uint64_t cache_position,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length,
+    std::uint64_t rope_dimension_count,
+    float frequency_base,
+    float attention_scale,
+    float rms_norm_epsilon
+) {
+    backends::metal::require_llama_cached_block_f32_operands(
+        input.descriptor(),
+        attention_norm_weight.descriptor(),
+        query_weight.descriptor(),
+        key_weight.descriptor(),
+        value_weight.descriptor(),
+        cache_key.descriptor(),
+        cache_value.descriptor(),
+        attention_output_weight.descriptor(),
+        feed_forward_norm_weight.descriptor(),
+        gate_weight.descriptor(),
+        up_weight.descriptor(),
+        down_weight.descriptor(),
+        cache_position,
+        head_count,
+        kv_head_count,
+        key_length,
+        value_length,
+        rope_dimension_count,
+        frequency_base,
+        attention_scale,
+        rms_norm_epsilon
+    );
+    backends::metal::require_same_backend(input.backend(), attention_norm_weight.backend(), "Llama cached block");
+    backends::metal::require_same_backend(input.backend(), query_weight.backend(), "Llama cached block");
+    backends::metal::require_same_backend(input.backend(), key_weight.backend(), "Llama cached block");
+    backends::metal::require_same_backend(input.backend(), value_weight.backend(), "Llama cached block");
+    backends::metal::require_same_backend(input.backend(), cache_key.backend(), "Llama cached block");
+    backends::metal::require_same_backend(input.backend(), cache_value.backend(), "Llama cached block");
+    backends::metal::require_same_backend(input.backend(), attention_output_weight.backend(), "Llama cached block");
+    backends::metal::require_same_backend(input.backend(), feed_forward_norm_weight.backend(), "Llama cached block");
+    backends::metal::require_same_backend(input.backend(), gate_weight.backend(), "Llama cached block");
+    backends::metal::require_same_backend(input.backend(), up_weight.backend(), "Llama cached block");
+    backends::metal::require_same_backend(input.backend(), down_weight.backend(), "Llama cached block");
+
+    switch (input.backend()) {
+        case runtime::BackendKind::cpu: {
+            const auto input_storage = copy_tensor_from_backend(input);
+            const auto attention_norm_storage = copy_tensor_from_backend(attention_norm_weight);
+            const auto normalized = rms_norm_f32(input_storage, attention_norm_storage, rms_norm_epsilon);
+            const auto normalized_buffer = copy_tensor_to_backend(normalized, runtime::BackendKind::cpu);
+            const auto projections = matmul_f32_f16_gguf_weight_triple_to_backend(
+                normalized_buffer,
+                query_weight,
+                key_weight,
+                value_weight
+            );
+            const auto attention_output = llama_cached_attention_f32_to_backend(
+                projections.first,
+                projections.second,
+                projections.third,
+                cache_key,
+                cache_value,
+                cache_position,
+                head_count,
+                kv_head_count,
+                key_length,
+                value_length,
+                rope_dimension_count,
+                frequency_base,
+                attention_scale
+            );
+            return residual_gated_silu_projection_f32_f16_gguf_weight_to_backend(
+                input,
+                attention_output,
+                attention_output_weight,
+                feed_forward_norm_weight,
+                gate_weight,
+                up_weight,
+                down_weight,
+                rms_norm_epsilon
+            );
+        }
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::llama_cached_block_f32_with_metal_buffers(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(input)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(attention_norm_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(query_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(key_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(value_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(cache_key)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(cache_value)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(attention_output_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(feed_forward_norm_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(gate_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(up_weight)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(down_weight)),
+                    cache_position,
+                    head_count,
+                    kv_head_count,
+                    key_length,
+                    value_length,
+                    rope_dimension_count,
+                    frequency_base,
+                    attention_scale,
+                    rms_norm_epsilon
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        input.backend(),
+        "unsupported backend buffers for Llama cached block"
     );
 }
 

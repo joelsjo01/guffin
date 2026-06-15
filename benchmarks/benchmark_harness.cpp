@@ -522,7 +522,7 @@ void add_unavailable_metal_feed_forward_backend_benchmark(BenchmarkReport& repor
 }
 
 [[nodiscard]] std::size_t llama_attention_weight_bytes(const LlamaAttentionLayerBackendWeights& weights) noexcept {
-    return weights.attention_norm_weight.bytes().size()
+    return backend_buffer_byte_count(weights.attention_norm_weight_buffer)
         + backend_buffer_byte_count(weights.query_weight)
         + backend_buffer_byte_count(weights.key_weight)
         + backend_buffer_byte_count(weights.value_weight)
@@ -1315,7 +1315,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     report.measurements.push_back(measure(
         "engine.llama_model_blocks_with_backend_kv_cache_f32.cpu_buffered",
         report.config.iterations,
-        "input=[7,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=cpu preloaded-projections fused-qkv resident-kv fused-block-tail cache_prefill",
+        "input=[7,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=cpu preloaded-projections resident-kv fused-cached-block cache_prefill",
         [
             &llama_cached_model_block_prefill_input,
             &llama_model_cpu_block_backend_weights,
@@ -1343,7 +1343,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
     report.measurements.push_back(measure(
         "engine.llama_model_blocks_with_backend_kv_cache_decode_f32.cpu_buffered",
         report.config.iterations,
-        "input=[1,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=cpu preloaded-projections fused-qkv resident-kv fused-block-tail cache_prefilled=7",
+        "input=[1,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=cpu preloaded-projections resident-kv fused-cached-block cache_prefilled=7",
         [
             &llama_cached_model_block_decode_input,
             &llama_model_cpu_block_backend_weights,
@@ -1672,7 +1672,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         report.measurements.push_back(measure(
             "engine.llama_model_blocks_with_backend_kv_cache_f32.metal_buffered",
             report.config.iterations,
-            "input=[7,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=metal preloaded-projections fused-qkv resident-kv fused-block-tail cache_prefill",
+            "input=[7,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=metal preloaded-projections resident-kv fused-cached-block one-command-buffer cache_prefill",
             [
                 &llama_cached_model_block_prefill_input,
                 &llama_model_metal_block_backend_weights,
@@ -1700,7 +1700,7 @@ void add_synthetic_tensor_benchmarks(BenchmarkReport& report) {
         report.measurements.push_back(measure(
             "engine.llama_model_blocks_with_backend_kv_cache_decode_f32.metal_buffered",
             report.config.iterations,
-            "input=[1,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=metal preloaded-projections fused-qkv resident-kv fused-block-tail cache_prefilled=7",
+            "input=[1,64] blocks=2 heads=4 kv_heads=2 ffn=128 backend=metal preloaded-projections resident-kv fused-cached-block one-command-buffer cache_prefilled=7",
             [
                 &llama_cached_model_block_decode_input,
                 &llama_model_metal_block_backend_weights,

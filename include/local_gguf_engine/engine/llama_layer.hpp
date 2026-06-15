@@ -20,6 +20,7 @@ struct LlamaAttentionLayerWeights {
 
 struct LlamaAttentionLayerBackendWeights {
     const tensor::TensorStorage& attention_norm_weight;
+    tensor::BackendBuffer attention_norm_weight_buffer;
     tensor::BackendBuffer query_weight;
     tensor::BackendBuffer key_weight;
     tensor::BackendBuffer value_weight;
