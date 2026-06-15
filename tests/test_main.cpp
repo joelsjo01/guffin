@@ -3857,6 +3857,163 @@ void test_matches_llama_cached_attention_to_metal_backend_buffer_when_available(
     );
 }
 
+void test_matches_llama_one_token_grouped_cached_attention_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    constexpr std::uint64_t prefill_rows = 3;
+    constexpr std::uint64_t decode_rows = 1;
+    constexpr std::uint64_t head_count = 4;
+    constexpr std::uint64_t kv_head_count = 2;
+    constexpr std::uint64_t key_length = 4;
+    constexpr std::uint64_t value_length = 3;
+    constexpr std::uint64_t cache_capacity = 8;
+    constexpr std::uint64_t query_width = head_count * key_length;
+    constexpr std::uint64_t key_width = kv_head_count * key_length;
+    constexpr std::uint64_t value_width = kv_head_count * value_length;
+    constexpr std::uint64_t rope_dimension_count = key_length;
+    constexpr float frequency_base = 10000.0F;
+    const auto attention_scale = 1.0F / std::sqrt(static_cast<float>(key_length));
+    auto make_values = [](std::size_t count, float scale, float bias) {
+        std::vector<float> values;
+        values.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto centered = static_cast<float>(static_cast<int>((index * 7U) % 17U) - 8);
+            values.push_back(bias + (centered * scale) + (0.0003F * static_cast<float>(index)));
+        }
+        return values;
+    };
+
+    const auto prefill_query_values = make_values(prefill_rows * query_width, 0.013F, 0.002F);
+    const auto prefill_key_values = make_values(prefill_rows * key_width, 0.011F, -0.003F);
+    const auto prefill_value_values = make_values(prefill_rows * value_width, 0.017F, 0.005F);
+    const auto decode_query_values = make_values(decode_rows * query_width, 0.019F, -0.004F);
+    const auto decode_key_values = make_values(decode_rows * key_width, 0.007F, 0.006F);
+    const auto decode_value_values = make_values(decode_rows * value_width, 0.023F, -0.001F);
+    const auto prefill_query = tensor_f32_matrix(
+        prefill_rows,
+        query_width,
+        std::span<const float>(prefill_query_values.data(), prefill_query_values.size())
+    );
+    const auto prefill_key = tensor_f32_matrix(
+        prefill_rows,
+        key_width,
+        std::span<const float>(prefill_key_values.data(), prefill_key_values.size())
+    );
+    const auto prefill_value = tensor_f32_matrix(
+        prefill_rows,
+        value_width,
+        std::span<const float>(prefill_value_values.data(), prefill_value_values.size())
+    );
+    const auto decode_query = tensor_f32_matrix(
+        decode_rows,
+        query_width,
+        std::span<const float>(decode_query_values.data(), decode_query_values.size())
+    );
+    const auto decode_key = tensor_f32_matrix(
+        decode_rows,
+        key_width,
+        std::span<const float>(decode_key_values.data(), decode_key_values.size())
+    );
+    const auto decode_value = tensor_f32_matrix(
+        decode_rows,
+        value_width,
+        std::span<const float>(decode_value_values.data(), decode_value_values.size())
+    );
+    const auto cache_key_descriptor = TensorDescriptor::from(Shape::from({cache_capacity, key_width}), DType::f32);
+    const auto cache_value_descriptor = TensorDescriptor::from(Shape::from({cache_capacity, value_width}), DType::f32);
+    auto cpu_cache_key = copy_tensor_to_backend(TensorStorage::allocate(cache_key_descriptor), BackendKind::cpu);
+    auto cpu_cache_value = copy_tensor_to_backend(TensorStorage::allocate(cache_value_descriptor), BackendKind::cpu);
+    auto metal_cache_key = copy_tensor_to_backend(TensorStorage::allocate(cache_key_descriptor), BackendKind::metal);
+    auto metal_cache_value = copy_tensor_to_backend(TensorStorage::allocate(cache_value_descriptor), BackendKind::metal);
+
+    (void)llama_cached_attention_f32_to_backend(
+        copy_tensor_to_backend(prefill_query, BackendKind::cpu),
+        copy_tensor_to_backend(prefill_key, BackendKind::cpu),
+        copy_tensor_to_backend(prefill_value, BackendKind::cpu),
+        cpu_cache_key,
+        cpu_cache_value,
+        0,
+        head_count,
+        kv_head_count,
+        key_length,
+        value_length,
+        rope_dimension_count,
+        frequency_base,
+        attention_scale
+    );
+    const auto cpu_output_buffer = llama_cached_attention_f32_to_backend(
+        copy_tensor_to_backend(decode_query, BackendKind::cpu),
+        copy_tensor_to_backend(decode_key, BackendKind::cpu),
+        copy_tensor_to_backend(decode_value, BackendKind::cpu),
+        cpu_cache_key,
+        cpu_cache_value,
+        prefill_rows,
+        head_count,
+        kv_head_count,
+        key_length,
+        value_length,
+        rope_dimension_count,
+        frequency_base,
+        attention_scale
+    );
+
+    (void)llama_cached_attention_f32_to_backend(
+        copy_tensor_to_backend(prefill_query, BackendKind::metal),
+        copy_tensor_to_backend(prefill_key, BackendKind::metal),
+        copy_tensor_to_backend(prefill_value, BackendKind::metal),
+        metal_cache_key,
+        metal_cache_value,
+        0,
+        head_count,
+        kv_head_count,
+        key_length,
+        value_length,
+        rope_dimension_count,
+        frequency_base,
+        attention_scale
+    );
+    const auto metal_output_buffer = llama_cached_attention_f32_to_backend(
+        copy_tensor_to_backend(decode_query, BackendKind::metal),
+        copy_tensor_to_backend(decode_key, BackendKind::metal),
+        copy_tensor_to_backend(decode_value, BackendKind::metal),
+        metal_cache_key,
+        metal_cache_value,
+        prefill_rows,
+        head_count,
+        kv_head_count,
+        key_length,
+        value_length,
+        rope_dimension_count,
+        frequency_base,
+        attention_scale
+    );
+
+    expect(
+        metal_output_buffer.backend() == BackendKind::metal,
+        "Metal grouped one-token Llama cached attention output backend mismatch"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_output_buffer),
+        copy_tensor_from_backend(cpu_output_buffer),
+        1.0e-4F,
+        "Metal grouped one-token Llama cached attention output"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_cache_key),
+        copy_tensor_from_backend(cpu_cache_key),
+        1.0e-4F,
+        "Metal grouped one-token Llama cached attention key cache"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_cache_value),
+        copy_tensor_from_backend(cpu_cache_value),
+        1.0e-4F,
+        "Metal grouped one-token Llama cached attention value cache"
+    );
+}
+
 void test_reports_unavailable_metal_backend_for_gguf_matmul_when_missing() {
     if (tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -9318,6 +9475,10 @@ int main() {
         {
             "matches Llama cached attention to Metal backend buffer when available",
             test_matches_llama_cached_attention_to_metal_backend_buffer_when_available,
+        },
+        {
+            "matches one-token grouped Llama cached attention to Metal backend buffer when available",
+            test_matches_llama_one_token_grouped_cached_attention_to_metal_backend_buffer_when_available,
         },
         {
             "reuses Metal F32 by F16 GGUF weight matmul state",

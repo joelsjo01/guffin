@@ -29,6 +29,8 @@ constexpr const char* matmul_f32_f16_gguf_weight_source = R"metal(
 #include <metal_stdlib>
 using namespace metal;
 
+constant uint llama_cached_decode_attention_thread_count = 256;
+
 struct MatmulDimensions {
     uint rows;
     uint shared;
@@ -295,6 +297,108 @@ kernel void llama_cached_attention_output_f32_kernel(
 
     output[query_row * output_width + output_column] = accumulator / denominator;
 }
+
+kernel void llama_cached_decode_attention_output_f32_kernel(
+    const device float* query [[buffer(0)]],
+    const device float* cache_key [[buffer(1)]],
+    const device float* cache_value [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant LlamaCachedAttentionDimensions& dims [[buffer(4)]],
+    threadgroup float* scratch [[threadgroup(0)]],
+    uint3 threadgroup_position [[threadgroup_position_in_grid]],
+    uint thread_index [[thread_index_in_threadgroup]]
+) {
+    if (dims.token_count != 1) {
+        return;
+    }
+
+    const uint head = threadgroup_position.x;
+    if (head >= dims.head_count) {
+        return;
+    }
+
+    const uint key_width = dims.kv_head_count * dims.key_length;
+    const uint value_width = dims.kv_head_count * dims.value_length;
+    const uint query_width = dims.head_count * dims.key_length;
+    const uint kv_group_size = dims.head_count / dims.kv_head_count;
+    const uint kv_head = head / kv_group_size;
+    const uint query_first_column = head * dims.key_length;
+    const uint key_first_column = kv_head * dims.key_length;
+    const uint value_first_column = kv_head * dims.value_length;
+    const uint output_first_column = head * dims.value_length;
+    const uint query_position = dims.cache_position;
+
+    threadgroup float* scores = scratch;
+    threadgroup float* reductions = scratch + dims.cached_token_count;
+
+    float local_max_score = -3.402823466e+38f;
+    for (uint key_row = thread_index; key_row < dims.cached_token_count; key_row += llama_cached_decode_attention_thread_count) {
+        float dot = 0.0f;
+        for (uint column = 0; column < dims.key_length; ++column) {
+            float query_value = query[query_first_column + column];
+            if (column < dims.rope_dimension_count) {
+                const uint pair_column = column - (column % 2);
+                const float first = query[query_first_column + pair_column];
+                const float second = query[query_first_column + pair_column + 1];
+                const float angle = llama_rope_angle(
+                    query_position,
+                    pair_column,
+                    dims.rope_dimension_count,
+                    dims.frequency_base
+                );
+                const float angle_cos = cos(angle);
+                const float angle_sin = sin(angle);
+                query_value = column == pair_column
+                    ? first * angle_cos - second * angle_sin
+                    : first * angle_sin + second * angle_cos;
+            }
+
+            dot += query_value * cache_key[key_row * key_width + key_first_column + column];
+        }
+
+        const float score = dot * dims.scale;
+        scores[key_row] = score;
+        local_max_score = max(local_max_score, score);
+    }
+
+    reductions[thread_index] = local_max_score;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = llama_cached_decode_attention_thread_count / 2; stride > 0; stride >>= 1) {
+        if (thread_index < stride) {
+            reductions[thread_index] = max(reductions[thread_index], reductions[thread_index + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const float max_score = reductions[0];
+
+    float local_denominator = 0.0f;
+    for (uint key_row = thread_index; key_row < dims.cached_token_count; key_row += llama_cached_decode_attention_thread_count) {
+        const float weight = exp(scores[key_row] - max_score);
+        scores[key_row] = weight;
+        local_denominator += weight;
+    }
+
+    reductions[thread_index] = local_denominator;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = llama_cached_decode_attention_thread_count / 2; stride > 0; stride >>= 1) {
+        if (thread_index < stride) {
+            reductions[thread_index] += reductions[thread_index + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const float denominator = reductions[0];
+
+    for (uint value_column = thread_index; value_column < dims.value_length; value_column += llama_cached_decode_attention_thread_count) {
+        float accumulator = 0.0f;
+        for (uint key_row = 0; key_row < dims.cached_token_count; ++key_row) {
+            accumulator += scores[key_row] * cache_value[key_row * value_width + value_first_column + value_column];
+        }
+
+        output[output_first_column + value_column] = accumulator / denominator;
+    }
+
+    (void)query_width;
+}
 )metal";
 
 struct MatmulDimensions {
@@ -326,6 +430,8 @@ struct LlamaCachedAttentionDimensions {
     float scale = 0.0F;
 };
 
+constexpr std::uint64_t llama_cached_decode_attention_thread_count = 256;
+
 struct LlamaCachedBlockScratchBuffers {
     id<MTLBuffer> attention_normalized = nil;
     id<MTLBuffer> query = nil;
@@ -349,6 +455,7 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_kv_append_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_attention_output_pipeline = nil;
+    id<MTLComputePipelineState> llama_cached_decode_attention_output_pipeline = nil;
     id<MTLCommandQueue> queue = nil;
     std::mutex llama_cached_block_scratch_mutex;
     LlamaCachedBlockScratchBuffers llama_cached_block_scratch;
@@ -1020,6 +1127,27 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> llama_cached_decode_attention_output_function =
+        [library newFunctionWithName:@"llama_cached_decode_attention_output_f32_kernel"];
+    if (llama_cached_decode_attention_output_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached decode attention output kernel function was not found"
+        );
+    }
+
+    NSError* llama_cached_decode_attention_output_pipeline_error = nil;
+    llama_cached_decode_attention_output_pipeline =
+        [device newComputePipelineStateWithFunction:llama_cached_decode_attention_output_function
+                                              error:&llama_cached_decode_attention_output_pipeline_error];
+    if (llama_cached_decode_attention_output_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached decode attention output pipeline creation failed: "
+                + ns_error_message(llama_cached_decode_attention_output_pipeline_error, "unknown error")
+        );
+    }
+
     queue = [device newCommandQueue];
     if (queue == nil) {
         throw metal_error(
@@ -1032,6 +1160,79 @@ MatmulPipelineState::MatmulPipelineState() {
 [[nodiscard]] MatmulPipelineState& shared_matmul_pipeline_state() {
     static MatmulPipelineState state;
     return state;
+}
+
+[[nodiscard]] std::uint64_t llama_cached_decode_attention_scratch_byte_count(
+    const LlamaCachedAttentionDimensions& dims
+) noexcept {
+    return (static_cast<std::uint64_t>(dims.cached_token_count) + llama_cached_decode_attention_thread_count)
+        * sizeof(float);
+}
+
+[[nodiscard]] bool can_use_llama_cached_decode_attention_output_kernel(
+    const MatmulPipelineState& state,
+    const LlamaCachedAttentionDimensions& dims
+) {
+    if (dims.token_count != 1 || dims.cached_token_count == 0) {
+        return false;
+    }
+
+    const auto pipeline_thread_limit = static_cast<std::uint64_t>(
+        [state.llama_cached_decode_attention_output_pipeline maxTotalThreadsPerThreadgroup]
+    );
+    if (pipeline_thread_limit < llama_cached_decode_attention_thread_count) {
+        return false;
+    }
+
+    const auto threadgroup_memory_limit = static_cast<std::uint64_t>([state.device maxThreadgroupMemoryLength]);
+    return llama_cached_decode_attention_scratch_byte_count(dims) <= threadgroup_memory_limit;
+}
+
+void encode_llama_cached_attention_output(
+    MatmulPipelineState& state,
+    id<MTLComputeCommandEncoder> encoder,
+    id<MTLBuffer> query_buffer,
+    id<MTLBuffer> cache_key_buffer,
+    id<MTLBuffer> cache_value_buffer,
+    id<MTLBuffer> output_buffer,
+    const LlamaCachedAttentionDimensions& dims,
+    std::uint64_t output_width
+) {
+    if (can_use_llama_cached_decode_attention_output_kernel(state, dims)) {
+        [encoder setComputePipelineState:state.llama_cached_decode_attention_output_pipeline];
+        [encoder setBuffer:query_buffer offset:0 atIndex:0];
+        [encoder setBuffer:cache_key_buffer offset:0 atIndex:1];
+        [encoder setBuffer:cache_value_buffer offset:0 atIndex:2];
+        [encoder setBuffer:output_buffer offset:0 atIndex:3];
+        [encoder setBytes:&dims length:sizeof(LlamaCachedAttentionDimensions) atIndex:4];
+        [encoder setThreadgroupMemoryLength:static_cast<NSUInteger>(
+            llama_cached_decode_attention_scratch_byte_count(dims)
+        )
+                                    atIndex:0];
+        [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(dims.head_count), 1, 1)
+                 threadsPerThreadgroup:MTLSizeMake(
+                     static_cast<NSUInteger>(llama_cached_decode_attention_thread_count),
+                     1,
+                     1
+                 )];
+        return;
+    }
+
+    [encoder setComputePipelineState:state.llama_cached_attention_output_pipeline];
+    [encoder setBuffer:query_buffer offset:0 atIndex:0];
+    [encoder setBuffer:cache_key_buffer offset:0 atIndex:1];
+    [encoder setBuffer:cache_value_buffer offset:0 atIndex:2];
+    [encoder setBuffer:output_buffer offset:0 atIndex:3];
+    [encoder setBytes:&dims length:sizeof(LlamaCachedAttentionDimensions) atIndex:4];
+
+    const MTLSize attention_threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+    const MTLSize attention_threadgroups = MTLSizeMake(
+        static_cast<NSUInteger>((output_width + 15U) / 16U),
+        static_cast<NSUInteger>((static_cast<std::uint64_t>(dims.token_count) + 15U) / 16U),
+        1
+    );
+    [encoder dispatchThreadgroups:attention_threadgroups
+            threadsPerThreadgroup:attention_threads_per_threadgroup];
 }
 
 [[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight_with_metal_right_buffer(
@@ -1948,10 +2149,7 @@ void append_llama_cached_kv_to_tensors_f32(
                                       output_descriptor.byte_count
                                    )
                                                            options:MTLResourceStorageModeShared];
-    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
-                                                          length:sizeof(LlamaCachedAttentionDimensions)
-                                                         options:MTLResourceStorageModeShared];
-    if (output_buffer == nil || dims_buffer == nil) {
+    if (output_buffer == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal Llama cached attention buffer allocation failed"
@@ -1978,7 +2176,7 @@ void append_llama_cached_kv_to_tensors_f32(
     [append_encoder setBuffer:value.buffer() offset:0 atIndex:1];
     [append_encoder setBuffer:cache_key.buffer() offset:0 atIndex:2];
     [append_encoder setBuffer:cache_value.buffer() offset:0 atIndex:3];
-    [append_encoder setBuffer:dims_buffer offset:0 atIndex:4];
+    [append_encoder setBytes:&dims length:sizeof(LlamaCachedAttentionDimensions) atIndex:4];
 
     const auto append_columns = key_width > value_width ? key_width : value_width;
     const MTLSize append_threads_per_threadgroup = MTLSizeMake(16, 16, 1);
@@ -1997,21 +2195,16 @@ void append_llama_cached_kv_to_tensors_f32(
             "Metal Llama cached attention output command encoding failed"
         );
     }
-    [attention_encoder setComputePipelineState:state.llama_cached_attention_output_pipeline];
-    [attention_encoder setBuffer:query.buffer() offset:0 atIndex:0];
-    [attention_encoder setBuffer:cache_key.buffer() offset:0 atIndex:1];
-    [attention_encoder setBuffer:cache_value.buffer() offset:0 atIndex:2];
-    [attention_encoder setBuffer:output_buffer offset:0 atIndex:3];
-    [attention_encoder setBuffer:dims_buffer offset:0 atIndex:4];
-
-    const MTLSize attention_threads_per_threadgroup = MTLSizeMake(16, 16, 1);
-    const MTLSize attention_threadgroups = MTLSizeMake(
-        static_cast<NSUInteger>((output_width + 15U) / 16U),
-        static_cast<NSUInteger>((token_count + 15U) / 16U),
-        1
+    encode_llama_cached_attention_output(
+        state,
+        attention_encoder,
+        query.buffer(),
+        cache_key.buffer(),
+        cache_value.buffer(),
+        output_buffer,
+        dims,
+        output_width
     );
-    [attention_encoder dispatchThreadgroups:attention_threadgroups
-                      threadsPerThreadgroup:attention_threads_per_threadgroup];
     [attention_encoder endEncoding];
 
     [command_buffer commit];
@@ -2281,21 +2474,16 @@ void append_llama_cached_kv_to_tensors_f32(
             "Metal Llama cached block attention command encoding failed"
         );
     }
-    [attention_encoder setComputePipelineState:state.llama_cached_attention_output_pipeline];
-    [attention_encoder setBuffer:query_buffer offset:0 atIndex:0];
-    [attention_encoder setBuffer:cache_key.buffer() offset:0 atIndex:1];
-    [attention_encoder setBuffer:cache_value.buffer() offset:0 atIndex:2];
-    [attention_encoder setBuffer:attention_output_buffer offset:0 atIndex:3];
-    [attention_encoder setBytes:&attention_dims length:sizeof(LlamaCachedAttentionDimensions) atIndex:4];
-
-    const MTLSize attention_threads_per_threadgroup = MTLSizeMake(16, 16, 1);
-    const MTLSize attention_threadgroups = MTLSizeMake(
-        static_cast<NSUInteger>((attention_output_width + 15U) / 16U),
-        static_cast<NSUInteger>((rows + 15U) / 16U),
-        1
+    encode_llama_cached_attention_output(
+        state,
+        attention_encoder,
+        query_buffer,
+        cache_key.buffer(),
+        cache_value.buffer(),
+        attention_output_buffer,
+        attention_dims,
+        attention_output_width
     );
-    [attention_encoder dispatchThreadgroups:attention_threadgroups
-                      threadsPerThreadgroup:attention_threads_per_threadgroup];
     [attention_encoder endEncoding];
 
     encode_matmul_add(
@@ -2728,18 +2916,16 @@ BackendBuffer benchmark_llama_cached_decode_attention_output_to_backend(
                 "Metal benchmark cached attention output command encoding failed"
             );
         }
-        [encoder setComputePipelineState:state.llama_cached_attention_output_pipeline];
-        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(query)).buffer() offset:0 atIndex:0];
-        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(cache_key)).buffer() offset:0 atIndex:1];
-        [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(cache_value)).buffer() offset:0 atIndex:2];
-        [encoder setBuffer:output_buffer offset:0 atIndex:3];
-        [encoder setBytes:&attention_dims length:sizeof(LlamaCachedAttentionDimensions) atIndex:4];
-        [encoder dispatchThreadgroups:MTLSizeMake(
-                                            static_cast<NSUInteger>((output_width + 15U) / 16U),
-                                            static_cast<NSUInteger>((rows + 15U) / 16U),
-                                            1
-                                        )
-                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        encode_llama_cached_attention_output(
+            state,
+            encoder,
+            require_metal_backend_buffer(backend_buffer_storage(query)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(cache_key)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(cache_value)).buffer(),
+            output_buffer,
+            attention_dims,
+            output_width
+        );
         [encoder endEncoding];
         [command_buffer commit];
         [command_buffer waitUntilCompleted];
