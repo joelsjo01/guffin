@@ -31,6 +31,7 @@ using namespace metal;
 
 constant uint llama_cached_decode_attention_thread_count = 256;
 constant uint llama_cached_decode_block_tail_thread_count = 256;
+constant uint llama_cached_decode_qkv_projection_thread_count = 256;
 
 struct MatmulDimensions {
     uint rows;
@@ -169,6 +170,14 @@ struct LlamaCachedDecodeBlockTailDimensions {
     float epsilon;
 };
 
+struct LlamaCachedDecodeQKVProjectionDimensions {
+    uint rows;
+    uint hidden;
+    uint query_width;
+    uint key_width;
+    uint value_width;
+};
+
 inline float llama_rope_angle(
     uint position,
     uint pair_offset,
@@ -176,6 +185,53 @@ inline float llama_rope_angle(
     float frequency_base
 ) {
     return float(position) / pow(frequency_base, float(pair_offset) / float(rope_dimension_count));
+}
+
+kernel void llama_cached_decode_qkv_projection_f32_f16_kernel(
+    const device float* input [[buffer(0)]],
+    const device half* query_weight [[buffer(1)]],
+    const device half* key_weight [[buffer(2)]],
+    const device half* value_weight [[buffer(3)]],
+    device float* query [[buffer(4)]],
+    device float* key [[buffer(5)]],
+    device float* value [[buffer(6)]],
+    constant LlamaCachedDecodeQKVProjectionDimensions& dims [[buffer(7)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint output_column = gid.x;
+    const uint row = gid.y;
+    if (row >= dims.rows) {
+        return;
+    }
+
+    const uint qkv_width = dims.query_width + dims.key_width + dims.value_width;
+    if (output_column >= qkv_width) {
+        return;
+    }
+
+    uint column = output_column;
+    uint output_width = dims.query_width;
+    const device half* selected_weight = query_weight;
+    device float* selected_output = query;
+    if (column >= dims.query_width) {
+        column -= dims.query_width;
+        output_width = dims.key_width;
+        selected_weight = key_weight;
+        selected_output = key;
+        if (column >= dims.key_width) {
+            column -= dims.key_width;
+            output_width = dims.value_width;
+            selected_weight = value_weight;
+            selected_output = value;
+        }
+    }
+
+    float sum = 0.0f;
+    for (uint inner = 0; inner < dims.hidden; ++inner) {
+        sum += input[row * dims.hidden + inner] * float(selected_weight[column * dims.hidden + inner]);
+    }
+
+    selected_output[row * output_width + column] = sum;
 }
 
 kernel void llama_cached_kv_append_f32_kernel(
@@ -507,12 +563,21 @@ struct LlamaCachedAttentionDimensions {
 
 constexpr std::uint64_t llama_cached_decode_attention_thread_count = 256;
 constexpr std::uint64_t llama_cached_decode_block_tail_thread_count = 256;
+constexpr std::uint64_t llama_cached_decode_qkv_projection_thread_count = 256;
 
 struct LlamaCachedDecodeBlockTailDimensions {
     std::uint32_t hidden = 0;
     std::uint32_t attention_output_width = 0;
     std::uint32_t feed_forward = 0;
     float epsilon = 0.0F;
+};
+
+struct LlamaCachedDecodeQKVProjectionDimensions {
+    std::uint32_t rows = 0;
+    std::uint32_t hidden = 0;
+    std::uint32_t query_width = 0;
+    std::uint32_t key_width = 0;
+    std::uint32_t value_width = 0;
 };
 
 struct LlamaCachedBlockScratchBuffers {
@@ -536,6 +601,7 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> add_pipeline = nil;
     id<MTLComputePipelineState> noop_pipeline = nil;
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
+    id<MTLComputePipelineState> llama_cached_decode_qkv_projection_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_kv_append_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_attention_output_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_decode_attention_output_pipeline = nil;
@@ -1170,6 +1236,27 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> llama_cached_decode_qkv_projection_function =
+        [library newFunctionWithName:@"llama_cached_decode_qkv_projection_f32_f16_kernel"];
+    if (llama_cached_decode_qkv_projection_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached decode QKV projection kernel function was not found"
+        );
+    }
+
+    NSError* llama_cached_decode_qkv_projection_pipeline_error = nil;
+    llama_cached_decode_qkv_projection_pipeline =
+        [device newComputePipelineStateWithFunction:llama_cached_decode_qkv_projection_function
+                                              error:&llama_cached_decode_qkv_projection_pipeline_error];
+    if (llama_cached_decode_qkv_projection_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Llama cached decode QKV projection pipeline creation failed: "
+                + ns_error_message(llama_cached_decode_qkv_projection_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> llama_cached_kv_append_function =
         [library newFunctionWithName:@"llama_cached_kv_append_f32_kernel"];
     if (llama_cached_kv_append_function == nil) {
@@ -1287,6 +1374,114 @@ MatmulPipelineState::MatmulPipelineState() {
 [[nodiscard]] MatmulPipelineState& shared_matmul_pipeline_state() {
     static MatmulPipelineState state;
     return state;
+}
+
+[[nodiscard]] bool can_use_llama_cached_decode_qkv_projection_kernel(
+    const MatmulPipelineState& state,
+    std::uint64_t rows,
+    const LlamaCachedDecodeQKVProjectionDimensions& dims
+) {
+    if (rows != 1 || dims.hidden == 0 || dims.query_width == 0 || dims.key_width == 0 || dims.value_width == 0) {
+        return false;
+    }
+
+    const auto pipeline_thread_limit = static_cast<std::uint64_t>(
+        [state.llama_cached_decode_qkv_projection_pipeline maxTotalThreadsPerThreadgroup]
+    );
+    return pipeline_thread_limit >= llama_cached_decode_qkv_projection_thread_count;
+}
+
+void encode_llama_cached_qkv_projection(
+    MatmulPipelineState& state,
+    id<MTLCommandBuffer> command_buffer,
+    id<MTLBuffer> input_buffer,
+    id<MTLBuffer> query_weight_buffer,
+    id<MTLBuffer> key_weight_buffer,
+    id<MTLBuffer> value_weight_buffer,
+    id<MTLBuffer> query_buffer,
+    id<MTLBuffer> key_buffer,
+    id<MTLBuffer> value_buffer,
+    const MatmulDimensions& query_dims,
+    const MatmulDimensions& key_dims,
+    const MatmulDimensions& value_dims,
+    std::uint64_t rows,
+    std::uint64_t hidden,
+    std::uint64_t query_width,
+    std::uint64_t key_width,
+    std::uint64_t value_width,
+    const char* error_context
+) {
+    const LlamaCachedDecodeQKVProjectionDimensions decode_qkv_dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .hidden = require_u32_dimension(hidden, "hidden"),
+        .query_width = require_u32_dimension(query_width, "query_width"),
+        .key_width = require_u32_dimension(key_width, "key_width"),
+        .value_width = require_u32_dimension(value_width, "value_width"),
+    };
+
+    if (can_use_llama_cached_decode_qkv_projection_kernel(state, rows, decode_qkv_dims)) {
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + error_context + " decode QKV projection command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.llama_cached_decode_qkv_projection_pipeline];
+        [encoder setBuffer:input_buffer offset:0 atIndex:0];
+        [encoder setBuffer:query_weight_buffer offset:0 atIndex:1];
+        [encoder setBuffer:key_weight_buffer offset:0 atIndex:2];
+        [encoder setBuffer:value_weight_buffer offset:0 atIndex:3];
+        [encoder setBuffer:query_buffer offset:0 atIndex:4];
+        [encoder setBuffer:key_buffer offset:0 atIndex:5];
+        [encoder setBuffer:value_buffer offset:0 atIndex:6];
+        [encoder setBytes:&decode_qkv_dims
+                   length:sizeof(LlamaCachedDecodeQKVProjectionDimensions)
+                  atIndex:7];
+
+        const auto qkv_width = query_width + key_width + value_width;
+        [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((qkv_width + 255U) / 256U), 1, 1)
+                 threadsPerThreadgroup:MTLSizeMake(
+                     static_cast<NSUInteger>(llama_cached_decode_qkv_projection_thread_count),
+                     1,
+                     1
+                 )];
+        [encoder endEncoding];
+        return;
+    }
+
+    auto encode_matmul = [&](
+        id<MTLBuffer> right_buffer,
+        id<MTLBuffer> output_buffer,
+        const MatmulDimensions& dims,
+        std::uint64_t output_columns_for_dispatch
+    ) {
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+        if (encoder == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + error_context + " matmul command encoding failed"
+            );
+        }
+
+        [encoder setComputePipelineState:state.matmul_pipeline];
+        [encoder setBuffer:input_buffer offset:0 atIndex:0];
+        [encoder setBuffer:right_buffer offset:0 atIndex:1];
+        [encoder setBuffer:output_buffer offset:0 atIndex:2];
+        [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:3];
+
+        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
+        const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
+        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder endEncoding];
+    };
+
+    encode_matmul(query_weight_buffer, query_buffer, query_dims, query_width);
+    encode_matmul(key_weight_buffer, key_buffer, key_dims, key_width);
+    encode_matmul(value_weight_buffer, value_buffer, value_dims, value_width);
 }
 
 [[nodiscard]] std::uint64_t llama_cached_decode_attention_scratch_byte_count(
@@ -2747,39 +2942,27 @@ void append_llama_cached_kv_to_tensors_f32(
         [encoder endEncoding];
     };
 
-    auto encode_matmul = [&](
-        id<MTLBuffer> left_buffer,
-        id<MTLBuffer> right_buffer,
-        id<MTLBuffer> matmul_output_buffer,
-        const MatmulDimensions& dims,
-        std::uint64_t output_columns_for_dispatch
-    ) {
-        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-        if (encoder == nil) {
-            throw metal_error(
-                runtime::BackendErrorCode::metal_execution_failed,
-                "Metal Llama cached block matmul command encoding failed"
-            );
-        }
-
-        [encoder setComputePipelineState:state.matmul_pipeline];
-        [encoder setBuffer:left_buffer offset:0 atIndex:0];
-        [encoder setBuffer:right_buffer offset:0 atIndex:1];
-        [encoder setBuffer:matmul_output_buffer offset:0 atIndex:2];
-        [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:3];
-
-        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
-        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
-        const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
-        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
-        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
-        [encoder endEncoding];
-    };
-
     encode_rms_norm(input.buffer(), attention_norm_weight.buffer(), attention_normalized_buffer);
-    encode_matmul(attention_normalized_buffer, query_weight.buffer(), query_buffer, query_dims, query_width);
-    encode_matmul(attention_normalized_buffer, key_weight.buffer(), key_buffer, key_dims, key_width);
-    encode_matmul(attention_normalized_buffer, value_weight.buffer(), value_buffer, value_dims, value_width);
+    encode_llama_cached_qkv_projection(
+        state,
+        command_buffer,
+        attention_normalized_buffer,
+        query_weight.buffer(),
+        key_weight.buffer(),
+        value_weight.buffer(),
+        query_buffer,
+        key_buffer,
+        value_buffer,
+        query_dims,
+        key_dims,
+        value_dims,
+        rows,
+        hidden,
+        query_width,
+        key_width,
+        value_width,
+        "Llama cached block QKV projection"
+    );
 
     id<MTLComputeCommandEncoder> append_encoder = [command_buffer computeCommandEncoder];
     if (append_encoder == nil) {
@@ -3060,39 +3243,26 @@ std::array<BackendBuffer, 3> benchmark_llama_cached_decode_qkv_projection_to_bac
             );
         }
 
-        auto encode_matmul = [&](
-            const BackendBuffer& right,
-            id<MTLBuffer> output_buffer,
-            const MatmulDimensions& dims,
-            std::uint64_t output_columns
-        ) {
-            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-            if (encoder == nil) {
-                throw metal_error(
-                    runtime::BackendErrorCode::metal_execution_failed,
-                    "Metal benchmark QKV projection matmul encoding failed"
-                );
-            }
-
-            [encoder setComputePipelineState:state.matmul_pipeline];
-            [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(input)).buffer()
-                        offset:0
-                       atIndex:0];
-            [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(right)).buffer() offset:0 atIndex:1];
-            [encoder setBuffer:output_buffer offset:0 atIndex:2];
-            [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:3];
-            [encoder dispatchThreadgroups:MTLSizeMake(
-                                                static_cast<NSUInteger>((output_columns + 15U) / 16U),
-                                                static_cast<NSUInteger>((rows + 15U) / 16U),
-                                                1
-                                            )
-                     threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-            [encoder endEncoding];
-        };
-
-        encode_matmul(query_weight, query_buffer, query_dims, query_width);
-        encode_matmul(key_weight, key_buffer, key_dims, key_width);
-        encode_matmul(value_weight, value_buffer, value_dims, value_width);
+        encode_llama_cached_qkv_projection(
+            state,
+            command_buffer,
+            require_metal_backend_buffer(backend_buffer_storage(input)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(query_weight)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(key_weight)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(value_weight)).buffer(),
+            query_buffer,
+            key_buffer,
+            value_buffer,
+            query_dims,
+            key_dims,
+            value_dims,
+            rows,
+            hidden,
+            query_width,
+            key_width,
+            value_width,
+            "benchmark QKV projection"
+        );
 
         [command_buffer commit];
         [command_buffer waitUntilCompleted];
@@ -3413,38 +3583,27 @@ std::array<BackendBuffer, 3> benchmark_llama_cached_decode_attention_frontend_to
             [encoder endEncoding];
         };
 
-        auto encode_matmul = [&](
-            const BackendBuffer& right,
-            id<MTLBuffer> output_buffer,
-            const MatmulDimensions& dims,
-            std::uint64_t output_columns
-        ) {
-            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-            if (encoder == nil) {
-                throw metal_error(
-                    runtime::BackendErrorCode::metal_execution_failed,
-                    "Metal benchmark attention front end matmul encoding failed"
-                );
-            }
-
-            [encoder setComputePipelineState:state.matmul_pipeline];
-            [encoder setBuffer:normalized_buffer offset:0 atIndex:0];
-            [encoder setBuffer:require_metal_backend_buffer(backend_buffer_storage(right)).buffer() offset:0 atIndex:1];
-            [encoder setBuffer:output_buffer offset:0 atIndex:2];
-            [encoder setBytes:&dims length:sizeof(MatmulDimensions) atIndex:3];
-            [encoder dispatchThreadgroups:MTLSizeMake(
-                                                static_cast<NSUInteger>((output_columns + 15U) / 16U),
-                                                static_cast<NSUInteger>((rows + 15U) / 16U),
-                                                1
-                                            )
-                     threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-            [encoder endEncoding];
-        };
-
         encode_rms_norm();
-        encode_matmul(query_weight, query_buffer, query_dims, query_width);
-        encode_matmul(key_weight, key_buffer, key_dims, key_width);
-        encode_matmul(value_weight, value_buffer, value_dims, value_width);
+        encode_llama_cached_qkv_projection(
+            state,
+            command_buffer,
+            normalized_buffer,
+            require_metal_backend_buffer(backend_buffer_storage(query_weight)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(key_weight)).buffer(),
+            require_metal_backend_buffer(backend_buffer_storage(value_weight)).buffer(),
+            query_buffer,
+            key_buffer,
+            value_buffer,
+            query_dims,
+            key_dims,
+            value_dims,
+            rows,
+            hidden,
+            query_width,
+            key_width,
+            value_width,
+            "benchmark attention front end QKV projection"
+        );
 
         id<MTLComputeCommandEncoder> append_encoder = [command_buffer computeCommandEncoder];
         if (append_encoder == nil) {
