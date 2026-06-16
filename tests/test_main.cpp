@@ -1,4 +1,6 @@
-#include "local_gguf_engine/benchmarks/benchmark_harness.hpp"
+#include "benchmark_tests.hpp"
+#include "test_support.hpp"
+
 #include "local_gguf_engine/engine/kv_cache.hpp"
 #include "local_gguf_engine/engine/llama_layer.hpp"
 #include "local_gguf_engine/engine/llama_model.hpp"
@@ -51,13 +53,6 @@
 
 namespace {
 
-using local_gguf_engine::benchmarks::BenchmarkConfig;
-using local_gguf_engine::benchmarks::BenchmarkMeasurement;
-using local_gguf_engine::benchmarks::BenchmarkReport;
-using local_gguf_engine::benchmarks::benchmark_output_path_is_under_results;
-using local_gguf_engine::benchmarks::default_benchmark_output_path;
-using local_gguf_engine::benchmarks::format_benchmark_report;
-using local_gguf_engine::benchmarks::parse_benchmark_args;
 using local_gguf_engine::engine::append_llama_kv_cache_layer_f32;
 using local_gguf_engine::engine::bind_llama_model_weights;
 using local_gguf_engine::engine::copy_llama_backend_kv_cache_to_cpu;
@@ -201,24 +196,9 @@ using local_gguf_engine::tokenizer::TokenizerError;
 using local_gguf_engine::tokenizer::TokenizerErrorCode;
 using local_gguf_engine::tokenizer::TokenizerModel;
 using local_gguf_engine::tokenizer::tokenizer_model_name;
-
-class TestFailure final : public std::exception {
-public:
-    explicit TestFailure(std::string message) : message_(std::move(message)) {}
-
-    [[nodiscard]] const char* what() const noexcept override {
-        return message_.c_str();
-    }
-
-private:
-    std::string message_;
-};
-
-void expect(bool condition, std::string_view message) {
-    if (!condition) {
-        throw TestFailure(std::string(message));
-    }
-}
+using local_gguf_engine::tests::TestCase;
+using local_gguf_engine::tests::TestFailure;
+using local_gguf_engine::tests::expect;
 
 void expect_close(float actual, float expected, float tolerance, std::string_view message) {
     if (std::fabs(actual - expected) > tolerance) {
@@ -9148,122 +9128,6 @@ void test_rejects_tokenizer_without_matching_token() {
     }
 }
 
-void test_parses_default_benchmark_args() {
-    const char* argv[] = {"local-gguf-bench"};
-    const auto parsed = parse_benchmark_args(1, argv);
-
-    expect(!parsed.should_exit, "benchmark default args should not exit");
-    expect(parsed.config.output_path == default_benchmark_output_path(), "benchmark default output path mismatch");
-    expect(!parsed.config.model_path.has_value(), "benchmark default model path should be absent");
-    expect(parsed.config.iterations == 10, "benchmark default iteration count mismatch");
-}
-
-void test_parses_benchmark_model_output_and_iterations() {
-    const char* argv[] = {
-        "local-gguf-bench",
-        "--model",
-        "models/example.gguf",
-        "--output",
-        "benchmarks/results/example.txt",
-        "--iterations",
-        "3",
-    };
-    const auto parsed = parse_benchmark_args(7, argv);
-
-    expect(!parsed.should_exit, "benchmark explicit args should not exit");
-    expect(parsed.config.model_path.has_value(), "benchmark model path should be present");
-    expect(*parsed.config.model_path == std::filesystem::path("models/example.gguf"), "benchmark model path mismatch");
-    expect(
-        parsed.config.output_path == std::filesystem::path("benchmarks/results/example.txt"),
-        "benchmark output path mismatch"
-    );
-    expect(parsed.config.iterations == 3, "benchmark explicit iteration count mismatch");
-}
-
-void test_rejects_benchmark_output_outside_results() {
-    const char* argv[] = {"local-gguf-bench", "--output", "benchmark-output.txt"};
-    const auto parsed = parse_benchmark_args(3, argv);
-
-    expect(parsed.should_exit, "benchmark output outside results should exit");
-    expect(parsed.exit_code == EXIT_FAILURE, "benchmark output outside results exit code mismatch");
-    expect(
-        parsed.message.find("benchmarks/results") != std::string::npos,
-        "benchmark output outside results error missing"
-    );
-}
-
-void test_rejects_invalid_benchmark_iterations() {
-    const char* argv[] = {"local-gguf-bench", "--iterations", "0"};
-    const auto parsed = parse_benchmark_args(3, argv);
-
-    expect(parsed.should_exit, "benchmark zero iterations should exit");
-    expect(parsed.exit_code == EXIT_FAILURE, "benchmark zero iterations exit code mismatch");
-    expect(
-        parsed.message.find("--iterations requires a positive count") != std::string::npos,
-        "benchmark zero iterations error missing"
-    );
-}
-
-void test_checks_benchmark_output_path_scope() {
-    expect(
-        benchmark_output_path_is_under_results("benchmarks/results/latest.txt"),
-        "benchmark output path under results should be accepted"
-    );
-    expect(
-        benchmark_output_path_is_under_results("benchmarks/results/nested/run.txt"),
-        "benchmark nested output path under results should be accepted"
-    );
-    expect(
-        !benchmark_output_path_is_under_results("benchmarks/results/../latest.txt"),
-        "benchmark normalized path outside results should be rejected"
-    );
-    expect(
-        !benchmark_output_path_is_under_results("/tmp/local-gguf-bench.txt"),
-        "benchmark absolute output path should be rejected"
-    );
-}
-
-void test_formats_benchmark_report() {
-    BenchmarkReport report {
-        .config = BenchmarkConfig {
-            .output_path = std::filesystem::path("benchmarks/results/test.txt"),
-            .model_path = std::filesystem::path("models/example.gguf"),
-            .iterations = 2,
-        },
-        .measurements = {
-            BenchmarkMeasurement {
-                .name = "tensor.add_f32",
-                .iterations = 2,
-                .total_ms = 3.0,
-                .min_ms = 1.0,
-                .max_ms = 2.0,
-                .bytes_processed = 96,
-                .checksum = 42,
-                .detail = "shape=[8] dtype=F32",
-            },
-        },
-    };
-
-    const auto text = format_benchmark_report(report);
-
-    expect(text.find("local GGUF benchmark report\n") == 0, "benchmark report heading mismatch");
-    expect(text.find("iterations: 2\n") != std::string::npos, "benchmark report iterations missing");
-    expect(
-        text.find("output: benchmarks/results/test.txt\n") != std::string::npos,
-        "benchmark report output path missing"
-    );
-    expect(text.find("model: models/example.gguf\n") != std::string::npos, "benchmark report model missing");
-    expect(text.find("- tensor.add_f32\n") != std::string::npos, "benchmark report measurement missing");
-    expect(text.find("  avg_ms: 1.500\n") != std::string::npos, "benchmark report average missing");
-    expect(text.find("  bytes_processed: 96\n") != std::string::npos, "benchmark report bytes missing");
-    expect(text.find("  checksum: 42\n") != std::string::npos, "benchmark report checksum missing");
-}
-
-struct TestCase {
-    std::string_view name;
-    void (*run)();
-};
-
 }  // namespace
 
 int main() {
@@ -9898,19 +9762,12 @@ int main() {
         },
         {"rejects tokenizer malformed BPE merges", test_rejects_tokenizer_malformed_bpe_merges},
         {"rejects tokenizer without matching token", test_rejects_tokenizer_without_matching_token},
-        {"parses default benchmark args", test_parses_default_benchmark_args},
-        {
-            "parses benchmark model output and iterations",
-            test_parses_benchmark_model_output_and_iterations,
-        },
-        {"rejects benchmark output outside results", test_rejects_benchmark_output_outside_results},
-        {"rejects invalid benchmark iterations", test_rejects_invalid_benchmark_iterations},
-        {"checks benchmark output path scope", test_checks_benchmark_output_path_scope},
-        {"formats benchmark report", test_formats_benchmark_report},
     };
 
     int failures = 0;
-    for (const auto& test : tests) {
+    std::size_t test_count = 0;
+    const auto run_test = [&](const TestCase& test) {
+        ++test_count;
         try {
             test.run();
             std::cout << "[PASS] " << test.name << '\n';
@@ -9918,6 +9775,13 @@ int main() {
             ++failures;
             std::cerr << "[FAIL] " << test.name << ": " << error.what() << '\n';
         }
+    };
+
+    for (const auto& test : tests) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::benchmark_test_cases()) {
+        run_test(test);
     }
 
     if (failures != 0) {
@@ -9925,6 +9789,6 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    std::cout << std::size(tests) << " test(s) passed\n";
+    std::cout << test_count << " test(s) passed\n";
     return EXIT_SUCCESS;
 }

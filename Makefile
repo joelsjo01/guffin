@@ -52,6 +52,8 @@ BENCHMARK_MAIN_SOURCES := \
 	benchmarks/benchmark_main.cpp
 
 TEST_SOURCES := \
+	tests/benchmark_tests.cpp \
+	tests/test_support.cpp \
 	tests/test_main.cpp
 
 COMMON_FLAGS := -std=c++20 -Iinclude -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fobjc-arc
