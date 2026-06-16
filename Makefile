@@ -53,7 +53,12 @@ BENCHMARK_MAIN_SOURCES := \
 
 TEST_SOURCES := \
 	tests/benchmark_tests.cpp \
+	tests/engine_model_tests.cpp \
+	tests/generate_cli_tests.cpp \
+	tests/gguf_inspect_tests.cpp \
+	tests/gguf_reader_tests.cpp \
 	tests/test_support.cpp \
+	tests/tokenizer_tests.cpp \
 	tests/test_main.cpp
 
 COMMON_FLAGS := -std=c++20 -Iinclude -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fobjc-arc
