@@ -3,6 +3,15 @@
 #include "generate_cli_tests.hpp"
 #include "gguf_inspect_tests.hpp"
 #include "gguf_reader_tests.hpp"
+#include "gguf_tensor_bridge_tests.hpp"
+#include "llama_attention_layer_tests.hpp"
+#include "llama_block_tests.hpp"
+#include "llama_feed_forward_layer_tests.hpp"
+#include "llama_kv_cache_tests.hpp"
+#include "llama_model_tests.hpp"
+#include "llama_test_support.hpp"
+#include "sampling_tests.hpp"
+#include "tensor_test_support.hpp"
 #include "test_support.hpp"
 #include "tokenizer_tests.hpp"
 
@@ -52,7 +61,6 @@
 
 namespace {
 
-using local_gguf_engine::engine::append_llama_kv_cache_layer_f32;
 using local_gguf_engine::engine::bind_llama_model_weights;
 using local_gguf_engine::engine::copy_llama_backend_kv_cache_to_cpu;
 using local_gguf_engine::engine::copy_llama_attention_layer_weights_to_backend;
@@ -64,10 +72,7 @@ using local_gguf_engine::engine::copy_llama_model_feed_forward_weights_to_backen
 using local_gguf_engine::engine::copy_llama_model_logits_weights_to_backend;
 using local_gguf_engine::engine::create_llama_kv_cache;
 using local_gguf_engine::engine::create_llama_backend_kv_cache;
-using local_gguf_engine::engine::embed_llama_token_ids_f32;
 using local_gguf_engine::engine::EngineModel;
-using local_gguf_engine::engine::EngineModelError;
-using local_gguf_engine::engine::EngineModelErrorCode;
 using local_gguf_engine::engine::EngineTensor;
 using local_gguf_engine::engine::generate_llama_argmax_tokens_f32;
 using local_gguf_engine::engine::generate_llama_argmax_tokens_with_kv_cache_f32;
@@ -79,16 +84,12 @@ using local_gguf_engine::engine::LlamaBlockBackendWeights;
 using local_gguf_engine::engine::LlamaBlockWeights;
 using local_gguf_engine::engine::LlamaFeedForwardLayerWeights;
 using local_gguf_engine::engine::LlamaKVCache;
-using local_gguf_engine::engine::LlamaKVCacheLayer;
-using local_gguf_engine::engine::llama_kv_cache_layer_key_prefix_f32;
-using local_gguf_engine::engine::llama_kv_cache_layer_value_prefix_f32;
 using local_gguf_engine::engine::LlamaModelAttentionBackendWeights;
 using local_gguf_engine::engine::LlamaModelBlockBackendWeights;
 using local_gguf_engine::engine::LlamaModelFeedForwardBackendWeights;
 using local_gguf_engine::engine::LlamaModelLogitsBackendWeights;
 using local_gguf_engine::engine::LlamaModelConfig;
 using local_gguf_engine::engine::LlamaModelWeights;
-using local_gguf_engine::engine::ModelArchitecture;
 using local_gguf_engine::engine::project_llama_logits_f32;
 using local_gguf_engine::engine::run_llama_attention_layer_f32;
 using local_gguf_engine::engine::run_llama_attention_layer_with_kv_cache_f32;
@@ -98,24 +99,17 @@ using local_gguf_engine::engine::run_llama_feed_forward_layer_f32;
 using local_gguf_engine::engine::run_llama_model_blocks_f32;
 using local_gguf_engine::engine::run_llama_model_blocks_with_kv_cache_f32;
 using local_gguf_engine::engine::run_llama_model_logits_f32;
-using local_gguf_engine::engine::run_llama_model_logits_with_kv_cache_f32;
 using local_gguf_engine::engine::run_llama_model_next_token_argmax_f32;
 using local_gguf_engine::engine::run_llama_model_next_token_argmax_with_kv_cache_f32;
 using local_gguf_engine::engine::run_llama_model_next_token_sampled_f32;
-using local_gguf_engine::engine::sample_argmax_token_f32;
-using local_gguf_engine::engine::sample_token_f32;
 using local_gguf_engine::engine::SamplingConfig;
 using local_gguf_engine::engine::SamplingState;
-using local_gguf_engine::engine::top_logit_tokens_f32;
 using local_gguf_engine::runtime::BackendError;
 using local_gguf_engine::runtime::BackendErrorCode;
 using local_gguf_engine::runtime::BackendKind;
 using local_gguf_engine::model_format::GGUFReadError;
 using local_gguf_engine::model_format::GGUFReadErrorCode;
-using local_gguf_engine::model_format::GGUFTensorInfo;
-using local_gguf_engine::model_format::GGUFTensorPayloadView;
 using local_gguf_engine::model_format::load_gguf_tensor_payload;
-using local_gguf_engine::model_format::load_gguf_tensor_payloads;
 using local_gguf_engine::model_format::read_gguf_model_view;
 using local_gguf_engine::tensor::byte_size;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
@@ -127,7 +121,6 @@ using local_gguf_engine::tensor::element_count;
 using local_gguf_engine::tensor::linear_index;
 using local_gguf_engine::tensor::mutable_element_bytes;
 using local_gguf_engine::tensor::dequantize_q8_0_block;
-using local_gguf_engine::tensor::f32_to_f16_bits;
 using local_gguf_engine::tensor::q8_0_block_count;
 using local_gguf_engine::tensor::q8_0_block_view;
 using local_gguf_engine::tensor::Q8_0BlockView;
@@ -170,16 +163,20 @@ using local_gguf_engine::tensor::ops::sum_f32;
 using local_gguf_engine::tensor::ops::sum_squares_f32;
 using local_gguf_engine::tests::TestCase;
 using local_gguf_engine::tests::TestFailure;
+using local_gguf_engine::tests::add_tiny_llama_block_tensors;
+using local_gguf_engine::tests::add_tiny_llama_top_level_tensors;
+using local_gguf_engine::tests::engine_tensor;
 using local_gguf_engine::tests::expect;
+using local_gguf_engine::tests::expect_close;
 using local_gguf_engine::tests::fixture;
-
-void expect_close(float actual, float expected, float tolerance, std::string_view message) {
-    if (std::fabs(actual - expected) > tolerance) {
-        std::ostringstream stream;
-        stream << message << ": expected " << expected << ", got " << actual;
-        throw TestFailure(stream.str());
-    }
-}
+using local_gguf_engine::tests::llama_block_tensor_name;
+using local_gguf_engine::tests::tensor_f16_gguf_matrix;
+using local_gguf_engine::tests::tensor_f16_matrix;
+using local_gguf_engine::tests::tensor_f32_matrix;
+using local_gguf_engine::tests::tensor_f32_vector;
+using local_gguf_engine::tests::tiny_bound_llama_model;
+using local_gguf_engine::tests::tiny_feed_forward_layer_config;
+using local_gguf_engine::tests::tiny_logits_config;
 
 void expect_f32_matrix_close(
     const TensorStorage& actual,
@@ -236,77 +233,6 @@ void expect_llama_kv_cache_close(
             prefix + " value cache"
         );
     }
-}
-
-TensorStorage tensor_f32_vector(std::span<const float> values) {
-    auto storage = TensorStorage::allocate(
-        TensorDescriptor::from(Shape::from({static_cast<std::uint64_t>(values.size())}), DType::f32)
-    );
-    for (std::uint64_t index = 0; index < values.size(); ++index) {
-        const std::array<std::uint64_t, 1> tensor_index {index};
-        write_f32(storage, std::span<const std::uint64_t>(tensor_index), values[static_cast<std::size_t>(index)]);
-    }
-
-    return storage;
-}
-
-TensorStorage tensor_f32_matrix(std::uint64_t rows, std::uint64_t columns, std::span<const float> values) {
-    if (values.size() != rows * columns) {
-        throw TestFailure("F32 matrix fixture value count mismatch");
-    }
-
-    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f32));
-    for (std::uint64_t row = 0; row < rows; ++row) {
-        for (std::uint64_t column = 0; column < columns; ++column) {
-            const std::array<std::uint64_t, 2> tensor_index {row, column};
-            write_f32(
-                storage,
-                std::span<const std::uint64_t>(tensor_index),
-                values[static_cast<std::size_t>(row * columns + column)]
-            );
-        }
-    }
-
-    return storage;
-}
-
-TensorStorage tensor_f16_matrix(std::uint64_t rows, std::uint64_t columns, std::span<const float> values) {
-    if (values.size() != rows * columns) {
-        throw TestFailure("F16 matrix fixture value count mismatch");
-    }
-
-    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f16));
-    for (std::uint64_t row = 0; row < rows; ++row) {
-        for (std::uint64_t column = 0; column < columns; ++column) {
-            const std::array<std::uint64_t, 2> tensor_index {row, column};
-            write_f16_from_f32(
-                storage,
-                std::span<const std::uint64_t>(tensor_index),
-                values[static_cast<std::size_t>(row * columns + column)]
-            );
-        }
-    }
-
-    return storage;
-}
-
-TensorStorage tensor_f16_gguf_matrix(std::uint64_t rows, std::uint64_t columns, std::span<const float> values) {
-    if (values.size() != rows * columns) {
-        throw TestFailure("F16 GGUF matrix fixture value count mismatch");
-    }
-
-    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f16));
-    auto bytes = storage.mutable_bytes();
-    for (std::uint64_t row = 0; row < rows; ++row) {
-        for (std::uint64_t column = 0; column < columns; ++column) {
-            const auto bits = f32_to_f16_bits(values[static_cast<std::size_t>(row * columns + column)]);
-            const auto byte_offset = static_cast<std::size_t>((column * rows + row) * sizeof(std::uint16_t));
-            bytes[byte_offset] = static_cast<std::uint8_t>(bits & 0xFFU);
-            bytes[byte_offset + 1] = static_cast<std::uint8_t>(bits >> 8U);
-        }
-    }
-
-    return storage;
 }
 
 void test_default_backend_starts_on_cpu() {
@@ -3369,1055 +3295,6 @@ void test_rejects_f32_f16_matmul_right_dtype_mismatch() {
     }
 }
 
-LlamaModelConfig tiny_attention_layer_config() {
-    return LlamaModelConfig {
-        .context_length = 16,
-        .embedding_length = 2,
-        .block_count = 1,
-        .feed_forward_length = 8,
-        .attention_head_count = 1,
-        .attention_head_count_kv = 1,
-        .attention_key_length = 2,
-        .attention_value_length = 2,
-        .rope_dimension_count = 2,
-        .vocab_size = 8,
-        .rope_freq_base = 10000.0F,
-        .rms_norm_epsilon = 3.5F,
-    };
-}
-
-void test_creates_llama_kv_cache() {
-    auto config = tiny_attention_layer_config();
-    config.block_count = 2;
-
-    const auto cache = create_llama_kv_cache(config);
-
-    expect(cache.layers.size() == 2, "Llama KV cache layer count mismatch");
-    expect(cache.context_length == 16, "Llama KV cache context length mismatch");
-    expect(cache.key_width == 2, "Llama KV cache key width mismatch");
-    expect(cache.value_width == 2, "Llama KV cache value width mismatch");
-    expect(cache.layers[0].filled_token_count == 0, "Llama KV cache initial fill mismatch");
-    expect(cache.layers[0].key.descriptor().shape == Shape::from({16, 2}), "Llama KV cache key shape mismatch");
-    expect(cache.layers[0].key.descriptor().dtype == DType::f32, "Llama KV cache key dtype mismatch");
-    expect(cache.layers[0].value.descriptor().shape == Shape::from({16, 2}), "Llama KV cache value shape mismatch");
-    expect(cache.layers[0].value.descriptor().dtype == DType::f32, "Llama KV cache value dtype mismatch");
-}
-
-void test_appends_and_reads_llama_kv_cache_layer() {
-    auto cache = create_llama_kv_cache(tiny_attention_layer_config());
-    const std::array<float, 4> key_values {
-        1.0F, 2.0F,
-        3.0F, 4.0F,
-    };
-    const std::array<float, 4> value_values {
-        10.0F, 20.0F,
-        30.0F, 40.0F,
-    };
-    const auto key_rows = tensor_f32_matrix(2, 2, std::span<const float>(key_values));
-    const auto value_rows = tensor_f32_matrix(2, 2, std::span<const float>(value_values));
-
-    append_llama_kv_cache_layer_f32(cache.layers[0], key_rows, value_rows, 0);
-    const auto key_prefix = llama_kv_cache_layer_key_prefix_f32(cache.layers[0]);
-    const auto value_prefix = llama_kv_cache_layer_value_prefix_f32(cache.layers[0]);
-
-    expect(cache.layers[0].filled_token_count == 2, "Llama KV cache filled token count mismatch");
-    expect(key_prefix.descriptor().shape == Shape::from({2, 2}), "Llama KV cache key prefix shape mismatch");
-    expect(value_prefix.descriptor().shape == Shape::from({2, 2}), "Llama KV cache value prefix shape mismatch");
-    const std::array<std::uint64_t, 2> row1_col0 {1, 0};
-    const std::array<std::uint64_t, 2> row1_col1 {1, 1};
-    expect(read_f32(key_prefix, std::span<const std::uint64_t>(row1_col0)) == 3.0F, "Llama KV key prefix value mismatch");
-    expect(read_f32(value_prefix, std::span<const std::uint64_t>(row1_col1)) == 40.0F, "Llama KV value prefix value mismatch");
-}
-
-void test_rejects_llama_kv_cache_append_position_mismatch() {
-    auto cache = create_llama_kv_cache(tiny_attention_layer_config());
-    const std::array<float, 2> key_values {1.0F, 2.0F};
-    const std::array<float, 2> value_values {10.0F, 20.0F};
-    const auto key_rows = tensor_f32_matrix(1, 2, std::span<const float>(key_values));
-    const auto value_rows = tensor_f32_matrix(1, 2, std::span<const float>(value_values));
-
-    try {
-        append_llama_kv_cache_layer_f32(cache.layers[0], key_rows, value_rows, 1);
-        throw TestFailure("Llama KV cache should reject non-contiguous append position");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "Llama KV cache append position must match filled token count",
-            "Llama KV cache position mismatch error text mismatch"
-        );
-    }
-}
-
-void test_rejects_llama_kv_cache_context_overflow() {
-    auto config = tiny_attention_layer_config();
-    config.context_length = 1;
-    auto cache = create_llama_kv_cache(config);
-    const std::array<float, 4> key_values {
-        1.0F, 2.0F,
-        3.0F, 4.0F,
-    };
-    const std::array<float, 4> value_values {
-        10.0F, 20.0F,
-        30.0F, 40.0F,
-    };
-    const auto key_rows = tensor_f32_matrix(2, 2, std::span<const float>(key_values));
-    const auto value_rows = tensor_f32_matrix(2, 2, std::span<const float>(value_values));
-
-    try {
-        append_llama_kv_cache_layer_f32(cache.layers[0], key_rows, value_rows, 0);
-        throw TestFailure("Llama KV cache should reject context overflow");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "Llama KV cache append would exceed context length",
-            "Llama KV cache overflow error text mismatch"
-        );
-    }
-}
-
-void test_rejects_llama_kv_cache_key_shape_mismatch() {
-    auto cache = create_llama_kv_cache(tiny_attention_layer_config());
-    const std::array<float, 1> key_values {1.0F};
-    const std::array<float, 2> value_values {10.0F, 20.0F};
-    const auto key_rows = tensor_f32_matrix(1, 1, std::span<const float>(key_values));
-    const auto value_rows = tensor_f32_matrix(1, 2, std::span<const float>(value_values));
-
-    try {
-        append_llama_kv_cache_layer_f32(cache.layers[0], key_rows, value_rows, 0);
-        throw TestFailure("Llama KV cache should reject key width mismatch");
-    } catch (const TensorError& error) {
-        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "Llama KV cache key shape error mismatch");
-        expect(error.expected_value() == 2, "Llama KV cache expected key width mismatch");
-        expect(error.actual_value() == 1, "Llama KV cache actual key width mismatch");
-    }
-}
-
-void test_runs_llama_attention_layer_with_f16_weights() {
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-
-    const auto output = run_llama_attention_layer_f32(input, weights, tiny_attention_layer_config(), 0);
-
-    expect(output.descriptor().shape == Shape::from({1, 2}), "Llama attention layer output shape mismatch");
-    expect(output.descriptor().dtype == DType::f32, "Llama attention layer output dtype mismatch");
-    const std::array<std::uint64_t, 2> index_0 {0, 0};
-    const std::array<std::uint64_t, 2> index_1 {0, 1};
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(index_0)),
-        3.75F,
-        0.000001F,
-        "Llama attention layer output value 0 mismatch"
-    );
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(index_1)),
-        5.0F,
-        0.000001F,
-        "Llama attention layer output value 1 mismatch"
-    );
-}
-
-void test_runs_llama_attention_layer_with_causal_mask() {
-    const std::array<float, 4> input_values {
-        3.0F, 4.0F,
-        30.0F, 40.0F,
-    };
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> zero_values {
-        0.0F, 0.0F,
-        0.0F, 0.0F,
-    };
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(2, 2, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(zero_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(zero_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-
-    const auto output = run_llama_attention_layer_f32(input, weights, tiny_attention_layer_config(), 1);
-
-    expect(output.descriptor().shape == Shape::from({2, 2}), "Llama causal attention output shape mismatch");
-    const std::array<std::uint64_t, 2> row0_col0 {0, 0};
-    const std::array<std::uint64_t, 2> row0_col1 {0, 1};
-    const std::array<std::uint64_t, 2> row1_col0 {1, 0};
-    const std::array<std::uint64_t, 2> row1_col1 {1, 1};
-    const auto row1_inverse_rms = 1.0 / std::sqrt(1250.0 + 3.5);
-    const auto row1_norm0 = 30.0 * row1_inverse_rms;
-    const auto row1_norm1 = 40.0 * row1_inverse_rms;
-
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(row0_col0)),
-        3.75F,
-        0.000001F,
-        "Llama causal attention row 0 value 0 mismatch"
-    );
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(row0_col1)),
-        5.0F,
-        0.000001F,
-        "Llama causal attention row 0 value 1 mismatch"
-    );
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(row1_col0)),
-        static_cast<float>(30.0 + (0.75 + row1_norm0) / 2.0),
-        0.000001F,
-        "Llama causal attention row 1 value 0 mismatch"
-    );
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(row1_col1)),
-        static_cast<float>(40.0 + (1.0 + row1_norm1) / 2.0),
-        0.000001F,
-        "Llama causal attention row 1 value 1 mismatch"
-    );
-}
-
-void test_runs_llama_attention_layer_with_kv_cache_matches_no_cache() {
-    const std::array<float, 4> full_input_values {
-        3.0F, 4.0F,
-        30.0F, 40.0F,
-    };
-    const std::array<float, 2> first_input_values {3.0F, 4.0F};
-    const std::array<float, 2> second_input_values {30.0F, 40.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> zero_values {
-        0.0F, 0.0F,
-        0.0F, 0.0F,
-    };
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    const auto full_input = tensor_f32_matrix(2, 2, std::span<const float>(full_input_values));
-    const auto first_input = tensor_f32_matrix(1, 2, std::span<const float>(first_input_values));
-    const auto second_input = tensor_f32_matrix(1, 2, std::span<const float>(second_input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(zero_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(zero_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-    auto cache = create_llama_kv_cache(tiny_attention_layer_config());
-
-    const auto no_cache = run_llama_attention_layer_f32(full_input, weights, tiny_attention_layer_config(), 1);
-    (void)run_llama_attention_layer_with_kv_cache_f32(first_input, weights, tiny_attention_layer_config(), 0, cache.layers[0]);
-    const auto cached = run_llama_attention_layer_with_kv_cache_f32(
-        second_input,
-        weights,
-        tiny_attention_layer_config(),
-        1,
-        cache.layers[0]
-    );
-
-    expect(cache.layers[0].filled_token_count == 2, "Llama attention KV cache fill mismatch");
-    expect(cached.descriptor().shape == Shape::from({1, 2}), "Llama cached attention output shape mismatch");
-    const std::array<std::uint64_t, 2> no_cache_row1_col0 {1, 0};
-    const std::array<std::uint64_t, 2> no_cache_row1_col1 {1, 1};
-    const std::array<std::uint64_t, 2> cached_row0_col0 {0, 0};
-    const std::array<std::uint64_t, 2> cached_row0_col1 {0, 1};
-    expect_close(
-        read_f32(cached, std::span<const std::uint64_t>(cached_row0_col0)),
-        read_f32(no_cache, std::span<const std::uint64_t>(no_cache_row1_col0)),
-        0.000001F,
-        "Llama cached attention value 0 should match no-cache row 1"
-    );
-    expect_close(
-        read_f32(cached, std::span<const std::uint64_t>(cached_row0_col1)),
-        read_f32(no_cache, std::span<const std::uint64_t>(no_cache_row1_col1)),
-        0.000001F,
-        "Llama cached attention value 1 should match no-cache row 1"
-    );
-}
-
-void test_runs_grouped_llama_attention_layer_with_kv_cache_matches_no_cache() {
-    const std::array<float, 12> full_input_values {
-        1.0F, 2.0F, 3.0F, 4.0F,
-        -2.0F, 1.0F, 0.5F, 3.0F,
-        4.0F, -1.0F, 2.0F, 0.0F,
-    };
-    const std::array<float, 8> prefill_input_values {
-        1.0F, 2.0F, 3.0F, 4.0F,
-        -2.0F, 1.0F, 0.5F, 3.0F,
-    };
-    const std::array<float, 4> decode_input_values {
-        4.0F, -1.0F, 2.0F, 0.0F,
-    };
-    const std::array<float, 4> norm_values {1.0F, 1.0F, 1.0F, 1.0F};
-    std::array<float, 32> query_weight_values {};
-    std::array<float, 16> key_weight_values {};
-    std::array<float, 16> value_weight_values {};
-    std::array<float, 32> output_weight_values {};
-
-    for (std::uint64_t row = 0; row < 4; ++row) {
-        for (std::uint64_t column = 0; column < 8; ++column) {
-            const auto pattern = static_cast<int>((row + 1) * (column + 2)) % 7 - 3;
-            query_weight_values[static_cast<std::size_t>(row * 8 + column)] = static_cast<float>(pattern) * 0.125F;
-        }
-    }
-
-    for (std::uint64_t row = 0; row < 4; ++row) {
-        for (std::uint64_t column = 0; column < 4; ++column) {
-            const auto key_pattern = static_cast<int>((row + 2) * (column + 1)) % 5 - 2;
-            const auto value_pattern = static_cast<int>((row + 3) * (column + 2)) % 7 - 3;
-            key_weight_values[static_cast<std::size_t>(row * 4 + column)] =
-                static_cast<float>(key_pattern) * 0.25F;
-            value_weight_values[static_cast<std::size_t>(row * 4 + column)] =
-                static_cast<float>(value_pattern) * 0.125F;
-        }
-    }
-
-    for (std::uint64_t row = 0; row < 8; ++row) {
-        for (std::uint64_t column = 0; column < 4; ++column) {
-            const auto pattern = static_cast<int>((row + 1) + (column * 2)) % 7 - 3;
-            output_weight_values[static_cast<std::size_t>(row * 4 + column)] =
-                static_cast<float>(pattern) * 0.125F;
-        }
-    }
-
-    const auto full_input = tensor_f32_matrix(3, 4, std::span<const float>(full_input_values));
-    const auto prefill_input = tensor_f32_matrix(2, 4, std::span<const float>(prefill_input_values));
-    const auto decode_input = tensor_f32_matrix(1, 4, std::span<const float>(decode_input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(4, 8, std::span<const float>(query_weight_values));
-    auto key_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(key_weight_values));
-    auto value_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(value_weight_values));
-    auto output_weight = tensor_f16_gguf_matrix(8, 4, std::span<const float>(output_weight_values));
-    auto config = tiny_attention_layer_config();
-    config.embedding_length = 4;
-    config.attention_head_count = 4;
-    config.attention_head_count_kv = 2;
-    config.attention_key_length = 2;
-    config.attention_value_length = 2;
-    config.rope_freq_base = 2.0F;
-    config.rms_norm_epsilon = 0.25F;
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-    auto cache = create_llama_kv_cache(config);
-
-    const auto no_cache = run_llama_attention_layer_f32(full_input, weights, config, 2);
-    (void)run_llama_attention_layer_with_kv_cache_f32(prefill_input, weights, config, 1, cache.layers[0]);
-    const auto cached = run_llama_attention_layer_with_kv_cache_f32(
-        decode_input,
-        weights,
-        config,
-        2,
-        cache.layers[0]
-    );
-
-    expect(cache.layers[0].filled_token_count == 3, "grouped Llama attention KV cache fill mismatch");
-    expect(cached.descriptor().shape == Shape::from({1, 4}), "grouped Llama cached attention output shape mismatch");
-    for (std::uint64_t column = 0; column < 4; ++column) {
-        const std::array<std::uint64_t, 2> no_cache_index {2, column};
-        const std::array<std::uint64_t, 2> cached_index {0, column};
-        expect_close(
-            read_f32(cached, std::span<const std::uint64_t>(cached_index)),
-            read_f32(no_cache, std::span<const std::uint64_t>(no_cache_index)),
-            0.00001F,
-            "grouped Llama cached attention should match no-cache final row"
-        );
-    }
-}
-
-void test_runs_llama_attention_layer_with_kv_cache_appends_rotated_key_heads() {
-    const std::array<float, 8> input_values {
-        1.0F, 0.0F, 0.0F, 1.0F,
-        0.0F, 1.0F, 1.0F, 0.0F,
-    };
-    const std::array<float, 4> norm_values {1.0F, 1.0F, 1.0F, 1.0F};
-    const std::array<float, 16> identity_values {
-        1.0F, 0.0F, 0.0F, 0.0F,
-        0.0F, 1.0F, 0.0F, 0.0F,
-        0.0F, 0.0F, 1.0F, 0.0F,
-        0.0F, 0.0F, 0.0F, 1.0F,
-    };
-    const auto input = tensor_f32_matrix(2, 4, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(4, 4, std::span<const float>(identity_values));
-    auto config = tiny_attention_layer_config();
-    config.embedding_length = 4;
-    config.attention_head_count = 2;
-    config.attention_head_count_kv = 2;
-    config.attention_key_length = 2;
-    config.attention_value_length = 2;
-    config.rope_freq_base = 1.0F;
-    config.rms_norm_epsilon = 0.5F;
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-    auto cache = create_llama_kv_cache(config);
-
-    (void)run_llama_attention_layer_with_kv_cache_f32(input, weights, config, 1, cache.layers[0]);
-
-    const auto sine = static_cast<float>(std::sin(1.0));
-    const auto cosine = static_cast<float>(std::cos(1.0));
-    const std::array<float, 8> expected_key_values {
-        1.0F, 0.0F, 0.0F, 1.0F,
-        -sine, cosine, cosine, sine,
-    };
-    const std::array<float, 4> expected_value_row1 {
-        0.0F, 1.0F, 1.0F, 0.0F,
-    };
-
-    expect(cache.layers[0].filled_token_count == 2, "Llama cached attention rotated key fill mismatch");
-    for (std::uint64_t row = 0; row < 2; ++row) {
-        for (std::uint64_t column = 0; column < 4; ++column) {
-            const std::array<std::uint64_t, 2> index {row, column};
-            expect_close(
-                read_f32(cache.layers[0].key, std::span<const std::uint64_t>(index)),
-                expected_key_values[static_cast<std::size_t>(row * 4 + column)],
-                0.000001F,
-                "Llama cached rotated key value mismatch"
-            );
-        }
-    }
-
-    for (std::uint64_t column = 0; column < 4; ++column) {
-        const std::array<std::uint64_t, 2> index {1, column};
-        expect_close(
-            read_f32(cache.layers[0].value, std::span<const std::uint64_t>(index)),
-            expected_value_row1[static_cast<std::size_t>(column)],
-            0.000001F,
-            "Llama cached appended value mismatch"
-        );
-    }
-}
-
-void test_rejects_llama_attention_layer_with_kv_cache_invalid_rope_dimension_count() {
-    const std::array<float, 2> input_values {1.0F, 0.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    const auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto config = tiny_attention_layer_config();
-    config.rope_dimension_count = 1;
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-    auto cache = create_llama_kv_cache(config);
-
-    try {
-        (void)run_llama_attention_layer_with_kv_cache_f32(input, weights, config, 0, cache.layers[0]);
-        throw TestFailure("cached Llama attention should reject invalid RoPE dimension count");
-    } catch (const TensorError& error) {
-        expect(
-            error.code() == TensorErrorCode::invalid_shape_dimension,
-            "cached Llama attention RoPE dimension error mismatch"
-        );
-        expect(error.expected_value() == 2, "cached Llama attention expected RoPE dimension mismatch");
-        expect(error.actual_value() == 1, "cached Llama attention actual RoPE dimension mismatch");
-        expect(cache.layers[0].filled_token_count == 0, "cached Llama attention should not append invalid RoPE rows");
-    }
-}
-
-void test_runs_llama_attention_layer_with_rowwise_rope_positions() {
-    const std::array<float, 4> input_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(2, 2, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto config = tiny_attention_layer_config();
-    config.rope_freq_base = 1.0F;
-    config.rms_norm_epsilon = 0.5F;
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-
-    const auto output = run_llama_attention_layer_f32(input, weights, config, 1);
-
-    const auto score_scale = 1.0 / std::sqrt(2.0);
-    const auto score0 = -std::sin(1.0) * score_scale;
-    const auto score1 = score_scale;
-    const auto score_max = score0 > score1 ? score0 : score1;
-    const auto weight0_numerator = std::exp(score0 - score_max);
-    const auto weight1_numerator = std::exp(score1 - score_max);
-    const auto weight_sum = weight0_numerator + weight1_numerator;
-    const auto row1_weight0 = static_cast<float>(weight0_numerator / weight_sum);
-    const auto row1_weight1 = static_cast<float>(weight1_numerator / weight_sum);
-    const std::array<std::uint64_t, 2> row0_col0 {0, 0};
-    const std::array<std::uint64_t, 2> row0_col1 {0, 1};
-    const std::array<std::uint64_t, 2> row1_col0 {1, 0};
-    const std::array<std::uint64_t, 2> row1_col1 {1, 1};
-
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(row0_col0)),
-        2.0F,
-        0.000001F,
-        "Llama rowwise RoPE row 0 value 0 mismatch"
-    );
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(row0_col1)),
-        0.0F,
-        0.000001F,
-        "Llama rowwise RoPE row 0 value 1 mismatch"
-    );
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(row1_col0)),
-        row1_weight0,
-        0.000001F,
-        "Llama rowwise RoPE row 1 value 0 mismatch"
-    );
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(row1_col1)),
-        1.0F + row1_weight1,
-        0.000001F,
-        "Llama rowwise RoPE row 1 value 1 mismatch"
-    );
-}
-
-void test_rejects_llama_attention_layer_position_before_input_window() {
-    const std::array<float, 4> input_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(2, 2, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-
-    try {
-        (void)run_llama_attention_layer_f32(input, weights, tiny_attention_layer_config(), 0);
-        throw TestFailure("Llama attention layer should reject a final position before the input window");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "Llama attention position must cover input rows",
-            "Llama attention layer input-window position error mismatch"
-        );
-    }
-}
-
-void test_rejects_llama_attention_layer_projection_shape_mismatch() {
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 2> narrow_values {1.0F, 0.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(2, 1, std::span<const float>(narrow_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-
-    try {
-        (void)run_llama_attention_layer_f32(input, weights, tiny_attention_layer_config(), 0);
-        throw TestFailure("Llama attention layer should reject query projection shape mismatch");
-    } catch (const TensorError& error) {
-        expect(
-            error.code() == TensorErrorCode::tensor_shape_mismatch,
-            "Llama attention layer projection shape error mismatch"
-        );
-        expect(error.expected_value() == 2, "Llama attention layer expected query width mismatch");
-        expect(error.actual_value() == 1, "Llama attention layer actual query width mismatch");
-    }
-}
-
-void test_rejects_llama_attention_layer_projection_dtype_mismatch() {
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f32_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-
-    try {
-        (void)run_llama_attention_layer_f32(input, weights, tiny_attention_layer_config(), 0);
-        throw TestFailure("Llama attention layer should reject F32 query projection weight");
-    } catch (const TensorError& error) {
-        expect(
-            error.code() == TensorErrorCode::unsupported_operator_dtype,
-            "Llama attention layer projection dtype error mismatch"
-        );
-        expect(error.expected_value() == 1, "Llama attention layer expected projection dtype mismatch");
-        expect(error.actual_value() == 0, "Llama attention layer actual projection dtype mismatch");
-    }
-}
-
-void test_rejects_llama_attention_layer_invalid_head_layout() {
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto config = tiny_attention_layer_config();
-    config.attention_head_count = 3;
-    config.attention_head_count_kv = 2;
-    const LlamaAttentionLayerWeights weights {
-        .attention_norm_weight = attention_norm_weight,
-        .query_weight = query_weight,
-        .key_weight = key_weight,
-        .value_weight = value_weight,
-        .output_weight = output_weight,
-    };
-
-    try {
-        (void)run_llama_attention_layer_f32(input, weights, config, 0);
-        throw TestFailure("Llama attention layer should reject non-divisible head layout");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "Llama attention head count must be divisible by KV head count",
-            "Llama attention layer invalid head layout error mismatch"
-        );
-    }
-}
-
-LlamaModelConfig tiny_feed_forward_layer_config() {
-    auto config = tiny_attention_layer_config();
-    config.feed_forward_length = 2;
-    return config;
-}
-
-void test_runs_llama_feed_forward_layer_with_f16_weights() {
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto gate_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaFeedForwardLayerWeights weights {
-        .feed_forward_norm_weight = feed_forward_norm_weight,
-        .gate_weight = gate_weight,
-        .up_weight = up_weight,
-        .down_weight = down_weight,
-    };
-
-    const auto output = run_llama_feed_forward_layer_f32(input, weights, tiny_feed_forward_layer_config());
-    const auto first_norm = 0.75;
-    const auto second_norm = 1.0;
-    const auto first_expected = 3.0 + first_norm * (first_norm / (1.0 + std::exp(-first_norm)));
-    const auto second_expected = 4.0 + second_norm * (second_norm / (1.0 + std::exp(-second_norm)));
-
-    expect(output.descriptor().shape == Shape::from({1, 2}), "Llama FFN layer output shape mismatch");
-    expect(output.descriptor().dtype == DType::f32, "Llama FFN layer output dtype mismatch");
-    const std::array<std::uint64_t, 2> index_0 {0, 0};
-    const std::array<std::uint64_t, 2> index_1 {0, 1};
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(index_0)),
-        static_cast<float>(first_expected),
-        0.000001F,
-        "Llama FFN layer output value 0 mismatch"
-    );
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(index_1)),
-        static_cast<float>(second_expected),
-        0.000001F,
-        "Llama FFN layer output value 1 mismatch"
-    );
-}
-
-void test_rejects_llama_feed_forward_layer_projection_shape_mismatch() {
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 2> narrow_values {1.0F, 0.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto gate_weight = tensor_f16_gguf_matrix(2, 1, std::span<const float>(narrow_values));
-    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaFeedForwardLayerWeights weights {
-        .feed_forward_norm_weight = feed_forward_norm_weight,
-        .gate_weight = gate_weight,
-        .up_weight = up_weight,
-        .down_weight = down_weight,
-    };
-
-    try {
-        (void)run_llama_feed_forward_layer_f32(input, weights, tiny_feed_forward_layer_config());
-        throw TestFailure("Llama FFN layer should reject gate projection shape mismatch");
-    } catch (const TensorError& error) {
-        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "Llama FFN shape error mismatch");
-        expect(error.expected_value() == 2, "Llama FFN expected gate width mismatch");
-        expect(error.actual_value() == 1, "Llama FFN actual gate width mismatch");
-    }
-}
-
-void test_rejects_llama_feed_forward_layer_projection_dtype_mismatch() {
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto gate_weight = tensor_f32_matrix(2, 2, std::span<const float>(identity_values));
-    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaFeedForwardLayerWeights weights {
-        .feed_forward_norm_weight = feed_forward_norm_weight,
-        .gate_weight = gate_weight,
-        .up_weight = up_weight,
-        .down_weight = down_weight,
-    };
-
-    try {
-        (void)run_llama_feed_forward_layer_f32(input, weights, tiny_feed_forward_layer_config());
-        throw TestFailure("Llama FFN layer should reject F32 gate projection weight");
-    } catch (const TensorError& error) {
-        expect(
-            error.code() == TensorErrorCode::unsupported_operator_dtype,
-            "Llama FFN projection dtype error mismatch"
-        );
-        expect(error.expected_value() == 1, "Llama FFN expected projection dtype mismatch");
-        expect(error.actual_value() == 0, "Llama FFN actual projection dtype mismatch");
-    }
-}
-
-void test_rejects_llama_feed_forward_layer_invalid_config() {
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto gate_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto config = tiny_feed_forward_layer_config();
-    config.feed_forward_length = 0;
-    const LlamaFeedForwardLayerWeights weights {
-        .feed_forward_norm_weight = feed_forward_norm_weight,
-        .gate_weight = gate_weight,
-        .up_weight = up_weight,
-        .down_weight = down_weight,
-    };
-
-    try {
-        (void)run_llama_feed_forward_layer_f32(input, weights, config);
-        throw TestFailure("Llama FFN layer should reject zero feed-forward length");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "Llama layer config dimensions must be positive",
-            "Llama FFN invalid config error mismatch"
-        );
-    }
-}
-
-void test_runs_llama_block_with_f16_weights() {
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto gate_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaBlockWeights weights {
-        .attention = LlamaAttentionLayerWeights {
-            .attention_norm_weight = attention_norm_weight,
-            .query_weight = query_weight,
-            .key_weight = key_weight,
-            .value_weight = value_weight,
-            .output_weight = output_weight,
-        },
-        .feed_forward = LlamaFeedForwardLayerWeights {
-            .feed_forward_norm_weight = feed_forward_norm_weight,
-            .gate_weight = gate_weight,
-            .up_weight = up_weight,
-            .down_weight = down_weight,
-        },
-    };
-
-    const auto output = run_llama_block_f32(input, weights, tiny_feed_forward_layer_config(), 0);
-    const auto attention_first = 3.75;
-    const auto attention_second = 5.0;
-    const auto block_mean_square = ((attention_first * attention_first) + (attention_second * attention_second)) / 2.0;
-    const auto inverse_rms = 1.0 / std::sqrt(block_mean_square + 3.5);
-    const auto first_norm = attention_first * inverse_rms;
-    const auto second_norm = attention_second * inverse_rms;
-    const auto first_expected = attention_first + first_norm * (first_norm / (1.0 + std::exp(-first_norm)));
-    const auto second_expected = attention_second + second_norm * (second_norm / (1.0 + std::exp(-second_norm)));
-
-    expect(output.descriptor().shape == Shape::from({1, 2}), "Llama block output shape mismatch");
-    expect(output.descriptor().dtype == DType::f32, "Llama block output dtype mismatch");
-    const std::array<std::uint64_t, 2> index_0 {0, 0};
-    const std::array<std::uint64_t, 2> index_1 {0, 1};
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(index_0)),
-        static_cast<float>(first_expected),
-        0.000001F,
-        "Llama block output value 0 mismatch"
-    );
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(index_1)),
-        static_cast<float>(second_expected),
-        0.000001F,
-        "Llama block output value 1 mismatch"
-    );
-}
-
-void test_rejects_llama_block_attention_projection_shape_mismatch() {
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 2> narrow_values {1.0F, 0.0F};
-    const std::array<float, 4> identity_values {
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-    };
-    auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    auto attention_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto feed_forward_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    auto query_weight = tensor_f16_gguf_matrix(2, 1, std::span<const float>(narrow_values));
-    auto key_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto value_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto output_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto gate_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto up_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    auto down_weight = tensor_f16_gguf_matrix(2, 2, std::span<const float>(identity_values));
-    const LlamaBlockWeights weights {
-        .attention = LlamaAttentionLayerWeights {
-            .attention_norm_weight = attention_norm_weight,
-            .query_weight = query_weight,
-            .key_weight = key_weight,
-            .value_weight = value_weight,
-            .output_weight = output_weight,
-        },
-        .feed_forward = LlamaFeedForwardLayerWeights {
-            .feed_forward_norm_weight = feed_forward_norm_weight,
-            .gate_weight = gate_weight,
-            .up_weight = up_weight,
-            .down_weight = down_weight,
-        },
-    };
-
-    try {
-        (void)run_llama_block_f32(input, weights, tiny_feed_forward_layer_config(), 0);
-        throw TestFailure("Llama block should reject attention projection shape mismatch");
-    } catch (const TensorError& error) {
-        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "Llama block shape error mismatch");
-        expect(error.expected_value() == 2, "Llama block expected query width mismatch");
-        expect(error.actual_value() == 1, "Llama block actual query width mismatch");
-    }
-}
-
-EngineTensor engine_tensor(std::string name, TensorStorage storage) {
-    return EngineTensor {
-        .name = std::move(name),
-        .storage = std::move(storage),
-    };
-}
-
-[[nodiscard]] std::string llama_block_tensor_name(std::uint32_t block_index, std::string_view suffix) {
-    return "blk." + std::to_string(block_index) + "." + std::string(suffix);
-}
-
-void add_tiny_llama_block_tensors(
-    std::vector<EngineTensor>& tensors,
-    std::uint32_t block_index,
-    float projection_scale,
-    bool query_as_f32,
-    bool include_down_weight
-) {
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 4> projection_values {
-        projection_scale, 0.0F,
-        0.0F, projection_scale,
-    };
-
-    tensors.push_back(engine_tensor(
-        llama_block_tensor_name(block_index, "attn_norm.weight"),
-        tensor_f32_vector(std::span<const float>(norm_values))
-    ));
-    if (query_as_f32) {
-        tensors.push_back(engine_tensor(
-            llama_block_tensor_name(block_index, "attn_q.weight"),
-            tensor_f32_matrix(2, 2, std::span<const float>(projection_values))
-        ));
-    } else {
-        tensors.push_back(engine_tensor(
-            llama_block_tensor_name(block_index, "attn_q.weight"),
-            tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
-        ));
-    }
-    tensors.push_back(engine_tensor(
-        llama_block_tensor_name(block_index, "attn_k.weight"),
-        tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
-    ));
-    tensors.push_back(engine_tensor(
-        llama_block_tensor_name(block_index, "attn_v.weight"),
-        tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
-    ));
-    tensors.push_back(engine_tensor(
-        llama_block_tensor_name(block_index, "attn_output.weight"),
-        tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
-    ));
-    tensors.push_back(engine_tensor(
-        llama_block_tensor_name(block_index, "ffn_norm.weight"),
-        tensor_f32_vector(std::span<const float>(norm_values))
-    ));
-    tensors.push_back(engine_tensor(
-        llama_block_tensor_name(block_index, "ffn_gate.weight"),
-        tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
-    ));
-    tensors.push_back(engine_tensor(
-        llama_block_tensor_name(block_index, "ffn_up.weight"),
-        tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
-    ));
-    if (include_down_weight) {
-        tensors.push_back(engine_tensor(
-            llama_block_tensor_name(block_index, "ffn_down.weight"),
-            tensor_f16_gguf_matrix(2, 2, std::span<const float>(projection_values))
-        ));
-    }
-}
-
-void add_tiny_llama_top_level_tensors(std::vector<EngineTensor>& tensors) {
-    const std::array<float, 16> token_embedding_values {
-        1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F, 7.0F, 8.0F,
-        10.0F, 20.0F, 30.0F, 40.0F, 50.0F, 60.0F, 70.0F, 80.0F,
-    };
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 16> output_values {
-        1.0F, 0.0F, 2.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
-        0.0F, 1.0F, 3.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
-    };
-
-    tensors.push_back(engine_tensor(
-        "token_embd.weight",
-        tensor_f16_gguf_matrix(2, 8, std::span<const float>(token_embedding_values))
-    ));
-    tensors.push_back(engine_tensor(
-        "output_norm.weight",
-        tensor_f32_vector(std::span<const float>(norm_values))
-    ));
-    tensors.push_back(engine_tensor(
-        "output.weight",
-        tensor_f16_gguf_matrix(2, 8, std::span<const float>(output_values))
-    ));
-}
-
-[[nodiscard]] EngineModel tiny_bound_llama_model(LlamaModelConfig config, std::vector<EngineTensor> tensors) {
-    return EngineModel(ModelArchitecture::llama, {}, config, std::move(tensors));
-}
-
 LlamaModelConfig backend_feed_forward_fixture_config() {
     return LlamaModelConfig {
         .context_length = 8,
@@ -5082,48 +3959,6 @@ void test_matches_llama_block_with_backend_kv_cache_and_metal_backend_weight_buf
     );
 }
 
-void test_binds_and_runs_llama_model_blocks_from_named_tensors() {
-    auto config = tiny_feed_forward_layer_config();
-    config.block_count = 2;
-    std::vector<EngineTensor> tensors;
-    add_tiny_llama_top_level_tensors(tensors);
-    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
-    add_tiny_llama_block_tensors(tensors, 1, 0.5F, false, true);
-    const auto model = tiny_bound_llama_model(config, std::move(tensors));
-    const auto weights = bind_llama_model_weights(model);
-
-    expect(weights.blocks.size() == 2, "bound Llama model block count mismatch");
-    const auto* block_one_down = model.find_tensor("blk.1.ffn_down.weight");
-    expect(block_one_down != nullptr, "bound Llama model test tensor lookup failed");
-    expect(
-        &weights.blocks[1].feed_forward.down_weight == &block_one_down->storage,
-        "bound Llama model should borrow block 1 down weight"
-    );
-
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    const auto output = run_llama_model_blocks_f32(input, weights, model.llama_config(), 0);
-    const auto first_block = run_llama_block_f32(input, weights.blocks[0], model.llama_config(), 0);
-    const auto expected = run_llama_block_f32(first_block, weights.blocks[1], model.llama_config(), 0);
-
-    expect(output.descriptor().shape == Shape::from({1, 2}), "bound Llama model output shape mismatch");
-    expect(output.descriptor().dtype == DType::f32, "bound Llama model output dtype mismatch");
-    const std::array<std::uint64_t, 2> index_0 {0, 0};
-    const std::array<std::uint64_t, 2> index_1 {0, 1};
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(index_0)),
-        read_f32(expected, std::span<const std::uint64_t>(index_0)),
-        0.000001F,
-        "bound Llama model output value 0 mismatch"
-    );
-    expect_close(
-        read_f32(output, std::span<const std::uint64_t>(index_1)),
-        read_f32(expected, std::span<const std::uint64_t>(index_1)),
-        0.000001F,
-        "bound Llama model output value 1 mismatch"
-    );
-}
-
 void test_copies_llama_model_attention_weights_to_cpu_backend_buffers() {
     const auto model = backend_feed_forward_fixture_model();
     const auto weights = bind_llama_model_weights(model);
@@ -5695,543 +4530,6 @@ void test_reports_unavailable_llama_model_feed_forward_backend_weight_copy_when_
         expect(error.backend() == BackendKind::metal, "Llama model Metal FFN backend weight copy backend mismatch");
     }
 }
-
-void test_rejects_llama_model_weight_binding_missing_tensor() {
-    auto config = tiny_feed_forward_layer_config();
-    config.block_count = 1;
-    std::vector<EngineTensor> tensors;
-    add_tiny_llama_top_level_tensors(tensors);
-    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, false);
-    const auto model = tiny_bound_llama_model(config, std::move(tensors));
-
-    try {
-        (void)bind_llama_model_weights(model);
-        throw TestFailure("Llama model weight binding should reject missing named tensors");
-    } catch (const EngineModelError& error) {
-        expect(error.code() == EngineModelErrorCode::missing_tensor, "Llama model missing tensor error mismatch");
-        expect(error.detail() == "blk.0.ffn_down.weight", "Llama model missing tensor detail mismatch");
-    }
-}
-
-void test_rejects_llama_model_blocks_projection_dtype_mismatch() {
-    auto config = tiny_feed_forward_layer_config();
-    config.block_count = 1;
-    std::vector<EngineTensor> tensors;
-    add_tiny_llama_top_level_tensors(tensors);
-    add_tiny_llama_block_tensors(tensors, 0, 1.0F, true, true);
-    const auto model = tiny_bound_llama_model(config, std::move(tensors));
-    const auto weights = bind_llama_model_weights(model);
-
-    const std::array<float, 2> input_values {3.0F, 4.0F};
-    const auto input = tensor_f32_matrix(1, 2, std::span<const float>(input_values));
-    try {
-        (void)run_llama_model_blocks_f32(input, weights, model.llama_config(), 0);
-        throw TestFailure("Llama model block execution should reject F32 query projection weight");
-    } catch (const TensorError& error) {
-        expect(
-            error.code() == TensorErrorCode::unsupported_operator_dtype,
-            "Llama model projection dtype error mismatch"
-        );
-        expect(error.expected_value() == 1, "Llama model expected projection dtype mismatch");
-        expect(error.actual_value() == 0, "Llama model actual projection dtype mismatch");
-    }
-}
-
-LlamaModelConfig tiny_logits_config() {
-    auto config = tiny_feed_forward_layer_config();
-    config.vocab_size = 3;
-    return config;
-}
-
-void test_embeds_llama_token_ids_from_f16_weight() {
-    const std::array<float, 6> embedding_values {
-        1.0F, 2.0F, 3.0F,
-        10.0F, 20.0F, 30.0F,
-    };
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 6> output_values {
-        1.0F, 0.0F, 2.0F,
-        0.0F, 1.0F, 3.0F,
-    };
-    const auto token_embedding_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values));
-    const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    const auto output_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values));
-    const LlamaModelWeights weights {
-        .token_embedding_weight = token_embedding_weight,
-        .output_norm_weight = output_norm_weight,
-        .output_weight = output_weight,
-        .blocks = {},
-    };
-    const std::array<std::uint32_t, 2> token_ids {2, 0};
-
-    const auto output = embed_llama_token_ids_f32(std::span<const std::uint32_t>(token_ids), weights, tiny_logits_config());
-
-    expect(output.descriptor().shape == Shape::from({2, 2}), "Llama token embedding output shape mismatch");
-    expect(output.descriptor().dtype == DType::f32, "Llama token embedding output dtype mismatch");
-    const std::array<std::uint64_t, 2> index_00 {0, 0};
-    const std::array<std::uint64_t, 2> index_01 {0, 1};
-    const std::array<std::uint64_t, 2> index_10 {1, 0};
-    const std::array<std::uint64_t, 2> index_11 {1, 1};
-    expect(read_f32(output, std::span<const std::uint64_t>(index_00)) == 3.0F, "Llama token embedding value 0,0 mismatch");
-    expect(read_f32(output, std::span<const std::uint64_t>(index_01)) == 30.0F, "Llama token embedding value 0,1 mismatch");
-    expect(read_f32(output, std::span<const std::uint64_t>(index_10)) == 1.0F, "Llama token embedding value 1,0 mismatch");
-    expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 10.0F, "Llama token embedding value 1,1 mismatch");
-}
-
-void test_rejects_llama_token_embedding_id_out_of_range() {
-    const std::array<float, 6> embedding_values {
-        1.0F, 2.0F, 3.0F,
-        10.0F, 20.0F, 30.0F,
-    };
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 6> output_values {
-        1.0F, 0.0F, 2.0F,
-        0.0F, 1.0F, 3.0F,
-    };
-    const auto token_embedding_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values));
-    const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    const auto output_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values));
-    const LlamaModelWeights weights {
-        .token_embedding_weight = token_embedding_weight,
-        .output_norm_weight = output_norm_weight,
-        .output_weight = output_weight,
-        .blocks = {},
-    };
-    const std::array<std::uint32_t, 1> token_ids {3};
-
-    try {
-        (void)embed_llama_token_ids_f32(std::span<const std::uint32_t>(token_ids), weights, tiny_logits_config());
-        throw TestFailure("Llama token embedding should reject token id above vocab");
-    } catch (const TensorError& error) {
-        expect(error.code() == TensorErrorCode::tensor_index_out_of_range, "Llama token id error mismatch");
-        expect(error.expected_value() == 3, "Llama token id expected vocab mismatch");
-        expect(error.actual_value() == 3, "Llama token id actual mismatch");
-    }
-}
-
-void test_projects_llama_logits_with_final_norm() {
-    const std::array<float, 6> embedding_values {
-        1.0F, 2.0F, 3.0F,
-        10.0F, 20.0F, 30.0F,
-    };
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 6> output_values {
-        1.0F, 0.0F, 2.0F,
-        0.0F, 1.0F, 3.0F,
-    };
-    const std::array<float, 2> hidden_values {3.0F, 4.0F};
-    const auto token_embedding_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values));
-    const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    const auto output_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values));
-    const auto hidden_states = tensor_f32_matrix(1, 2, std::span<const float>(hidden_values));
-    const LlamaModelWeights weights {
-        .token_embedding_weight = token_embedding_weight,
-        .output_norm_weight = output_norm_weight,
-        .output_weight = output_weight,
-        .blocks = {},
-    };
-
-    const auto logits = project_llama_logits_f32(hidden_states, weights, tiny_logits_config());
-
-    expect(logits.descriptor().shape == Shape::from({1, 3}), "Llama logits shape mismatch");
-    expect(logits.descriptor().dtype == DType::f32, "Llama logits dtype mismatch");
-    const std::array<std::uint64_t, 2> index_0 {0, 0};
-    const std::array<std::uint64_t, 2> index_1 {0, 1};
-    const std::array<std::uint64_t, 2> index_2 {0, 2};
-    expect_close(read_f32(logits, std::span<const std::uint64_t>(index_0)), 0.75F, 0.000001F, "Llama logits value 0 mismatch");
-    expect_close(read_f32(logits, std::span<const std::uint64_t>(index_1)), 1.0F, 0.000001F, "Llama logits value 1 mismatch");
-    expect_close(read_f32(logits, std::span<const std::uint64_t>(index_2)), 4.5F, 0.000001F, "Llama logits value 2 mismatch");
-}
-
-void test_runs_llama_model_logits_from_token_ids() {
-    auto config = tiny_logits_config();
-    config.block_count = 1;
-    const std::array<float, 6> embedding_values {
-        3.0F, 0.0F, 0.0F,
-        4.0F, 0.0F, 0.0F,
-    };
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 6> output_values {
-        1.0F, 0.0F, 2.0F,
-        0.0F, 1.0F, 3.0F,
-    };
-    std::vector<EngineTensor> tensors;
-    tensors.push_back(engine_tensor(
-        "token_embd.weight",
-        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
-    ));
-    tensors.push_back(engine_tensor(
-        "output_norm.weight",
-        tensor_f32_vector(std::span<const float>(norm_values))
-    ));
-    tensors.push_back(engine_tensor(
-        "output.weight",
-        tensor_f16_gguf_matrix(2, 3, std::span<const float>(output_values))
-    ));
-    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
-    const auto model = tiny_bound_llama_model(config, std::move(tensors));
-    const auto weights = bind_llama_model_weights(model);
-    const std::array<std::uint32_t, 1> token_ids {0};
-
-    const auto logits = run_llama_model_logits_f32(
-        std::span<const std::uint32_t>(token_ids),
-        weights,
-        model.llama_config(),
-        0
-    );
-    const auto embeddings = embed_llama_token_ids_f32(std::span<const std::uint32_t>(token_ids), weights, model.llama_config());
-    const auto hidden_states = run_llama_model_blocks_f32(embeddings, weights, model.llama_config(), 0);
-    const auto expected = project_llama_logits_f32(hidden_states, weights, model.llama_config());
-
-    expect(logits.descriptor().shape == Shape::from({1, 3}), "Llama model logits shape mismatch");
-    const std::array<std::uint64_t, 2> index_0 {0, 0};
-    const std::array<std::uint64_t, 2> index_1 {0, 1};
-    const std::array<std::uint64_t, 2> index_2 {0, 2};
-    expect_close(
-        read_f32(logits, std::span<const std::uint64_t>(index_0)),
-        read_f32(expected, std::span<const std::uint64_t>(index_0)),
-        0.000001F,
-        "Llama model logits value 0 mismatch"
-    );
-    expect_close(
-        read_f32(logits, std::span<const std::uint64_t>(index_1)),
-        read_f32(expected, std::span<const std::uint64_t>(index_1)),
-        0.000001F,
-        "Llama model logits value 1 mismatch"
-    );
-    expect_close(
-        read_f32(logits, std::span<const std::uint64_t>(index_2)),
-        read_f32(expected, std::span<const std::uint64_t>(index_2)),
-        0.000001F,
-        "Llama model logits value 2 mismatch"
-    );
-}
-
-void test_runs_llama_model_logits_with_kv_cache_matches_no_cache() {
-    auto config = tiny_logits_config();
-    config.block_count = 1;
-    config.vocab_size = 8;
-    std::vector<EngineTensor> tensors;
-    add_tiny_llama_top_level_tensors(tensors);
-    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
-    const auto model = tiny_bound_llama_model(config, std::move(tensors));
-    const auto weights = bind_llama_model_weights(model);
-    const std::array<std::uint32_t, 2> full_token_ids {0, 1};
-    const std::array<std::uint32_t, 1> first_token_id {0};
-    const std::array<std::uint32_t, 1> second_token_id {1};
-    auto cache = create_llama_kv_cache(model.llama_config());
-
-    const auto no_cache = run_llama_model_logits_f32(
-        std::span<const std::uint32_t>(full_token_ids),
-        weights,
-        model.llama_config(),
-        1
-    );
-    (void)run_llama_model_logits_with_kv_cache_f32(
-        std::span<const std::uint32_t>(first_token_id),
-        weights,
-        model.llama_config(),
-        0,
-        cache
-    );
-    const auto cached = run_llama_model_logits_with_kv_cache_f32(
-        std::span<const std::uint32_t>(second_token_id),
-        weights,
-        model.llama_config(),
-        1,
-        cache
-    );
-
-    expect(cache.layers[0].filled_token_count == 2, "Llama model KV cache fill mismatch");
-    expect(cached.descriptor().shape == Shape::from({1, 8}), "Llama cached logits shape mismatch");
-    for (std::uint64_t token = 0; token < 8; ++token) {
-        const std::array<std::uint64_t, 2> no_cache_index {1, token};
-        const std::array<std::uint64_t, 2> cached_index {0, token};
-        expect_close(
-            read_f32(cached, std::span<const std::uint64_t>(cached_index)),
-            read_f32(no_cache, std::span<const std::uint64_t>(no_cache_index)),
-            0.00001F,
-            "Llama cached logits should match no-cache final row"
-        );
-    }
-}
-
-void test_rejects_llama_model_kv_cache_layer_count_mismatch() {
-    auto config = tiny_logits_config();
-    config.block_count = 1;
-    config.vocab_size = 8;
-    std::vector<EngineTensor> tensors;
-    add_tiny_llama_top_level_tensors(tensors);
-    add_tiny_llama_block_tensors(tensors, 0, 1.0F, false, true);
-    const auto model = tiny_bound_llama_model(config, std::move(tensors));
-    const auto weights = bind_llama_model_weights(model);
-    const std::array<std::uint32_t, 1> token_ids {0};
-    LlamaKVCache cache {
-        .layers = {},
-        .context_length = 0,
-        .key_width = 0,
-        .value_width = 0,
-    };
-
-    try {
-        (void)run_llama_model_logits_with_kv_cache_f32(
-            std::span<const std::uint32_t>(token_ids),
-            weights,
-            model.llama_config(),
-            0,
-            cache
-        );
-        throw TestFailure("Llama model cached logits should reject cache layer count mismatch");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "Llama KV cache layer count must match model block count",
-            "Llama KV cache layer count error text mismatch"
-        );
-    }
-}
-
-void test_rejects_llama_logits_output_weight_dtype_mismatch() {
-    const std::array<float, 6> embedding_values {
-        1.0F, 2.0F, 3.0F,
-        10.0F, 20.0F, 30.0F,
-    };
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    const std::array<float, 6> output_values {
-        1.0F, 0.0F, 2.0F,
-        0.0F, 1.0F, 3.0F,
-    };
-    const std::array<float, 2> hidden_values {3.0F, 4.0F};
-    const auto token_embedding_weight = tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values));
-    const auto output_norm_weight = tensor_f32_vector(std::span<const float>(norm_values));
-    const auto output_weight = tensor_f32_matrix(2, 3, std::span<const float>(output_values));
-    const auto hidden_states = tensor_f32_matrix(1, 2, std::span<const float>(hidden_values));
-    const LlamaModelWeights weights {
-        .token_embedding_weight = token_embedding_weight,
-        .output_norm_weight = output_norm_weight,
-        .output_weight = output_weight,
-        .blocks = {},
-    };
-
-    try {
-        (void)project_llama_logits_f32(hidden_states, weights, tiny_logits_config());
-        throw TestFailure("Llama logits projection should reject F32 output weight");
-    } catch (const TensorError& error) {
-        expect(error.code() == TensorErrorCode::unsupported_operator_dtype, "Llama logits dtype error mismatch");
-        expect(error.expected_value() == 1, "Llama logits expected output dtype mismatch");
-        expect(error.actual_value() == 0, "Llama logits actual output dtype mismatch");
-    }
-}
-
-void test_samples_argmax_token_from_f32_logits_vector() {
-    const std::array<float, 4> logits_values {0.5F, 3.0F, 3.0F, 2.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-
-    const auto token = sample_argmax_token_f32(logits);
-
-    expect(token == 1, "argmax sampler should pick the first max token");
-}
-
-void test_samples_argmax_token_from_last_logits_row() {
-    const std::array<float, 6> logits_values {
-        0.0F, 1.0F, 9.0F,
-        4.0F, 3.0F, 4.0F,
-    };
-    const auto logits = tensor_f32_matrix(2, 3, std::span<const float>(logits_values));
-
-    const auto token = sample_argmax_token_f32(logits);
-
-    expect(token == 0, "argmax sampler should use the last logits row and first-max tie break");
-}
-
-void test_selects_top_logit_tokens_from_last_row() {
-    const std::array<float, 8> logits_values {
-        9.0F, 0.0F, 1.0F, 2.0F,
-        4.0F, 5.0F, 5.0F, 1.0F,
-    };
-    const auto logits = tensor_f32_matrix(2, 4, std::span<const float>(logits_values));
-
-    const auto top_logits = top_logit_tokens_f32(logits, 3);
-
-    expect(top_logits.size() == 3, "top logits count mismatch");
-    expect(top_logits[0].token == 1, "top logits first token mismatch");
-    expect(top_logits[1].token == 2, "top logits tie should prefer lower token id");
-    expect(top_logits[2].token == 0, "top logits third token mismatch");
-    expect_close(top_logits[0].logit, 5.0F, 0.000001F, "top logits first value mismatch");
-}
-
-void test_rejects_argmax_sampler_dtype_mismatch() {
-    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
-    const auto logits = tensor_f16_gguf_matrix(1, 3, std::span<const float>(logits_values));
-
-    try {
-        (void)sample_argmax_token_f32(logits);
-        throw TestFailure("argmax sampler should reject F16 logits");
-    } catch (const TensorError& error) {
-        expect(error.code() == TensorErrorCode::unsupported_operator_dtype, "argmax sampler dtype error mismatch");
-        expect(error.expected_value() == 0, "argmax sampler expected dtype mismatch");
-        expect(error.actual_value() == 1, "argmax sampler actual dtype mismatch");
-    }
-}
-
-void test_rejects_argmax_sampler_rank_above_two() {
-    const auto logits = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 1, 2}), DType::f32));
-
-    try {
-        (void)sample_argmax_token_f32(logits);
-        throw TestFailure("argmax sampler should reject logits rank above two");
-    } catch (const TensorError& error) {
-        expect(error.code() == TensorErrorCode::invalid_shape_rank, "argmax sampler rank error mismatch");
-        expect(error.expected_value() == 2, "argmax sampler expected rank mismatch");
-        expect(error.actual_value() == 3, "argmax sampler actual rank mismatch");
-    }
-}
-
-void test_samples_temperature_top_k_token_from_f32_logits_vector() {
-    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    const SamplingConfig sampling {
-        .temperature = 1.0F,
-        .top_k = 2,
-        .seed = 0,
-    };
-    SamplingState first_state(sampling.seed);
-    SamplingState second_state(sampling.seed);
-
-    const auto first_token = sample_token_f32(logits, sampling, first_state);
-    const auto second_token = sample_token_f32(logits, sampling, second_state);
-
-    expect(first_token == 1, "temperature top-k sampler should draw the second top-k candidate for seed 0");
-    expect(second_token == first_token, "temperature top-k sampler should be deterministic for the same seed");
-}
-
-void test_samples_temperature_top_k_token_from_last_logits_row() {
-    const std::array<float, 6> logits_values {
-        100.0F, 0.0F, 0.0F,
-        0.0F, 1.0F, 2.0F,
-    };
-    const auto logits = tensor_f32_matrix(2, 3, std::span<const float>(logits_values));
-    const SamplingConfig sampling {
-        .temperature = 1.0F,
-        .top_k = 2,
-        .seed = 0,
-    };
-    SamplingState state(sampling.seed);
-
-    const auto token = sample_token_f32(logits, sampling, state);
-
-    expect(token == 1, "temperature top-k sampler should use the final logits row");
-}
-
-void test_samples_temperature_top_p_token_from_f32_logits_vector() {
-    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    const SamplingConfig sampling {
-        .temperature = 1.0F,
-        .top_p = 0.5F,
-        .seed = 0,
-    };
-    SamplingState state(sampling.seed);
-
-    const auto token = sample_token_f32(logits, sampling, state);
-
-    expect(token == 2, "temperature top-p sampler should keep at least the highest-probability token");
-}
-
-void test_samples_temperature_repetition_penalty_token_from_f32_logits_vector() {
-    const std::array<float, 3> logits_values {0.0F, 4.0F, 5.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    const std::array<std::uint32_t, 1> repetition_tokens {2};
-    const SamplingConfig sampling {
-        .temperature = 1.0F,
-        .top_p = 0.01F,
-        .repetition_penalty = 2.0F,
-        .seed = 0,
-    };
-    SamplingState state(sampling.seed);
-
-    const auto token = sample_token_f32(logits, sampling, state, std::span<const std::uint32_t>(repetition_tokens));
-
-    expect(token == 1, "repetition penalty should lower a repeated positive-logit token before top-p filtering");
-}
-
-void test_sampling_temperature_zero_keeps_argmax_path() {
-    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    const SamplingConfig sampling {
-        .temperature = 0.0F,
-        .top_k = 2,
-        .seed = 0,
-    };
-    SamplingState state(sampling.seed);
-
-    const auto token = sample_token_f32(logits, sampling, state);
-
-    expect(token == 2, "zero-temperature sampler should preserve argmax behavior");
-}
-
-void test_rejects_sampling_negative_temperature() {
-    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    const SamplingConfig sampling {
-        .temperature = -1.0F,
-        .top_k = 2,
-        .seed = 0,
-    };
-    SamplingState state(sampling.seed);
-
-    try {
-        (void)sample_token_f32(logits, sampling, state);
-        throw TestFailure("temperature sampler should reject negative temperature");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "sampling temperature must be zero or a positive finite value",
-            "temperature sampler error text mismatch"
-        );
-    }
-}
-
-void test_rejects_sampling_invalid_top_p() {
-    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    const SamplingConfig sampling {
-        .temperature = 1.0F,
-        .top_p = 0.0F,
-        .seed = 0,
-    };
-    SamplingState state(sampling.seed);
-
-    try {
-        (void)sample_token_f32(logits, sampling, state);
-        throw TestFailure("temperature sampler should reject invalid top-p");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "sampling top-p must be in (0, 1]",
-            "top-p sampler error text mismatch"
-        );
-    }
-}
-
-void test_rejects_sampling_invalid_repetition_penalty() {
-    const std::array<float, 3> logits_values {0.0F, 1.0F, 2.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    const SamplingConfig sampling {
-        .temperature = 1.0F,
-        .repetition_penalty = 0.5F,
-        .seed = 0,
-    };
-    SamplingState state(sampling.seed);
-
-    try {
-        (void)sample_token_f32(logits, sampling, state);
-        throw TestFailure("temperature sampler should reject invalid repetition penalty");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "sampling repetition penalty must be at least 1",
-            "repetition-penalty sampler error text mismatch"
-        );
-    }
-}
-
 EngineModel tiny_argmax_generation_model(LlamaModelConfig config) {
     const std::array<float, 6> embedding_values {
         3.0F, 0.0F, 0.0F,
@@ -6258,55 +4556,6 @@ EngineModel tiny_argmax_generation_model(LlamaModelConfig config) {
     add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
     return tiny_bound_llama_model(config, std::move(tensors));
 }
-
-EngineModel tiny_tied_output_generation_model(LlamaModelConfig config) {
-    const std::array<float, 6> embedding_values {
-        1.0F, 0.0F, 2.0F,
-        0.0F, 0.0F, 0.0F,
-    };
-    const std::array<float, 2> norm_values {1.0F, 1.0F};
-    std::vector<EngineTensor> tensors;
-    tensors.push_back(engine_tensor(
-        "token_embd.weight",
-        tensor_f16_gguf_matrix(2, 3, std::span<const float>(embedding_values))
-    ));
-    tensors.push_back(engine_tensor(
-        "output_norm.weight",
-        tensor_f32_vector(std::span<const float>(norm_values))
-    ));
-    add_tiny_llama_block_tensors(tensors, 0, 0.0F, false, true);
-    return tiny_bound_llama_model(config, std::move(tensors));
-}
-
-void test_binds_llama_model_missing_output_weight_to_token_embedding() {
-    auto config = tiny_logits_config();
-    config.block_count = 1;
-    config.context_length = 8;
-    const auto model = tiny_tied_output_generation_model(config);
-    const auto weights = bind_llama_model_weights(model);
-    const auto* token_embedding = model.find_tensor("token_embd.weight");
-
-    expect(token_embedding != nullptr, "tied-output Llama model should have token embedding");
-    expect(model.find_tensor("output.weight") == nullptr, "tied-output Llama model should omit output weight");
-    expect(
-        &weights.output_weight == &token_embedding->storage,
-        "tied-output Llama model should reuse token embedding as output weight"
-    );
-
-    const std::array<std::uint32_t, 1> prompt_tokens {0};
-    const auto tokens = generate_llama_argmax_tokens_with_kv_cache_f32(
-        std::span<const std::uint32_t>(prompt_tokens),
-        2,
-        weights,
-        model.llama_config()
-    );
-
-    expect(tokens.size() == 3, "tied-output Llama generation token count mismatch");
-    expect(tokens[0] == 0, "tied-output Llama generation prompt token mismatch");
-    expect(tokens[1] == 2, "tied-output Llama generation first token mismatch");
-    expect(tokens[2] == 2, "tied-output Llama generation second token mismatch");
-}
-
 void test_runs_llama_next_token_argmax_from_token_ids() {
     auto config = tiny_logits_config();
     config.block_count = 1;
@@ -6862,116 +5111,10 @@ void test_rejects_llama_generation_context_overflow() {
     }
 }
 
-void test_converts_gguf_payload_view_to_tensor_storage() {
-    const auto bytes = fixture("valid-tensor-payload-view");
-    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
-    const auto loaded = load_gguf_tensor_payload(model.tensor_payloads[0]);
-
-    expect(loaded.name == "ab", "loaded GGUF tensor name mismatch");
-    expect(loaded.storage.descriptor().shape == Shape::from({2}), "loaded GGUF tensor shape mismatch");
-    expect(loaded.storage.descriptor().dtype == DType::f32, "loaded GGUF tensor dtype mismatch");
-    expect(loaded.storage.descriptor().element_count == 2, "loaded GGUF tensor element count mismatch");
-    expect(loaded.storage.descriptor().byte_count == 8, "loaded GGUF tensor byte count mismatch");
-    expect(loaded.storage.bytes().size() == 8, "loaded GGUF tensor storage byte count mismatch");
-    expect(
-        loaded.storage.bytes().data() != model.tensor_payloads[0].bytes.data(),
-        "loaded GGUF tensor storage should own a byte copy"
-    );
-    expect(loaded.storage.bytes()[0] == 0x00, "loaded GGUF tensor byte 0 mismatch");
-    expect(loaded.storage.bytes()[7] == 0x40, "loaded GGUF tensor byte 7 mismatch");
-}
-
-void test_converts_q8_0_gguf_payload_view_to_tensor_storage() {
-    const auto bytes = fixture("valid-q8-0-tensor-payload-view");
-    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
-    const auto loaded_tensors = load_gguf_tensor_payloads(model);
-
-    expect(loaded_tensors.size() == 1, "loaded Q8_0 GGUF tensor count mismatch");
-    expect(loaded_tensors[0].name == "q8", "loaded Q8_0 GGUF tensor name mismatch");
-    expect(loaded_tensors[0].storage.descriptor().shape == Shape::from({32}), "loaded Q8_0 shape mismatch");
-    expect(loaded_tensors[0].storage.descriptor().dtype == DType::q8_0, "loaded Q8_0 dtype mismatch");
-    expect(loaded_tensors[0].storage.descriptor().element_count == 32, "loaded Q8_0 element count mismatch");
-    expect(loaded_tensors[0].storage.descriptor().byte_count == 34, "loaded Q8_0 byte count mismatch");
-    expect(loaded_tensors[0].storage.bytes()[33] == 0x21, "loaded Q8_0 final byte mismatch");
-}
-
-void test_rejects_unsupported_gguf_tensor_type_in_bridge() {
-    const GGUFTensorPayloadView payload {
-        .tensor = GGUFTensorInfo {
-            .name = "bad",
-            .dimensions = std::vector<std::uint64_t> {1},
-            .type_id = 255,
-            .offset = 0,
-            .file_offset = 0,
-        },
-        .bytes = {},
-    };
-
-    try {
-        (void)load_gguf_tensor_payload(payload);
-        throw TestFailure("unsupported GGUF tensor bridge type should throw");
-    } catch (const GGUFReadError& error) {
-        expect(error.code() == GGUFReadErrorCode::unsupported_tensor_type, "error code should be unsupported_tensor_type");
-        expect(error.actual_byte_count() == 255, "unsupported GGUF tensor type id mismatch");
-    }
-}
-
-void test_rejects_invalid_quantized_gguf_tensor_shape_in_bridge() {
-    const std::array<std::uint8_t, 34> bytes {};
-    const GGUFTensorPayloadView payload {
-        .tensor = GGUFTensorInfo {
-            .name = "q8_bad",
-            .dimensions = std::vector<std::uint64_t> {31},
-            .type_id = 8,
-            .offset = 0,
-            .file_offset = 0,
-        },
-        .bytes = std::span<const std::uint8_t>(bytes),
-    };
-
-    try {
-        (void)load_gguf_tensor_payload(payload);
-        throw TestFailure("invalid Q8_0 GGUF bridge shape should throw");
-    } catch (const TensorError& error) {
-        expect(
-            error.code() == TensorErrorCode::invalid_quantized_element_count,
-            "error code should be invalid_quantized_element_count"
-        );
-        expect(error.expected_value() == 32, "expected Q8_0 bridge block size mismatch");
-        expect(error.actual_value() == 31, "actual Q8_0 bridge element count mismatch");
-    }
-}
-
-void test_rejects_gguf_tensor_payload_size_mismatch_in_bridge() {
-    const std::array<std::uint8_t, 7> bytes {};
-    const GGUFTensorPayloadView payload {
-        .tensor = GGUFTensorInfo {
-            .name = "short",
-            .dimensions = std::vector<std::uint64_t> {2},
-            .type_id = 0,
-            .offset = 0,
-            .file_offset = 0,
-        },
-        .bytes = std::span<const std::uint8_t>(bytes),
-    };
-
-    try {
-        (void)load_gguf_tensor_payload(payload);
-        throw TestFailure("GGUF bridge payload size mismatch should throw");
-    } catch (const TensorError& error) {
-        expect(
-            error.code() == TensorErrorCode::invalid_storage_byte_count,
-            "error code should be invalid_storage_byte_count"
-        );
-        expect(error.expected_value() == 8, "expected GGUF bridge storage byte count mismatch");
-        expect(error.actual_value() == 7, "actual GGUF bridge storage byte count mismatch");
-    }
-}
-
 }  // namespace
 
 int main() {
-    const TestCase tests[] = {
+    const TestCase tests_before_llama_kv_cache[] = {
         {"default backend starts on CPU", test_default_backend_starts_on_cpu},
         {"tensor shape accepts valid shapes", test_tensor_shape_accepts_valid_shapes},
         {"rejects tensor shape rank over four", test_rejects_tensor_shape_rank_over_four},
@@ -7197,15 +5340,9 @@ int main() {
             test_reports_unavailable_metal_backend_buffer_copy_when_missing,
         },
         {"rejects F32xF16 matmul right dtype mismatch", test_rejects_f32_f16_matmul_right_dtype_mismatch},
-        {"creates Llama KV cache", test_creates_llama_kv_cache},
-        {"appends and reads Llama KV cache layer", test_appends_and_reads_llama_kv_cache_layer},
-        {
-            "rejects Llama KV cache append position mismatch",
-            test_rejects_llama_kv_cache_append_position_mismatch,
-        },
-        {"rejects Llama KV cache context overflow", test_rejects_llama_kv_cache_context_overflow},
-        {"rejects Llama KV cache key shape mismatch", test_rejects_llama_kv_cache_key_shape_mismatch},
-        {"runs Llama attention layer with F16 weights", test_runs_llama_attention_layer_with_f16_weights},
+    };
+
+    const TestCase tests_after_attention_layer_primary_before_attention_validation[] = {
         {
             "runs Llama attention layer with CPU backend weight buffers",
             test_runs_llama_attention_layer_with_cpu_backend_weight_buffers,
@@ -7214,58 +5351,16 @@ int main() {
             "runs Llama attention layer with KV cache and CPU backend weight buffers",
             test_runs_llama_attention_layer_with_kv_cache_and_cpu_backend_weight_buffers,
         },
-        {"runs Llama attention layer with causal mask", test_runs_llama_attention_layer_with_causal_mask},
-        {
-            "runs Llama attention layer with KV cache matches no-cache",
-            test_runs_llama_attention_layer_with_kv_cache_matches_no_cache,
-        },
-        {
-            "runs grouped Llama attention layer with KV cache matches no-cache",
-            test_runs_grouped_llama_attention_layer_with_kv_cache_matches_no_cache,
-        },
-        {
-            "runs Llama attention layer with KV cache appends rotated key heads",
-            test_runs_llama_attention_layer_with_kv_cache_appends_rotated_key_heads,
-        },
-        {
-            "rejects Llama attention layer with KV cache invalid RoPE dimension count",
-            test_rejects_llama_attention_layer_with_kv_cache_invalid_rope_dimension_count,
-        },
-        {
-            "runs Llama attention layer with rowwise RoPE positions",
-            test_runs_llama_attention_layer_with_rowwise_rope_positions,
-        },
-        {
-            "rejects Llama attention layer position before input window",
-            test_rejects_llama_attention_layer_position_before_input_window,
-        },
-        {
-            "rejects Llama attention layer projection shape mismatch",
-            test_rejects_llama_attention_layer_projection_shape_mismatch,
-        },
-        {
-            "rejects Llama attention layer projection dtype mismatch",
-            test_rejects_llama_attention_layer_projection_dtype_mismatch,
-        },
-        {
-            "rejects Llama attention layer invalid head layout",
-            test_rejects_llama_attention_layer_invalid_head_layout,
-        },
-        {"runs Llama FFN layer with F16 weights", test_runs_llama_feed_forward_layer_with_f16_weights},
+    };
+
+    const TestCase tests_after_ffn_layer_primary_before_ffn_validation[] = {
         {
             "runs Llama FFN layer with CPU backend weight buffers",
             test_runs_llama_feed_forward_layer_with_cpu_backend_weight_buffers,
         },
-        {
-            "rejects Llama FFN layer projection shape mismatch",
-            test_rejects_llama_feed_forward_layer_projection_shape_mismatch,
-        },
-        {
-            "rejects Llama FFN layer projection dtype mismatch",
-            test_rejects_llama_feed_forward_layer_projection_dtype_mismatch,
-        },
-        {"rejects Llama FFN layer invalid config", test_rejects_llama_feed_forward_layer_invalid_config},
-        {"runs Llama block with F16 weights", test_runs_llama_block_with_f16_weights},
+    };
+
+    const TestCase tests_after_block_primary_before_block_validation[] = {
         {
             "runs Llama block with CPU backend weight buffers",
             test_runs_llama_block_with_cpu_backend_weight_buffers,
@@ -7286,14 +5381,9 @@ int main() {
             "matches Llama block with backend KV cache and Metal backend weight buffers when available",
             test_matches_llama_block_with_backend_kv_cache_and_metal_backend_weight_buffers_when_available,
         },
-        {
-            "rejects Llama block attention projection shape mismatch",
-            test_rejects_llama_block_attention_projection_shape_mismatch,
-        },
-        {
-            "binds and runs Llama model blocks from named tensors",
-            test_binds_and_runs_llama_model_blocks_from_named_tensors,
-        },
+    };
+
+    const TestCase tests_after_model_block_before_model_logits[] = {
         {
             "copies Llama model attention weights to CPU backend buffers",
             test_copies_llama_model_attention_weights_to_cpu_backend_buffers,
@@ -7374,62 +5464,9 @@ int main() {
             "reports unavailable Llama model logits backend weight copy when Metal is missing",
             test_reports_unavailable_llama_model_logits_backend_weight_copy_when_metal_missing,
         },
-        {
-            "rejects Llama model weight binding missing tensor",
-            test_rejects_llama_model_weight_binding_missing_tensor,
-        },
-        {
-            "binds Llama model missing output weight to token embedding",
-            test_binds_llama_model_missing_output_weight_to_token_embedding,
-        },
-        {
-            "rejects Llama model blocks projection dtype mismatch",
-            test_rejects_llama_model_blocks_projection_dtype_mismatch,
-        },
-        {"embeds Llama token IDs from F16 weight", test_embeds_llama_token_ids_from_f16_weight},
-        {
-            "rejects Llama token embedding ID out of range",
-            test_rejects_llama_token_embedding_id_out_of_range,
-        },
-        {"projects Llama logits with final norm", test_projects_llama_logits_with_final_norm},
-        {"runs Llama model logits from token IDs", test_runs_llama_model_logits_from_token_ids},
-        {
-            "runs Llama model logits with KV cache matches no-cache",
-            test_runs_llama_model_logits_with_kv_cache_matches_no_cache,
-        },
-        {
-            "rejects Llama model KV cache layer count mismatch",
-            test_rejects_llama_model_kv_cache_layer_count_mismatch,
-        },
-        {
-            "rejects Llama logits output weight dtype mismatch",
-            test_rejects_llama_logits_output_weight_dtype_mismatch,
-        },
-        {"samples argmax token from F32 logits vector", test_samples_argmax_token_from_f32_logits_vector},
-        {"samples argmax token from last logits row", test_samples_argmax_token_from_last_logits_row},
-        {"selects top logit tokens from last row", test_selects_top_logit_tokens_from_last_row},
-        {"rejects argmax sampler dtype mismatch", test_rejects_argmax_sampler_dtype_mismatch},
-        {"rejects argmax sampler rank above two", test_rejects_argmax_sampler_rank_above_two},
-        {
-            "samples temperature top-k token from F32 logits vector",
-            test_samples_temperature_top_k_token_from_f32_logits_vector,
-        },
-        {
-            "samples temperature top-k token from last logits row",
-            test_samples_temperature_top_k_token_from_last_logits_row,
-        },
-        {
-            "samples temperature top-p token from F32 logits vector",
-            test_samples_temperature_top_p_token_from_f32_logits_vector,
-        },
-        {
-            "samples temperature repetition-penalty token from F32 logits vector",
-            test_samples_temperature_repetition_penalty_token_from_f32_logits_vector,
-        },
-        {"sampling temperature zero keeps argmax path", test_sampling_temperature_zero_keeps_argmax_path},
-        {"rejects sampling negative temperature", test_rejects_sampling_negative_temperature},
-        {"rejects sampling invalid top-p", test_rejects_sampling_invalid_top_p},
-        {"rejects sampling invalid repetition penalty", test_rejects_sampling_invalid_repetition_penalty},
+    };
+
+    const TestCase tests_after_sampling[] = {
         {"runs Llama next-token argmax from token IDs", test_runs_llama_next_token_argmax_from_token_ids},
         {"rejects Llama next-token empty token IDs", test_rejects_llama_next_token_empty_token_ids},
         {
@@ -7482,23 +5519,6 @@ int main() {
         {"rejects Llama generation context overflow", test_rejects_llama_generation_context_overflow},
     };
 
-    const TestCase tests_after_generate_cli[] = {
-        {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
-        {
-            "converts Q8_0 GGUF payload view to tensor storage",
-            test_converts_q8_0_gguf_payload_view_to_tensor_storage,
-        },
-        {"rejects unsupported GGUF tensor type in bridge", test_rejects_unsupported_gguf_tensor_type_in_bridge},
-        {
-            "rejects invalid quantized GGUF tensor shape in bridge",
-            test_rejects_invalid_quantized_gguf_tensor_shape_in_bridge,
-        },
-        {
-            "rejects GGUF tensor payload size mismatch in bridge",
-            test_rejects_gguf_tensor_payload_size_mismatch_in_bridge,
-        },
-    };
-
     int failures = 0;
     std::size_t test_count = 0;
     const auto run_test = [&](const TestCase& test) {
@@ -7512,13 +5532,58 @@ int main() {
         }
     };
 
-    for (const auto& test : tests) {
+    for (const auto& test : tests_before_llama_kv_cache) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::llama_kv_cache_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::llama_attention_layer_primary_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : tests_after_attention_layer_primary_before_attention_validation) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::llama_attention_layer_validation_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::llama_feed_forward_layer_primary_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : tests_after_ffn_layer_primary_before_ffn_validation) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::llama_feed_forward_layer_validation_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::llama_block_primary_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : tests_after_block_primary_before_block_validation) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::llama_block_validation_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::llama_model_block_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : tests_after_model_block_before_model_logits) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::llama_model_logits_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::sampling_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : tests_after_sampling) {
         run_test(test);
     }
     for (const auto& test : local_gguf_engine::tests::generate_cli_test_cases()) {
         run_test(test);
     }
-    for (const auto& test : tests_after_generate_cli) {
+    for (const auto& test : local_gguf_engine::tests::gguf_tensor_bridge_test_cases()) {
         run_test(test);
     }
     for (const auto& test : local_gguf_engine::tests::gguf_reader_test_cases()) {

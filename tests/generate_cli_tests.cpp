@@ -1,10 +1,10 @@
 #include "generate_cli_tests.hpp"
+#include "tensor_test_support.hpp"
 
 #include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/frontends/cli/generate.hpp"
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
-#include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
@@ -38,9 +38,6 @@ using local_gguf_engine::model_format::GGUFMetadataEntry;
 using local_gguf_engine::model_format::GGUFMetadataValue;
 using local_gguf_engine::model_format::GGUFMetadataValueType;
 using local_gguf_engine::tensor::DType;
-using local_gguf_engine::tensor::f32_to_f16_bits;
-using local_gguf_engine::tensor::Shape;
-using local_gguf_engine::tensor::TensorDescriptor;
 using local_gguf_engine::tensor::TensorStorage;
 using local_gguf_engine::tests::metadata_bool;
 using local_gguf_engine::tests::metadata_f32;
@@ -52,6 +49,8 @@ using local_gguf_engine::tests::metadata_u32;
 using local_gguf_engine::tests::smollm2_chat_template_fixture;
 using local_gguf_engine::tests::TestFailure;
 using local_gguf_engine::tests::expect;
+using local_gguf_engine::tests::tensor_f16_gguf_matrix;
+using local_gguf_engine::tests::tensor_f32_vector;
 
 class TempBinaryFile final {
 public:
@@ -296,42 +295,6 @@ std::vector<std::uint8_t> write_tiny_gguf_bytes(
     }
 
     return bytes;
-}
-
-TensorStorage tensor_f32_vector(std::span<const float> values) {
-    auto storage = TensorStorage::allocate(
-        TensorDescriptor::from(Shape::from({static_cast<std::uint64_t>(values.size())}), DType::f32)
-    );
-    auto bytes = storage.mutable_bytes();
-    for (std::uint64_t index = 0; index < values.size(); ++index) {
-        const auto bits = std::bit_cast<std::uint32_t>(values[static_cast<std::size_t>(index)]);
-        const auto byte_offset = static_cast<std::size_t>(index * sizeof(float));
-        bytes[byte_offset] = static_cast<std::uint8_t>(bits & 0xFFU);
-        bytes[byte_offset + 1] = static_cast<std::uint8_t>((bits >> 8U) & 0xFFU);
-        bytes[byte_offset + 2] = static_cast<std::uint8_t>((bits >> 16U) & 0xFFU);
-        bytes[byte_offset + 3] = static_cast<std::uint8_t>((bits >> 24U) & 0xFFU);
-    }
-
-    return storage;
-}
-
-TensorStorage tensor_f16_gguf_matrix(std::uint64_t rows, std::uint64_t columns, std::span<const float> values) {
-    if (values.size() != rows * columns) {
-        throw TestFailure("F16 GGUF matrix fixture value count mismatch");
-    }
-
-    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f16));
-    auto bytes = storage.mutable_bytes();
-    for (std::uint64_t row = 0; row < rows; ++row) {
-        for (std::uint64_t column = 0; column < columns; ++column) {
-            const auto bits = f32_to_f16_bits(values[static_cast<std::size_t>(row * columns + column)]);
-            const auto byte_offset = static_cast<std::size_t>((column * rows + row) * sizeof(std::uint16_t));
-            bytes[byte_offset] = static_cast<std::uint8_t>(bits & 0xFFU);
-            bytes[byte_offset + 1] = static_cast<std::uint8_t>(bits >> 8U);
-        }
-    }
-
-    return storage;
 }
 
 EngineTensor engine_tensor(std::string name, TensorStorage storage) {
