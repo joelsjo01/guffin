@@ -59,12 +59,16 @@ TEST_SOURCES := \
 	tests/gguf_reader_tests.cpp \
 	tests/gguf_tensor_bridge_tests.cpp \
 	tests/llama_attention_layer_tests.cpp \
+	tests/llama_backend_tests.cpp \
 	tests/llama_block_tests.cpp \
 	tests/llama_feed_forward_layer_tests.cpp \
+	tests/llama_generation_tests.cpp \
 	tests/llama_kv_cache_tests.cpp \
 	tests/llama_model_tests.cpp \
 	tests/llama_test_support.cpp \
 	tests/sampling_tests.cpp \
+	tests/tensor_backend_tests.cpp \
+	tests/tensor_tests.cpp \
 	tests/tensor_test_support.cpp \
 	tests/test_support.cpp \
 	tests/tokenizer_tests.cpp \
