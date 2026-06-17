@@ -18,6 +18,11 @@ ENGINE_SOURCES := \
 	src/runtime/backend_error.cpp \
 	src/tokenizer/tokenizer.cpp \
 	src/tensor/backend.cpp \
+	src/tensor/backends/metal/metal_benchmark.mm \
+	src/tensor/backends/metal/metal_buffer.mm \
+	src/tensor/backends/metal/metal_context.mm \
+	src/tensor/backends/metal/metal_llama_ops.mm \
+	src/tensor/backends/metal/metal_tensor_ops.mm \
 	src/tensor/backends/metal_backend.mm \
 	src/tensor/dtype.cpp \
 	src/tensor/f16.cpp \
@@ -46,6 +51,7 @@ GENERATE_SOURCES := \
 	src/frontends/cli/generate_main.cpp
 
 BENCHMARK_SOURCES := \
+	benchmarks/benchmark_cli.cpp \
 	benchmarks/benchmark_harness.cpp
 
 BENCHMARK_MAIN_SOURCES := \

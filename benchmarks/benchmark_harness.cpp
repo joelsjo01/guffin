@@ -23,15 +23,13 @@
 #include "local_gguf_engine/tensor/tensor.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
+#include "../src/tensor/backends/metal/metal_benchmark.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cstdlib>
 #include <fstream>
-#include <iomanip>
 #include <limits>
-#include <ostream>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -40,103 +38,6 @@
 #include <system_error>
 #include <utility>
 #include <vector>
-
-namespace local_gguf_engine::tensor::backends::metal {
-
-void benchmark_noop_dispatch();
-
-local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_attention_norm_to_backend(
-    const local_gguf_engine::tensor::BackendBuffer& input,
-    const local_gguf_engine::tensor::BackendBuffer& attention_norm_weight,
-    float rms_norm_epsilon
-);
-
-std::array<local_gguf_engine::tensor::BackendBuffer, 3>
-benchmark_llama_cached_decode_qkv_projection_to_backend(
-    const local_gguf_engine::tensor::BackendBuffer& input,
-    const local_gguf_engine::tensor::BackendBuffer& query_weight,
-    const local_gguf_engine::tensor::BackendBuffer& key_weight,
-    const local_gguf_engine::tensor::BackendBuffer& value_weight
-);
-
-void benchmark_llama_cached_decode_kv_append_to_backend(
-    const local_gguf_engine::tensor::BackendBuffer& key,
-    const local_gguf_engine::tensor::BackendBuffer& value,
-    local_gguf_engine::tensor::BackendBuffer& cache_key,
-    local_gguf_engine::tensor::BackendBuffer& cache_value,
-    std::uint64_t cache_position,
-    std::uint64_t kv_head_count,
-    std::uint64_t key_length,
-    std::uint64_t value_length,
-    std::uint64_t rope_dimension_count,
-    float frequency_base
-);
-
-std::array<local_gguf_engine::tensor::BackendBuffer, 3>
-benchmark_llama_cached_decode_attention_frontend_to_backend(
-    const local_gguf_engine::tensor::BackendBuffer& input,
-    const local_gguf_engine::tensor::BackendBuffer& attention_norm_weight,
-    const local_gguf_engine::tensor::BackendBuffer& query_weight,
-    const local_gguf_engine::tensor::BackendBuffer& key_weight,
-    const local_gguf_engine::tensor::BackendBuffer& value_weight,
-    local_gguf_engine::tensor::BackendBuffer& cache_key,
-    local_gguf_engine::tensor::BackendBuffer& cache_value,
-    std::uint64_t cache_position,
-    std::uint64_t head_count,
-    std::uint64_t kv_head_count,
-    std::uint64_t key_length,
-    std::uint64_t value_length,
-    std::uint64_t rope_dimension_count,
-    float frequency_base,
-    float rms_norm_epsilon
-);
-
-local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_attention_output_to_backend(
-    const local_gguf_engine::tensor::BackendBuffer& query,
-    const local_gguf_engine::tensor::BackendBuffer& cache_key,
-    const local_gguf_engine::tensor::BackendBuffer& cache_value,
-    std::uint64_t cache_position,
-    std::uint64_t head_count,
-    std::uint64_t kv_head_count,
-    std::uint64_t key_length,
-    std::uint64_t value_length,
-    std::uint64_t rope_dimension_count,
-    float frequency_base,
-    float scale
-);
-
-local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_block_tail_to_backend(
-    const local_gguf_engine::tensor::BackendBuffer& input,
-    const local_gguf_engine::tensor::BackendBuffer& attention_output,
-    const local_gguf_engine::tensor::BackendBuffer& attention_output_weight,
-    const local_gguf_engine::tensor::BackendBuffer& feed_forward_norm_weight,
-    const local_gguf_engine::tensor::BackendBuffer& gate_weight,
-    const local_gguf_engine::tensor::BackendBuffer& up_weight,
-    const local_gguf_engine::tensor::BackendBuffer& down_weight,
-    float rms_norm_epsilon
-);
-
-local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_attention_residual_to_backend(
-    const local_gguf_engine::tensor::BackendBuffer& input,
-    const local_gguf_engine::tensor::BackendBuffer& attention_output,
-    const local_gguf_engine::tensor::BackendBuffer& attention_output_weight
-);
-
-local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_ffn_gate_up_to_backend(
-    const local_gguf_engine::tensor::BackendBuffer& attention_residual,
-    const local_gguf_engine::tensor::BackendBuffer& feed_forward_norm_weight,
-    const local_gguf_engine::tensor::BackendBuffer& gate_weight,
-    const local_gguf_engine::tensor::BackendBuffer& up_weight,
-    float rms_norm_epsilon
-);
-
-local_gguf_engine::tensor::BackendBuffer benchmark_llama_cached_decode_ffn_down_to_backend(
-    const local_gguf_engine::tensor::BackendBuffer& gated,
-    const local_gguf_engine::tensor::BackendBuffer& attention_residual,
-    const local_gguf_engine::tensor::BackendBuffer& down_weight
-);
-
-}  // namespace local_gguf_engine::tensor::backends::metal
 
 namespace local_gguf_engine::benchmarks {
 
@@ -2811,133 +2712,7 @@ void add_model_load_benchmarks(BenchmarkReport& report, const std::filesystem::p
     ));
 }
 
-[[nodiscard]] std::size_t parse_iteration_count(std::string_view text) {
-    std::size_t parsed_characters = 0;
-    const auto value = std::stoull(std::string(text), &parsed_characters, 10);
-    if (parsed_characters != text.size() || value == 0) {
-        throw std::invalid_argument("invalid iteration count");
-    }
-
-    if (value > static_cast<unsigned long long>(std::numeric_limits<std::size_t>::max())) {
-        throw std::out_of_range("iteration count is too large");
-    }
-
-    return static_cast<std::size_t>(value);
-}
-
-[[nodiscard]] BenchmarkArgParseResult parse_error(std::string message) {
-    BenchmarkArgParseResult result;
-    result.config.output_path = default_benchmark_output_path();
-    result.should_exit = true;
-    result.exit_code = EXIT_FAILURE;
-    result.message = "error: " + std::move(message) + "\n\n" + benchmark_usage();
-    return result;
-}
-
-[[nodiscard]] bool path_has_prefix(
-    const std::filesystem::path& path,
-    const std::filesystem::path& prefix
-) {
-    auto path_iterator = path.begin();
-    auto prefix_iterator = prefix.begin();
-
-    for (; prefix_iterator != prefix.end(); ++prefix_iterator, ++path_iterator) {
-        if (path_iterator == path.end() || *path_iterator != *prefix_iterator) {
-            return false;
-        }
-    }
-
-    return path_iterator != path.end();
-}
-
 }  // namespace
-
-double BenchmarkMeasurement::average_ms() const noexcept {
-    if (iterations == 0) {
-        return 0.0;
-    }
-
-    return total_ms / static_cast<double>(iterations);
-}
-
-std::filesystem::path default_benchmark_output_path() {
-    return std::filesystem::path("benchmarks") / "results" / "latest.txt";
-}
-
-bool benchmark_output_path_is_under_results(const std::filesystem::path& path) {
-    if (path.empty() || path.is_absolute()) {
-        return false;
-    }
-
-    return path_has_prefix(
-        path.lexically_normal(),
-        (std::filesystem::path("benchmarks") / "results").lexically_normal()
-    );
-}
-
-std::string benchmark_usage() {
-    return "usage: local-gguf-bench [--model <model.gguf>] "
-           "[--output benchmarks/results/<name>.txt] [--iterations <count>]\n";
-}
-
-BenchmarkArgParseResult parse_benchmark_args(int argc, const char* const* argv) {
-    BenchmarkArgParseResult result;
-    result.config.output_path = default_benchmark_output_path();
-
-    for (int index = 1; index < argc; ++index) {
-        const std::string_view argument = argv[index];
-
-        if (argument == "--help" || argument == "-h") {
-            result.should_exit = true;
-            result.exit_code = EXIT_SUCCESS;
-            result.message = benchmark_usage();
-            return result;
-        }
-
-        if (argument == "--model") {
-            if (index + 1 >= argc) {
-                return parse_error("--model requires a path");
-            }
-            result.config.model_path = std::filesystem::path(argv[++index]);
-            continue;
-        }
-
-        if (argument == "--output") {
-            if (index + 1 >= argc) {
-                return parse_error("--output requires a path under benchmarks/results");
-            }
-            result.config.output_path = std::filesystem::path(argv[++index]);
-            continue;
-        }
-
-        if (argument == "--iterations") {
-            if (index + 1 >= argc) {
-                return parse_error("--iterations requires a positive count");
-            }
-            try {
-                result.config.iterations = parse_iteration_count(argv[++index]);
-            } catch (const std::exception&) {
-                return parse_error("--iterations requires a positive count");
-            }
-            continue;
-        }
-
-        if (!argument.empty() && argument.front() == '-') {
-            return parse_error("unknown option '" + std::string(argument) + "'");
-        }
-
-        if (result.config.model_path.has_value()) {
-            return parse_error("expected at most one model path");
-        }
-        result.config.model_path = std::filesystem::path(argument);
-    }
-
-    if (!benchmark_output_path_is_under_results(result.config.output_path)) {
-        return parse_error("benchmark output path must be under benchmarks/results");
-    }
-
-    return result;
-}
 
 BenchmarkReport run_benchmarks(const BenchmarkConfig& config) {
     BenchmarkReport report {
@@ -2952,63 +2727,6 @@ BenchmarkReport run_benchmarks(const BenchmarkConfig& config) {
     }
 
     return report;
-}
-
-std::string format_benchmark_report(const BenchmarkReport& report) {
-    std::ostringstream output;
-    output << std::fixed << std::setprecision(3);
-    output << "local GGUF benchmark report\n";
-    output << "iterations: " << report.config.iterations << '\n';
-    output << "output: " << report.config.output_path.string() << '\n';
-    output << "model: "
-           << (report.config.model_path.has_value() ? report.config.model_path->string() : "<none>")
-           << '\n';
-    output << "benchmarks:\n";
-
-    for (const auto& measurement : report.measurements) {
-        output << "- " << measurement.name << '\n';
-        output << "  iterations: " << measurement.iterations << '\n';
-        output << "  total_ms: " << measurement.total_ms << '\n';
-        output << "  avg_ms: " << measurement.average_ms() << '\n';
-        output << "  min_ms: " << measurement.min_ms << '\n';
-        output << "  max_ms: " << measurement.max_ms << '\n';
-        output << "  bytes_processed: " << measurement.bytes_processed << '\n';
-        output << "  checksum: " << measurement.checksum << '\n';
-        output << "  detail: " << measurement.detail << '\n';
-    }
-
-    return output.str();
-}
-
-int run_benchmark_cli(int argc, const char* const* argv, std::ostream& output, std::ostream& error) {
-    const auto parsed = parse_benchmark_args(argc, argv);
-    if (parsed.should_exit) {
-        auto& stream = parsed.exit_code == EXIT_SUCCESS ? output : error;
-        stream << parsed.message;
-        return parsed.exit_code;
-    }
-
-    try {
-        const auto report = run_benchmarks(parsed.config);
-        const auto report_text = format_benchmark_report(report);
-        std::filesystem::create_directories(parsed.config.output_path.parent_path());
-
-        std::ofstream file(parsed.config.output_path, std::ios::trunc);
-        if (!file) {
-            throw std::runtime_error("could not open benchmark output '" + parsed.config.output_path.string() + "'");
-        }
-        file << report_text;
-        if (!file) {
-            throw std::runtime_error("could not write benchmark output '" + parsed.config.output_path.string() + "'");
-        }
-
-        output << report_text;
-        output << "wrote benchmark report: " << parsed.config.output_path.string() << '\n';
-        return EXIT_SUCCESS;
-    } catch (const std::exception& exception) {
-        error << "error: " << exception.what() << '\n';
-        return EXIT_FAILURE;
-    }
 }
 
 }  // namespace local_gguf_engine::benchmarks
