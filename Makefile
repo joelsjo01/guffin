@@ -52,32 +52,47 @@ GENERATE_SOURCES := \
 
 BENCHMARK_SOURCES := \
 	benchmarks/benchmark_cli.cpp \
-	benchmarks/benchmark_harness.cpp
+	benchmarks/benchmark_harness.cpp \
+	benchmarks/benchmark_model_load.cpp \
+	benchmarks/benchmark_projection.cpp \
+	benchmarks/benchmark_resident_kv_decode.cpp \
+	benchmarks/benchmark_synthetic_core.cpp \
+	benchmarks/benchmark_synthetic_llama.cpp \
+	benchmarks/benchmark_support.cpp
 
 BENCHMARK_MAIN_SOURCES := \
 	benchmarks/benchmark_main.cpp
 
+TEST_INCLUDE_FLAGS := \
+	-Itests/benchmarks \
+	-Itests/engine \
+	-Itests/frontends/cli \
+	-Itests/model_format \
+	-Itests/support \
+	-Itests/tensor \
+	-Itests/tokenizer
+
 TEST_SOURCES := \
-	tests/benchmark_tests.cpp \
-	tests/engine_model_tests.cpp \
-	tests/generate_cli_tests.cpp \
-	tests/gguf_inspect_tests.cpp \
-	tests/gguf_reader_tests.cpp \
-	tests/gguf_tensor_bridge_tests.cpp \
-	tests/llama_attention_layer_tests.cpp \
-	tests/llama_backend_tests.cpp \
-	tests/llama_block_tests.cpp \
-	tests/llama_feed_forward_layer_tests.cpp \
-	tests/llama_generation_tests.cpp \
-	tests/llama_kv_cache_tests.cpp \
-	tests/llama_model_tests.cpp \
-	tests/llama_test_support.cpp \
-	tests/sampling_tests.cpp \
-	tests/tensor_backend_tests.cpp \
-	tests/tensor_tests.cpp \
-	tests/tensor_test_support.cpp \
-	tests/test_support.cpp \
-	tests/tokenizer_tests.cpp \
+	tests/benchmarks/benchmark_tests.cpp \
+	tests/engine/engine_model_tests.cpp \
+	tests/engine/llama_attention_layer_tests.cpp \
+	tests/engine/llama_backend_tests.cpp \
+	tests/engine/llama_block_tests.cpp \
+	tests/engine/llama_feed_forward_layer_tests.cpp \
+	tests/engine/llama_generation_tests.cpp \
+	tests/engine/llama_kv_cache_tests.cpp \
+	tests/engine/llama_model_tests.cpp \
+	tests/engine/sampling_tests.cpp \
+	tests/frontends/cli/generate_cli_tests.cpp \
+	tests/frontends/cli/gguf_inspect_tests.cpp \
+	tests/model_format/gguf_reader_tests.cpp \
+	tests/model_format/gguf_tensor_bridge_tests.cpp \
+	tests/support/llama_test_support.cpp \
+	tests/support/tensor_test_support.cpp \
+	tests/support/test_support.cpp \
+	tests/tensor/tensor_backend_tests.cpp \
+	tests/tensor/tensor_tests.cpp \
+	tests/tokenizer/tokenizer_tests.cpp \
 	tests/test_main.cpp
 
 COMMON_FLAGS := -std=c++20 -Iinclude -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fobjc-arc
@@ -112,7 +127,7 @@ run-benchmark: $(BENCHMARK_BINARY)
 
 $(TEST_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(BENCHMARK_SOURCES) $(TEST_SOURCES)
 	mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(BENCHMARK_SOURCES) $(TEST_SOURCES) $(METAL_LDFLAGS) -o $(TEST_BINARY)
+	$(CXX) $(CXXFLAGS) $(TEST_INCLUDE_FLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(BENCHMARK_SOURCES) $(TEST_SOURCES) $(METAL_LDFLAGS) -o $(TEST_BINARY)
 
 $(GGUF_INSPECT_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GGUF_INSPECT_SOURCES)
 	mkdir -p $(BUILD_DIR)
