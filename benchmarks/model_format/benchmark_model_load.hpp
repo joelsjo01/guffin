@@ -6,6 +6,6 @@
 
 namespace local_gguf_engine::benchmarks {
 
-void add_model_load_benchmarks(BenchmarkReport& report, const std::filesystem::path& model_path);
+void add_model_load_benchmarks(BenchmarkReport &report, const std::filesystem::path &model_path);
 
-}  // namespace local_gguf_engine::benchmarks
+} // namespace local_gguf_engine::benchmarks

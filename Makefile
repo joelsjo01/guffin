@@ -18,6 +18,8 @@ ENGINE_SOURCES := \
 	src/runtime/backend_error.cpp \
 	src/tokenizer/tokenizer.cpp \
 	src/tensor/backend.cpp \
+	src/tensor/backend_buffer.mm \
+	src/tensor/backends/cpu_backend.cpp \
 	src/tensor/backends/metal/metal_benchmark.mm \
 	src/tensor/backends/metal/metal_buffer.mm \
 	src/tensor/backends/metal/metal_context.mm \
@@ -51,17 +53,17 @@ GENERATE_SOURCES := \
 	src/frontends/cli/generate_main.cpp
 
 BENCHMARK_SOURCES := \
-	benchmarks/benchmark_cli.cpp \
 	benchmarks/benchmark_harness.cpp \
-	benchmarks/benchmark_model_load.cpp \
-	benchmarks/benchmark_projection.cpp \
-	benchmarks/benchmark_resident_kv_decode.cpp \
-	benchmarks/benchmark_synthetic_core.cpp \
-	benchmarks/benchmark_synthetic_llama.cpp \
-	benchmarks/benchmark_support.cpp
+	benchmarks/engine/benchmark_synthetic_llama.cpp \
+	benchmarks/engine/kv/benchmark_resident_kv_decode.cpp \
+	benchmarks/frontends/cli/benchmark_cli.cpp \
+	benchmarks/model_format/benchmark_model_load.cpp \
+	benchmarks/support/benchmark_support.cpp \
+	benchmarks/tensor/benchmark_projection.cpp \
+	benchmarks/tensor/benchmark_synthetic_core.cpp
 
 BENCHMARK_MAIN_SOURCES := \
-	benchmarks/benchmark_main.cpp
+	benchmarks/frontends/cli/benchmark_main.cpp
 
 TEST_INCLUDE_FLAGS := \
 	-Itests/benchmarks \

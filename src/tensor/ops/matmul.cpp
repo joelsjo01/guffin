@@ -1,6 +1,7 @@
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 
 #include "validation.hpp"
+#include "../backends/cpu_backend.hpp"
 #include "../backends/metal_backend.hpp"
 
 #include "local_gguf_engine/runtime/backend_error.hpp"
@@ -93,32 +94,6 @@ template <typename RightReader>
     return output;
 }
 
-[[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight_cpu(
-    const TensorStorage& left,
-    const TensorStorage& right
-) {
-    const auto rows = left.descriptor().shape.dimension(0);
-    const auto shared = left.descriptor().shape.dimension(1);
-    const auto columns = right.descriptor().shape.dimension(1);
-    auto output = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f32));
-
-    for (std::uint64_t row = 0; row < rows; ++row) {
-        for (std::uint64_t column = 0; column < columns; ++column) {
-            float sum = 0.0F;
-            for (std::uint64_t inner = 0; inner < shared; ++inner) {
-                const auto left_index = row * shared + inner;
-                // GGUF/GGML stores dimension 0 contiguously, so each output column owns a packed input row.
-                const auto right_index = column * shared + inner;
-                sum += read_f32_linear(left, left_index) * read_f16_linear_as_f32(right, right_index);
-            }
-
-            write_f32_linear(output, row * columns + column, sum);
-        }
-    }
-
-    return output;
-}
-
 }  // namespace
 
 TensorStorage matmul_f32(const TensorStorage& left, const TensorStorage& right) {
@@ -146,7 +121,7 @@ TensorStorage matmul_f32_f16_gguf_weight(
 
     switch (backend) {
         case runtime::BackendKind::cpu:
-            return matmul_f32_f16_gguf_weight_cpu(left, right);
+            return backends::cpu::matmul_f32_f16_gguf_weight(left, right);
         case runtime::BackendKind::metal:
             return backends::metal::matmul_f32_f16_gguf_weight(left, right);
     }

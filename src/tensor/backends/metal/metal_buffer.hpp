@@ -6,18 +6,6 @@
 
 namespace local_gguf_engine::tensor::backends::metal {
 
-class CpuBackendBufferStorage final : public detail::BackendBufferStorage {
-public:
-    explicit CpuBackendBufferStorage(const TensorStorage& storage);
-
-    [[nodiscard]] runtime::BackendKind backend() const noexcept override;
-    [[nodiscard]] const TensorDescriptor& descriptor() const noexcept override;
-    [[nodiscard]] const TensorStorage& storage() const noexcept;
-
-private:
-    TensorStorage storage_;
-};
-
 class MetalBackendBufferStorage final : public detail::BackendBufferStorage {
 public:
     MetalBackendBufferStorage(const TensorStorage& storage, id<MTLBuffer> buffer);
@@ -32,15 +20,16 @@ private:
     id<MTLBuffer> buffer_ = nil;
 };
 
-[[nodiscard]] const CpuBackendBufferStorage& require_cpu_backend_buffer(
-    const detail::BackendBufferStorage& storage
-);
 [[nodiscard]] const MetalBackendBufferStorage& require_metal_backend_buffer(
     const detail::BackendBufferStorage& storage
 );
 [[nodiscard]] BackendBuffer make_metal_backend_buffer(
     TensorDescriptor descriptor,
     id<MTLBuffer> buffer
+);
+[[nodiscard]] BackendBuffer copy_tensor_to_metal_backend(const TensorStorage& storage);
+[[nodiscard]] TensorStorage copy_tensor_from_metal_backend(
+    const detail::BackendBufferStorage& storage
 );
 
 }  // namespace local_gguf_engine::tensor::backends::metal

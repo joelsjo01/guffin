@@ -1,11 +1,10 @@
 #include "metal_tensor_ops.hpp"
 
+#include "../cpu_backend.hpp"
 #include "../metal_backend.hpp"
 #include "metal_context.hpp"
 
 #include "local_gguf_engine/runtime/backend_error.hpp"
-#include "local_gguf_engine/tensor/ops/elementwise.hpp"
-#include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/tensor_error.hpp"
 #include "../../ops/validation.hpp"
 
@@ -994,10 +993,9 @@ TensorStorage matmul_f32_f16_gguf_weight(const TensorStorage& left, const Backen
 
     switch (right.backend()) {
         case runtime::BackendKind::cpu:
-            return matmul_f32_f16_gguf_weight(
+            return backends::cpu::matmul_f32_f16_gguf_weight_with_cpu_right_buffer(
                 left,
-                backends::metal::require_cpu_backend_buffer(backend_buffer_storage(right)).storage(),
-                runtime::BackendKind::cpu
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(right))
             );
         case runtime::BackendKind::metal:
             @autoreleasepool {
@@ -1027,20 +1025,11 @@ BackendBuffer matmul_f32_f16_gguf_weight_to_backend(
     );
 
     switch (right.backend()) {
-        case runtime::BackendKind::cpu: {
-            const auto& left_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(left)
-            ).storage();
-            const auto& right_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(right)
-            ).storage();
-            const auto output = matmul_f32_f16_gguf_weight(
-                left_storage,
-                right_storage,
-                runtime::BackendKind::cpu
+        case runtime::BackendKind::cpu:
+            return backends::cpu::matmul_f32_f16_gguf_weight_with_cpu_buffers(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(left)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(right))
             );
-            return copy_tensor_to_backend(output, runtime::BackendKind::cpu);
-        }
         case runtime::BackendKind::metal:
             @autoreleasepool {
                 return backends::metal::matmul_f32_f16_gguf_weight_with_metal_buffers(
@@ -1074,40 +1063,13 @@ F32F16GGUFWeightTripleMatmulBackendBuffers matmul_f32_f16_gguf_weight_triple_to_
     backends::metal::require_same_backend(left.backend(), third_right.backend(), "F32xF16 GGUF triple matmul");
 
     switch (left.backend()) {
-        case runtime::BackendKind::cpu: {
-            const auto& left_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(left)
-            ).storage();
-            const auto& first_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(first_right)
-            ).storage();
-            const auto& second_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(second_right)
-            ).storage();
-            const auto& third_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(third_right)
-            ).storage();
-            const auto first_output = matmul_f32_f16_gguf_weight(
-                left_storage,
-                first_storage,
-                runtime::BackendKind::cpu
+        case runtime::BackendKind::cpu:
+            return backends::cpu::matmul_f32_f16_gguf_weight_triple_with_cpu_buffers(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(left)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(first_right)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(second_right)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(third_right))
             );
-            const auto second_output = matmul_f32_f16_gguf_weight(
-                left_storage,
-                second_storage,
-                runtime::BackendKind::cpu
-            );
-            const auto third_output = matmul_f32_f16_gguf_weight(
-                left_storage,
-                third_storage,
-                runtime::BackendKind::cpu
-            );
-            return F32F16GGUFWeightTripleMatmulBackendBuffers {
-                .first = copy_tensor_to_backend(first_output, runtime::BackendKind::cpu),
-                .second = copy_tensor_to_backend(second_output, runtime::BackendKind::cpu),
-                .third = copy_tensor_to_backend(third_output, runtime::BackendKind::cpu),
-            };
-        }
         case runtime::BackendKind::metal:
             @autoreleasepool {
                 return backends::metal::matmul_f32_f16_gguf_weight_triple_with_metal_buffers(
@@ -1134,16 +1096,11 @@ BackendBuffer silu_multiply_f32_to_backend(
     backends::metal::require_same_backend(gate.backend(), up.backend(), "SiLU multiply");
 
     switch (gate.backend()) {
-        case runtime::BackendKind::cpu: {
-            const auto& gate_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(gate)
-            ).storage();
-            const auto& up_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(up)
-            ).storage();
-            const auto output = multiply_f32(silu_f32(gate_storage), up_storage);
-            return copy_tensor_to_backend(output, runtime::BackendKind::cpu);
-        }
+        case runtime::BackendKind::cpu:
+            return backends::cpu::silu_multiply_f32_with_cpu_buffers(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(gate)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(up))
+            );
         case runtime::BackendKind::metal:
             @autoreleasepool {
                 return backends::metal::silu_multiply_f32_with_metal_buffers(
@@ -1189,37 +1146,13 @@ BackendBuffer gated_silu_projection_f32_f16_gguf_weight_to_backend(
     );
 
     switch (left.backend()) {
-        case runtime::BackendKind::cpu: {
-            const auto& left_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(left)
-            ).storage();
-            const auto& gate_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(gate_weight)
-            ).storage();
-            const auto& up_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(up_weight)
-            ).storage();
-            const auto& down_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(down_weight)
-            ).storage();
-            const auto gate = matmul_f32_f16_gguf_weight(
-                left_storage,
-                gate_storage,
-                runtime::BackendKind::cpu
+        case runtime::BackendKind::cpu:
+            return backends::cpu::gated_silu_projection_f32_f16_gguf_weight_with_cpu_buffers(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(left)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(gate_weight)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(up_weight)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(down_weight))
             );
-            const auto up = matmul_f32_f16_gguf_weight(
-                left_storage,
-                up_storage,
-                runtime::BackendKind::cpu
-            );
-            const auto gated = multiply_f32(silu_f32(gate), up);
-            const auto output = matmul_f32_f16_gguf_weight(
-                gated,
-                down_storage,
-                runtime::BackendKind::cpu
-            );
-            return copy_tensor_to_backend(output, runtime::BackendKind::cpu);
-        }
         case runtime::BackendKind::metal:
             @autoreleasepool {
                 return backends::metal::gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
@@ -1274,59 +1207,17 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_to_backend(
     backends::metal::require_same_backend(input.backend(), down_weight.backend(), "residual gated SiLU projection");
 
     switch (input.backend()) {
-        case runtime::BackendKind::cpu: {
-            const auto& input_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(input)
-            ).storage();
-            const auto& attention_output_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(attention_output)
-            ).storage();
-            const auto& attention_output_weight_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(attention_output_weight)
-            ).storage();
-            const auto& feed_forward_norm_weight_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(feed_forward_norm_weight)
-            ).storage();
-            const auto& gate_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(gate_weight)
-            ).storage();
-            const auto& up_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(up_weight)
-            ).storage();
-            const auto& down_storage = backends::metal::require_cpu_backend_buffer(
-                backend_buffer_storage(down_weight)
-            ).storage();
-
-            const auto attention_projected = matmul_f32_f16_gguf_weight(
-                attention_output_storage,
-                attention_output_weight_storage,
-                runtime::BackendKind::cpu
-            );
-            const auto attention_residual = add_f32(input_storage, attention_projected);
-            const auto normalized = rms_norm_f32(
-                attention_residual,
-                feed_forward_norm_weight_storage,
+        case runtime::BackendKind::cpu:
+            return backends::cpu::residual_gated_silu_projection_f32_f16_gguf_weight_with_cpu_buffers(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(input)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(attention_output)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(attention_output_weight)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(feed_forward_norm_weight)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(gate_weight)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(up_weight)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(down_weight)),
                 epsilon
             );
-            const auto gate = matmul_f32_f16_gguf_weight(
-                normalized,
-                gate_storage,
-                runtime::BackendKind::cpu
-            );
-            const auto up = matmul_f32_f16_gguf_weight(
-                normalized,
-                up_storage,
-                runtime::BackendKind::cpu
-            );
-            const auto gated = multiply_f32(silu_f32(gate), up);
-            const auto feed_forward_projected = matmul_f32_f16_gguf_weight(
-                gated,
-                down_storage,
-                runtime::BackendKind::cpu
-            );
-            const auto output = add_f32(attention_residual, feed_forward_projected);
-            return copy_tensor_to_backend(output, runtime::BackendKind::cpu);
-        }
         case runtime::BackendKind::metal:
             @autoreleasepool {
                 return backends::metal::residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
