@@ -8,4 +8,4 @@ namespace local_gguf_engine::tests {
 
 std::span<const TestCase> benchmark_test_cases();
 
-}  // namespace local_gguf_engine::tests
+} // namespace local_gguf_engine::tests
