@@ -4,6 +4,7 @@
 #include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
+#include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/tensor_error.hpp"
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
@@ -18,6 +19,7 @@
 #include <ostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -27,14 +29,19 @@ namespace local_gguf_engine::frontends::cli {
 namespace {
 
 using engine::bind_llama_model_weights;
+using engine::copy_llama_model_inference_weights_to_backend;
+using engine::create_llama_backend_kv_cache;
 using engine::create_llama_kv_cache;
 using engine::EngineModelError;
 using engine::generate_llama_sampled_tokens_with_kv_cache_f32;
+using engine::LlamaModelInferenceConfig;
 using engine::load_engine_model_from_gguf;
 using engine::run_llama_model_logits_with_kv_cache_f32;
 using engine::top_logit_tokens_f32;
 using model_format::GGUFReadError;
 using model_format::read_gguf_model_view;
+using runtime::BackendError;
+using runtime::BackendKind;
 using tensor::TensorError;
 using tokenizer::format_generate_prompt_from_gguf_metadata;
 using tokenizer::load_tokenizer_from_gguf_metadata;
@@ -65,7 +72,8 @@ struct EncodedGeneratePrompt {
 void write_generate_usage(std::ostream& error) {
     error << "usage: local-gguf-generate <model.gguf> <prompt> <max-new-tokens>"
           << " [--greedy] [--temperature <value>] [--top-k <count>] [--top-p <value>]"
-          << " [--repeat-penalty <value>] [--seed <integer>] [--debug-first-token]\n";
+          << " [--repeat-penalty <value>] [--seed <integer>] [--backend cpu|metal]"
+          << " [--debug-first-token]\n";
 }
 
 [[nodiscard]] std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
@@ -198,7 +206,21 @@ void write_generate_usage(std::ostream& error) {
     return value >= 1.0F;
 }
 
-[[nodiscard]] bool parse_sampling_options(
+[[nodiscard]] bool parse_backend_kind(std::string_view text, BackendKind& backend) noexcept {
+    if (text == "cpu") {
+        backend = BackendKind::cpu;
+        return true;
+    }
+
+    if (text == "metal") {
+        backend = BackendKind::metal;
+        return true;
+    }
+
+    return false;
+}
+
+[[nodiscard]] bool parse_generate_options(
     int argc,
     const char* const* argv,
     GenerateOptions& options,
@@ -299,6 +321,22 @@ void write_generate_usage(std::ostream& error) {
 
             options.sampling.seed = seed;
             seed_set = true;
+            ++index;
+        } else if (option == "--backend") {
+            if (index + 1 >= argc) {
+                write_generate_usage(error);
+                error << "error: --backend requires a value\n";
+                return false;
+            }
+
+            BackendKind backend = BackendKind::cpu;
+            if (!parse_backend_kind(argv[index + 1], backend)) {
+                write_generate_usage(error);
+                error << "error: --backend must be cpu or metal\n";
+                return false;
+            }
+
+            options.backend = backend;
             ++index;
         } else if (option == "--debug-first-token") {
             options.debug_first_token = true;
@@ -414,14 +452,30 @@ std::string generate_text_from_gguf_bytes(
     const auto tokenizer = load_tokenizer_from_gguf_metadata(model_view.directory.metadata);
     const auto encoded_prompt = encode_generate_prompt(model_view.directory.metadata, tokenizer, prompt);
     const auto weights = bind_llama_model_weights(model);
-    const auto output_token_ids = generate_llama_sampled_tokens_with_kv_cache_f32(
-        std::span<const std::uint32_t>(encoded_prompt.token_ids),
-        max_new_tokens,
-        weights,
-        model.llama_config(),
-        options.sampling,
-        tokenizer.special_tokens().eos_token_id
-    );
+    std::vector<std::uint32_t> output_token_ids;
+    if (options.backend == BackendKind::cpu) {
+        output_token_ids = generate_llama_sampled_tokens_with_kv_cache_f32(
+            std::span<const std::uint32_t>(encoded_prompt.token_ids),
+            max_new_tokens,
+            weights,
+            model.llama_config(),
+            options.sampling,
+            tokenizer.special_tokens().eos_token_id
+        );
+    } else {
+        const auto inference_weights = copy_llama_model_inference_weights_to_backend(
+            weights,
+            LlamaModelInferenceConfig {.backend = options.backend}
+        );
+        output_token_ids = generate_llama_sampled_tokens_with_kv_cache_f32(
+            std::span<const std::uint32_t>(encoded_prompt.token_ids),
+            max_new_tokens,
+            inference_weights,
+            model.llama_config(),
+            options.sampling,
+            tokenizer.special_tokens().eos_token_id
+        );
+    }
 
     return tokenizer.decode(
         std::span<const std::uint32_t>(output_token_ids).subspan(encoded_prompt.token_ids.size()),
@@ -434,6 +488,20 @@ GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_bytes(
     std::string_view prompt,
     std::size_t top_token_count
 ) {
+    return inspect_generate_first_token_from_gguf_bytes(
+        bytes,
+        prompt,
+        top_token_count,
+        GenerateOptions {}
+    );
+}
+
+GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_bytes(
+    std::span<const std::uint8_t> bytes,
+    std::string_view prompt,
+    std::size_t top_token_count,
+    const GenerateOptions& options
+) {
     const auto model_view = read_gguf_model_view(bytes);
     const auto model = load_engine_model_from_gguf(model_view);
     const auto tokenizer = load_tokenizer_from_gguf_metadata(model_view.directory.metadata);
@@ -443,15 +511,32 @@ GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_bytes(
     }
 
     const auto weights = bind_llama_model_weights(model);
-    auto cache = create_llama_kv_cache(model.llama_config());
     const auto prompt_final_position = static_cast<std::uint64_t>(encoded_prompt.token_ids.size() - 1U);
-    const auto logits = run_llama_model_logits_with_kv_cache_f32(
-        std::span<const std::uint32_t>(encoded_prompt.token_ids),
-        weights,
-        model.llama_config(),
-        prompt_final_position,
-        cache
-    );
+    const auto logits = [&] {
+        if (options.backend == BackendKind::cpu) {
+            auto cache = create_llama_kv_cache(model.llama_config());
+            return run_llama_model_logits_with_kv_cache_f32(
+                std::span<const std::uint32_t>(encoded_prompt.token_ids),
+                weights,
+                model.llama_config(),
+                prompt_final_position,
+                cache
+            );
+        }
+
+        const auto inference_weights = copy_llama_model_inference_weights_to_backend(
+            weights,
+            LlamaModelInferenceConfig {.backend = options.backend}
+        );
+        auto cache = create_llama_backend_kv_cache(model.llama_config(), options.backend);
+        return run_llama_model_logits_with_kv_cache_f32(
+            std::span<const std::uint32_t>(encoded_prompt.token_ids),
+            inference_weights,
+            model.llama_config(),
+            prompt_final_position,
+            cache
+        );
+    }();
 
     std::vector<GenerateFirstTokenLogit> top_logits;
     for (const auto& token_logit : top_logit_tokens_f32(logits, top_token_count)) {
@@ -509,7 +594,7 @@ int run_generate(int argc, const char* const* argv, std::ostream& output, std::o
     GenerateOptions options {
         .sampling = default_cli_sampling,
     };
-    if (!parse_sampling_options(argc, argv, options, error)) {
+    if (!parse_generate_options(argc, argv, options, error)) {
         return 1;
     }
 
@@ -520,7 +605,8 @@ int run_generate(int argc, const char* const* argv, std::ostream& output, std::o
                 inspect_generate_first_token_from_gguf_bytes(
                     std::span<const std::uint8_t>(bytes),
                     argv[2],
-                    default_debug_top_token_count
+                    default_debug_top_token_count,
+                    options
                 ),
                 error
             );
@@ -537,6 +623,8 @@ int run_generate(int argc, const char* const* argv, std::ostream& output, std::o
         error << "error: invalid model: " << model_error.what() << '\n';
     } catch (const TokenizerError& tokenizer_error) {
         error << "error: tokenizer: " << tokenizer_error.what() << '\n';
+    } catch (const BackendError& backend_error) {
+        error << "error: backend: " << backend_error.what() << '\n';
     } catch (const TensorError& tensor_error) {
         error << "error: tensor: " << tensor_error.what() << '\n';
     } catch (const std::exception& unexpected_error) {

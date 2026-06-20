@@ -1,6 +1,7 @@
 #pragma once
 
 #include "local_gguf_engine/engine/sampling.hpp"
+#include "local_gguf_engine/runtime/backend_kind.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -8,11 +9,13 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace local_gguf_engine::frontends::cli {
 
 struct GenerateOptions {
     engine::SamplingConfig sampling;
+    runtime::BackendKind backend = runtime::default_backend();
     bool debug_first_token = false;
 };
 
@@ -46,6 +49,13 @@ struct GenerateFirstTokenDebugInfo {
     std::span<const std::uint8_t> bytes,
     std::string_view prompt,
     std::size_t top_token_count
+);
+
+[[nodiscard]] GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_bytes(
+    std::span<const std::uint8_t> bytes,
+    std::string_view prompt,
+    std::size_t top_token_count,
+    const GenerateOptions& options
 );
 
 void write_generate_first_token_debug(

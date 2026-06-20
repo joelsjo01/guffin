@@ -5,6 +5,8 @@
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/frontends/cli/generate.hpp"
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
+#include "local_gguf_engine/runtime/backend_kind.hpp"
+#include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
@@ -37,8 +39,10 @@ using local_gguf_engine::model_format::GGUFMetadataArray;
 using local_gguf_engine::model_format::GGUFMetadataEntry;
 using local_gguf_engine::model_format::GGUFMetadataValue;
 using local_gguf_engine::model_format::GGUFMetadataValueType;
+using local_gguf_engine::runtime::BackendKind;
 using local_gguf_engine::tensor::DType;
 using local_gguf_engine::tensor::TensorStorage;
+using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tests::metadata_bool;
 using local_gguf_engine::tests::metadata_f32;
 using local_gguf_engine::tests::metadata_f32_array;
@@ -632,6 +636,18 @@ void test_generates_text_from_gguf_bytes_with_sampling_options() {
     expect(text == "Hello", "generate text should use seeded temperature/top-k sampling options");
 }
 
+void test_generates_text_from_gguf_bytes_with_cpu_backend_option() {
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+    const GenerateOptions options {
+        .sampling = local_gguf_engine::engine::SamplingConfig {},
+        .backend = BackendKind::cpu,
+    };
+
+    const auto text = generate_text_from_gguf_bytes(std::span<const std::uint8_t>(bytes), "", 2, options);
+
+    expect(text == "!", "generate text CPU backend option should preserve cached argmax output");
+}
+
 void test_runs_generate_success_path() {
     const auto bytes = tiny_generate_cli_gguf_bytes();
     const TempBinaryFile model("tiny-generate", std::span<const std::uint8_t>(bytes));
@@ -665,6 +681,58 @@ void test_runs_generate_with_greedy_option() {
     expect(exit_code == EXIT_SUCCESS, "generate greedy success exit code mismatch");
     expect(output.str() == "!\n", "generate greedy output mismatch");
     expect(error.str().empty(), "generate greedy should not write stderr");
+}
+
+void test_runs_generate_with_cpu_backend_option() {
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-generate-backend-cpu", std::span<const std::uint8_t>(bytes));
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = model.path().string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "2",
+        "--greedy",
+        "--backend",
+        "cpu",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(7, argv, output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "generate CPU backend success exit code mismatch");
+    expect(output.str() == "!\n", "generate CPU backend output mismatch");
+    expect(error.str().empty(), "generate CPU backend should not write stderr");
+}
+
+void test_runs_generate_with_metal_backend_option_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-generate-backend-metal", std::span<const std::uint8_t>(bytes));
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = model.path().string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "2",
+        "--greedy",
+        "--backend",
+        "metal",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(7, argv, output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "generate Metal backend success exit code mismatch");
+    expect(output.str() == "!\n", "generate Metal backend output mismatch");
+    expect(error.str().empty(), "generate Metal backend should not write stderr");
 }
 
 void test_runs_generate_with_sampling_options() {
@@ -760,6 +828,41 @@ void test_runs_generate_with_first_token_debug() {
     );
 }
 
+void test_reports_generate_metal_backend_unavailable_when_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = tiny_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-generate-backend-metal-missing", std::span<const std::uint8_t>(bytes));
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = model.path().string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "2",
+        "--greedy",
+        "--backend",
+        "metal",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(7, argv, output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate unavailable Metal backend exit code mismatch");
+    expect(output.str().empty(), "generate unavailable Metal backend should not write stdout");
+    expect(
+        error.str().find("error: backend:") != std::string::npos,
+        "generate unavailable Metal backend error prefix missing"
+    );
+    expect(
+        error.str().find("Metal backend unavailable") != std::string::npos,
+        "generate unavailable Metal backend message missing"
+    );
+}
+
 void test_rejects_generate_missing_arguments() {
     const char* argv[] = {"local-gguf-generate"};
     std::ostringstream output;
@@ -841,6 +944,31 @@ void test_rejects_generate_invalid_top_p_option() {
     );
 }
 
+void test_rejects_generate_invalid_backend_option() {
+    const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-generate.gguf";
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "",
+        "1",
+        "--backend",
+        "gpu",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(6, argv, output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate invalid-backend exit code mismatch");
+    expect(output.str().empty(), "generate invalid-backend should not write stdout");
+    expect(
+        error.str().find("--backend must be cpu or metal") != std::string::npos,
+        "generate invalid-backend error missing"
+    );
+}
+
 void test_rejects_generate_invalid_repeat_penalty_option() {
     const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-generate.gguf";
     const std::string program = "local-gguf-generate";
@@ -913,15 +1041,29 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
         "generates text from GGUF bytes with sampling options",
         test_generates_text_from_gguf_bytes_with_sampling_options,
     },
+    {
+        "generates text from GGUF bytes with CPU backend option",
+        test_generates_text_from_gguf_bytes_with_cpu_backend_option,
+    },
     {"runs generate success path", test_runs_generate_success_path},
     {"runs generate with greedy option", test_runs_generate_with_greedy_option},
+    {"runs generate with CPU backend option", test_runs_generate_with_cpu_backend_option},
+    {
+        "runs generate with Metal backend option when available",
+        test_runs_generate_with_metal_backend_option_when_available,
+    },
     {"runs generate with sampling options", test_runs_generate_with_sampling_options},
     {"runs generate with top-p option", test_runs_generate_with_top_p_option},
     {"runs generate with first-token debug", test_runs_generate_with_first_token_debug},
+    {
+        "reports generate Metal backend unavailable when missing",
+        test_reports_generate_metal_backend_unavailable_when_missing,
+    },
     {"rejects generate missing arguments", test_rejects_generate_missing_arguments},
     {"rejects generate invalid max new tokens", test_rejects_generate_invalid_max_new_tokens},
     {"rejects generate invalid temperature option", test_rejects_generate_invalid_temperature_option},
     {"rejects generate invalid top-p option", test_rejects_generate_invalid_top_p_option},
+    {"rejects generate invalid backend option", test_rejects_generate_invalid_backend_option},
     {
         "rejects generate invalid repeat-penalty option",
         test_rejects_generate_invalid_repeat_penalty_option,

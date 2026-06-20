@@ -32,11 +32,13 @@ using local_gguf_engine::engine::copy_llama_feed_forward_layer_weights_to_backen
 using local_gguf_engine::engine::copy_llama_model_attention_weights_to_backend;
 using local_gguf_engine::engine::copy_llama_model_block_weights_to_backend;
 using local_gguf_engine::engine::copy_llama_model_feed_forward_weights_to_backend;
+using local_gguf_engine::engine::copy_llama_model_inference_weights_to_backend;
 using local_gguf_engine::engine::copy_llama_model_logits_weights_to_backend;
 using local_gguf_engine::engine::create_llama_backend_kv_cache;
 using local_gguf_engine::engine::create_llama_kv_cache;
 using local_gguf_engine::engine::EngineModel;
 using local_gguf_engine::engine::EngineTensor;
+using local_gguf_engine::engine::generate_llama_argmax_tokens_with_kv_cache_f32;
 using local_gguf_engine::engine::LlamaBlockBackendWeights;
 using local_gguf_engine::engine::LlamaBlockWeights;
 using local_gguf_engine::engine::LlamaKVCache;
@@ -44,6 +46,7 @@ using local_gguf_engine::engine::LlamaModelAttentionBackendWeights;
 using local_gguf_engine::engine::LlamaModelBlockBackendWeights;
 using local_gguf_engine::engine::LlamaModelConfig;
 using local_gguf_engine::engine::LlamaModelFeedForwardBackendWeights;
+using local_gguf_engine::engine::LlamaModelInferenceConfig;
 using local_gguf_engine::engine::LlamaModelLogitsBackendWeights;
 using local_gguf_engine::engine::LlamaModelWeights;
 using local_gguf_engine::engine::project_llama_logits_f32;
@@ -55,6 +58,10 @@ using local_gguf_engine::engine::run_llama_feed_forward_layer_f32;
 using local_gguf_engine::engine::run_llama_model_blocks_f32;
 using local_gguf_engine::engine::run_llama_model_blocks_with_kv_cache_f32;
 using local_gguf_engine::engine::run_llama_model_logits_f32;
+using local_gguf_engine::engine::run_llama_model_next_token_argmax_f32;
+using local_gguf_engine::engine::run_llama_model_next_token_sampled_f32;
+using local_gguf_engine::engine::SamplingConfig;
+using local_gguf_engine::engine::SamplingState;
 using local_gguf_engine::runtime::BackendError;
 using local_gguf_engine::runtime::BackendErrorCode;
 using local_gguf_engine::runtime::BackendKind;
@@ -1302,6 +1309,67 @@ void test_runs_llama_model_logits_with_cpu_backend_weight_buffers() {
     expect_f32_matrix_close(output, expected, 0.0F, "Llama model CPU logits backend output");
 }
 
+void test_runs_llama_next_token_argmax_with_default_inference_backend() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto inference_weights = copy_llama_model_inference_weights_to_backend(weights);
+    const std::array<std::uint32_t, 2> token_ids {0, 3};
+
+    const auto expected = run_llama_model_next_token_argmax_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        1
+    );
+    const auto token = run_llama_model_next_token_argmax_f32(
+        std::span<const std::uint32_t>(token_ids),
+        inference_weights,
+        model.llama_config(),
+        1
+    );
+
+    expect(inference_weights.backend == BackendKind::cpu, "default Llama inference backend should be CPU");
+    expect_model_logits_backend_weights(weights, inference_weights.logits, BackendKind::cpu);
+    expect(token == expected, "default Llama inference backend argmax should match CPU reference");
+}
+
+void test_runs_llama_next_token_sampled_with_default_inference_backend() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto inference_weights = copy_llama_model_inference_weights_to_backend(weights);
+    const std::array<std::uint32_t, 2> token_ids {0, 3};
+    const SamplingConfig sampling {
+        .temperature = 1.0F,
+        .top_k = 3,
+        .seed = 7,
+    };
+    SamplingState expected_state(sampling.seed);
+    SamplingState inference_state(sampling.seed);
+
+    const auto expected = run_llama_model_next_token_sampled_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        1,
+        sampling,
+        expected_state,
+        std::span<const std::uint32_t>(token_ids)
+    );
+    const auto token = run_llama_model_next_token_sampled_f32(
+        std::span<const std::uint32_t>(token_ids),
+        inference_weights,
+        model.llama_config(),
+        1,
+        sampling,
+        inference_state,
+        std::span<const std::uint32_t>(token_ids)
+    );
+
+    expect(inference_weights.backend == BackendKind::cpu, "default sampled Llama inference backend should be CPU");
+    expect_model_logits_backend_weights(weights, inference_weights.logits, BackendKind::cpu);
+    expect(token == expected, "default Llama inference backend sampled output should match CPU reference");
+}
+
 void test_matches_llama_model_logits_with_metal_backend_weight_buffers_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -1329,6 +1397,92 @@ void test_matches_llama_model_logits_with_metal_backend_weight_buffers_when_avai
     expect_f32_matrix_close(output, expected, 1.0e-2F, "Llama model Metal logits backend output");
 }
 
+void test_matches_llama_next_token_argmax_with_metal_inference_backend_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto inference_weights = copy_llama_model_inference_weights_to_backend(
+        weights,
+        LlamaModelInferenceConfig {.backend = BackendKind::metal}
+    );
+    const std::array<std::uint32_t, 2> token_ids {0, 3};
+
+    const auto expected = run_llama_model_next_token_argmax_f32(
+        std::span<const std::uint32_t>(token_ids),
+        weights,
+        model.llama_config(),
+        1
+    );
+    const auto token = run_llama_model_next_token_argmax_f32(
+        std::span<const std::uint32_t>(token_ids),
+        inference_weights,
+        model.llama_config(),
+        1
+    );
+
+    expect(inference_weights.backend == BackendKind::metal, "explicit Llama inference backend should be Metal");
+    expect_model_logits_backend_weights(weights, inference_weights.logits, BackendKind::metal);
+    expect(token == expected, "Metal Llama inference backend argmax should match CPU reference");
+}
+
+void test_runs_llama_cached_argmax_generation_with_default_inference_backend() {
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto inference_weights = copy_llama_model_inference_weights_to_backend(weights);
+    const std::array<std::uint32_t, 2> prompt_token_ids {0, 3};
+
+    const auto expected = generate_llama_argmax_tokens_with_kv_cache_f32(
+        std::span<const std::uint32_t>(prompt_token_ids),
+        2,
+        weights,
+        model.llama_config()
+    );
+    const auto tokens = generate_llama_argmax_tokens_with_kv_cache_f32(
+        std::span<const std::uint32_t>(prompt_token_ids),
+        2,
+        inference_weights,
+        model.llama_config()
+    );
+
+    expect(inference_weights.backend == BackendKind::cpu, "default cached Llama inference backend should be CPU");
+    expect_model_logits_backend_weights(weights, inference_weights.logits, BackendKind::cpu);
+    expect(tokens == expected, "default cached Llama inference backend generation should match CPU reference");
+}
+
+void test_matches_llama_cached_argmax_generation_with_metal_inference_backend_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+    const auto inference_weights = copy_llama_model_inference_weights_to_backend(
+        weights,
+        LlamaModelInferenceConfig {.backend = BackendKind::metal}
+    );
+    const std::array<std::uint32_t, 2> prompt_token_ids {0, 3};
+
+    const auto expected = generate_llama_argmax_tokens_with_kv_cache_f32(
+        std::span<const std::uint32_t>(prompt_token_ids),
+        2,
+        weights,
+        model.llama_config()
+    );
+    const auto tokens = generate_llama_argmax_tokens_with_kv_cache_f32(
+        std::span<const std::uint32_t>(prompt_token_ids),
+        2,
+        inference_weights,
+        model.llama_config()
+    );
+
+    expect(inference_weights.backend == BackendKind::metal, "explicit cached Llama inference backend should be Metal");
+    expect_model_logits_backend_weights(weights, inference_weights.logits, BackendKind::metal);
+    expect(tokens == expected, "Metal cached Llama inference backend generation should match CPU reference");
+}
+
 void test_reports_unavailable_llama_model_logits_backend_weight_copy_when_metal_missing() {
     if (tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -1346,6 +1500,29 @@ void test_reports_unavailable_llama_model_logits_backend_weight_copy_when_metal_
             "Llama model Metal logits backend weight copy unavailable error code mismatch"
         );
         expect(error.backend() == BackendKind::metal, "Llama model Metal logits backend weight copy backend mismatch");
+    }
+}
+
+void test_reports_unavailable_llama_model_inference_weight_copy_when_metal_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto model = backend_feed_forward_fixture_model();
+    const auto weights = bind_llama_model_weights(model);
+
+    try {
+        (void)copy_llama_model_inference_weights_to_backend(
+            weights,
+            LlamaModelInferenceConfig {.backend = BackendKind::metal}
+        );
+        throw TestFailure("Llama model Metal inference weight copy should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Llama model Metal inference weight copy unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Llama model Metal inference weight copy backend mismatch");
     }
 }
 
@@ -1484,12 +1661,36 @@ const TestCase llama_backend_model_tests[] {
         test_runs_llama_model_logits_with_cpu_backend_weight_buffers,
     },
     {
+        "runs Llama next-token argmax with default inference backend",
+        test_runs_llama_next_token_argmax_with_default_inference_backend,
+    },
+    {
+        "runs Llama next-token sampled with default inference backend",
+        test_runs_llama_next_token_sampled_with_default_inference_backend,
+    },
+    {
         "matches Llama model logits with Metal backend weight buffers when available",
         test_matches_llama_model_logits_with_metal_backend_weight_buffers_when_available,
     },
     {
+        "matches Llama next-token argmax with Metal inference backend when available",
+        test_matches_llama_next_token_argmax_with_metal_inference_backend_when_available,
+    },
+    {
+        "runs Llama cached argmax generation with default inference backend",
+        test_runs_llama_cached_argmax_generation_with_default_inference_backend,
+    },
+    {
+        "matches Llama cached argmax generation with Metal inference backend when available",
+        test_matches_llama_cached_argmax_generation_with_metal_inference_backend_when_available,
+    },
+    {
         "reports unavailable Llama model logits backend weight copy when Metal is missing",
         test_reports_unavailable_llama_model_logits_backend_weight_copy_when_metal_missing,
+    },
+    {
+        "reports unavailable Llama model inference weight copy when Metal is missing",
+        test_reports_unavailable_llama_model_inference_weight_copy_when_metal_missing,
     },
 };
 

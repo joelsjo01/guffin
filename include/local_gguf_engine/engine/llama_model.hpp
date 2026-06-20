@@ -3,6 +3,7 @@
 #include "local_gguf_engine/engine/llama_layer.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
+#include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
 #include <cstddef>
@@ -40,6 +41,15 @@ struct LlamaModelLogitsBackendWeights {
     std::vector<LlamaBlockBackendWeights> blocks;
 };
 
+struct LlamaModelInferenceConfig {
+    runtime::BackendKind backend = runtime::default_backend();
+};
+
+struct LlamaModelInferenceBackendWeights {
+    runtime::BackendKind backend = runtime::default_backend();
+    LlamaModelLogitsBackendWeights logits;
+};
+
 [[nodiscard]] LlamaModelWeights bind_llama_model_weights(const EngineModel& model);
 [[nodiscard]] LlamaModelAttentionBackendWeights copy_llama_model_attention_weights_to_backend(
     const LlamaModelWeights& weights,
@@ -56,6 +66,10 @@ struct LlamaModelLogitsBackendWeights {
 [[nodiscard]] LlamaModelLogitsBackendWeights copy_llama_model_logits_weights_to_backend(
     const LlamaModelWeights& weights,
     runtime::BackendKind backend
+);
+[[nodiscard]] LlamaModelInferenceBackendWeights copy_llama_model_inference_weights_to_backend(
+    const LlamaModelWeights& weights,
+    const LlamaModelInferenceConfig& config = {}
 );
 
 [[nodiscard]] tensor::TensorStorage embed_llama_token_ids_f32(
@@ -128,12 +142,27 @@ struct LlamaModelLogitsBackendWeights {
     std::uint64_t position
 );
 
+[[nodiscard]] tensor::TensorStorage run_llama_model_logits_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelInferenceBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+);
+
 [[nodiscard]] tensor::TensorStorage run_llama_model_logits_with_kv_cache_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position,
     LlamaKVCache& cache
+);
+
+[[nodiscard]] tensor::TensorStorage run_llama_model_logits_with_kv_cache_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelInferenceBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaBackendKVCache& cache
 );
 
 [[nodiscard]] std::uint32_t run_llama_model_next_token_argmax_f32(
@@ -150,12 +179,27 @@ struct LlamaModelLogitsBackendWeights {
     std::uint64_t position
 );
 
+[[nodiscard]] std::uint32_t run_llama_model_next_token_argmax_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelInferenceBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position
+);
+
 [[nodiscard]] std::uint32_t run_llama_model_next_token_argmax_with_kv_cache_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position,
     LlamaKVCache& cache
+);
+
+[[nodiscard]] std::uint32_t run_llama_model_next_token_argmax_with_kv_cache_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelInferenceBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaBackendKVCache& cache
 );
 
 [[nodiscard]] std::uint32_t run_llama_model_next_token_sampled_f32(
@@ -171,6 +215,16 @@ struct LlamaModelLogitsBackendWeights {
 [[nodiscard]] std::uint32_t run_llama_model_next_token_sampled_f32(
     std::span<const std::uint32_t> token_ids,
     const LlamaModelLogitsBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    const SamplingConfig& sampling,
+    SamplingState& sampling_state,
+    std::span<const std::uint32_t> repetition_token_ids = {}
+);
+
+[[nodiscard]] std::uint32_t run_llama_model_next_token_sampled_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelInferenceBackendWeights& weights,
     const LlamaModelConfig& config,
     std::uint64_t position,
     const SamplingConfig& sampling,
@@ -184,6 +238,17 @@ struct LlamaModelLogitsBackendWeights {
     const LlamaModelConfig& config,
     std::uint64_t position,
     LlamaKVCache& cache,
+    const SamplingConfig& sampling,
+    SamplingState& sampling_state,
+    std::span<const std::uint32_t> repetition_token_ids = {}
+);
+
+[[nodiscard]] std::uint32_t run_llama_model_next_token_sampled_with_kv_cache_f32(
+    std::span<const std::uint32_t> token_ids,
+    const LlamaModelInferenceBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::uint64_t position,
+    LlamaBackendKVCache& cache,
     const SamplingConfig& sampling,
     SamplingState& sampling_state,
     std::span<const std::uint32_t> repetition_token_ids = {}
@@ -205,6 +270,14 @@ struct LlamaModelLogitsBackendWeights {
     std::optional<std::uint32_t> stop_token_id = std::nullopt
 );
 
+[[nodiscard]] std::vector<std::uint32_t> generate_llama_argmax_tokens_with_kv_cache_f32(
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    const LlamaModelInferenceBackendWeights& weights,
+    const LlamaModelConfig& config,
+    std::optional<std::uint32_t> stop_token_id = std::nullopt
+);
+
 [[nodiscard]] std::vector<std::uint32_t> generate_llama_sampled_tokens_f32(
     std::span<const std::uint32_t> prompt_token_ids,
     std::size_t max_new_tokens,
@@ -218,6 +291,15 @@ struct LlamaModelLogitsBackendWeights {
     std::span<const std::uint32_t> prompt_token_ids,
     std::size_t max_new_tokens,
     const LlamaModelWeights& weights,
+    const LlamaModelConfig& config,
+    const SamplingConfig& sampling,
+    std::optional<std::uint32_t> stop_token_id = std::nullopt
+);
+
+[[nodiscard]] std::vector<std::uint32_t> generate_llama_sampled_tokens_with_kv_cache_f32(
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    const LlamaModelInferenceBackendWeights& weights,
     const LlamaModelConfig& config,
     const SamplingConfig& sampling,
     std::optional<std::uint32_t> stop_token_id = std::nullopt
