@@ -15,8 +15,8 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | Gemma tokenizer and chat template | Local Gemma IT prompt formatting, role validation, BOS/EOS behavior, and generation prompt suffix have tests. |
 | Done | Tiny reference correctness fixtures | Small Q4_K/Q6_K and Gemma semantic fixtures exist for parity, without becoming a full 9B CPU runtime. |
 | Done | File-backed loading | Large tensor payloads can flow from validated file-backed views to backend upload without eager duplicate host copies. |
-| Current | Metal resident model plan | Packed weights, KV cache, scratch, and per-layer state are owned by a reusable Gemma Metal plan. |
-| Planned | Packed Q4_K/Q6_K Metal matmul | Representative Gemma projection shapes consume packed weights directly and pass CPU/reference parity. |
+| Done | Metal resident model plan | Packed weights, KV cache, scratch, and per-layer state are owned by a reusable Gemma Metal plan. |
+| Current | Packed Q4_K/Q6_K Metal matmul | Representative Gemma projection shapes consume packed weights directly and pass CPU/reference parity. |
 | Planned | Separate prefill and decode | Prompt eval and one-token decode use distinct schedules with resident KV and clear phase metrics. |
 | Planned | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |

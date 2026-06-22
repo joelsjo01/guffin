@@ -28,6 +28,8 @@ private:
     id<MTLBuffer> buffer
 );
 [[nodiscard]] BackendBuffer copy_tensor_to_metal_backend(const TensorStorage& storage);
+[[nodiscard]] BackendBuffer copy_tensor_view_to_metal_backend(const TensorView& view);
+[[nodiscard]] BackendBuffer allocate_metal_backend_buffer(const TensorDescriptor& descriptor);
 [[nodiscard]] TensorStorage copy_tensor_from_metal_backend(
     const detail::BackendBufferStorage& storage
 );

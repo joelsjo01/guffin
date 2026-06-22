@@ -32,6 +32,8 @@ private:
     explicit BackendBuffer(std::shared_ptr<detail::BackendBufferStorage> storage);
 
     friend BackendBuffer copy_tensor_to_backend(const TensorStorage&, runtime::BackendKind);
+    friend BackendBuffer copy_tensor_view_to_backend(const TensorView&, runtime::BackendKind);
+    friend BackendBuffer allocate_backend_buffer(const TensorDescriptor&, runtime::BackendKind);
     friend TensorStorage copy_tensor_from_backend(const BackendBuffer&);
     friend const detail::BackendBufferStorage& backend_buffer_storage(const BackendBuffer&) noexcept;
     friend BackendBuffer detail::make_backend_buffer(std::shared_ptr<detail::BackendBufferStorage>);
@@ -41,6 +43,14 @@ private:
 
 [[nodiscard]] BackendBuffer copy_tensor_to_backend(
     const TensorStorage& storage,
+    runtime::BackendKind backend
+);
+[[nodiscard]] BackendBuffer copy_tensor_view_to_backend(
+    const TensorView& view,
+    runtime::BackendKind backend
+);
+[[nodiscard]] BackendBuffer allocate_backend_buffer(
+    const TensorDescriptor& descriptor,
     runtime::BackendKind backend
 );
 [[nodiscard]] TensorStorage copy_tensor_from_backend(const BackendBuffer& buffer);

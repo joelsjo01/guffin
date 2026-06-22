@@ -48,6 +48,9 @@ std::string unavailable_reason() {
 CpuBackendBufferStorage::CpuBackendBufferStorage(const TensorStorage& storage)
     : storage_(TensorStorage::from_bytes(storage.descriptor(), storage.bytes())) {}
 
+CpuBackendBufferStorage::CpuBackendBufferStorage(const TensorView& view)
+    : storage_(TensorStorage::from_bytes(view.descriptor(), view.bytes())) {}
+
 runtime::BackendKind CpuBackendBufferStorage::backend() const noexcept {
     return runtime::BackendKind::cpu;
 }
@@ -77,6 +80,14 @@ const CpuBackendBufferStorage& require_cpu_backend_buffer(
 
 BackendBuffer copy_tensor_to_cpu_backend(const TensorStorage& storage) {
     return detail::make_backend_buffer(std::make_shared<CpuBackendBufferStorage>(storage));
+}
+
+BackendBuffer copy_tensor_view_to_cpu_backend(const TensorView& view) {
+    return detail::make_backend_buffer(std::make_shared<CpuBackendBufferStorage>(view));
+}
+
+BackendBuffer allocate_cpu_backend_buffer(const TensorDescriptor& descriptor) {
+    return copy_tensor_to_cpu_backend(TensorStorage::allocate(descriptor));
 }
 
 TensorStorage copy_tensor_from_cpu_backend(const detail::BackendBufferStorage& storage) {

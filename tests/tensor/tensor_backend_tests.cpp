@@ -28,8 +28,10 @@ namespace {
 using local_gguf_engine::runtime::BackendError;
 using local_gguf_engine::runtime::BackendErrorCode;
 using local_gguf_engine::runtime::BackendKind;
+using local_gguf_engine::tensor::allocate_backend_buffer;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
 using local_gguf_engine::tensor::copy_tensor_to_backend;
+using local_gguf_engine::tensor::copy_tensor_view_to_backend;
 using local_gguf_engine::tensor::DType;
 using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::Shape;
@@ -124,6 +126,42 @@ void test_copies_tensor_to_and_from_cpu_backend_buffer() {
     expect(
         std::equal(storage.bytes().begin(), storage.bytes().end(), roundtrip.bytes().begin()),
         "CPU backend buffer roundtrip bytes mismatch"
+    );
+}
+
+void test_copies_tensor_view_to_and_from_cpu_backend_buffer() {
+    const std::array<float, 4> values {
+        1.25F, -2.5F,
+        3.75F, -4.5F,
+    };
+    const auto storage = tensor_f32_matrix(2, 2, std::span<const float>(values));
+
+    const auto buffer = copy_tensor_view_to_backend(storage.view(), BackendKind::cpu);
+    const auto roundtrip = copy_tensor_from_backend(buffer);
+
+    expect(buffer.backend() == BackendKind::cpu, "CPU backend view buffer kind mismatch");
+    expect(buffer.descriptor() == storage.descriptor(), "CPU backend view buffer descriptor mismatch");
+    expect(roundtrip.descriptor() == storage.descriptor(), "CPU backend view buffer roundtrip descriptor mismatch");
+    expect(
+        std::equal(storage.bytes().begin(), storage.bytes().end(), roundtrip.bytes().begin()),
+        "CPU backend view buffer roundtrip bytes mismatch"
+    );
+}
+
+void test_allocates_cpu_backend_buffer() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({2, 2}), DType::f32);
+
+    const auto buffer = allocate_backend_buffer(descriptor, BackendKind::cpu);
+    const auto roundtrip = copy_tensor_from_backend(buffer);
+
+    expect(buffer.backend() == BackendKind::cpu, "CPU allocated backend buffer kind mismatch");
+    expect(buffer.descriptor() == descriptor, "CPU allocated backend buffer descriptor mismatch");
+    expect(roundtrip.descriptor() == descriptor, "CPU allocated backend buffer roundtrip descriptor mismatch");
+    expect(
+        std::all_of(roundtrip.bytes().begin(), roundtrip.bytes().end(), [](std::uint8_t byte) {
+            return byte == 0;
+        }),
+        "CPU allocated backend buffer should be zero initialized"
     );
 }
 
@@ -476,6 +514,44 @@ void test_copies_tensor_to_and_from_metal_backend_buffer_when_available() {
         std::equal(storage.bytes().begin(), storage.bytes().end(), roundtrip.bytes().begin()),
         "Metal backend buffer roundtrip bytes mismatch"
     );
+}
+
+void test_copies_tensor_view_to_and_from_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 4> values {
+        1.25F, -2.5F,
+        3.75F, -4.5F,
+    };
+    const auto storage = tensor_f32_matrix(2, 2, std::span<const float>(values));
+
+    const auto buffer = copy_tensor_view_to_backend(storage.view(), BackendKind::metal);
+    const auto roundtrip = copy_tensor_from_backend(buffer);
+
+    expect(buffer.backend() == BackendKind::metal, "Metal backend view buffer kind mismatch");
+    expect(buffer.descriptor() == storage.descriptor(), "Metal backend view buffer descriptor mismatch");
+    expect(roundtrip.descriptor() == storage.descriptor(), "Metal backend view buffer roundtrip descriptor mismatch");
+    expect(
+        std::equal(storage.bytes().begin(), storage.bytes().end(), roundtrip.bytes().begin()),
+        "Metal backend view buffer roundtrip bytes mismatch"
+    );
+}
+
+void test_allocates_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto descriptor = TensorDescriptor::from(Shape::from({2, 2}), DType::f32);
+
+    const auto buffer = allocate_backend_buffer(descriptor, BackendKind::metal);
+    const auto roundtrip = copy_tensor_from_backend(buffer);
+
+    expect(buffer.backend() == BackendKind::metal, "Metal allocated backend buffer kind mismatch");
+    expect(buffer.descriptor() == descriptor, "Metal allocated backend buffer descriptor mismatch");
+    expect(roundtrip.descriptor() == descriptor, "Metal allocated backend buffer roundtrip descriptor mismatch");
 }
 
 void test_multiplies_f32_by_metal_backend_f16_gguf_weight_buffer_when_available() {
@@ -1131,12 +1207,56 @@ void test_reports_unavailable_metal_backend_buffer_copy_when_missing() {
     }
 }
 
+void test_reports_unavailable_metal_backend_view_copy_when_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 4> values {
+        1.0F, 2.0F,
+        3.0F, 4.0F,
+    };
+    const auto storage = tensor_f32_matrix(2, 2, std::span<const float>(values));
+
+    try {
+        (void)copy_tensor_view_to_backend(storage.view(), BackendKind::metal);
+        throw TestFailure("Metal backend view copy should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Metal backend view-copy unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Metal backend view-copy unavailable backend mismatch");
+    }
+}
+
+void test_reports_unavailable_metal_backend_allocation_when_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto descriptor = TensorDescriptor::from(Shape::from({2, 2}), DType::f32);
+
+    try {
+        (void)allocate_backend_buffer(descriptor, BackendKind::metal);
+        throw TestFailure("Metal backend allocation should report unavailable Metal device");
+    } catch (const BackendError& error) {
+        expect(
+            error.code() == BackendErrorCode::unavailable_metal_device,
+            "Metal backend allocation unavailable error code mismatch"
+        );
+        expect(error.backend() == BackendKind::metal, "Metal backend allocation unavailable backend mismatch");
+    }
+}
+
 const TestCase tensor_backend_tests[] {
     {
         "multiplies F32 by F16 GGUF weight matrix on CPU backend",
         test_multiplies_f32_by_f16_gguf_weight_matrix_on_cpu_backend,
     },
     {"copies tensor to and from CPU backend buffer", test_copies_tensor_to_and_from_cpu_backend_buffer},
+    {"copies tensor view to and from CPU backend buffer", test_copies_tensor_view_to_and_from_cpu_backend_buffer},
+    {"allocates CPU backend buffer", test_allocates_cpu_backend_buffer},
     {
         "multiplies F32 by CPU backend F16 GGUF weight buffer",
         test_multiplies_f32_by_cpu_backend_f16_gguf_weight_buffer,
@@ -1163,6 +1283,14 @@ const TestCase tensor_backend_tests[] {
     {
         "copies tensor to and from Metal backend buffer when available",
         test_copies_tensor_to_and_from_metal_backend_buffer_when_available,
+    },
+    {
+        "copies tensor view to and from Metal backend buffer when available",
+        test_copies_tensor_view_to_and_from_metal_backend_buffer_when_available,
+    },
+    {
+        "allocates Metal backend buffer when available",
+        test_allocates_metal_backend_buffer_when_available,
     },
     {
         "multiplies F32 by Metal backend F16 GGUF weight buffer when available",
@@ -1204,6 +1332,14 @@ const TestCase tensor_backend_tests[] {
     {
         "reports unavailable Metal backend buffer copy when missing",
         test_reports_unavailable_metal_backend_buffer_copy_when_missing,
+    },
+    {
+        "reports unavailable Metal backend view copy when missing",
+        test_reports_unavailable_metal_backend_view_copy_when_missing,
+    },
+    {
+        "reports unavailable Metal backend allocation when missing",
+        test_reports_unavailable_metal_backend_allocation_when_missing,
     },
 };
 

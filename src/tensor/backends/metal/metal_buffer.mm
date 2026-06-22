@@ -56,10 +56,14 @@ BackendBuffer make_metal_backend_buffer(TensorDescriptor descriptor, id<MTLBuffe
 }
 
 BackendBuffer copy_tensor_to_metal_backend(const TensorStorage& storage) {
+    return copy_tensor_view_to_metal_backend(storage.view());
+}
+
+BackendBuffer copy_tensor_view_to_metal_backend(const TensorView& view) {
     @autoreleasepool {
         auto& state = shared_matmul_pipeline_state();
-        id<MTLBuffer> buffer = [state.device newBufferWithBytes:storage.bytes().data()
-                                                         length:static_cast<NSUInteger>(storage.bytes().size())
+        id<MTLBuffer> buffer = [state.device newBufferWithBytes:view.bytes().data()
+                                                         length:static_cast<NSUInteger>(view.bytes().size())
                                                         options:MTLResourceStorageModeShared];
         if (buffer == nil) {
             throw runtime::BackendError(
@@ -70,8 +74,25 @@ BackendBuffer copy_tensor_to_metal_backend(const TensorStorage& storage) {
         }
 
         return detail::make_backend_buffer(
-            std::make_shared<MetalBackendBufferStorage>(storage, buffer)
+            std::make_shared<MetalBackendBufferStorage>(view.descriptor(), buffer)
         );
+    }
+}
+
+BackendBuffer allocate_metal_backend_buffer(const TensorDescriptor& descriptor) {
+    @autoreleasepool {
+        auto& state = shared_matmul_pipeline_state();
+        id<MTLBuffer> buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(descriptor.byte_count)
+                                                         options:MTLResourceStorageModeShared];
+        if (buffer == nil) {
+            throw runtime::BackendError(
+                runtime::BackendErrorCode::metal_execution_failed,
+                runtime::BackendKind::metal,
+                "Metal backend buffer allocation failed"
+            );
+        }
+
+        return make_metal_backend_buffer(descriptor, buffer);
     }
 }
 

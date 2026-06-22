@@ -14,6 +14,7 @@ namespace local_gguf_engine::tensor::backends::cpu {
 class CpuBackendBufferStorage final : public detail::BackendBufferStorage {
 public:
     explicit CpuBackendBufferStorage(const TensorStorage& storage);
+    explicit CpuBackendBufferStorage(const TensorView& view);
 
     [[nodiscard]] runtime::BackendKind backend() const noexcept override;
     [[nodiscard]] const TensorDescriptor& descriptor() const noexcept override;
@@ -27,6 +28,8 @@ private:
     const detail::BackendBufferStorage& storage
 );
 [[nodiscard]] BackendBuffer copy_tensor_to_cpu_backend(const TensorStorage& storage);
+[[nodiscard]] BackendBuffer copy_tensor_view_to_cpu_backend(const TensorView& view);
+[[nodiscard]] BackendBuffer allocate_cpu_backend_buffer(const TensorDescriptor& descriptor);
 [[nodiscard]] TensorStorage copy_tensor_from_cpu_backend(
     const detail::BackendBufferStorage& storage
 );

@@ -32,17 +32,36 @@ const TensorDescriptor& BackendBuffer::descriptor() const noexcept {
 }
 
 BackendBuffer copy_tensor_to_backend(const TensorStorage& storage, runtime::BackendKind backend) {
+    return copy_tensor_view_to_backend(storage.view(), backend);
+}
+
+BackendBuffer copy_tensor_view_to_backend(const TensorView& view, runtime::BackendKind backend) {
     switch (backend) {
         case runtime::BackendKind::cpu:
-            return backends::cpu::copy_tensor_to_cpu_backend(storage);
+            return backends::cpu::copy_tensor_view_to_cpu_backend(view);
         case runtime::BackendKind::metal:
-            return backends::metal::copy_tensor_to_metal_backend(storage);
+            return backends::metal::copy_tensor_view_to_metal_backend(view);
     }
 
     throw runtime::BackendError(
         runtime::BackendErrorCode::unsupported_backend,
         backend,
         "unsupported backend for tensor buffer copy"
+    );
+}
+
+BackendBuffer allocate_backend_buffer(const TensorDescriptor& descriptor, runtime::BackendKind backend) {
+    switch (backend) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::allocate_cpu_backend_buffer(descriptor);
+        case runtime::BackendKind::metal:
+            return backends::metal::allocate_metal_backend_buffer(descriptor);
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        backend,
+        "unsupported backend for tensor buffer allocation"
     );
 }
 
