@@ -22,6 +22,21 @@ namespace {
     return static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
 }
 
+void validate_quantized_row_element_count(const Shape& shape, DTypeLayout layout) {
+    if (layout.block_element_count == 1) {
+        return;
+    }
+
+    const auto row_element_count = shape.dimension(shape.rank() - 1);
+    if (row_element_count % layout.block_element_count != 0) {
+        throw TensorError(
+            TensorErrorCode::invalid_quantized_element_count,
+            layout.block_element_count,
+            row_element_count
+        );
+    }
+}
+
 }  // namespace
 
 Shape Shape::from(std::initializer_list<Dimension> dimensions) {
@@ -82,6 +97,8 @@ std::uint64_t element_count(const Shape& shape) {
 
 std::size_t byte_size(const Shape& shape, DType dtype) {
     const auto layout = dtype_layout(dtype);
+    validate_quantized_row_element_count(shape, layout);
+
     const auto elements = element_count(shape);
 
     if (elements % layout.block_element_count != 0) {

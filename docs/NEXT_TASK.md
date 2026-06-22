@@ -5,36 +5,35 @@ completed implementation slice.
 
 ## Objective
 
-Add layout-only Q4_K/Q6_K GGUF/tensor support for the local Gemma 2 9B Q4 file.
+Add Gemma 2 config parsing and weight binding for the local Gemma 2 9B Q4 file.
 
 ## Why
 
-This removes the first hard blocker: `models/gemma-2-9b-Q4.gguf` fails before
-Gemma metadata, binding, tokenizer, or Metal planning can be exercised because
-GGUF tensor types `12` and `14` are unsupported.
+Q4_K/Q6_K tensor layout support now lets `models/gemma-2-9b-Q4.gguf` inspect
+through payload validation. The next blocker is architecture binding:
+`general.architecture = "gemma2"` and Gemma tensor names/config keys need to
+bind beside the current Llama path before tokenizer, reference fixtures, or
+Metal planning can be exercised.
 
 ## Read
 
 - `AGENTS.md`
 - `docs/ENGINE_PRINCIPLES.md`
 - `docs/GRAPH.md` only to locate files/tests
+- `docs/GEMMA_Q4_MILESTONES.md`
 - `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md`, especially
-  `## GGUF Quantization And Q4/K Format Findings`,
-  `## Target Architecture Proposal`, and `## First Slice Recommendation`
+  `## Gemma 2 Architecture And Tokenizer Findings` and
+  `## Target Architecture Proposal`
 
 ## Touch
 
-- `include/local_gguf_engine/tensor/dtype.hpp`
-- `src/tensor/dtype.cpp`
-- `src/tensor/layout.cpp`
-- `src/tensor/quantization.cpp`
-- `include/local_gguf_engine/model_format/gguf_tensor_bridge.hpp`
-- `src/model_format/gguf_tensor_bridge.cpp`
-- `src/model_format/gguf_reader.cpp`
-- `src/frontends/cli/gguf_inspect.cpp` only if inspector support needs an
-  explicit type-name/update
-- `tests/model_format`
-- `tests/tensor`
+- `include/local_gguf_engine/engine/model.hpp`
+- `src/engine/model.cpp`
+- Gemma-specific engine config/weight files if a split keeps the slice small
+- `tests/engine/engine_model_tests.cpp`
+- `tests/model_format` only if additional GGUF metadata fixtures are needed
+- `docs/GEMMA_Q4_MILESTONES.md`
+- `docs/NEXT_TASK.md`
 
 ## Do Not
 
@@ -42,22 +41,25 @@ GGUF tensor types `12` and `14` are unsupported.
 - Do not optimize the old CPU/Llama path unless it directly proves the current
   slice.
 - Do not read broad docs or benchmark artifacts unless named above.
-- Do not add generation, full Gemma CPU execution, Metal kernels, or model
-  architecture refactors in this slice.
+- Do not add generation, tokenizer/chat-template support, full Gemma CPU
+  execution, Metal kernels, or broad model architecture refactors in this
+  slice.
 
 ## Verify
 
-- Add deterministic tests for Q4_K/Q6_K row-size and payload-size validation,
-  malformed row rejection, dtype conversion, and safe block-view access.
-- Run the focused tests that cover `model_format` and `tensor`.
-- Run `build/release/gguf-inspect models/gemma-2-9b-Q4.gguf` if a release
-  inspector already exists; the expected improvement is that type IDs `12` and
-  `14` no longer fail at payload conversion.
+- Add deterministic tests for `gemma2` metadata parsing, required config keys,
+  required tensor-name binding, mixed Q4_K/Q6_K projection binding, and missing
+  or malformed metadata/tensor failures.
+- Run the focused tests that cover engine model binding and any touched
+  `model_format` fixtures.
+- Run a local Gemma load/generation command far enough to prove any remaining
+  failure is an explicit unsupported Gemma execution/runtime error, not
+  architecture or tensor binding.
 - Run `bash scripts/ci.sh` after implementation changes.
 
 ## Stop When
 
-The Gemma GGUF tensor directory can be inspected with Q4_K/Q6_K payload sizes
-validated, tests cover the new layouts and rejection cases, and execution still
-fails explicitly later for unsupported Gemma runtime work rather than at tensor
-type conversion.
+The local Gemma GGUF metadata and required tensor names bind into a Gemma-owned
+config/weights representation beside Llama, mixed Q4_K/Q6_K tensors remain
+packed, and execution still fails explicitly later for unsupported Gemma
+runtime work rather than architecture, metadata, tensor type, or binding.

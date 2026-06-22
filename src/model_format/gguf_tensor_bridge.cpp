@@ -25,6 +25,10 @@ tensor::DType dtype_from_gguf_tensor_type(std::uint32_t type_id) {
             return tensor::DType::f16;
         case 8:
             return tensor::DType::q8_0;
+        case 12:
+            return tensor::DType::q4_k;
+        case 14:
+            return tensor::DType::q6_k;
         default:
             throw GGUFReadError(GGUFReadErrorCode::unsupported_tensor_type, 0, type_id);
     }

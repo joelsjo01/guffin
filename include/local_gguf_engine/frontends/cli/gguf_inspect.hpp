@@ -15,6 +15,8 @@ struct GGUFTensorDTypeCounts {
     std::size_t f32 = 0;
     std::size_t f16 = 0;
     std::size_t q8_0 = 0;
+    std::size_t q4_k = 0;
+    std::size_t q6_k = 0;
     std::size_t unsupported = 0;
 };
 

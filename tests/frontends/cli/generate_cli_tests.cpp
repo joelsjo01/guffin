@@ -210,6 +210,10 @@ std::uint32_t gguf_type_id_for_dtype(DType dtype) {
             return 1;
         case DType::q8_0:
             return 8;
+        case DType::q4_k:
+            return 12;
+        case DType::q6_k:
+            return 14;
     }
 
     throw TestFailure("test GGUF writer unsupported tensor dtype");

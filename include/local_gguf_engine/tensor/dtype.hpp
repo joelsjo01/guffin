@@ -10,6 +10,8 @@ enum class DType : std::uint8_t {
     f32 = 0,
     f16 = 1,
     q8_0 = 8,
+    q4_k = 12,
+    q6_k = 14,
 };
 
 struct DTypeLayout {

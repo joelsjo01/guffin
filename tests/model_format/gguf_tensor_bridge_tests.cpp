@@ -4,6 +4,7 @@
 #include "local_gguf_engine/model_format/gguf_tensor.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
+#include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor_error.hpp"
 
@@ -18,11 +19,13 @@ using local_gguf_engine::model_format::GGUFReadError;
 using local_gguf_engine::model_format::GGUFReadErrorCode;
 using local_gguf_engine::model_format::GGUFTensorInfo;
 using local_gguf_engine::model_format::GGUFTensorPayloadView;
+using local_gguf_engine::model_format::dtype_from_gguf_tensor_type;
 using local_gguf_engine::model_format::load_gguf_tensor_payload;
 using local_gguf_engine::model_format::load_gguf_tensor_payloads;
 using local_gguf_engine::model_format::read_gguf_model_view;
 using local_gguf_engine::tensor::DType;
 using local_gguf_engine::tensor::Shape;
+using local_gguf_engine::tensor::Q4_KBlockView;
 using local_gguf_engine::tensor::TensorError;
 using local_gguf_engine::tensor::TensorErrorCode;
 using local_gguf_engine::tests::expect;
@@ -60,6 +63,37 @@ void test_converts_q8_0_gguf_payload_view_to_tensor_storage() {
     expect(loaded_tensors[0].storage.descriptor().element_count == 32, "loaded Q8_0 element count mismatch");
     expect(loaded_tensors[0].storage.descriptor().byte_count == 34, "loaded Q8_0 byte count mismatch");
     expect(loaded_tensors[0].storage.bytes()[33] == 0x21, "loaded Q8_0 final byte mismatch");
+}
+
+void test_converts_k_quant_gguf_tensor_types_to_dtypes() {
+    expect(dtype_from_gguf_tensor_type(12) == DType::q4_k, "GGUF type 12 should map to Q4_K");
+    expect(dtype_from_gguf_tensor_type(14) == DType::q6_k, "GGUF type 14 should map to Q6_K");
+}
+
+void test_converts_q4_k_gguf_payload_view_to_tensor_storage() {
+    const auto bytes = fixture("valid-q4-k-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+    const auto loaded = load_gguf_tensor_payload(model.tensor_payloads[0]);
+
+    expect(loaded.name == "q4", "loaded Q4_K GGUF tensor name mismatch");
+    expect(loaded.storage.descriptor().shape == Shape::from({256}), "loaded Q4_K shape mismatch");
+    expect(loaded.storage.descriptor().dtype == DType::q4_k, "loaded Q4_K dtype mismatch");
+    expect(loaded.storage.descriptor().element_count == 256, "loaded Q4_K element count mismatch");
+    expect(loaded.storage.descriptor().byte_count == 144, "loaded Q4_K byte count mismatch");
+    expect(loaded.storage.bytes()[143] == 0x7F, "loaded Q4_K final byte mismatch");
+}
+
+void test_converts_q6_k_gguf_payload_view_to_tensor_storage() {
+    const auto bytes = fixture("valid-q6-k-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+    const auto loaded = load_gguf_tensor_payload(model.tensor_payloads[0]);
+
+    expect(loaded.name == "q6", "loaded Q6_K GGUF tensor name mismatch");
+    expect(loaded.storage.descriptor().shape == Shape::from({256}), "loaded Q6_K shape mismatch");
+    expect(loaded.storage.descriptor().dtype == DType::q6_k, "loaded Q6_K dtype mismatch");
+    expect(loaded.storage.descriptor().element_count == 256, "loaded Q6_K element count mismatch");
+    expect(loaded.storage.descriptor().byte_count == 210, "loaded Q6_K byte count mismatch");
+    expect(loaded.storage.bytes()[209] == 0x40, "loaded Q6_K final byte mismatch");
 }
 
 void test_rejects_unsupported_gguf_tensor_type_in_bridge() {
@@ -109,6 +143,32 @@ void test_rejects_invalid_quantized_gguf_tensor_shape_in_bridge() {
     }
 }
 
+void test_rejects_invalid_q4_k_gguf_tensor_row_size_in_bridge() {
+    const std::array<std::uint8_t, Q4_KBlockView::byte_count> bytes {};
+    const GGUFTensorPayloadView payload {
+        .tensor = GGUFTensorInfo {
+            .name = "q4_bad",
+            .dimensions = std::vector<std::uint64_t> {2, 128},
+            .type_id = 12,
+            .offset = 0,
+            .file_offset = 0,
+        },
+        .bytes = std::span<const std::uint8_t>(bytes),
+    };
+
+    try {
+        (void)load_gguf_tensor_payload(payload);
+        throw TestFailure("invalid Q4_K GGUF bridge row size should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_quantized_element_count,
+            "error code should be invalid_quantized_element_count"
+        );
+        expect(error.expected_value() == 256, "expected Q4_K bridge row block size mismatch");
+        expect(error.actual_value() == 128, "actual Q4_K bridge row element count mismatch");
+    }
+}
+
 void test_rejects_gguf_tensor_payload_size_mismatch_in_bridge() {
     const std::array<std::uint8_t, 7> bytes {};
     const GGUFTensorPayloadView payload {
@@ -135,11 +195,46 @@ void test_rejects_gguf_tensor_payload_size_mismatch_in_bridge() {
     }
 }
 
+void test_rejects_q4_k_gguf_tensor_payload_size_mismatch_in_bridge() {
+    const std::array<std::uint8_t, Q4_KBlockView::byte_count - 1> bytes {};
+    const GGUFTensorPayloadView payload {
+        .tensor = GGUFTensorInfo {
+            .name = "q4_short",
+            .dimensions = std::vector<std::uint64_t> {256},
+            .type_id = 12,
+            .offset = 0,
+            .file_offset = 0,
+        },
+        .bytes = std::span<const std::uint8_t>(bytes),
+    };
+
+    try {
+        (void)load_gguf_tensor_payload(payload);
+        throw TestFailure("Q4_K GGUF bridge payload size mismatch should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_storage_byte_count,
+            "error code should be invalid_storage_byte_count"
+        );
+        expect(error.expected_value() == Q4_KBlockView::byte_count, "expected Q4_K payload byte count mismatch");
+        expect(error.actual_value() == Q4_KBlockView::byte_count - 1, "actual Q4_K payload byte count mismatch");
+    }
+}
+
 const local_gguf_engine::tests::TestCase kGGUFTensorBridgeTests[] = {
     {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
     {
         "converts Q8_0 GGUF payload view to tensor storage",
         test_converts_q8_0_gguf_payload_view_to_tensor_storage,
+    },
+    {"converts K-quant GGUF tensor types to dtypes", test_converts_k_quant_gguf_tensor_types_to_dtypes},
+    {
+        "converts Q4_K GGUF payload view to tensor storage",
+        test_converts_q4_k_gguf_payload_view_to_tensor_storage,
+    },
+    {
+        "converts Q6_K GGUF payload view to tensor storage",
+        test_converts_q6_k_gguf_payload_view_to_tensor_storage,
     },
     {"rejects unsupported GGUF tensor type in bridge", test_rejects_unsupported_gguf_tensor_type_in_bridge},
     {
@@ -147,8 +242,16 @@ const local_gguf_engine::tests::TestCase kGGUFTensorBridgeTests[] = {
         test_rejects_invalid_quantized_gguf_tensor_shape_in_bridge,
     },
     {
+        "rejects invalid Q4_K GGUF tensor row size in bridge",
+        test_rejects_invalid_q4_k_gguf_tensor_row_size_in_bridge,
+    },
+    {
         "rejects GGUF tensor payload size mismatch in bridge",
         test_rejects_gguf_tensor_payload_size_mismatch_in_bridge,
+    },
+    {
+        "rejects Q4_K GGUF tensor payload size mismatch in bridge",
+        test_rejects_q4_k_gguf_tensor_payload_size_mismatch_in_bridge,
     },
 };
 

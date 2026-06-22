@@ -38,7 +38,7 @@ public:
 };
 
 [[nodiscard]] bool gguf_type_is_supported(std::uint32_t type_id) noexcept {
-    return type_id == 0 || type_id == 1 || type_id == 8;
+    return type_id == 0 || type_id == 1 || type_id == 8 || type_id == 12 || type_id == 14;
 }
 
 void add_dtype_count(GGUFTensorDTypeCounts& counts, std::uint32_t type_id) noexcept {
@@ -51,6 +51,12 @@ void add_dtype_count(GGUFTensorDTypeCounts& counts, std::uint32_t type_id) noexc
             return;
         case 8:
             ++counts.q8_0;
+            return;
+        case 12:
+            ++counts.q4_k;
+            return;
+        case 14:
+            ++counts.q6_k;
             return;
         default:
             ++counts.unsupported;
@@ -199,6 +205,10 @@ std::string dtype_name_for_gguf_type(std::uint32_t type_id) {
             return "F16";
         case 8:
             return "Q8_0";
+        case 12:
+            return "Q4_K";
+        case 14:
+            return "Q6_K";
         default: {
             std::ostringstream output;
             output << "unsupported(" << type_id << ')';
@@ -243,6 +253,8 @@ void write_gguf_inspection_summary(
     output << "  F32: " << summary.dtype_counts.f32 << '\n';
     output << "  F16: " << summary.dtype_counts.f16 << '\n';
     output << "  Q8_0: " << summary.dtype_counts.q8_0 << '\n';
+    output << "  Q4_K: " << summary.dtype_counts.q4_k << '\n';
+    output << "  Q6_K: " << summary.dtype_counts.q6_k << '\n';
     output << "  unsupported: " << summary.dtype_counts.unsupported << '\n';
     output << "total supported payload bytes: " << summary.total_supported_payload_bytes << '\n';
     output << "first tensors:\n";

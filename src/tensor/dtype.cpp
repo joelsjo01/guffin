@@ -10,6 +10,10 @@ DTypeLayout dtype_layout(DType dtype) {
             return DTypeLayout {.block_element_count = 1, .block_byte_count = 2};
         case DType::q8_0:
             return DTypeLayout {.block_element_count = 32, .block_byte_count = 34};
+        case DType::q4_k:
+            return DTypeLayout {.block_element_count = 256, .block_byte_count = 144};
+        case DType::q6_k:
+            return DTypeLayout {.block_element_count = 256, .block_byte_count = 210};
     }
 
     throw TensorError(

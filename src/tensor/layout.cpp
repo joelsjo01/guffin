@@ -9,6 +9,8 @@ std::size_t unquantized_element_byte_count(DType dtype) {
         case DType::f16:
             return 2;
         case DType::q8_0:
+        case DType::q4_k:
+        case DType::q6_k:
             throw TensorError(
                 TensorErrorCode::unsupported_indexed_dtype,
                 0,

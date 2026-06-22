@@ -49,8 +49,14 @@ using local_gguf_engine::tensor::element_count;
 using local_gguf_engine::tensor::linear_index;
 using local_gguf_engine::tensor::mutable_element_bytes;
 using local_gguf_engine::tensor::dequantize_q8_0_block;
+using local_gguf_engine::tensor::q4_k_block_count;
+using local_gguf_engine::tensor::q4_k_block_view;
+using local_gguf_engine::tensor::q6_k_block_count;
+using local_gguf_engine::tensor::q6_k_block_view;
 using local_gguf_engine::tensor::q8_0_block_count;
 using local_gguf_engine::tensor::q8_0_block_view;
+using local_gguf_engine::tensor::Q4_KBlockView;
+using local_gguf_engine::tensor::Q6_KBlockView;
 using local_gguf_engine::tensor::Q8_0BlockView;
 using local_gguf_engine::tensor::read_f16_as_f32;
 using local_gguf_engine::tensor::read_f32;
@@ -151,6 +157,10 @@ void test_calculates_tensor_byte_sizes() {
     expect(byte_size(Shape::from({2, 3}), DType::f16) == 12, "F16 tensor byte size mismatch");
     expect(byte_size(Shape::from({32}), DType::q8_0) == 34, "Q8_0 single-block byte size mismatch");
     expect(byte_size(Shape::from({2, 32}), DType::q8_0) == 68, "Q8_0 multi-block byte size mismatch");
+    expect(byte_size(Shape::from({256}), DType::q4_k) == 144, "Q4_K single-block byte size mismatch");
+    expect(byte_size(Shape::from({2, 256}), DType::q4_k) == 288, "Q4_K multi-block byte size mismatch");
+    expect(byte_size(Shape::from({256}), DType::q6_k) == 210, "Q6_K single-block byte size mismatch");
+    expect(byte_size(Shape::from({2, 256}), DType::q6_k) == 420, "Q6_K multi-block byte size mismatch");
 }
 
 void test_rejects_unsupported_tensor_dtype() {
@@ -174,6 +184,20 @@ void test_rejects_invalid_quantized_tensor_element_count() {
         );
         expect(error.expected_value() == 32, "expected Q8_0 block element count mismatch");
         expect(error.actual_value() == 31, "actual Q8_0 element count mismatch");
+    }
+}
+
+void test_rejects_invalid_quantized_tensor_row_element_count() {
+    try {
+        (void)byte_size(Shape::from({2, 128}), DType::q4_k);
+        throw TestFailure("invalid Q4_K row element count should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_quantized_element_count,
+            "error code should be invalid_quantized_element_count"
+        );
+        expect(error.expected_value() == 256, "expected Q4_K row block element count mismatch");
+        expect(error.actual_value() == 128, "actual Q4_K row element count mismatch");
     }
 }
 
@@ -259,7 +283,7 @@ void test_rejects_tensor_descriptor_with_invalid_shape_dtype_combination() {
             "error code should be invalid_quantized_element_count"
         );
         expect(error.expected_value() == 32, "expected Q8_0 descriptor block size mismatch");
-        expect(error.actual_value() == 30, "actual Q8_0 descriptor element count mismatch");
+        expect(error.actual_value() == 15, "actual Q8_0 descriptor row element count mismatch");
     }
 }
 
@@ -305,6 +329,88 @@ void test_views_loaded_gguf_q8_0_block() {
     expect(block.scale_bits() == 0x0100U, "loaded Q8_0 scale bits mismatch");
     expect(block.quantized_value(0) == 2, "loaded Q8_0 quantized value 0 mismatch");
     expect(block.quantized_value(31) == 33, "loaded Q8_0 quantized final value mismatch");
+}
+
+void test_views_loaded_gguf_q4_k_block() {
+    const auto bytes = fixture("valid-q4-k-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+    const auto loaded = load_gguf_tensor_payload(model.tensor_payloads[0]);
+
+    expect(loaded.storage.descriptor().dtype == DType::q4_k, "loaded Q4_K dtype mismatch");
+    expect(q4_k_block_count(loaded.storage.descriptor()) == 1, "loaded Q4_K block count mismatch");
+
+    const auto block = q4_k_block_view(loaded.storage, 0);
+    expect(block.scale_bits() == 0x3800U, "Q4_K scale bits mismatch");
+    expect(block.min_scale_bits() == 0x3C00U, "Q4_K min scale bits mismatch");
+    expect(block.scale() == 0.5F, "Q4_K scale decode mismatch");
+    expect(block.min_scale() == 1.0F, "Q4_K min scale decode mismatch");
+    expect(block.scale_min_bytes().size() == Q4_KBlockView::scale_min_byte_count, "Q4_K scale byte count mismatch");
+    expect(block.scale_min_bytes()[0] == 0x10, "Q4_K scale byte 0 mismatch");
+    expect(block.scale_min_bytes()[11] == 0x1B, "Q4_K scale final byte mismatch");
+    expect(block.quantized_bytes().size() == Q4_KBlockView::quantized_byte_count, "Q4_K quant byte count mismatch");
+    expect(block.quantized_bytes()[127] == 0x7F, "Q4_K quant final byte mismatch");
+    expect(block.quantized_nibble(2) == 1, "Q4_K quantized nibble 2 mismatch");
+    expect(block.quantized_nibble(255) == 7, "Q4_K quantized final nibble mismatch");
+}
+
+void test_views_loaded_gguf_q6_k_block() {
+    const auto bytes = fixture("valid-q6-k-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+    const auto loaded = load_gguf_tensor_payload(model.tensor_payloads[0]);
+
+    expect(loaded.storage.descriptor().dtype == DType::q6_k, "loaded Q6_K dtype mismatch");
+    expect(q6_k_block_count(loaded.storage.descriptor()) == 1, "loaded Q6_K block count mismatch");
+
+    const auto block = q6_k_block_view(loaded.storage, 0);
+    expect(block.low_bit_bytes().size() == Q6_KBlockView::low_bit_byte_count, "Q6_K low byte count mismatch");
+    expect(block.high_bit_bytes().size() == Q6_KBlockView::high_bit_byte_count, "Q6_K high byte count mismatch");
+    expect(block.scale_bytes().size() == Q6_KBlockView::scale_byte_count, "Q6_K scale byte count mismatch");
+    expect(block.low_bit_bytes()[127] == 0x7F, "Q6_K low final byte mismatch");
+    expect(block.high_bit_bytes()[0] == 0x80, "Q6_K high byte 0 mismatch");
+    expect(block.scale_bits() == 0x4000U, "Q6_K scale bits mismatch");
+    expect(block.scale() == 2.0F, "Q6_K scale decode mismatch");
+    expect(block.low_nibble(2) == 1, "Q6_K low nibble 2 mismatch");
+    expect(block.high_bits(3) == 2, "Q6_K high bits 3 mismatch");
+    expect(block.scale_value(0) == static_cast<std::int8_t>(-16), "Q6_K scale value 0 mismatch");
+    expect(block.scale_value(15) == static_cast<std::int8_t>(-1), "Q6_K scale value 15 mismatch");
+}
+
+void test_rejects_q4_k_block_element_index_out_of_range() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({256}), DType::q4_k);
+    const std::array<std::uint8_t, Q4_KBlockView::byte_count> bytes {};
+    const auto storage = TensorStorage::from_bytes(descriptor, std::span<const std::uint8_t>(bytes));
+    const auto block = q4_k_block_view(storage, 0);
+
+    try {
+        (void)block.quantized_nibble(Q4_KBlockView::element_count);
+        throw TestFailure("Q4_K block element index out of range should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::quantized_block_element_index_out_of_range,
+            "error code should be quantized_block_element_index_out_of_range"
+        );
+        expect(error.expected_value() == Q4_KBlockView::element_count, "expected Q4_K element count mismatch");
+        expect(error.actual_value() == Q4_KBlockView::element_count, "actual Q4_K element index mismatch");
+    }
+}
+
+void test_rejects_q6_k_scale_index_out_of_range() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({256}), DType::q6_k);
+    const std::array<std::uint8_t, Q6_KBlockView::byte_count> bytes {};
+    const auto storage = TensorStorage::from_bytes(descriptor, std::span<const std::uint8_t>(bytes));
+    const auto block = q6_k_block_view(storage, 0);
+
+    try {
+        (void)block.scale_value(Q6_KBlockView::scale_byte_count);
+        throw TestFailure("Q6_K scale index out of range should throw");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::quantized_block_element_index_out_of_range,
+            "error code should be quantized_block_element_index_out_of_range"
+        );
+        expect(error.expected_value() == Q6_KBlockView::scale_byte_count, "expected Q6_K scale count mismatch");
+        expect(error.actual_value() == Q6_KBlockView::scale_byte_count, "actual Q6_K scale index mismatch");
+    }
 }
 
 void test_rejects_q8_0_block_access_for_unquantized_dtype() {
@@ -2112,6 +2218,10 @@ const TestCase tensor_core_tests[] = {
     {"calculates tensor byte sizes", test_calculates_tensor_byte_sizes},
     {"rejects unsupported tensor dtype", test_rejects_unsupported_tensor_dtype},
     {"rejects invalid quantized tensor element count", test_rejects_invalid_quantized_tensor_element_count},
+    {
+        "rejects invalid quantized tensor row element count",
+        test_rejects_invalid_quantized_tensor_row_element_count,
+    },
     {"rejects tensor byte size overflow", test_rejects_tensor_byte_size_overflow},
     {"creates tensor descriptor from shape and dtype", test_creates_tensor_descriptor_from_shape_and_dtype},
     {"allocates zero initialized tensor storage", test_allocates_zero_initialized_tensor_storage},
@@ -2123,6 +2233,10 @@ const TestCase tensor_core_tests[] = {
     },
     {"decodes Q8_0 block values", test_decodes_q8_0_block_values},
     {"views loaded GGUF Q8_0 block", test_views_loaded_gguf_q8_0_block},
+    {"views loaded GGUF Q4_K block", test_views_loaded_gguf_q4_k_block},
+    {"views loaded GGUF Q6_K block", test_views_loaded_gguf_q6_k_block},
+    {"rejects Q4_K block element index out of range", test_rejects_q4_k_block_element_index_out_of_range},
+    {"rejects Q6_K scale index out of range", test_rejects_q6_k_scale_index_out_of_range},
     {
         "rejects Q8_0 block access for unquantized dtype",
         test_rejects_q8_0_block_access_for_unquantized_dtype,

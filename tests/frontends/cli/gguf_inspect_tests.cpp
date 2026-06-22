@@ -78,12 +78,42 @@ void test_inspects_gguf_summary_from_f16_payload() {
     expect(summary.dtype_counts.f32 == 0, "GGUF inspect F32 count mismatch");
     expect(summary.dtype_counts.f16 == 1, "GGUF inspect F16 count mismatch");
     expect(summary.dtype_counts.q8_0 == 0, "GGUF inspect Q8_0 count mismatch");
+    expect(summary.dtype_counts.q4_k == 0, "GGUF inspect Q4_K count mismatch");
+    expect(summary.dtype_counts.q6_k == 0, "GGUF inspect Q6_K count mismatch");
     expect(summary.dtype_counts.unsupported == 0, "GGUF inspect unsupported count mismatch");
     expect(summary.total_supported_payload_bytes == 4, "GGUF inspect supported payload byte mismatch");
     expect(summary.first_tensors.size() == 1, "GGUF inspect first tensor count mismatch");
     expect(summary.first_tensors[0].name == "h2", "GGUF inspect first tensor name mismatch");
     expect(summary.first_tensors[0].shape == std::vector<std::uint64_t> {2}, "GGUF inspect shape mismatch");
     expect(summary.first_tensors[0].dtype == "F16", "GGUF inspect first tensor dtype mismatch");
+}
+
+void test_inspects_gguf_summary_from_q4_k_payload() {
+    const auto bytes = fixture("valid-q4-k-tensor-payload-view");
+    const auto summary = inspect_gguf_bytes(std::span<const std::uint8_t>(bytes), 3);
+
+    expect(summary.tensor_count == 1, "Q4_K GGUF inspect tensor count mismatch");
+    expect(summary.dtype_counts.q4_k == 1, "Q4_K GGUF inspect dtype count mismatch");
+    expect(summary.dtype_counts.q6_k == 0, "Q4_K GGUF inspect Q6_K count mismatch");
+    expect(summary.dtype_counts.unsupported == 0, "Q4_K GGUF inspect unsupported count mismatch");
+    expect(summary.total_supported_payload_bytes == 144, "Q4_K GGUF inspect payload byte mismatch");
+    expect(summary.first_tensors.size() == 1, "Q4_K GGUF inspect first tensor count mismatch");
+    expect(summary.first_tensors[0].name == "q4", "Q4_K GGUF inspect first tensor name mismatch");
+    expect(summary.first_tensors[0].dtype == "Q4_K", "Q4_K GGUF inspect first tensor dtype mismatch");
+}
+
+void test_inspects_gguf_summary_from_q6_k_payload() {
+    const auto bytes = fixture("valid-q6-k-tensor-payload-view");
+    const auto summary = inspect_gguf_bytes(std::span<const std::uint8_t>(bytes), 3);
+
+    expect(summary.tensor_count == 1, "Q6_K GGUF inspect tensor count mismatch");
+    expect(summary.dtype_counts.q4_k == 0, "Q6_K GGUF inspect Q4_K count mismatch");
+    expect(summary.dtype_counts.q6_k == 1, "Q6_K GGUF inspect dtype count mismatch");
+    expect(summary.dtype_counts.unsupported == 0, "Q6_K GGUF inspect unsupported count mismatch");
+    expect(summary.total_supported_payload_bytes == 210, "Q6_K GGUF inspect payload byte mismatch");
+    expect(summary.first_tensors.size() == 1, "Q6_K GGUF inspect first tensor count mismatch");
+    expect(summary.first_tensors[0].name == "q6", "Q6_K GGUF inspect first tensor name mismatch");
+    expect(summary.first_tensors[0].dtype == "Q6_K", "Q6_K GGUF inspect first tensor dtype mismatch");
 }
 
 void test_formats_gguf_inspection_summary() {
@@ -105,6 +135,8 @@ void test_formats_gguf_inspection_summary() {
         "GGUF inspect formatted tensor data start missing"
     );
     expect(text.find("  F16: 1\n") != std::string::npos, "GGUF inspect formatted F16 count missing");
+    expect(text.find("  Q4_K: 0\n") != std::string::npos, "GGUF inspect formatted Q4_K count missing");
+    expect(text.find("  Q6_K: 0\n") != std::string::npos, "GGUF inspect formatted Q6_K count missing");
     expect(
         text.find("total supported payload bytes: 4\n") != std::string::npos,
         "GGUF inspect formatted payload byte count missing"
@@ -211,6 +243,8 @@ namespace local_gguf_engine::tests {
 std::span<const TestCase> gguf_inspect_test_cases() {
     static constexpr TestCase tests[] = {
         {"inspects GGUF summary from F16 payload", test_inspects_gguf_summary_from_f16_payload},
+        {"inspects GGUF summary from Q4_K payload", test_inspects_gguf_summary_from_q4_k_payload},
+        {"inspects GGUF summary from Q6_K payload", test_inspects_gguf_summary_from_q6_k_payload},
         {"formats GGUF inspection summary", test_formats_gguf_inspection_summary},
         {"runs gguf-inspect success path", test_runs_gguf_inspect_success},
         {"rejects gguf-inspect missing path", test_rejects_gguf_inspect_missing_path},

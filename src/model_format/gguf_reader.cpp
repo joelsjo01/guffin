@@ -509,6 +509,10 @@ struct TensorTypeLayout {
             return TensorTypeLayout {.block_element_count = 1, .block_byte_count = 2};
         case 8:
             return TensorTypeLayout {.block_element_count = 32, .block_byte_count = 34};
+        case 12:
+            return TensorTypeLayout {.block_element_count = 256, .block_byte_count = 144};
+        case 14:
+            return TensorTypeLayout {.block_element_count = 256, .block_byte_count = 210};
         default:
             throw GGUFReadError(GGUFReadErrorCode::unsupported_tensor_type, 0, type_id);
     }
@@ -523,8 +527,21 @@ struct TensorTypeLayout {
     return element_count;
 }
 
+[[nodiscard]] std::uint64_t tensor_row_element_count(const GGUFTensorInfo& tensor) {
+    if (tensor.dimensions.empty()) {
+        return tensor_element_count(tensor);
+    }
+
+    return tensor.dimensions.back();
+}
+
 [[nodiscard]] std::size_t tensor_payload_byte_count(const GGUFTensorInfo& tensor) {
     const auto layout = tensor_type_layout(tensor.type_id);
+    const auto row_element_count = tensor_row_element_count(tensor);
+    if (row_element_count % layout.block_element_count != 0) {
+        throw GGUFReadError(GGUFReadErrorCode::invalid_tensor_size, layout.block_element_count, row_element_count);
+    }
+
     const auto element_count = tensor_element_count(tensor);
     if (element_count % layout.block_element_count != 0) {
         throw GGUFReadError(GGUFReadErrorCode::invalid_tensor_size, layout.block_element_count, element_count);

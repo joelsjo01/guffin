@@ -527,6 +527,38 @@ void test_reads_q8_0_tensor_payload_view() {
     expect(model.tensor_payloads[0].bytes[33] == 0x21, "Q8_0 payload byte 33 mismatch");
 }
 
+void test_reads_q4_k_tensor_payload_view() {
+    const auto bytes = fixture("valid-q4-k-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+
+    expect(model.directory.tensors.size() == 1, "Q4_K payload view tensor count mismatch");
+    expect(model.directory.tensors[0].name == "q4", "Q4_K payload tensor name mismatch");
+    expect(model.directory.tensors[0].dimensions == std::vector<std::uint64_t> {256}, "Q4_K dimensions mismatch");
+    expect(model.directory.tensors[0].type_id == 12, "Q4_K tensor type mismatch");
+    expect(model.directory.tensors[0].file_offset == 64, "Q4_K file offset mismatch");
+    expect(model.tensor_payloads.size() == 1, "Q4_K payload view count mismatch");
+    expect(model.tensor_payloads[0].bytes.size() == 144, "Q4_K payload byte count mismatch");
+    expect(model.tensor_payloads[0].bytes.data() == bytes.data() + 64, "Q4_K payload should point into input bytes");
+    expect(model.tensor_payloads[0].bytes[0] == 0x00, "Q4_K payload byte 0 mismatch");
+    expect(model.tensor_payloads[0].bytes[143] == 0x7F, "Q4_K payload byte 143 mismatch");
+}
+
+void test_reads_q6_k_tensor_payload_view() {
+    const auto bytes = fixture("valid-q6-k-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+
+    expect(model.directory.tensors.size() == 1, "Q6_K payload view tensor count mismatch");
+    expect(model.directory.tensors[0].name == "q6", "Q6_K payload tensor name mismatch");
+    expect(model.directory.tensors[0].dimensions == std::vector<std::uint64_t> {256}, "Q6_K dimensions mismatch");
+    expect(model.directory.tensors[0].type_id == 14, "Q6_K tensor type mismatch");
+    expect(model.directory.tensors[0].file_offset == 64, "Q6_K file offset mismatch");
+    expect(model.tensor_payloads.size() == 1, "Q6_K payload view count mismatch");
+    expect(model.tensor_payloads[0].bytes.size() == 210, "Q6_K payload byte count mismatch");
+    expect(model.tensor_payloads[0].bytes.data() == bytes.data() + 64, "Q6_K payload should point into input bytes");
+    expect(model.tensor_payloads[0].bytes[0] == 0x00, "Q6_K payload byte 0 mismatch");
+    expect(model.tensor_payloads[0].bytes[209] == 0x40, "Q6_K payload byte 209 mismatch");
+}
+
 void test_reads_f16_tensor_payload_view() {
     const auto bytes = fixture("valid-f16-tensor-payload-view");
     const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
@@ -565,6 +597,19 @@ void test_rejects_unsupported_tensor_payload_type() {
         throw TestFailure("unsupported tensor type should throw");
     } catch (const GGUFReadError& error) {
         expect(error.code() == GGUFReadErrorCode::unsupported_tensor_type, "error code should be unsupported_tensor_type");
+    }
+}
+
+void test_rejects_invalid_q4_k_tensor_row_size() {
+    const auto bytes = fixture("invalid-q4-k-row-size");
+
+    try {
+        (void)read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+        throw TestFailure("invalid Q4_K tensor row size should throw");
+    } catch (const GGUFReadError& error) {
+        expect(error.code() == GGUFReadErrorCode::invalid_tensor_size, "error code should be invalid_tensor_size");
+        expect(error.expected_byte_count() == 256, "expected Q4_K row element count mismatch");
+        expect(error.actual_byte_count() == 128, "actual Q4_K row element count mismatch");
     }
 }
 
@@ -608,9 +653,12 @@ std::span<const TestCase> gguf_reader_test_cases() {
         {"rejects truncated GGUF tensor directory", test_rejects_truncated_tensor_directory},
         {"reads GGUF tensor payload views without copying", test_reads_tensor_payload_views_without_copying},
         {"reads Q8_0 GGUF tensor payload view", test_reads_q8_0_tensor_payload_view},
+        {"reads Q4_K GGUF tensor payload view", test_reads_q4_k_tensor_payload_view},
+        {"reads Q6_K GGUF tensor payload view", test_reads_q6_k_tensor_payload_view},
         {"reads F16 GGUF tensor payload view", test_reads_f16_tensor_payload_view},
         {"rejects truncated GGUF tensor payload", test_rejects_truncated_tensor_payload},
         {"rejects unsupported GGUF tensor payload type", test_rejects_unsupported_tensor_payload_type},
+        {"rejects invalid Q4_K GGUF tensor row size", test_rejects_invalid_q4_k_tensor_row_size},
         {"rejects invalid quantized GGUF tensor payload size", test_rejects_invalid_quantized_tensor_payload_size},
     };
 
