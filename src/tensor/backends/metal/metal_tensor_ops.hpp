@@ -45,6 +45,11 @@ void require_gated_silu_projection_f32_f16_gguf_weight_operands(
 );
 void require_f32_vector_descriptor(const TensorDescriptor& descriptor);
 void require_positive_epsilon(float epsilon);
+void require_rms_norm_f32_operands(
+    const TensorDescriptor& input,
+    const TensorDescriptor& weight,
+    float epsilon
+);
 void require_positive_finite_scale(float scale);
 void require_positive_frequency_base(float frequency_base);
 void require_residual_gated_silu_projection_f32_f16_gguf_weight_operands(
@@ -76,6 +81,11 @@ void require_f32_f16_matmul_gguf_weight_triple_operands(
     std::span<const std::uint32_t> token_ids,
     const MetalBackendBufferStorage& embedding_weight,
     float scale
+);
+[[nodiscard]] BackendBuffer rms_norm_f32_with_metal_buffers(
+    const MetalBackendBufferStorage& input,
+    const MetalBackendBufferStorage& weight,
+    float epsilon
 );
 [[nodiscard]] BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
     const MetalBackendBufferStorage& left,

@@ -39,6 +39,11 @@ private:
     const CpuBackendBufferStorage& embedding_weight,
     float scale
 );
+[[nodiscard]] BackendBuffer rms_norm_f32_with_cpu_buffers(
+    const CpuBackendBufferStorage& input,
+    const CpuBackendBufferStorage& weight,
+    float epsilon
+);
 
 [[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight(
     const TensorStorage& left,

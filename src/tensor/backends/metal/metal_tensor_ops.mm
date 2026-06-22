@@ -6,6 +6,7 @@
 
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/ops/embedding.hpp"
+#include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/tensor_error.hpp"
 #include "../../ops/validation.hpp"
 
@@ -222,6 +223,22 @@ void require_positive_epsilon(float epsilon) {
     if (!(epsilon > 0.0F)) {
         throw std::invalid_argument("RMSNorm epsilon must be positive");
     }
+}
+
+void require_rms_norm_f32_operands(
+    const TensorDescriptor& input,
+    const TensorDescriptor& weight,
+    float epsilon
+) {
+    ops::require_f32_descriptor(input);
+    require_matrix_descriptor(input);
+    require_f32_vector_descriptor(weight);
+    const auto hidden = input.shape.dimension(1);
+    const auto weight_hidden = weight.shape.dimension(0);
+    if (hidden != weight_hidden) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, hidden, weight_hidden);
+    }
+    require_positive_epsilon(epsilon);
 }
 
 void require_positive_finite_scale(float scale) {
@@ -496,6 +513,70 @@ BackendBuffer embed_f16_gguf_weight_token_ids_with_metal_buffer(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal F16 GGUF token embedding command failed: "
                 + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return make_metal_backend_buffer(output_descriptor, output_buffer);
+}
+
+BackendBuffer rms_norm_f32_with_metal_buffers(
+    const MetalBackendBufferStorage& input,
+    const MetalBackendBufferStorage& weight,
+    float epsilon
+) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto rows = input.descriptor().shape.dimension(0);
+    const auto hidden = input.descriptor().shape.dimension(1);
+    const RMSNormDimensions dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .hidden = require_u32_dimension(hidden, "hidden"),
+        .epsilon = epsilon,
+    };
+    const auto output_descriptor = input.descriptor();
+
+    id<MTLBuffer> output_buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(
+                                      output_descriptor.byte_count
+                                   )
+                                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(RMSNormDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (output_buffer == nil || dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal RMSNorm buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (command_buffer == nil || encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal RMSNorm command encoding failed"
+        );
+    }
+
+    [encoder setComputePipelineState:state.rms_norm_pipeline];
+    [encoder setBuffer:input.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:weight.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:output_buffer offset:0 atIndex:2];
+    [encoder setBuffer:dims_buffer offset:0 atIndex:3];
+
+    const MTLSize threads_per_threadgroup = MTLSizeMake(64, 1, 1);
+    const auto threadgroup_count = static_cast<NSUInteger>((rows + 63U) / 64U);
+    const MTLSize threadgroups = MTLSizeMake(threadgroup_count, 1, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal RMSNorm command failed: " + ns_error_message(execution_error, "unknown error")
         );
     }
 
@@ -1270,6 +1351,38 @@ BackendBuffer embed_f16_gguf_weight_token_ids_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         embedding_weight.backend(),
         "unsupported backend buffer for F16 GGUF token embedding"
+    );
+}
+
+BackendBuffer rms_norm_f32_to_backend(
+    const BackendBuffer& input,
+    const BackendBuffer& weight,
+    float epsilon
+) {
+    backends::metal::require_rms_norm_f32_operands(input.descriptor(), weight.descriptor(), epsilon);
+    backends::metal::require_same_backend(input.backend(), weight.backend(), "RMSNorm");
+
+    switch (input.backend()) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::rms_norm_f32_with_cpu_buffers(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(input)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(weight)),
+                epsilon
+            );
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::rms_norm_f32_with_metal_buffers(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(input)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(weight)),
+                    epsilon
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        input.backend(),
+        "unsupported backend buffers for RMSNorm"
     );
 }
 

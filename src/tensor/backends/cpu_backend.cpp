@@ -155,6 +155,14 @@ BackendBuffer embed_f16_gguf_weight_token_ids_with_cpu_buffer(
     return copy_tensor_to_cpu_backend(output);
 }
 
+BackendBuffer rms_norm_f32_with_cpu_buffers(
+    const CpuBackendBufferStorage& input,
+    const CpuBackendBufferStorage& weight,
+    float epsilon
+) {
+    return copy_tensor_to_cpu_backend(ops::rms_norm_f32(input.storage(), weight.storage(), epsilon));
+}
+
 TensorStorage matmul_f32_f16_gguf_weight(
     const TensorStorage& left,
     const TensorStorage& right

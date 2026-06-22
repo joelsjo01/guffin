@@ -8,6 +8,7 @@
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
+#include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
@@ -56,6 +57,7 @@ using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorDescriptor;
 using local_gguf_engine::tensor::backend_buffer_storage;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
+using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tests::TestCase;
@@ -66,6 +68,7 @@ using local_gguf_engine::tests::metadata_f32;
 using local_gguf_engine::tests::metadata_string;
 using local_gguf_engine::tests::metadata_u32;
 using local_gguf_engine::tests::tensor_f16_gguf_matrix;
+using local_gguf_engine::tests::tensor_f32_vector;
 
 GGUFModelView tiny_model_view(
     std::vector<GGUFMetadataEntry> metadata_entries,
@@ -221,6 +224,30 @@ std::size_t payload_byte_count(std::span<const GGUFTensorPayloadView> payloads) 
 
 std::size_t backend_buffer_byte_count(const local_gguf_engine::tensor::BackendBuffer& buffer) {
     return buffer.descriptor().byte_count;
+}
+
+void expect_f32_matrix_close(
+    const local_gguf_engine::tensor::TensorStorage& actual,
+    const local_gguf_engine::tensor::TensorStorage& expected,
+    float tolerance,
+    std::string_view message
+) {
+    expect(actual.descriptor() == expected.descriptor(), std::string(message) + " descriptor mismatch");
+    expect(actual.descriptor().dtype == DType::f32, std::string(message) + " dtype mismatch");
+
+    const auto rows = actual.descriptor().shape.dimension(0);
+    const auto columns = actual.descriptor().shape.dimension(1);
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            expect_close(
+                read_f32(actual, std::span<const std::uint64_t>(index)),
+                read_f32(expected, std::span<const std::uint64_t>(index)),
+                tolerance,
+                message
+            );
+        }
+    }
 }
 
 std::size_t expected_kv_cache_byte_count(const Gemma2ModelConfig& config) {
@@ -508,6 +535,10 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
     embedding_values[7] = 40.0F;
     const auto embedding = tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values));
     std::copy(embedding.bytes().begin(), embedding.bytes().end(), payload_store.bytes[0].begin());
+    std::vector<float> attention_norm_values(256U, 1.0F);
+    attention_norm_values[1] = 0.5F;
+    const auto attention_norm = tensor_f32_vector(std::span<const float>(attention_norm_values));
+    std::copy(attention_norm.bytes().begin(), attention_norm.bytes().end(), payload_store.bytes[2].begin());
 
     auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
@@ -518,6 +549,13 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         std::span<const std::uint32_t>(prompt_token_ids)
     );
     const auto hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
+    const auto normalized_attention_input =
+        copy_tensor_from_backend(shell.prefill_first_layer_input.normalized_attention_input);
+    const auto expected_normalized = rms_norm_f32(
+        hidden_states,
+        attention_norm,
+        shell.plan.config().rms_norm_epsilon
+    );
 
     expect(shell.prefill_input.token_ids == std::vector<std::uint32_t>({3, 1}), "Gemma2 shell token ids mismatch");
     expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
@@ -531,6 +569,31 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         "Gemma2 shell input hidden state dtype mismatch"
     );
     expect(hidden_states.descriptor() == shell.prefill_input.hidden_states.descriptor(), "Gemma2 shell input readback descriptor mismatch");
+    expect(shell.prefill_first_layer_input.layer_index == 0, "Gemma2 shell first layer input index mismatch");
+    expect(
+        shell.prefill_first_layer_input.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell first layer input phase mismatch"
+    );
+    expect(
+        shell.prefill_first_layer_input.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell first layer input scratch ownership mismatch"
+    );
+    expect(
+        shell.prefill_first_layer_input.normalized_attention_input.backend() == BackendKind::metal,
+        "Gemma2 shell first layer input backend mismatch"
+    );
+    expect(
+        shell.prefill_first_layer_input.normalized_attention_input.descriptor()
+            == shell.prefill.scratch().normalized_hidden,
+        "Gemma2 shell first layer input scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(
+            shell.prefill_first_layer_input.normalized_attention_input,
+            shell.prefill_input.hidden_states
+        ),
+        "Gemma2 shell first layer input should be an explicit output buffer"
+    );
 
     const std::array<std::uint64_t, 2> token_0_hidden_0 {0, 0};
     const std::array<std::uint64_t, 2> token_0_hidden_1 {0, 1};
@@ -559,6 +622,12 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         320.0F,
         0.0F,
         "Gemma2 shell token 1 hidden 1 mismatch"
+    );
+    expect_f32_matrix_close(
+        normalized_attention_input,
+        expected_normalized,
+        1.0e-5F,
+        "Gemma2 shell first layer normalized attention input"
     );
 }
 

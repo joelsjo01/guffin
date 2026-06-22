@@ -5,21 +5,23 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma layer input primitive behind the Metal runtime
-shell.
+Add the first scheduled Gemma attention projection setup primitive behind the
+Metal runtime shell.
 
 ## Why
 
 Gemma now reaches the real generate path far enough to load file-backed tensor
 views, tokenize the prompt, upload the resident Metal model plan, build
 separate prefill/decode schedules, and turn prompt token IDs into backend-
-resident hidden states with the Gemma embedding scale.
+resident hidden states with the Gemma embedding scale. The first layer now also
+consumes those resident prefill hidden states through `blk.0.attn_norm.weight`
+and produces an explicit backend-resident normalized attention input.
 
-The next blocker is moving those hidden states into the first layer's scheduled
-attention setup without breaking the resident model plan. Keep this slice tiny
-and replaceable: enough to prove the scheduled layer path can consume resident
-input activations and write explicit phase outputs, but not enough to pretend
-full generation exists.
+The next blocker is moving that normalized first-layer input into the scheduled
+Q/K/V setup without breaking the resident model plan. Keep this slice tiny and
+replaceable: enough to prove first-layer projection setup can consume explicit
+scheduled activations and write explicit phase outputs, but not enough to
+pretend full generation exists.
 
 ## Read
 
@@ -35,7 +37,7 @@ full generation exists.
 
 - Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
   and `src/engine`
-- Metal backend/tensor code only for the narrow primitive and its tests
+- Metal backend/tensor code only for narrow packed projection helpers and tests
 - `tests/engine`
 - `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
@@ -46,8 +48,8 @@ full generation exists.
 ## Do Not
 
 - Do not add full Gemma generation or a full Gemma layer chain.
-- Do not add full attention softmax/KV-cache update/output projection unless a
-  smaller tested primitive genuinely requires it.
+- Do not add attention softmax, KV-cache update, attention output projection,
+  FFN work, logits, or sampling changes.
 - Do not add full 9B CPU execution, sampling changes, broad graph
   abstractions, or benchmark work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -70,7 +72,7 @@ full generation exists.
 
 ## Stop When
 
-One small scheduled Gemma layer-input primitive consumes the runtime shell's
-resident prefill hidden states and produces explicit resident or phase-local
-outputs with deterministic tests, while full Gemma generation remains
-explicitly unsupported.
+One small scheduled Gemma projection-setup primitive consumes the runtime
+shell's first-layer normalized attention input and produces explicit
+resident or phase-local Q/K/V outputs with deterministic tests, while full
+Gemma generation remains explicitly unsupported.
