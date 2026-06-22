@@ -17,7 +17,8 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | File-backed loading | Large tensor payloads can flow from validated file-backed views to backend upload without eager duplicate host copies. |
 | Done | Metal resident model plan | Packed weights, KV cache, scratch, and per-layer state are owned by a reusable Gemma Metal plan. |
 | Done | Packed Q4_K/Q6_K Metal matmul | Representative Gemma projection shapes consume packed weights directly and pass CPU/reference parity. |
-| Current | Separate prefill and decode | Prompt eval and one-token decode use distinct schedules with resident KV and clear phase metrics. |
+| Done | Separate prefill and decode | Prompt prefill and one-token decode have distinct resident-plan schedules with explicit KV, scratch, and layer phase shapes. |
+| Current | Gemma generation runtime shell | The real Gemma generate path builds the resident Metal plan and phase schedules, then stops at an explicit unsupported execution boundary. |
 | Planned | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |
 

@@ -5,8 +5,11 @@
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 
+#include <algorithm>
 #include <initializer_list>
 #include <limits>
+#include <span>
+#include <stdexcept>
 #include <utility>
 
 namespace local_gguf_engine::engine {
@@ -199,6 +202,114 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     return layers;
 }
 
+[[nodiscard]] Gemma2MetalScheduleScratch schedule_scratch_from_decode_scratch(
+    const Gemma2MetalDecodeScratch& scratch
+) {
+    return Gemma2MetalScheduleScratch {
+        .normalized_hidden = scratch.normalized_hidden.descriptor(),
+        .query = scratch.query.descriptor(),
+        .key = scratch.key.descriptor(),
+        .value = scratch.value.descriptor(),
+        .attention_scores = scratch.attention_scores.descriptor(),
+        .attention_output = scratch.attention_output.descriptor(),
+        .feed_forward_gate = scratch.feed_forward_gate.descriptor(),
+        .feed_forward_up = scratch.feed_forward_up.descriptor(),
+        .feed_forward_gated = scratch.feed_forward_gated.descriptor(),
+        .logits = scratch.logits.descriptor(),
+    };
+}
+
+[[nodiscard]] std::uint32_t layer_attention_token_count(
+    const Gemma2ModelConfig& config,
+    const Gemma2MetalLayerState& layer,
+    std::uint32_t total_kv_token_count
+) {
+    if (layer.uses_sliding_window && config.sliding_window > 0) {
+        return std::min(total_kv_token_count, config.sliding_window);
+    }
+
+    return total_kv_token_count;
+}
+
+[[nodiscard]] std::vector<Gemma2MetalLayerSchedule> make_layer_schedules(
+    const Gemma2MetalModelPlan& plan,
+    std::uint32_t total_kv_token_count
+) {
+    std::vector<Gemma2MetalLayerSchedule> layers;
+    layers.reserve(plan.layers().size());
+    for (const auto& layer : plan.layers()) {
+        layers.push_back(Gemma2MetalLayerSchedule {
+            .layer_index = layer.layer_index,
+            .uses_sliding_window = layer.uses_sliding_window,
+            .attention_token_count = layer_attention_token_count(plan.config(), layer, total_kv_token_count),
+        });
+    }
+
+    return layers;
+}
+
+[[nodiscard]] std::uint32_t max_attention_token_count(std::span<const Gemma2MetalLayerSchedule> layers) {
+    std::uint32_t max_tokens = 0;
+    for (const auto& layer : layers) {
+        max_tokens = std::max(max_tokens, layer.attention_token_count);
+    }
+
+    return max_tokens;
+}
+
+[[nodiscard]] Gemma2MetalScheduleScratch make_phase_local_scratch(
+    const Gemma2ModelConfig& config,
+    std::uint32_t token_count,
+    std::uint32_t attention_token_count
+) {
+    return Gemma2MetalScheduleScratch {
+        .normalized_hidden = f32_descriptor({token_count, config.embedding_length}),
+        .query = f32_descriptor({token_count, attention_query_width(config)}),
+        .key = f32_descriptor({token_count, attention_key_width(config)}),
+        .value = f32_descriptor({token_count, attention_value_width(config)}),
+        .attention_scores = f32_descriptor({token_count, config.attention_head_count, attention_token_count}),
+        .attention_output = f32_descriptor({token_count, attention_output_width(config)}),
+        .feed_forward_gate = f32_descriptor({token_count, config.feed_forward_length}),
+        .feed_forward_up = f32_descriptor({token_count, config.feed_forward_length}),
+        .feed_forward_gated = f32_descriptor({token_count, config.feed_forward_length}),
+        .logits = f32_descriptor({token_count, config.vocab_size}),
+    };
+}
+
+[[nodiscard]] std::size_t schedule_scratch_byte_count(const Gemma2MetalScheduleScratch& scratch) {
+    std::size_t total = 0;
+    checked_add_bytes(total, scratch.normalized_hidden.byte_count);
+    checked_add_bytes(total, scratch.query.byte_count);
+    checked_add_bytes(total, scratch.key.byte_count);
+    checked_add_bytes(total, scratch.value.byte_count);
+    checked_add_bytes(total, scratch.attention_scores.byte_count);
+    checked_add_bytes(total, scratch.attention_output.byte_count);
+    checked_add_bytes(total, scratch.feed_forward_gate.byte_count);
+    checked_add_bytes(total, scratch.feed_forward_up.byte_count);
+    checked_add_bytes(total, scratch.feed_forward_gated.byte_count);
+    checked_add_bytes(total, scratch.logits.byte_count);
+
+    return total;
+}
+
+void require_prefill_token_count(const Gemma2ModelConfig& config, std::uint32_t prompt_token_count) {
+    if (prompt_token_count == 0) {
+        throw std::invalid_argument("Gemma2 Metal prefill schedule token count must be positive");
+    }
+    if (prompt_token_count > config.context_length) {
+        throw std::invalid_argument("Gemma2 Metal prefill schedule token count exceeds context length");
+    }
+}
+
+void require_decode_cached_token_count(const Gemma2ModelConfig& config, std::uint32_t cached_token_count) {
+    if (cached_token_count == 0) {
+        throw std::invalid_argument("Gemma2 Metal decode schedule cached token count must be positive");
+    }
+    if (cached_token_count >= config.context_length) {
+        throw std::invalid_argument("Gemma2 Metal decode schedule cached token count must leave room for one token");
+    }
+}
+
 }  // namespace
 
 Gemma2MetalModelPlan::Gemma2MetalModelPlan(
@@ -256,6 +367,103 @@ std::size_t Gemma2MetalModelPlan::scratch_byte_count() const noexcept {
     return scratch_byte_count_;
 }
 
+Gemma2MetalSchedule::Gemma2MetalSchedule(
+    Gemma2ModelConfig config,
+    Gemma2MetalModelWeightBuffers weights,
+    std::vector<Gemma2MetalKVCacheLayer> kv_cache,
+    Gemma2MetalDecodeScratch resident_decode_scratch,
+    std::vector<Gemma2MetalLayerSchedule> layers,
+    Gemma2MetalSchedulePhase phase,
+    Gemma2MetalScratchOwnership scratch_ownership,
+    Gemma2MetalScheduleScratch scratch,
+    std::uint32_t token_count,
+    std::uint32_t cache_position,
+    std::uint32_t total_kv_token_count,
+    std::size_t resident_weight_byte_count,
+    std::size_t resident_kv_cache_byte_count,
+    std::size_t resident_decode_scratch_byte_count,
+    std::size_t phase_scratch_byte_count
+)
+    : config_(config),
+      weights_(std::move(weights)),
+      kv_cache_(std::move(kv_cache)),
+      resident_decode_scratch_(std::move(resident_decode_scratch)),
+      layers_(std::move(layers)),
+      phase_(phase),
+      scratch_ownership_(scratch_ownership),
+      scratch_(std::move(scratch)),
+      token_count_(token_count),
+      cache_position_(cache_position),
+      total_kv_token_count_(total_kv_token_count),
+      resident_weight_byte_count_(resident_weight_byte_count),
+      resident_kv_cache_byte_count_(resident_kv_cache_byte_count),
+      resident_decode_scratch_byte_count_(resident_decode_scratch_byte_count),
+      phase_scratch_byte_count_(phase_scratch_byte_count) {}
+
+runtime::BackendKind Gemma2MetalSchedule::backend() const noexcept {
+    return gemma_backend;
+}
+
+const Gemma2ModelConfig& Gemma2MetalSchedule::config() const noexcept {
+    return config_;
+}
+
+Gemma2MetalSchedulePhase Gemma2MetalSchedule::phase() const noexcept {
+    return phase_;
+}
+
+std::uint32_t Gemma2MetalSchedule::token_count() const noexcept {
+    return token_count_;
+}
+
+std::uint32_t Gemma2MetalSchedule::cache_position() const noexcept {
+    return cache_position_;
+}
+
+std::uint32_t Gemma2MetalSchedule::total_kv_token_count() const noexcept {
+    return total_kv_token_count_;
+}
+
+Gemma2MetalScratchOwnership Gemma2MetalSchedule::scratch_ownership() const noexcept {
+    return scratch_ownership_;
+}
+
+const Gemma2MetalScheduleScratch& Gemma2MetalSchedule::scratch() const noexcept {
+    return scratch_;
+}
+
+const Gemma2MetalModelWeightBuffers& Gemma2MetalSchedule::weights() const noexcept {
+    return weights_;
+}
+
+const std::vector<Gemma2MetalKVCacheLayer>& Gemma2MetalSchedule::kv_cache() const noexcept {
+    return kv_cache_;
+}
+
+const Gemma2MetalDecodeScratch& Gemma2MetalSchedule::resident_decode_scratch() const noexcept {
+    return resident_decode_scratch_;
+}
+
+const std::vector<Gemma2MetalLayerSchedule>& Gemma2MetalSchedule::layers() const noexcept {
+    return layers_;
+}
+
+std::size_t Gemma2MetalSchedule::resident_weight_byte_count() const noexcept {
+    return resident_weight_byte_count_;
+}
+
+std::size_t Gemma2MetalSchedule::resident_kv_cache_byte_count() const noexcept {
+    return resident_kv_cache_byte_count_;
+}
+
+std::size_t Gemma2MetalSchedule::resident_decode_scratch_byte_count() const noexcept {
+    return resident_decode_scratch_byte_count_;
+}
+
+std::size_t Gemma2MetalSchedule::phase_scratch_byte_count() const noexcept {
+    return phase_scratch_byte_count_;
+}
+
 Gemma2MetalModelPlan create_gemma2_metal_model_plan(const EngineModel& model) {
     const auto weights = bind_gemma2_model_weights(model);
     return create_gemma2_metal_model_plan(model.gemma2_config(), weights);
@@ -285,6 +493,70 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
         uploaded_weight_byte_count,
         kv_cache_byte_count,
         scratch_byte_count
+    );
+}
+
+Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(
+    const Gemma2MetalModelPlan& plan,
+    std::uint32_t prompt_token_count
+) {
+    require_prefill_token_count(plan.config(), prompt_token_count);
+
+    auto layers = make_layer_schedules(plan, prompt_token_count);
+    auto scratch = make_phase_local_scratch(
+        plan.config(),
+        prompt_token_count,
+        max_attention_token_count(std::span<const Gemma2MetalLayerSchedule>(layers))
+    );
+    const auto phase_scratch_bytes = schedule_scratch_byte_count(scratch);
+
+    return Gemma2MetalSchedule(
+        plan.config(),
+        plan.weights(),
+        plan.kv_cache(),
+        plan.decode_scratch(),
+        std::move(layers),
+        Gemma2MetalSchedulePhase::prefill,
+        Gemma2MetalScratchOwnership::phase_local,
+        std::move(scratch),
+        prompt_token_count,
+        0,
+        prompt_token_count,
+        plan.uploaded_weight_byte_count(),
+        plan.kv_cache_byte_count(),
+        plan.scratch_byte_count(),
+        phase_scratch_bytes
+    );
+}
+
+Gemma2MetalSchedule create_gemma2_metal_decode_schedule(
+    const Gemma2MetalModelPlan& plan,
+    std::uint32_t cached_token_count
+) {
+    require_decode_cached_token_count(plan.config(), cached_token_count);
+
+    const auto token_count = 1U;
+    const auto total_kv_token_count = cached_token_count + token_count;
+    auto layers = make_layer_schedules(plan, total_kv_token_count);
+    auto scratch = schedule_scratch_from_decode_scratch(plan.decode_scratch());
+    const auto phase_scratch_bytes = schedule_scratch_byte_count(scratch);
+
+    return Gemma2MetalSchedule(
+        plan.config(),
+        plan.weights(),
+        plan.kv_cache(),
+        plan.decode_scratch(),
+        std::move(layers),
+        Gemma2MetalSchedulePhase::decode,
+        Gemma2MetalScratchOwnership::resident_decode,
+        std::move(scratch),
+        token_count,
+        cached_token_count,
+        total_kv_token_count,
+        plan.uploaded_weight_byte_count(),
+        plan.kv_cache_byte_count(),
+        plan.scratch_byte_count(),
+        phase_scratch_bytes
     );
 }
 

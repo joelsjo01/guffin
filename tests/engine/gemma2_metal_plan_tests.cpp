@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <span>
 #include <string>
 #include <string_view>
@@ -24,11 +25,15 @@ namespace {
 using local_gguf_engine::engine::EngineModel;
 using local_gguf_engine::engine::EngineModelError;
 using local_gguf_engine::engine::EngineModelErrorCode;
+using local_gguf_engine::engine::Gemma2MetalSchedulePhase;
+using local_gguf_engine::engine::Gemma2MetalScratchOwnership;
 using local_gguf_engine::engine::Gemma2MetalModelPlan;
 using local_gguf_engine::engine::Gemma2ModelConfig;
 using local_gguf_engine::engine::LlamaModelConfig;
 using local_gguf_engine::engine::ModelArchitecture;
+using local_gguf_engine::engine::create_gemma2_metal_decode_schedule;
 using local_gguf_engine::engine::create_gemma2_metal_model_plan;
+using local_gguf_engine::engine::create_gemma2_metal_prefill_schedule;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::model_format::GGUFHeader;
 using local_gguf_engine::model_format::GGUFMetadataEntry;
@@ -43,6 +48,7 @@ using local_gguf_engine::runtime::BackendKind;
 using local_gguf_engine::tensor::DType;
 using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorDescriptor;
+using local_gguf_engine::tensor::backend_buffer_storage;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
 using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tests::TestCase;
@@ -122,13 +128,13 @@ GGUFTensorPayloadView tensor_payload_view(
     };
 }
 
-std::vector<GGUFMetadataEntry> tiny_gemma2_metadata() {
+std::vector<GGUFMetadataEntry> tiny_gemma2_metadata(std::uint32_t block_count = 1) {
     return {
         metadata_string("general.architecture", "gemma2"),
         metadata_string("general.name", "Tiny Gemma 2 Metal Plan Fixture"),
         metadata_u32("gemma2.context_length", 16),
         metadata_u32("gemma2.embedding_length", 256),
-        metadata_u32("gemma2.block_count", 1),
+        metadata_u32("gemma2.block_count", block_count),
         metadata_u32("gemma2.feed_forward_length", 256),
         metadata_u32("gemma2.attention.head_count", 1),
         metadata_u32("gemma2.attention.head_count_kv", 1),
@@ -165,26 +171,32 @@ void add_payload(
     ));
 }
 
-TinyGemma2PayloadStore tiny_gemma2_payload_store(bool include_post_ffw_norm = true) {
+TinyGemma2PayloadStore tiny_gemma2_payload_store(
+    bool include_post_ffw_norm = true,
+    std::uint32_t block_count = 1
+) {
     TinyGemma2PayloadStore store;
-    store.bytes.reserve(16);
-    store.payloads.reserve(16);
+    store.bytes.reserve(static_cast<std::size_t>(2 + block_count * 11));
+    store.payloads.reserve(static_cast<std::size_t>(2 + block_count * 11));
 
     add_payload(store, "token_embd.weight", {256, 4}, DType::f16);
     add_payload(store, "output_norm.weight", {256}, DType::f32);
-    add_payload(store, block_tensor_name(0, "attn_norm.weight"), {256}, DType::f32);
-    add_payload(store, block_tensor_name(0, "post_attention_norm.weight"), {256}, DType::f32);
-    add_payload(store, block_tensor_name(0, "attn_q.weight"), {256, 256}, DType::q4_k);
-    add_payload(store, block_tensor_name(0, "attn_k.weight"), {256, 256}, DType::q4_k);
-    add_payload(store, block_tensor_name(0, "attn_v.weight"), {256, 256}, DType::q6_k);
-    add_payload(store, block_tensor_name(0, "attn_output.weight"), {256, 256}, DType::q4_k);
-    add_payload(store, block_tensor_name(0, "ffn_norm.weight"), {256}, DType::f32);
-    if (include_post_ffw_norm) {
-        add_payload(store, block_tensor_name(0, "post_ffw_norm.weight"), {256}, DType::f32);
+
+    for (std::uint32_t block_index = 0; block_index < block_count; ++block_index) {
+        add_payload(store, block_tensor_name(block_index, "attn_norm.weight"), {256}, DType::f32);
+        add_payload(store, block_tensor_name(block_index, "post_attention_norm.weight"), {256}, DType::f32);
+        add_payload(store, block_tensor_name(block_index, "attn_q.weight"), {256, 256}, DType::q4_k);
+        add_payload(store, block_tensor_name(block_index, "attn_k.weight"), {256, 256}, DType::q4_k);
+        add_payload(store, block_tensor_name(block_index, "attn_v.weight"), {256, 256}, DType::q6_k);
+        add_payload(store, block_tensor_name(block_index, "attn_output.weight"), {256, 256}, DType::q4_k);
+        add_payload(store, block_tensor_name(block_index, "ffn_norm.weight"), {256}, DType::f32);
+        if (include_post_ffw_norm) {
+            add_payload(store, block_tensor_name(block_index, "post_ffw_norm.weight"), {256}, DType::f32);
+        }
+        add_payload(store, block_tensor_name(block_index, "ffn_gate.weight"), {256, 256}, DType::q4_k);
+        add_payload(store, block_tensor_name(block_index, "ffn_up.weight"), {256, 256}, DType::q4_k);
+        add_payload(store, block_tensor_name(block_index, "ffn_down.weight"), {256, 256}, DType::q6_k);
     }
-    add_payload(store, block_tensor_name(0, "ffn_gate.weight"), {256, 256}, DType::q4_k);
-    add_payload(store, block_tensor_name(0, "ffn_up.weight"), {256, 256}, DType::q4_k);
-    add_payload(store, block_tensor_name(0, "ffn_down.weight"), {256, 256}, DType::q6_k);
 
     return store;
 }
@@ -227,6 +239,26 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(scratch.feed_forward_up)
         + backend_buffer_byte_count(scratch.feed_forward_gated)
         + backend_buffer_byte_count(scratch.logits);
+}
+
+std::size_t schedule_scratch_byte_count(const local_gguf_engine::engine::Gemma2MetalScheduleScratch& scratch) {
+    return scratch.normalized_hidden.byte_count
+        + scratch.query.byte_count
+        + scratch.key.byte_count
+        + scratch.value.byte_count
+        + scratch.attention_scores.byte_count
+        + scratch.attention_output.byte_count
+        + scratch.feed_forward_gate.byte_count
+        + scratch.feed_forward_up.byte_count
+        + scratch.feed_forward_gated.byte_count
+        + scratch.logits.byte_count;
+}
+
+bool shares_backend_storage(
+    const local_gguf_engine::tensor::BackendBuffer& left,
+    const local_gguf_engine::tensor::BackendBuffer& right
+) {
+    return &backend_buffer_storage(left) == &backend_buffer_storage(right);
 }
 
 EngineModel tiny_llama_model() {
@@ -305,6 +337,202 @@ void test_gemma2_metal_plan_roundtrips_uploaded_borrowed_weight_when_available()
     );
 }
 
+void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store(true, 2);
+    auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const auto plan = create_gemma2_metal_model_plan(model);
+
+    const auto prefill = create_gemma2_metal_prefill_schedule(plan, 12);
+    const auto decode = create_gemma2_metal_decode_schedule(plan, 12);
+
+    expect(prefill.backend() == BackendKind::metal, "Gemma2 prefill schedule backend mismatch");
+    expect(decode.backend() == BackendKind::metal, "Gemma2 decode schedule backend mismatch");
+    expect(prefill.config() == plan.config(), "Gemma2 prefill schedule config mismatch");
+    expect(decode.config() == plan.config(), "Gemma2 decode schedule config mismatch");
+    expect(prefill.phase() == Gemma2MetalSchedulePhase::prefill, "Gemma2 prefill schedule phase mismatch");
+    expect(decode.phase() == Gemma2MetalSchedulePhase::decode, "Gemma2 decode schedule phase mismatch");
+
+    expect(prefill.token_count() == 12, "Gemma2 prefill token count mismatch");
+    expect(prefill.cache_position() == 0, "Gemma2 prefill cache position mismatch");
+    expect(prefill.total_kv_token_count() == 12, "Gemma2 prefill total KV token count mismatch");
+    expect(decode.token_count() == 1, "Gemma2 decode token count mismatch");
+    expect(decode.cache_position() == 12, "Gemma2 decode cache position mismatch");
+    expect(decode.total_kv_token_count() == 13, "Gemma2 decode total KV token count mismatch");
+
+    expect(
+        prefill.scratch_ownership() == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 prefill scratch ownership mismatch"
+    );
+    expect(
+        decode.scratch_ownership() == Gemma2MetalScratchOwnership::resident_decode,
+        "Gemma2 decode scratch ownership mismatch"
+    );
+    expect(
+        prefill.scratch().normalized_hidden.shape == Shape::from({12, 256}),
+        "Gemma2 prefill normalized hidden scratch shape mismatch"
+    );
+    expect(
+        prefill.scratch().attention_scores.shape == Shape::from({12, 1, 12}),
+        "Gemma2 prefill attention score scratch shape mismatch"
+    );
+    expect(
+        decode.scratch().normalized_hidden.shape == Shape::from({1, 256}),
+        "Gemma2 decode normalized hidden scratch shape mismatch"
+    );
+    expect(
+        decode.scratch().attention_scores.shape == Shape::from({1, 1, 16}),
+        "Gemma2 decode resident attention score scratch shape mismatch"
+    );
+    expect(
+        prefill.phase_scratch_byte_count() == schedule_scratch_byte_count(prefill.scratch()),
+        "Gemma2 prefill schedule scratch byte count mismatch"
+    );
+    expect(
+        decode.phase_scratch_byte_count() == plan.scratch_byte_count(),
+        "Gemma2 decode schedule scratch byte count mismatch"
+    );
+
+    expect(prefill.layers().size() == 2, "Gemma2 prefill layer schedule count mismatch");
+    expect(decode.layers().size() == 2, "Gemma2 decode layer schedule count mismatch");
+    expect(prefill.layers()[0].layer_index == 0, "Gemma2 prefill layer 0 index mismatch");
+    expect(prefill.layers()[0].uses_sliding_window, "Gemma2 prefill layer 0 should use sliding attention");
+    expect(prefill.layers()[0].attention_token_count == 8, "Gemma2 prefill sliding attention count mismatch");
+    expect(prefill.layers()[1].layer_index == 1, "Gemma2 prefill layer 1 index mismatch");
+    expect(!prefill.layers()[1].uses_sliding_window, "Gemma2 prefill layer 1 should use full attention");
+    expect(prefill.layers()[1].attention_token_count == 12, "Gemma2 prefill full attention count mismatch");
+    expect(decode.layers()[0].attention_token_count == 8, "Gemma2 decode sliding attention count mismatch");
+    expect(decode.layers()[1].attention_token_count == 13, "Gemma2 decode full attention count mismatch");
+}
+
+void test_gemma2_metal_schedules_share_resident_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store();
+    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const auto plan = create_gemma2_metal_model_plan(model);
+
+    const auto prefill = create_gemma2_metal_prefill_schedule(plan, 4);
+    const auto decode = create_gemma2_metal_decode_schedule(plan, 4);
+
+    expect(
+        shares_backend_storage(prefill.weights().token_embedding_weight, plan.weights().token_embedding_weight),
+        "Gemma2 prefill schedule should share token embedding buffer"
+    );
+    expect(
+        shares_backend_storage(decode.weights().blocks[0].attention.query_weight, plan.weights().blocks[0].attention.query_weight),
+        "Gemma2 decode schedule should share query weight buffer"
+    );
+    expect(
+        shares_backend_storage(prefill.kv_cache()[0].key, plan.kv_cache()[0].key),
+        "Gemma2 prefill schedule should share KV key buffer"
+    );
+    expect(
+        shares_backend_storage(decode.kv_cache()[0].value, plan.kv_cache()[0].value),
+        "Gemma2 decode schedule should share KV value buffer"
+    );
+    expect(
+        shares_backend_storage(decode.resident_decode_scratch().logits, plan.decode_scratch().logits),
+        "Gemma2 decode schedule should share resident logits scratch buffer"
+    );
+    expect(
+        prefill.resident_weight_byte_count() == plan.uploaded_weight_byte_count(),
+        "Gemma2 prefill resident weight byte count mismatch"
+    );
+    expect(
+        decode.resident_kv_cache_byte_count() == plan.kv_cache_byte_count(),
+        "Gemma2 decode resident KV byte count mismatch"
+    );
+    expect(
+        decode.resident_decode_scratch_byte_count() == plan.scratch_byte_count(),
+        "Gemma2 decode resident scratch byte count mismatch"
+    );
+}
+
+void test_gemma2_metal_schedule_retains_buffers_after_plan_lifetime_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto schedule = [] {
+        auto payload_store = tiny_gemma2_payload_store();
+        auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+        const auto model = load_engine_model_from_gguf(view);
+        const auto plan = create_gemma2_metal_model_plan(model);
+
+        return create_gemma2_metal_decode_schedule(plan, 4);
+    }();
+
+    const auto roundtrip = copy_tensor_from_backend(schedule.weights().token_embedding_weight);
+    expect(
+        roundtrip.descriptor() == schedule.weights().token_embedding_weight.descriptor(),
+        "Gemma2 Metal schedule retained weight descriptor mismatch"
+    );
+    expect(schedule.kv_cache().size() == 1, "Gemma2 Metal schedule retained KV cache count mismatch");
+    expect(
+        schedule.resident_decode_scratch().logits.descriptor().shape == Shape::from({1, 4}),
+        "Gemma2 Metal schedule retained logits scratch shape mismatch"
+    );
+}
+
+void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store();
+    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const auto plan = create_gemma2_metal_model_plan(model);
+
+    try {
+        (void)create_gemma2_metal_prefill_schedule(plan, 0);
+        throw TestFailure("Gemma2 Metal prefill schedule should reject empty prompts");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Gemma2 Metal prefill schedule token count must be positive",
+            "Gemma2 Metal empty prefill error mismatch"
+        );
+    }
+
+    try {
+        (void)create_gemma2_metal_prefill_schedule(plan, 17);
+        throw TestFailure("Gemma2 Metal prefill schedule should reject prompts past context");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Gemma2 Metal prefill schedule token count exceeds context length",
+            "Gemma2 Metal oversized prefill error mismatch"
+        );
+    }
+
+    try {
+        (void)create_gemma2_metal_decode_schedule(plan, 0);
+        throw TestFailure("Gemma2 Metal decode schedule should reject empty cache");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Gemma2 Metal decode schedule cached token count must be positive",
+            "Gemma2 Metal empty decode cache error mismatch"
+        );
+    }
+
+    try {
+        (void)create_gemma2_metal_decode_schedule(plan, 16);
+        throw TestFailure("Gemma2 Metal decode schedule should reject full cache");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Gemma2 Metal decode schedule cached token count must leave room for one token",
+            "Gemma2 Metal full decode cache error mismatch"
+        );
+    }
+}
+
 void test_rejects_gemma2_metal_plan_for_non_gemma_model() {
     try {
         (void)create_gemma2_metal_model_plan(tiny_llama_model());
@@ -363,6 +591,22 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "roundtrips Gemma2 Metal uploaded borrowed weight when available",
         test_gemma2_metal_plan_roundtrips_uploaded_borrowed_weight_when_available,
+    },
+    {
+        "creates distinct Gemma2 Metal prefill and decode schedules when available",
+        test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_available,
+    },
+    {
+        "Gemma2 Metal schedules share resident buffers when available",
+        test_gemma2_metal_schedules_share_resident_buffers_when_available,
+    },
+    {
+        "Gemma2 Metal schedule retains buffers after plan lifetime when available",
+        test_gemma2_metal_schedule_retains_buffers_after_plan_lifetime_when_available,
+    },
+    {
+        "rejects invalid Gemma2 Metal schedule shapes when available",
+        test_rejects_invalid_gemma2_metal_schedule_shapes_when_available,
     },
     {"rejects Gemma2 Metal plan for non-Gemma model", test_rejects_gemma2_metal_plan_for_non_gemma_model},
     {
