@@ -13,5 +13,9 @@ namespace local_gguf_engine::tensor::backends::metal {
     const TensorStorage& left,
     const TensorStorage& right
 );
+[[nodiscard]] TensorStorage matmul_f32_quantized_gguf_weight(
+    const TensorStorage& left,
+    const TensorStorage& right
+);
 
 }  // namespace local_gguf_engine::tensor::backends::metal

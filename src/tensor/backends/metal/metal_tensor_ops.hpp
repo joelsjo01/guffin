@@ -19,6 +19,14 @@ void require_f32_f16_matmul_gguf_weight_operands(
     const TensorDescriptor& left,
     const TensorDescriptor& right
 );
+void require_f32_quantized_matmul_gguf_weight_operands(
+    const TensorStorage& left,
+    const TensorDescriptor& right
+);
+void require_f32_quantized_matmul_gguf_weight_operands(
+    const TensorDescriptor& left,
+    const TensorDescriptor& right
+);
 void require_same_backend(
     runtime::BackendKind left,
     runtime::BackendKind right,
@@ -60,6 +68,10 @@ void require_f32_f16_matmul_gguf_weight_triple_operands(
     const MetalBackendBufferStorage& right
 );
 [[nodiscard]] BackendBuffer matmul_f32_f16_gguf_weight_with_metal_buffers(
+    const MetalBackendBufferStorage& left,
+    const MetalBackendBufferStorage& right
+);
+[[nodiscard]] BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
     const MetalBackendBufferStorage& left,
     const MetalBackendBufferStorage& right
 );

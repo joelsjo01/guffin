@@ -46,6 +46,14 @@ private:
     const CpuBackendBufferStorage& left,
     const CpuBackendBufferStorage& right
 );
+[[nodiscard]] TensorStorage matmul_f32_quantized_gguf_weight(
+    const TensorStorage& left,
+    const TensorStorage& right
+);
+[[nodiscard]] BackendBuffer matmul_f32_quantized_gguf_weight_with_cpu_buffers(
+    const CpuBackendBufferStorage& left,
+    const CpuBackendBufferStorage& right
+);
 [[nodiscard]] ops::F32F16GGUFWeightTripleMatmulBackendBuffers
 matmul_f32_f16_gguf_weight_triple_with_cpu_buffers(
     const CpuBackendBufferStorage& left,

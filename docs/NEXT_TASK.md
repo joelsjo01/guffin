@@ -5,15 +5,17 @@ completed implementation slice.
 
 ## Objective
 
-Add the first packed Q4_K/Q6_K Metal matmul path for Gemma projection weights.
+Add the first separate Gemma prefill/decode schedule boundary on the
+Metal-resident plan.
 
 ## Why
 
-Gemma tensor payloads can now load through validated file-backed views and a
-Metal-resident model plan can own packed weights, KV, scratch, and per-layer
-state. The next blocker is execution of the dominant projection work: consume
-packed Q4_K/Q6_K weight buffers directly on Metal for representative matmul
-shapes, without whole-model dequantization or falling back to owned host copies.
+Gemma now has file-backed loading, a Metal-resident model plan, and first
+packed Q4_K/Q6_K matmul kernels that consume resident packed buffers directly.
+The next blocker is execution structure: prompt prefill and one-token decode
+need separate schedules over the resident plan so KV/scratch ownership,
+command encoding, and phase-specific work are explicit before full generation
+is wired.
 
 ## Read
 
@@ -27,13 +29,14 @@ shapes, without whole-model dequantization or falling back to owned host copies.
 
 ## Touch
 
-- Metal tensor-op/kernel code under `src/tensor/backends/metal`
-- Matmul op surface under `include/local_gguf_engine/tensor/ops` and
-  `src/tensor/ops` only if the existing API cannot express packed inputs
-- Gemma model plan code only if descriptors/weight handles need small metadata
-  additions for packed matmul dispatch
-- `tests/tensor`
-- `tests/engine` only if plan integration changes
+- Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
+  and `src/engine`
+- Metal tensor-op/kernel code only where a schedule needs a narrow backend
+  primitive
+- Gemma model plan code if schedule handles, phase scratch, or small control
+  metadata need to be added
+- `tests/engine`
+- `tests/tensor` only for new backend primitives or parity helpers
 - CLI tests only if the unsupported Gemma runtime boundary changes
 - `docs/GEMMA_Q4_MILESTONES.md`
 - `docs/NEXT_TASK.md`
@@ -44,25 +47,25 @@ shapes, without whole-model dequantization or falling back to owned host copies.
 - Do not optimize the old CPU/Llama path unless it directly proves the current
   slice.
 - Do not read broad docs or benchmark artifacts unless named above.
-- Do not add full Gemma generation, full 9B CPU execution, attention kernels,
-  prefill/decode scheduling, sampling changes, broad graph abstractions, or
-  benchmark work in this slice.
-- Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers
-  just to make matmul easier.
+- Do not add full Gemma generation, full 9B CPU execution, sampling changes,
+  broad graph abstractions, or benchmark work in this slice.
+- Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
+- Do not replace the resident plan with per-op host round trips.
 
 ## Verify
 
-- Add deterministic parity tests for small packed Q4_K and Q6_K matmul cases
-  against CPU/reference results.
-- Add unavailable-Metal behavior tests for the new Metal matmul path.
-- Run focused tensor/engine/CLI tests touched by the matmul change.
+- Add deterministic tests that prove prefill and decode are distinct schedule
+  objects or paths, with explicit KV/scratch/layer-state ownership.
+- Add unavailable-Metal behavior tests if the schedule creates new Metal
+  resources directly.
+- Run focused engine/tensor/CLI tests touched by the schedule change.
 - Run local Gemma inspection/generation far enough to prove any remaining
   failure is still the explicit unsupported Gemma runtime error.
 - Run `bash scripts/ci.sh` after implementation changes.
 
 ## Stop When
 
-Representative packed Q4_K and Q6_K matmul inputs can execute directly from
-packed Metal buffers with deterministic CPU/reference parity, unavailable Metal
-is handled explicitly, and the real Gemma CLI path still stops at unsupported
-Gemma execution rather than drifting into full generation.
+Gemma has a small reusable schedule boundary that separates prompt prefill from
+one-token decode on the resident Metal plan, keeps ownership explicit, has
+deterministic tests for phase shape/resource behavior, and still stops before
+claiming full Gemma generation.

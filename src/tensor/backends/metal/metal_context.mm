@@ -69,6 +69,46 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> matmul_q4_k_function =
+        [library newFunctionWithName:@"matmul_f32_q4_k_gguf_weight_kernel"];
+    if (matmul_q4_k_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Q4_K matmul kernel function was not found"
+        );
+    }
+
+    NSError* matmul_q4_k_pipeline_error = nil;
+    matmul_q4_k_pipeline = [device newComputePipelineStateWithFunction:matmul_q4_k_function
+                                                                  error:&matmul_q4_k_pipeline_error];
+    if (matmul_q4_k_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Q4_K matmul pipeline creation failed: "
+                + ns_error_message(matmul_q4_k_pipeline_error, "unknown error")
+        );
+    }
+
+    id<MTLFunction> matmul_q6_k_function =
+        [library newFunctionWithName:@"matmul_f32_q6_k_gguf_weight_kernel"];
+    if (matmul_q6_k_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Q6_K matmul kernel function was not found"
+        );
+    }
+
+    NSError* matmul_q6_k_pipeline_error = nil;
+    matmul_q6_k_pipeline = [device newComputePipelineStateWithFunction:matmul_q6_k_function
+                                                                  error:&matmul_q6_k_pipeline_error];
+    if (matmul_q6_k_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Q6_K matmul pipeline creation failed: "
+                + ns_error_message(matmul_q6_k_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> matmul_add_function =
         [library newFunctionWithName:@"matmul_f32_f16_gguf_weight_add_kernel"];
     if (matmul_add_function == nil) {

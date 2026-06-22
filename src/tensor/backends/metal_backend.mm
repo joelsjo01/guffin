@@ -46,6 +46,128 @@ kernel void matmul_f32_f16_gguf_weight_kernel(
     output[row * dims.columns + column] = sum;
 }
 
+inline ushort read_little_endian_u16(const device uchar* bytes, uint offset) {
+    return ushort(bytes[offset]) | ushort(ushort(bytes[offset + 1]) << 8);
+}
+
+inline float f16_bits_to_float(ushort bits) {
+    return float(as_type<half>(bits));
+}
+
+inline uint q4_k_scale_min_value(
+    const device uchar* scale_min,
+    uint group_index,
+    bool min_value
+) {
+    if (group_index < 4) {
+        return uint(scale_min[group_index + (min_value ? 4 : 0)] & 0x3f);
+    }
+
+    const uchar low_source = scale_min[group_index + 4];
+    if (min_value) {
+        const uint high_bits = uint((scale_min[group_index] & 0xc0) >> 2);
+        return uint(low_source >> 4) | high_bits;
+    }
+
+    const uint high_bits = uint((scale_min[group_index - 4] & 0xc0) >> 2);
+    return uint(low_source & 0x0f) | high_bits;
+}
+
+inline float q4_k_value(const device uchar* block, uint element_index) {
+    const float d = f16_bits_to_float(read_little_endian_u16(block, 0));
+    const float dmin = f16_bits_to_float(read_little_endian_u16(block, 2));
+    const device uchar* scale_min = block + 4;
+    const device uchar* quantized = block + 16;
+
+    const uint group_index = element_index / 32;
+    const uint super_group_base = (element_index / 64) * 32;
+    const uint index_in_super_group = element_index % 64;
+    const uchar packed = quantized[super_group_base + (index_in_super_group % 32)];
+    const uint shift = index_in_super_group < 32 ? 0 : 4;
+    const uint nibble = uint((packed >> shift) & 0x0f);
+
+    return d * float(q4_k_scale_min_value(scale_min, group_index, false)) * float(nibble)
+        - dmin * float(q4_k_scale_min_value(scale_min, group_index, true));
+}
+
+// GGUF/GGML projection weights are shaped [input_width, output_columns], while
+// packed K-quant blocks are stored contiguously per output column.
+kernel void matmul_f32_q4_k_gguf_weight_kernel(
+    const device float* left [[buffer(0)]],
+    const device uchar* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulDimensions& dims [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint column = gid.x;
+    const uint row = gid.y;
+    if (row >= dims.rows || column >= dims.columns) {
+        return;
+    }
+
+    const uint blocks_per_column = dims.shared / 256;
+    float sum = 0.0f;
+    for (uint inner = 0; inner < dims.shared; ++inner) {
+        const uint block_index = column * blocks_per_column + (inner / 256);
+        const device uchar* block = right + block_index * 144;
+        sum += left[row * dims.shared + inner] * q4_k_value(block, inner % 256);
+    }
+
+    output[row * dims.columns + column] = sum;
+}
+
+inline int signed_i8(uchar value) {
+    return value >= 128 ? int(value) - 256 : int(value);
+}
+
+inline float q6_k_value(const device uchar* block, uint element_index) {
+    const device uchar* low_bits = block;
+    const device uchar* high_bits = block + 128;
+    const device uchar* scales = block + 192;
+    const float d = f16_bits_to_float(read_little_endian_u16(block, 208));
+
+    const uint half_block_index = element_index / 128;
+    const uint index_in_half_block = element_index % 128;
+    const uint lane_index = index_in_half_block % 32;
+    const uint low_base = half_block_index * 64;
+    const uint low_plane_offset = ((index_in_half_block / 32) % 2) * 32;
+    const uint low_shift = index_in_half_block < 64 ? 0 : 4;
+    const uint low = uint((low_bits[low_base + low_plane_offset + lane_index] >> low_shift) & 0x0f);
+
+    const uint high_base = half_block_index * 32;
+    const uint high_shift = (index_in_half_block / 32) * 2;
+    const uint high = uint((high_bits[high_base + lane_index] >> high_shift) & 0x03);
+    const int quantized = int(low | (high << 4)) - 32;
+    const int scale = signed_i8(scales[element_index / 16]);
+
+    return d * float(scale) * float(quantized);
+}
+
+// Keep this separate from Q4_K: the block sizes and bit-plane layout differ.
+kernel void matmul_f32_q6_k_gguf_weight_kernel(
+    const device float* left [[buffer(0)]],
+    const device uchar* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulDimensions& dims [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint column = gid.x;
+    const uint row = gid.y;
+    if (row >= dims.rows || column >= dims.columns) {
+        return;
+    }
+
+    const uint blocks_per_column = dims.shared / 256;
+    float sum = 0.0f;
+    for (uint inner = 0; inner < dims.shared; ++inner) {
+        const uint block_index = column * blocks_per_column + (inner / 256);
+        const device uchar* block = right + block_index * 210;
+        sum += left[row * dims.shared + inner] * q6_k_value(block, inner % 256);
+    }
+
+    output[row * dims.columns + column] = sum;
+}
+
 kernel void matmul_f32_f16_gguf_weight_add_kernel(
     const device float* left [[buffer(0)]],
     const device half* right [[buffer(1)]],

@@ -41,6 +41,42 @@ void require_f32_f16_matmul_gguf_weight_operands(const TensorStorage& left, cons
     require_matmul_inner_dimensions(left.descriptor(), right.descriptor());
 }
 
+void require_quantized_gguf_weight_descriptor(const TensorDescriptor& descriptor) {
+    if (descriptor.dtype == DType::q4_k || descriptor.dtype == DType::q6_k) {
+        return;
+    }
+
+    throw TensorError(
+        TensorErrorCode::unsupported_operator_dtype,
+        static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::q4_k)),
+        static_cast<std::uint64_t>(static_cast<std::uint8_t>(descriptor.dtype))
+    );
+}
+
+void require_quantized_gguf_weight_inner_block_alignment(const TensorDescriptor& descriptor) {
+    constexpr std::uint64_t k_quant_block_elements = 256;
+    const auto inner_width = descriptor.shape.dimension(0);
+    if (inner_width % k_quant_block_elements != 0) {
+        throw TensorError(
+            TensorErrorCode::invalid_quantized_element_count,
+            k_quant_block_elements,
+            inner_width
+        );
+    }
+}
+
+void require_f32_quantized_matmul_gguf_weight_operands(
+    const TensorDescriptor& left,
+    const TensorDescriptor& right
+) {
+    require_f32_descriptor(left);
+    require_quantized_gguf_weight_descriptor(right);
+    require_matrix_descriptor(left);
+    require_matrix_descriptor(right);
+    require_matmul_inner_dimensions(left, right);
+    require_quantized_gguf_weight_inner_block_alignment(right);
+}
+
 [[nodiscard]] float read_f32_linear(const TensorStorage& storage, std::uint64_t linear_index) {
     float value = 0.0F;
     const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
@@ -130,6 +166,34 @@ TensorStorage matmul_f32_f16_gguf_weight(
         runtime::BackendErrorCode::unsupported_backend,
         backend,
         "unsupported backend for F32xF16 GGUF weight matmul"
+    );
+}
+
+TensorStorage matmul_f32_quantized_gguf_weight(
+    const TensorStorage& left,
+    const TensorStorage& right
+) {
+    return matmul_f32_quantized_gguf_weight(left, right, runtime::default_backend());
+}
+
+TensorStorage matmul_f32_quantized_gguf_weight(
+    const TensorStorage& left,
+    const TensorStorage& right,
+    runtime::BackendKind backend
+) {
+    require_f32_quantized_matmul_gguf_weight_operands(left.descriptor(), right.descriptor());
+
+    switch (backend) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::matmul_f32_quantized_gguf_weight(left, right);
+        case runtime::BackendKind::metal:
+            return backends::metal::matmul_f32_quantized_gguf_weight(left, right);
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        backend,
+        "unsupported backend for F32xK-quant GGUF weight matmul"
     );
 }
 

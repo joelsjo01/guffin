@@ -45,6 +45,52 @@ void require_matmul_inner_dimensions(const TensorDescriptor& left, const TensorD
     }
 }
 
+void require_quantized_gguf_weight_descriptor(const TensorDescriptor& descriptor) {
+    if (descriptor.dtype == DType::q4_k || descriptor.dtype == DType::q6_k) {
+        return;
+    }
+
+    throw TensorError(
+        TensorErrorCode::unsupported_operator_dtype,
+        static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::q4_k)),
+        static_cast<std::uint64_t>(static_cast<std::uint8_t>(descriptor.dtype))
+    );
+}
+
+void require_quantized_gguf_weight_inner_block_alignment(const TensorDescriptor& descriptor) {
+    constexpr std::uint64_t k_quant_block_elements = 256;
+    const auto inner_width = descriptor.shape.dimension(0);
+    if (inner_width % k_quant_block_elements != 0) {
+        throw TensorError(
+            TensorErrorCode::invalid_quantized_element_count,
+            k_quant_block_elements,
+            inner_width
+        );
+    }
+}
+
+id<MTLComputePipelineState> quantized_matmul_pipeline(
+    MatmulPipelineState& state,
+    DType dtype
+) {
+    switch (dtype) {
+        case DType::q4_k:
+            return state.matmul_q4_k_pipeline;
+        case DType::q6_k:
+            return state.matmul_q6_k_pipeline;
+        case DType::f32:
+        case DType::f16:
+        case DType::q8_0:
+            break;
+    }
+
+    throw TensorError(
+        TensorErrorCode::unsupported_operator_dtype,
+        static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::q4_k)),
+        static_cast<std::uint64_t>(static_cast<std::uint8_t>(dtype))
+    );
+}
+
 }  // namespace
 
 std::uint32_t require_u32_dimension(std::uint64_t value, const char* name) {
@@ -89,6 +135,25 @@ void require_f32_f16_matmul_gguf_weight_operands(
     require_matrix_descriptor(left);
     require_matrix_descriptor(right);
     require_matmul_inner_dimensions(left, right);
+}
+
+void require_f32_quantized_matmul_gguf_weight_operands(
+    const TensorStorage& left,
+    const TensorDescriptor& right
+) {
+    require_f32_quantized_matmul_gguf_weight_operands(left.descriptor(), right);
+}
+
+void require_f32_quantized_matmul_gguf_weight_operands(
+    const TensorDescriptor& left,
+    const TensorDescriptor& right
+) {
+    ops::require_f32_descriptor(left);
+    require_quantized_gguf_weight_descriptor(right);
+    require_matrix_descriptor(left);
+    require_matrix_descriptor(right);
+    require_matmul_inner_dimensions(left, right);
+    require_quantized_gguf_weight_inner_block_alignment(right);
 }
 
 void require_same_backend(
@@ -350,6 +415,70 @@ BackendBuffer matmul_f32_f16_gguf_weight_with_metal_buffers(
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal backend-buffer matmul command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return make_metal_backend_buffer(output_descriptor, output_buffer);
+}
+
+BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
+    const MetalBackendBufferStorage& left,
+    const MetalBackendBufferStorage& right
+) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto rows = left.descriptor().shape.dimension(0);
+    const auto shared = left.descriptor().shape.dimension(1);
+    const auto columns = right.descriptor().shape.dimension(1);
+    const MatmulDimensions dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .shared = require_u32_dimension(shared, "shared"),
+        .columns = require_u32_dimension(columns, "columns"),
+    };
+    const auto output_descriptor = TensorDescriptor::from(Shape::from({rows, columns}), DType::f32);
+
+    id<MTLBuffer> output_buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(output_descriptor.byte_count)
+                                                            options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(MatmulDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (output_buffer == nil || dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal backend-buffer K-quant matmul buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (command_buffer == nil || encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal backend-buffer K-quant matmul command encoding failed"
+        );
+    }
+
+    [encoder setComputePipelineState:quantized_matmul_pipeline(state, right.descriptor().dtype)];
+    [encoder setBuffer:left.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:right.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:output_buffer offset:0 atIndex:2];
+    [encoder setBuffer:dims_buffer offset:0 atIndex:3];
+
+    const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+    const auto threadgroup_columns = static_cast<NSUInteger>((columns + 15U) / 16U);
+    const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
+    const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal backend-buffer K-quant matmul command failed: "
+                + ns_error_message(execution_error, "unknown error")
         );
     }
 
@@ -984,6 +1113,18 @@ TensorStorage matmul_f32_f16_gguf_weight(const TensorStorage& left, const Tensor
     }
 }
 
+TensorStorage matmul_f32_quantized_gguf_weight(const TensorStorage& left, const TensorStorage& right) {
+    @autoreleasepool {
+        const auto left_buffer = copy_tensor_to_metal_backend(left);
+        const auto right_buffer = copy_tensor_to_metal_backend(right);
+        const auto output_buffer = matmul_f32_quantized_gguf_weight_with_metal_buffers(
+            require_metal_backend_buffer(backend_buffer_storage(left_buffer)),
+            require_metal_backend_buffer(backend_buffer_storage(right_buffer))
+        );
+        return copy_tensor_from_metal_backend(backend_buffer_storage(output_buffer));
+    }
+}
+
 }  // namespace local_gguf_engine::tensor::backends::metal
 
 namespace local_gguf_engine::tensor::ops {
@@ -1043,6 +1184,39 @@ BackendBuffer matmul_f32_f16_gguf_weight_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         right.backend(),
         "unsupported backend buffers for F32xF16 GGUF weight matmul"
+    );
+}
+
+BackendBuffer matmul_f32_quantized_gguf_weight_to_backend(
+    const BackendBuffer& left,
+    const BackendBuffer& right
+) {
+    backends::metal::require_f32_quantized_matmul_gguf_weight_operands(left.descriptor(), right.descriptor());
+    backends::metal::require_same_backend(
+        left.backend(),
+        right.backend(),
+        "F32xK-quant GGUF weight matmul"
+    );
+
+    switch (left.backend()) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::matmul_f32_quantized_gguf_weight_with_cpu_buffers(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(left)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(right))
+            );
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::matmul_f32_quantized_gguf_weight_with_metal_buffers(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(left)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(right))
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        left.backend(),
+        "unsupported backend buffers for F32xK-quant GGUF weight matmul"
     );
 }
 

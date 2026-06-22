@@ -4,6 +4,7 @@
 #include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
+#include "local_gguf_engine/tensor/quantization.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -33,6 +34,36 @@ namespace {
 void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float value) {
     const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
     std::memcpy(storage.mutable_bytes().data() + byte_offset, &value, sizeof(float));
+}
+
+[[nodiscard]] float read_quantized_gguf_weight_value(
+    const TensorStorage& storage,
+    std::uint64_t column,
+    std::uint64_t inner
+) {
+    constexpr std::uint64_t k_quant_block_elements = 256;
+    // GGUF/GGML projection weights are shaped [input_width, output_columns],
+    // but each output column owns the contiguous packed K-quant blocks.
+    const auto blocks_per_column = storage.descriptor().shape.dimension(0) / k_quant_block_elements;
+    const auto block_index = column * blocks_per_column + (inner / k_quant_block_elements);
+    const auto element_index = static_cast<std::size_t>(inner % k_quant_block_elements);
+
+    switch (storage.descriptor().dtype) {
+        case DType::q4_k:
+            return q4_k_block_view(storage, block_index).dequantized_value(element_index);
+        case DType::q6_k:
+            return q6_k_block_view(storage, block_index).dequantized_value(element_index);
+        case DType::f32:
+        case DType::f16:
+        case DType::q8_0:
+            break;
+    }
+
+    throw TensorError(
+        TensorErrorCode::unsupported_operator_dtype,
+        static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::q4_k)),
+        static_cast<std::uint64_t>(static_cast<std::uint8_t>(storage.descriptor().dtype))
+    );
 }
 
 }  // namespace
@@ -133,6 +164,37 @@ BackendBuffer matmul_f32_f16_gguf_weight_with_cpu_buffers(
     const CpuBackendBufferStorage& right
 ) {
     return copy_tensor_to_cpu_backend(matmul_f32_f16_gguf_weight(left.storage(), right.storage()));
+}
+
+TensorStorage matmul_f32_quantized_gguf_weight(
+    const TensorStorage& left,
+    const TensorStorage& right
+) {
+    const auto rows = left.descriptor().shape.dimension(0);
+    const auto shared = left.descriptor().shape.dimension(1);
+    const auto columns = right.descriptor().shape.dimension(1);
+    auto output = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f32));
+
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            float sum = 0.0F;
+            for (std::uint64_t inner = 0; inner < shared; ++inner) {
+                sum += read_f32_linear(left, row * shared + inner)
+                    * read_quantized_gguf_weight_value(right, column, inner);
+            }
+
+            write_f32_linear(output, row * columns + column, sum);
+        }
+    }
+
+    return output;
+}
+
+BackendBuffer matmul_f32_quantized_gguf_weight_with_cpu_buffers(
+    const CpuBackendBufferStorage& left,
+    const CpuBackendBufferStorage& right
+) {
+    return copy_tensor_to_cpu_backend(matmul_f32_quantized_gguf_weight(left.storage(), right.storage()));
 }
 
 ops::F32F16GGUFWeightTripleMatmulBackendBuffers

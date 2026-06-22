@@ -26,7 +26,20 @@ struct F32F16GGUFWeightTripleMatmulBackendBuffers {
     const TensorStorage& left,
     const BackendBuffer& right
 );
+[[nodiscard]] TensorStorage matmul_f32_quantized_gguf_weight(
+    const TensorStorage& left,
+    const TensorStorage& right
+);
+[[nodiscard]] TensorStorage matmul_f32_quantized_gguf_weight(
+    const TensorStorage& left,
+    const TensorStorage& right,
+    runtime::BackendKind backend
+);
 [[nodiscard]] BackendBuffer matmul_f32_f16_gguf_weight_to_backend(
+    const BackendBuffer& left,
+    const BackendBuffer& right
+);
+[[nodiscard]] BackendBuffer matmul_f32_quantized_gguf_weight_to_backend(
     const BackendBuffer& left,
     const BackendBuffer& right
 );
