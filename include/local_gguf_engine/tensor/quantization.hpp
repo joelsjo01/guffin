@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace local_gguf_engine::tensor {
 
@@ -47,7 +48,10 @@ public:
     [[nodiscard]] float min_scale() const noexcept;
     [[nodiscard]] std::span<const std::uint8_t> scale_min_bytes() const noexcept;
     [[nodiscard]] std::span<const std::uint8_t> quantized_bytes() const noexcept;
+    [[nodiscard]] std::uint8_t scale_value(std::size_t group_index) const;
+    [[nodiscard]] std::uint8_t min_value(std::size_t group_index) const;
     [[nodiscard]] std::uint8_t quantized_nibble(std::size_t element_index) const;
+    [[nodiscard]] float dequantized_value(std::size_t element_index) const;
 
 private:
     std::uint16_t scale_bits_;
@@ -78,7 +82,9 @@ public:
     [[nodiscard]] float scale() const noexcept;
     [[nodiscard]] std::uint8_t low_nibble(std::size_t element_index) const;
     [[nodiscard]] std::uint8_t high_bits(std::size_t element_index) const;
+    [[nodiscard]] std::int8_t quantized_value(std::size_t element_index) const;
     [[nodiscard]] std::int8_t scale_value(std::size_t group_index) const;
+    [[nodiscard]] float dequantized_value(std::size_t element_index) const;
 
 private:
     std::span<const std::uint8_t> low_bit_bytes_;
@@ -95,7 +101,27 @@ private:
 );
 [[nodiscard]] std::uint64_t q4_k_block_count(const TensorDescriptor& descriptor);
 [[nodiscard]] Q4_KBlockView q4_k_block_view(const TensorStorage& storage, std::uint64_t block_index);
+[[nodiscard]] std::array<float, Q4_KBlockView::element_count> dequantize_q4_k_block(
+    const TensorStorage& storage,
+    std::uint64_t block_index
+);
+[[nodiscard]] std::vector<float> dequantize_q4_k_row(const TensorStorage& storage, std::uint64_t row_index);
+[[nodiscard]] float dot_q4_k_row_f32(
+    const TensorStorage& storage,
+    std::uint64_t row_index,
+    std::span<const float> input
+);
 [[nodiscard]] std::uint64_t q6_k_block_count(const TensorDescriptor& descriptor);
 [[nodiscard]] Q6_KBlockView q6_k_block_view(const TensorStorage& storage, std::uint64_t block_index);
+[[nodiscard]] std::array<float, Q6_KBlockView::element_count> dequantize_q6_k_block(
+    const TensorStorage& storage,
+    std::uint64_t block_index
+);
+[[nodiscard]] std::vector<float> dequantize_q6_k_row(const TensorStorage& storage, std::uint64_t row_index);
+[[nodiscard]] float dot_q6_k_row_f32(
+    const TensorStorage& storage,
+    std::uint64_t row_index,
+    std::span<const float> input
+);
 
 }  // namespace local_gguf_engine::tensor

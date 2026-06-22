@@ -23,6 +23,7 @@ using local_gguf_engine::model_format::dtype_from_gguf_tensor_type;
 using local_gguf_engine::model_format::load_gguf_tensor_payload;
 using local_gguf_engine::model_format::load_gguf_tensor_payloads;
 using local_gguf_engine::model_format::read_gguf_model_view;
+using local_gguf_engine::model_format::view_gguf_tensor_payload;
 using local_gguf_engine::tensor::DType;
 using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::Q4_KBlockView;
@@ -49,6 +50,22 @@ void test_converts_gguf_payload_view_to_tensor_storage() {
     );
     expect(loaded.storage.bytes()[0] == 0x00, "loaded GGUF tensor byte 0 mismatch");
     expect(loaded.storage.bytes()[7] == 0x40, "loaded GGUF tensor byte 7 mismatch");
+}
+
+void test_views_gguf_payload_without_copying() {
+    const auto bytes = fixture("valid-tensor-payload-view");
+    const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
+    const auto borrowed = view_gguf_tensor_payload(model.tensor_payloads[0]);
+
+    expect(borrowed.name == "ab", "borrowed GGUF tensor name mismatch");
+    expect(borrowed.view.descriptor().shape == Shape::from({2}), "borrowed GGUF tensor shape mismatch");
+    expect(borrowed.view.descriptor().dtype == DType::f32, "borrowed GGUF tensor dtype mismatch");
+    expect(borrowed.view.bytes().size() == 8, "borrowed GGUF tensor byte count mismatch");
+    expect(
+        borrowed.view.bytes().data() == model.tensor_payloads[0].bytes.data(),
+        "borrowed GGUF tensor view should point at payload bytes"
+    );
+    expect(borrowed.view.bytes()[7] == 0x40, "borrowed GGUF tensor final byte mismatch");
 }
 
 void test_converts_q8_0_gguf_payload_view_to_tensor_storage() {
@@ -223,6 +240,7 @@ void test_rejects_q4_k_gguf_tensor_payload_size_mismatch_in_bridge() {
 
 const local_gguf_engine::tests::TestCase kGGUFTensorBridgeTests[] = {
     {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
+    {"views GGUF payload without copying", test_views_gguf_payload_without_copying},
     {
         "converts Q8_0 GGUF payload view to tensor storage",
         test_converts_q8_0_gguf_payload_view_to_tensor_storage,

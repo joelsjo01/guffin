@@ -2,15 +2,53 @@
 
 #include <algorithm>
 #include <bit>
+#include <cerrno>
+#include <filesystem>
 #include <limits>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <variant>
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace local_gguf_engine::model_format {
 
 namespace {
+
+class UniqueFileDescriptor final {
+public:
+    explicit UniqueFileDescriptor(int descriptor) noexcept : descriptor_(descriptor) {}
+
+    UniqueFileDescriptor(const UniqueFileDescriptor&) = delete;
+    UniqueFileDescriptor& operator=(const UniqueFileDescriptor&) = delete;
+
+    ~UniqueFileDescriptor() {
+        if (descriptor_ >= 0) {
+            (void)::close(descriptor_);
+        }
+    }
+
+    [[nodiscard]] int get() const noexcept {
+        return descriptor_;
+    }
+
+private:
+    int descriptor_ = -1;
+};
+
+[[nodiscard]] std::system_error file_error(std::string_view operation, const std::filesystem::path& path) {
+    const auto error_number = errno;
+    return std::system_error(
+        error_number,
+        std::generic_category(),
+        std::string(operation) + " '" + path.string() + "'"
+    );
+}
 
 [[nodiscard]] constexpr std::uint32_t read_little_endian_u32(
     std::span<const std::uint8_t> bytes,
@@ -647,6 +685,47 @@ std::array<std::uint8_t, 4> GGUFReadError::actual_magic() const noexcept {
     return actual_magic_;
 }
 
+GGUFFileBackedModel::GGUFFileBackedModel(GGUFFileBackedModel&& other) noexcept
+    : data_(std::exchange(other.data_, nullptr)),
+      byte_count_(std::exchange(other.byte_count_, 0)),
+      model_(std::move(other.model_)) {}
+
+GGUFFileBackedModel& GGUFFileBackedModel::operator=(GGUFFileBackedModel&& other) noexcept {
+    if (this != &other) {
+        reset();
+        data_ = std::exchange(other.data_, nullptr);
+        byte_count_ = std::exchange(other.byte_count_, 0);
+        model_ = std::move(other.model_);
+    }
+
+    return *this;
+}
+
+GGUFFileBackedModel::~GGUFFileBackedModel() {
+    reset();
+}
+
+std::span<const std::uint8_t> GGUFFileBackedModel::bytes() const noexcept {
+    return std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(data_), byte_count_);
+}
+
+const GGUFModelView& GGUFFileBackedModel::view() const noexcept {
+    return model_;
+}
+
+GGUFFileBackedModel::GGUFFileBackedModel(void* data, std::size_t byte_count, GGUFModelView model)
+    : data_(data),
+      byte_count_(byte_count),
+      model_(std::move(model)) {}
+
+void GGUFFileBackedModel::reset() noexcept {
+    if (data_ != nullptr) {
+        (void)::munmap(data_, byte_count_);
+        data_ = nullptr;
+        byte_count_ = 0;
+    }
+}
+
 GGUFHeader read_gguf_header(std::span<const std::uint8_t> bytes) {
     if (bytes.size() < GGUFHeader::encoded_byte_count) {
         throw GGUFReadError(
@@ -739,6 +818,49 @@ GGUFModelView read_gguf_model_view(std::span<const std::uint8_t> bytes) {
         .directory = std::move(directory),
         .tensor_payloads = std::move(tensor_payloads),
     };
+}
+
+GGUFFileBackedModel read_file_backed_gguf_model(const std::filesystem::path& path) {
+    const auto descriptor = ::open(path.c_str(), O_RDONLY);
+    if (descriptor < 0) {
+        throw file_error("could not read", path);
+    }
+
+    UniqueFileDescriptor file(descriptor);
+
+    struct stat status {};
+    if (::fstat(file.get(), &status) != 0) {
+        throw file_error("could not read", path);
+    }
+
+    if (status.st_size < 0) {
+        throw std::runtime_error("could not read '" + path.string() + "': invalid file size");
+    }
+
+    const auto file_size = static_cast<std::uintmax_t>(status.st_size);
+    if (file_size > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
+        throw std::runtime_error("could not read '" + path.string() + "': file is too large");
+    }
+
+    const auto byte_count = static_cast<std::size_t>(file_size);
+    if (byte_count == 0) {
+        throw GGUFReadError(GGUFReadErrorCode::truncated_header, GGUFHeader::encoded_byte_count, 0);
+    }
+
+    void* data = ::mmap(nullptr, byte_count, PROT_READ, MAP_PRIVATE, file.get(), 0);
+    if (data == MAP_FAILED) {
+        throw file_error("could not map", path);
+    }
+
+    try {
+        auto model = read_gguf_model_view(
+            std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(data), byte_count)
+        );
+        return GGUFFileBackedModel(data, byte_count, std::move(model));
+    } catch (...) {
+        (void)::munmap(data, byte_count);
+        throw;
+    }
 }
 
 }  // namespace local_gguf_engine::model_format

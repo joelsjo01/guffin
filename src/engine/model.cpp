@@ -20,6 +20,7 @@ using model_format::GGUFMetadataEntry;
 using model_format::GGUFMetadataSection;
 using model_format::GGUFMetadataValueType;
 using model_format::load_gguf_tensor_payload;
+using model_format::view_gguf_tensor_payload;
 
 [[nodiscard]] std::string error_message(EngineModelErrorCode code, std::string_view detail) {
     std::string message;
@@ -272,6 +273,28 @@ using model_format::load_gguf_tensor_payload;
     return tensors;
 }
 
+[[nodiscard]] std::vector<EngineTensorView> load_unique_tensor_views(const model_format::GGUFModelView& model) {
+    std::vector<EngineTensorView> tensors;
+    tensors.reserve(model.tensor_payloads.size());
+
+    std::unordered_set<std::string> names;
+    names.reserve(model.tensor_payloads.size());
+
+    for (const auto& payload : model.tensor_payloads) {
+        if (!names.insert(payload.tensor.name).second) {
+            throw EngineModelError(EngineModelErrorCode::duplicate_tensor_name, payload.tensor.name);
+        }
+
+        auto borrowed = view_gguf_tensor_payload(payload);
+        tensors.push_back(EngineTensorView {
+            .name = std::move(borrowed.name),
+            .view = borrowed.view,
+        });
+    }
+
+    return tensors;
+}
+
 }  // namespace
 
 EngineModelError::EngineModelError(EngineModelErrorCode code, std::string detail)
@@ -308,11 +331,29 @@ EngineModel::EngineModel(
     Gemma2ModelConfig gemma2_config,
     std::vector<EngineTensor> tensors
 )
+    : EngineModel(
+        architecture,
+        std::move(name),
+        llama_config,
+        gemma2_config,
+        std::move(tensors),
+        {}
+    ) {}
+
+EngineModel::EngineModel(
+    ModelArchitecture architecture,
+    std::optional<std::string> name,
+    LlamaModelConfig llama_config,
+    Gemma2ModelConfig gemma2_config,
+    std::vector<EngineTensor> tensors,
+    std::vector<EngineTensorView> tensor_views
+)
     : architecture_(architecture),
       name_(std::move(name)),
       llama_config_(llama_config),
       gemma2_config_(gemma2_config),
-      tensors_(std::move(tensors)) {}
+      tensors_(std::move(tensors)),
+      tensor_views_(std::move(tensor_views)) {}
 
 ModelArchitecture EngineModel::architecture() const noexcept {
     return architecture_;
@@ -334,6 +375,10 @@ const std::vector<EngineTensor>& EngineModel::tensors() const noexcept {
     return tensors_;
 }
 
+const std::vector<EngineTensorView>& EngineModel::tensor_views() const noexcept {
+    return tensor_views_;
+}
+
 const EngineTensor* EngineModel::find_tensor(std::string_view name) const noexcept {
     const auto found = std::find_if(
         tensors_.begin(),
@@ -344,6 +389,22 @@ const EngineTensor* EngineModel::find_tensor(std::string_view name) const noexce
     );
 
     if (found == tensors_.end()) {
+        return nullptr;
+    }
+
+    return &*found;
+}
+
+const EngineTensorView* EngineModel::find_tensor_view(std::string_view name) const noexcept {
+    const auto found = std::find_if(
+        tensor_views_.begin(),
+        tensor_views_.end(),
+        [name](const EngineTensorView& tensor) {
+            return tensor.name == name;
+        }
+    );
+
+    if (found == tensor_views_.end()) {
         return nullptr;
     }
 
@@ -367,13 +428,14 @@ EngineModel load_engine_model_from_gguf(const model_format::GGUFModelView& model
 
     if (architecture == ModelArchitecture::gemma2) {
         const auto gemma2_config = load_gemma2_config(model);
-        auto tensors = load_unique_tensors(model);
+        auto tensor_views = load_unique_tensor_views(model);
         return EngineModel(
             architecture,
             name,
             LlamaModelConfig {},
             gemma2_config,
-            std::move(tensors)
+            {},
+            std::move(tensor_views)
         );
     }
 

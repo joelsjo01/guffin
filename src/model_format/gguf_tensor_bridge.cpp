@@ -42,11 +42,20 @@ tensor::TensorDescriptor tensor_descriptor_from_gguf_tensor_info(const GGUFTenso
 }
 
 LoadedGGUFTensor load_gguf_tensor_payload(const GGUFTensorPayloadView& payload) {
-    const auto descriptor = tensor_descriptor_from_gguf_tensor_info(payload.tensor);
+    auto borrowed = view_gguf_tensor_payload(payload);
 
     return LoadedGGUFTensor {
+        .name = std::move(borrowed.name),
+        .storage = tensor::TensorStorage::from_bytes(borrowed.view.descriptor(), borrowed.view.bytes()),
+    };
+}
+
+BorrowedGGUFTensor view_gguf_tensor_payload(const GGUFTensorPayloadView& payload) {
+    const auto descriptor = tensor_descriptor_from_gguf_tensor_info(payload.tensor);
+
+    return BorrowedGGUFTensor {
         .name = payload.tensor.name,
-        .storage = tensor::TensorStorage::from_bytes(descriptor, payload.bytes),
+        .view = tensor::TensorView::from_bytes(descriptor, payload.bytes),
     };
 }
 

@@ -8,20 +8,20 @@
 namespace local_gguf_engine::engine {
 
 struct Gemma2AttentionWeights {
-    const tensor::TensorStorage& attention_norm_weight;
-    const tensor::TensorStorage& post_attention_norm_weight;
-    const tensor::TensorStorage& query_weight;
-    const tensor::TensorStorage& key_weight;
-    const tensor::TensorStorage& value_weight;
-    const tensor::TensorStorage& output_weight;
+    tensor::TensorView attention_norm_weight;
+    tensor::TensorView post_attention_norm_weight;
+    tensor::TensorView query_weight;
+    tensor::TensorView key_weight;
+    tensor::TensorView value_weight;
+    tensor::TensorView output_weight;
 };
 
 struct Gemma2FeedForwardWeights {
-    const tensor::TensorStorage& feed_forward_norm_weight;
-    const tensor::TensorStorage& post_feed_forward_norm_weight;
-    const tensor::TensorStorage& gate_weight;
-    const tensor::TensorStorage& up_weight;
-    const tensor::TensorStorage& down_weight;
+    tensor::TensorView feed_forward_norm_weight;
+    tensor::TensorView post_feed_forward_norm_weight;
+    tensor::TensorView gate_weight;
+    tensor::TensorView up_weight;
+    tensor::TensorView down_weight;
 };
 
 struct Gemma2BlockWeights {
@@ -30,10 +30,9 @@ struct Gemma2BlockWeights {
 };
 
 struct Gemma2ModelWeights {
-    // Borrowed tensor references. The EngineModel used for binding must outlive this view.
-    const tensor::TensorStorage& token_embedding_weight;
-    const tensor::TensorStorage& output_norm_weight;
-    const tensor::TensorStorage& output_weight;
+    tensor::TensorView token_embedding_weight;
+    tensor::TensorView output_norm_weight;
+    tensor::TensorView output_weight;
     std::vector<Gemma2BlockWeights> blocks;
 };
 

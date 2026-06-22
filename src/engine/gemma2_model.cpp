@@ -12,49 +12,59 @@ namespace {
     return "blk." + std::to_string(block_index) + "." + std::string(suffix);
 }
 
-[[nodiscard]] const tensor::TensorStorage& require_tensor(const EngineModel& model, std::string name) {
-    const auto* tensor = model.find_tensor(name);
-    if (tensor == nullptr) {
-        throw EngineModelError(EngineModelErrorCode::missing_tensor, std::move(name));
+[[nodiscard]] tensor::TensorView require_tensor_view(const EngineModel& model, std::string name) {
+    const auto* tensor_view = model.find_tensor_view(name);
+    if (tensor_view != nullptr) {
+        return tensor_view->view;
     }
 
-    return tensor->storage;
+    const auto* tensor = model.find_tensor(name);
+    if (tensor != nullptr) {
+        return tensor->storage.view();
+    }
+
+    throw EngineModelError(EngineModelErrorCode::missing_tensor, std::move(name));
 }
 
-[[nodiscard]] const tensor::TensorStorage& output_weight_or_tied_embedding(
+[[nodiscard]] tensor::TensorView output_weight_or_tied_embedding(
     const EngineModel& model,
-    const tensor::TensorStorage& token_embedding_weight
+    const tensor::TensorView& token_embedding_weight
 ) {
-    const auto* output_weight = model.find_tensor("output.weight");
-    if (output_weight == nullptr) {
-        return token_embedding_weight;
+    const auto* output_weight_view = model.find_tensor_view("output.weight");
+    if (output_weight_view != nullptr) {
+        return output_weight_view->view;
     }
 
-    return output_weight->storage;
+    const auto* output_weight = model.find_tensor("output.weight");
+    if (output_weight != nullptr) {
+        return output_weight->storage.view();
+    }
+
+    return token_embedding_weight;
 }
 
 [[nodiscard]] Gemma2BlockWeights bind_gemma2_block_weights(const EngineModel& model, std::uint32_t block_index) {
     return Gemma2BlockWeights {
         .attention = Gemma2AttentionWeights {
-            .attention_norm_weight = require_tensor(model, block_tensor_name(block_index, "attn_norm.weight")),
-            .post_attention_norm_weight = require_tensor(
+            .attention_norm_weight = require_tensor_view(model, block_tensor_name(block_index, "attn_norm.weight")),
+            .post_attention_norm_weight = require_tensor_view(
                 model,
                 block_tensor_name(block_index, "post_attention_norm.weight")
             ),
-            .query_weight = require_tensor(model, block_tensor_name(block_index, "attn_q.weight")),
-            .key_weight = require_tensor(model, block_tensor_name(block_index, "attn_k.weight")),
-            .value_weight = require_tensor(model, block_tensor_name(block_index, "attn_v.weight")),
-            .output_weight = require_tensor(model, block_tensor_name(block_index, "attn_output.weight")),
+            .query_weight = require_tensor_view(model, block_tensor_name(block_index, "attn_q.weight")),
+            .key_weight = require_tensor_view(model, block_tensor_name(block_index, "attn_k.weight")),
+            .value_weight = require_tensor_view(model, block_tensor_name(block_index, "attn_v.weight")),
+            .output_weight = require_tensor_view(model, block_tensor_name(block_index, "attn_output.weight")),
         },
         .feed_forward = Gemma2FeedForwardWeights {
-            .feed_forward_norm_weight = require_tensor(model, block_tensor_name(block_index, "ffn_norm.weight")),
-            .post_feed_forward_norm_weight = require_tensor(
+            .feed_forward_norm_weight = require_tensor_view(model, block_tensor_name(block_index, "ffn_norm.weight")),
+            .post_feed_forward_norm_weight = require_tensor_view(
                 model,
                 block_tensor_name(block_index, "post_ffw_norm.weight")
             ),
-            .gate_weight = require_tensor(model, block_tensor_name(block_index, "ffn_gate.weight")),
-            .up_weight = require_tensor(model, block_tensor_name(block_index, "ffn_up.weight")),
-            .down_weight = require_tensor(model, block_tensor_name(block_index, "ffn_down.weight")),
+            .gate_weight = require_tensor_view(model, block_tensor_name(block_index, "ffn_gate.weight")),
+            .up_weight = require_tensor_view(model, block_tensor_name(block_index, "ffn_up.weight")),
+            .down_weight = require_tensor_view(model, block_tensor_name(block_index, "ffn_down.weight")),
         },
     };
 }
@@ -75,10 +85,10 @@ Gemma2ModelWeights bind_gemma2_model_weights(const EngineModel& model) {
         blocks.push_back(bind_gemma2_block_weights(model, block_index));
     }
 
-    const auto& token_embedding_weight = require_tensor(model, "token_embd.weight");
+    const auto token_embedding_weight = require_tensor_view(model, "token_embd.weight");
     return Gemma2ModelWeights {
         .token_embedding_weight = token_embedding_weight,
-        .output_norm_weight = require_tensor(model, "output_norm.weight"),
+        .output_norm_weight = require_tensor_view(model, "output_norm.weight"),
         .output_weight = output_weight_or_tied_embedding(model, token_embedding_weight),
         .blocks = std::move(blocks),
     };

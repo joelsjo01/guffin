@@ -9,6 +9,7 @@ BENCHMARK_BINARY := $(BUILD_DIR)/local-gguf-bench
 
 ENGINE_SOURCES := \
 	src/engine/gemma2_model.cpp \
+	src/engine/gemma2_reference.cpp \
 	src/engine/kv_cache.cpp \
 	src/engine/llama_layer.cpp \
 	src/engine/llama_model.cpp \
@@ -78,6 +79,7 @@ TEST_INCLUDE_FLAGS := \
 TEST_SOURCES := \
 	tests/benchmarks/benchmark_tests.cpp \
 	tests/engine/engine_model_tests.cpp \
+	tests/engine/gemma2_reference_tests.cpp \
 	tests/engine/llama_attention_layer_tests.cpp \
 	tests/engine/llama_backend_tests.cpp \
 	tests/engine/llama_block_tests.cpp \

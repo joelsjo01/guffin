@@ -241,6 +241,7 @@ void test_loads_engine_model_from_llama_gguf_view() {
 
 void test_loads_engine_model_from_gemma2_gguf_view() {
     auto payload_store = tiny_gemma2_payload_store();
+    const auto* token_embedding_bytes = payload_store.payloads[0].bytes.data();
     auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
 
     const auto model = load_engine_model_from_gguf(view);
@@ -267,7 +268,16 @@ void test_loads_engine_model_from_gemma2_gguf_view() {
         .uses_tied_output_weight = true,
     };
     expect(model.gemma2_config() == expected_config, "Gemma2 config mismatch");
-    expect(model.tensors().size() == 13, "Gemma2 tensor count mismatch");
+    expect(model.tensors().empty(), "Gemma2 engine model should not eagerly own tensor storage");
+    expect(model.tensor_views().size() == 13, "Gemma2 tensor view count mismatch");
+
+    const auto* token_embedding = model.find_tensor_view("token_embd.weight");
+    expect(token_embedding != nullptr, "Gemma2 token embedding view lookup failed");
+    expect(
+        token_embedding->view.bytes().data() == token_embedding_bytes,
+        "Gemma2 token embedding view should point at GGUF payload bytes"
+    );
+    expect(model.find_tensor("token_embd.weight") == nullptr, "Gemma2 tensor lookup should not find owned storage");
 }
 
 void test_binds_gemma2_model_weights_with_mixed_k_quant_tensors() {
@@ -279,7 +289,7 @@ void test_binds_gemma2_model_weights_with_mixed_k_quant_tensors() {
 
     expect(weights.blocks.size() == 1, "Gemma2 bound block count mismatch");
     expect(
-        &weights.output_weight == &weights.token_embedding_weight,
+        weights.output_weight.bytes().data() == weights.token_embedding_weight.bytes().data(),
         "Gemma2 missing output.weight should tie output to token embedding"
     );
     expect(weights.token_embedding_weight.descriptor().dtype == DType::f16, "Gemma2 token embedding dtype mismatch");
@@ -473,7 +483,10 @@ void test_rejects_gemma2_weight_binding_missing_tensor() {
 
 const local_gguf_engine::tests::TestCase kEngineModelTests[] = {
     {"loads engine model from Llama GGUF view", test_loads_engine_model_from_llama_gguf_view},
-    {"loads engine model from Gemma2 GGUF view", test_loads_engine_model_from_gemma2_gguf_view},
+    {
+        "loads engine model from Gemma2 GGUF view without eager owned tensor copies",
+        test_loads_engine_model_from_gemma2_gguf_view,
+    },
     {
         "binds Gemma2 model weights with mixed K-quant tensors",
         test_binds_gemma2_model_weights_with_mixed_k_quant_tensors,

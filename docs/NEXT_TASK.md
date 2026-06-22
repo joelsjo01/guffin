@@ -5,17 +5,15 @@ completed implementation slice.
 
 ## Objective
 
-Add Gemma tokenizer and chat-template prompt formatting for the local Gemma 2
-9B Q4 file.
+Add the first Metal-resident Gemma model plan boundary.
 
 ## Why
 
-Gemma 2 config parsing and weight binding now succeed far enough for
-`models/gemma-2-9b-Q4.gguf` to fail explicitly at unsupported Gemma runtime
-execution. The next blocker is prompt preparation: the file reports
-`general.architecture = "gemma2"`, `tokenizer.ggml.model = "llama"`, and a
-Gemma-specific `tokenizer.chat_template` that the current SmolLM2-only prompt
-formatter does not support.
+Large Gemma tensor payloads now flow through validated file-backed views without
+eager owned tensor copies on the Gemma load path. The next blocker is backend
+residency: Gemma needs an explicit Metal-owned plan that can receive packed
+weight views, own persistent buffers, and define KV/scratch/layer-state
+ownership before real packed kernels and execution schedules land.
 
 ## Read
 
@@ -24,17 +22,17 @@ formatter does not support.
 - `docs/GRAPH.md` only to locate files/tests
 - `docs/GEMMA_Q4_MILESTONES.md`
 - `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md`, especially
-  `## Gemma 2 Architecture And Tokenizer Findings` and
   `## Target Architecture Proposal`
 
 ## Touch
 
-- `include/local_gguf_engine/tokenizer/tokenizer.hpp`
-- `src/tokenizer/tokenizer.cpp`
-- `src/frontends/cli/generate.cpp` only to move the Gemma runtime stop after
-  tokenizer/prompt validation
-- `tests/tokenizer/tokenizer_tests.cpp`
-- `tests/frontends/cli/generate_cli_tests.cpp` if the CLI boundary changes
+- Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
+  and `src/engine`
+- Metal buffer/context ownership code only where needed for persistent Gemma
+  weight/KV/scratch handles
+- `tests/engine`
+- `tests/tensor` only for backend ownership/unavailable-device behavior
+- CLI tests only if the unsupported Gemma runtime boundary changes
 - `docs/GEMMA_Q4_MILESTONES.md`
 - `docs/NEXT_TASK.md`
 
@@ -44,24 +42,25 @@ formatter does not support.
 - Do not optimize the old CPU/Llama path unless it directly proves the current
   slice.
 - Do not read broad docs or benchmark artifacts unless named above.
-- Do not add Gemma generation execution, full Gemma CPU execution, Metal
-  kernels, a broad Jinja runtime, or broad model architecture refactors in this
-  slice.
+- Do not add full Gemma generation, full 9B CPU execution, packed matmul
+  kernels, attention kernels, sampling changes, broad graph abstractions, or
+  benchmark work in this slice.
+- Do not copy all Gemma tensor payloads back into owned host `TensorStorage`
+  before Metal upload.
 
 ## Verify
 
-- Add deterministic tests for Gemma prompt formatting, role validation,
-  BOS/EOS behavior, unsupported template rejection, and the generation prompt
-  suffix.
-- Run the focused tokenizer and generate CLI tests.
-- Run a local Gemma load/generation command far enough to prove any remaining
-  failure is an explicit unsupported Gemma runtime error after tokenizer and
-  prompt preparation, not tokenizer/chat-template support.
+- Add deterministic tests for plan ownership, required weight coverage,
+  unavailable Metal behavior, and no eager host tensor-copy regression.
+- Run focused engine/tensor/CLI tests touched by the ownership change.
+- Run local Gemma inspection/generation far enough to prove any remaining
+  failure is still the explicit unsupported Gemma runtime error.
 - Run `bash scripts/ci.sh` after implementation changes.
 
 ## Stop When
 
-The local Gemma GGUF tokenizer metadata can format and encode Gemma IT prompts
-with deterministic tests, and generation still fails explicitly later for
-unsupported Gemma runtime work rather than architecture, tensor binding,
-tokenizer, or chat-template handling.
+Gemma has a small reusable Metal plan object that is constructed from borrowed
+validated weight views, owns persistent backend resources for weights plus
+declared KV/scratch/layer state, handles unavailable Metal deterministically,
+and still stops before unsupported Gemma execution rather than drifting into
+kernel or generation work.

@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <span>
 #include <stdexcept>
 
@@ -51,6 +52,28 @@ private:
     std::array<std::uint8_t, 4> actual_magic_;
 };
 
+class GGUFFileBackedModel final {
+public:
+    GGUFFileBackedModel(const GGUFFileBackedModel&) = delete;
+    GGUFFileBackedModel& operator=(const GGUFFileBackedModel&) = delete;
+    GGUFFileBackedModel(GGUFFileBackedModel&& other) noexcept;
+    GGUFFileBackedModel& operator=(GGUFFileBackedModel&& other) noexcept;
+    ~GGUFFileBackedModel();
+
+    [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept;
+    [[nodiscard]] const GGUFModelView& view() const noexcept;
+
+private:
+    friend GGUFFileBackedModel read_file_backed_gguf_model(const std::filesystem::path& path);
+
+    GGUFFileBackedModel(void* data, std::size_t byte_count, GGUFModelView model);
+    void reset() noexcept;
+
+    void* data_ = nullptr;
+    std::size_t byte_count_ = 0;
+    GGUFModelView model_;
+};
+
 [[nodiscard]] constexpr std::array<std::uint8_t, 4> gguf_magic() noexcept {
     return {0x47, 0x47, 0x55, 0x46};
 }
@@ -59,5 +82,6 @@ private:
 [[nodiscard]] GGUFMetadataSection read_gguf_metadata_section(std::span<const std::uint8_t> bytes);
 [[nodiscard]] GGUFTensorDirectory read_gguf_tensor_directory(std::span<const std::uint8_t> bytes);
 [[nodiscard]] GGUFModelView read_gguf_model_view(std::span<const std::uint8_t> bytes);
+[[nodiscard]] GGUFFileBackedModel read_file_backed_gguf_model(const std::filesystem::path& path);
 
 }  // namespace local_gguf_engine::model_format

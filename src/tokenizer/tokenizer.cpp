@@ -51,6 +51,9 @@ constexpr std::int32_t gguf_token_type_unused = 5;
         case TokenizerErrorCode::unsupported_chat_template:
             message = "unsupported chat template";
             break;
+        case TokenizerErrorCode::invalid_chat_message:
+            message = "invalid chat message";
+            break;
     }
 
     if (!detail.empty()) {
@@ -221,7 +224,7 @@ template <typename Values>
 
 void validate_architecture(const GGUFMetadataSection& metadata) {
     const auto architecture = require_metadata_string(metadata, "general.architecture");
-    if (architecture != "llama") {
+    if (architecture != "llama" && architecture != "gemma2") {
         throw TokenizerError(TokenizerErrorCode::unsupported_architecture, architecture);
     }
 }
@@ -695,6 +698,124 @@ constexpr std::string_view smollm2_default_system_prompt =
     return formatted;
 }
 
+[[nodiscard]] bool supports_gemma2_it_template(std::string_view chat_template) noexcept {
+    return chat_template.find("{{ bos_token }}") != std::string_view::npos
+        && chat_template.find("System role not supported") != std::string_view::npos
+        && chat_template.find("Conversation roles must alternate") != std::string_view::npos
+        && chat_template.find("message['role'] == 'assistant'") != std::string_view::npos
+        && chat_template.find("{% set role = 'model' %}") != std::string_view::npos
+        && chat_template.find("<start_of_turn>") != std::string_view::npos
+        && chat_template.find("<end_of_turn>") != std::string_view::npos
+        && chat_template.find("message['content'] | trim") != std::string_view::npos
+        && chat_template.find("add_generation_prompt") != std::string_view::npos
+        && chat_template.find("<start_of_turn>model") != std::string_view::npos;
+}
+
+[[nodiscard]] bool is_ascii_whitespace(char character) noexcept {
+    return character == ' '
+        || character == '\t'
+        || character == '\n'
+        || character == '\r'
+        || character == '\v'
+        || character == '\f';
+}
+
+[[nodiscard]] std::string_view trim_ascii_whitespace(std::string_view text) noexcept {
+    std::size_t begin = 0;
+    while (begin < text.size() && is_ascii_whitespace(text[begin])) {
+        ++begin;
+    }
+
+    auto end = text.size();
+    while (end > begin && is_ascii_whitespace(text[end - 1U])) {
+        --end;
+    }
+
+    return text.substr(begin, end - begin);
+}
+
+[[nodiscard]] std::string token_text_for_id(
+    const GGUFMetadataSection& metadata,
+    std::uint32_t token_id,
+    std::string_view detail
+) {
+    const auto& token_texts = require_metadata_array_values<std::vector<std::string>>(
+        metadata,
+        "tokenizer.ggml.tokens",
+        GGUFMetadataValueType::string
+    );
+
+    if (static_cast<std::uint64_t>(token_id) >= static_cast<std::uint64_t>(token_texts.size())) {
+        throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, std::string(detail));
+    }
+
+    return token_texts[token_id];
+}
+
+[[nodiscard]] std::string bos_token_text(const GGUFMetadataSection& metadata) {
+    const auto token_id = require_special_token_id(
+        optional_metadata_u32(metadata, "tokenizer.ggml.bos_token_id"),
+        "tokenizer.ggml.bos_token_id"
+    );
+    return token_text_for_id(metadata, token_id, "tokenizer.ggml.bos_token_id");
+}
+
+[[nodiscard]] std::string_view gemma2_output_role_for_message(const ChatMessage& message, std::size_t index) {
+    if (message.role == "system") {
+        throw TokenizerError(TokenizerErrorCode::invalid_chat_message, "system");
+    }
+
+    const auto expects_user = index % 2U == 0U;
+    const auto is_user = message.role == "user";
+    const auto is_model = message.role == "assistant" || message.role == "model";
+    if (!is_user && !is_model) {
+        throw TokenizerError(TokenizerErrorCode::invalid_chat_message, std::string(message.role));
+    }
+
+    if (expects_user != is_user) {
+        throw TokenizerError(TokenizerErrorCode::invalid_chat_message, "role alternation");
+    }
+
+    return is_user ? std::string_view("user") : std::string_view("model");
+}
+
+[[nodiscard]] PromptFormatResult format_gemma2_it_chat_prompt(
+    const GGUFMetadataSection& metadata,
+    std::span<const ChatMessage> messages,
+    bool add_generation_prompt
+) {
+    if (messages.empty()) {
+        throw TokenizerError(TokenizerErrorCode::invalid_chat_message, "messages");
+    }
+
+    std::size_t content_size = 0;
+    for (const auto& message : messages) {
+        content_size += trim_ascii_whitespace(message.content).size();
+    }
+
+    std::string formatted = bos_token_text(metadata);
+    formatted.reserve(formatted.size() + content_size + messages.size() * 36U + (add_generation_prompt ? 22U : 0U));
+    for (std::size_t index = 0; index < messages.size(); ++index) {
+        const auto output_role = gemma2_output_role_for_message(messages[index], index);
+        formatted += "<start_of_turn>";
+        formatted += output_role;
+        formatted.push_back('\n');
+        formatted += trim_ascii_whitespace(messages[index].content);
+        formatted += "<end_of_turn>\n";
+    }
+
+    if (add_generation_prompt) {
+        formatted += "<start_of_turn>model\n";
+    }
+
+    return PromptFormatResult {
+        .text = std::move(formatted),
+        .encode_special_tokens = true,
+        .add_bos = false,
+        .add_eos = false,
+    };
+}
+
 void append_gpt2_decoded_text(std::string& output, std::string_view token_text) {
     // GPT-2 vocab stores bytes in a reversible Unicode alphabet before BPE merges.
     std::size_t offset = 0;
@@ -755,6 +876,35 @@ std::string_view tokenizer_model_name(TokenizerModel model) noexcept {
     return "unknown";
 }
 
+PromptFormatResult format_chat_prompt_from_gguf_metadata(
+    const GGUFMetadataSection& metadata,
+    std::span<const ChatMessage> messages,
+    bool add_generation_prompt
+) {
+    const auto chat_template = optional_metadata_string(metadata, "tokenizer.chat_template");
+    if (!chat_template.has_value()) {
+        throw TokenizerError(TokenizerErrorCode::unsupported_chat_template, "tokenizer.chat_template");
+    }
+
+    const auto architecture = require_metadata_string(metadata, "general.architecture");
+    if (architecture == "gemma2" && supports_gemma2_it_template(*chat_template)) {
+        return format_gemma2_it_chat_prompt(metadata, messages, add_generation_prompt);
+    }
+
+    if (supports_smollm2_single_user_template(*chat_template)) {
+        if (messages.size() != 1 || messages.front().role != "user" || !add_generation_prompt) {
+            throw TokenizerError(TokenizerErrorCode::invalid_chat_message, "messages");
+        }
+
+        return PromptFormatResult {
+            .text = format_smollm2_single_user_prompt(messages.front().content),
+            .encode_special_tokens = true,
+        };
+    }
+
+    throw TokenizerError(TokenizerErrorCode::unsupported_chat_template, "tokenizer.chat_template");
+}
+
 PromptFormatResult format_generate_prompt_from_gguf_metadata(
     const GGUFMetadataSection& metadata,
     std::string_view prompt
@@ -767,14 +917,27 @@ PromptFormatResult format_generate_prompt_from_gguf_metadata(
         };
     }
 
-    if (!supports_smollm2_single_user_template(*chat_template)) {
-        throw TokenizerError(TokenizerErrorCode::unsupported_chat_template, "tokenizer.chat_template");
+    const auto architecture = require_metadata_string(metadata, "general.architecture");
+    if (architecture == "gemma2" && supports_gemma2_it_template(*chat_template)) {
+        const ChatMessage message {
+            .role = "user",
+            .content = prompt,
+        };
+        return format_chat_prompt_from_gguf_metadata(
+            metadata,
+            std::span<const ChatMessage>(&message, 1),
+            true
+        );
     }
 
-    return PromptFormatResult {
-        .text = format_smollm2_single_user_prompt(prompt),
-        .encode_special_tokens = true,
-    };
+    if (supports_smollm2_single_user_template(*chat_template)) {
+        return PromptFormatResult {
+            .text = format_smollm2_single_user_prompt(prompt),
+            .encode_special_tokens = true,
+        };
+    }
+
+    throw TokenizerError(TokenizerErrorCode::unsupported_chat_template, "tokenizer.chat_template");
 }
 
 Tokenizer::Tokenizer(

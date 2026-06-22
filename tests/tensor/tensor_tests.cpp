@@ -48,7 +48,13 @@ using local_gguf_engine::tensor::element_bytes;
 using local_gguf_engine::tensor::element_count;
 using local_gguf_engine::tensor::linear_index;
 using local_gguf_engine::tensor::mutable_element_bytes;
+using local_gguf_engine::tensor::dequantize_q4_k_block;
+using local_gguf_engine::tensor::dequantize_q4_k_row;
+using local_gguf_engine::tensor::dequantize_q6_k_block;
+using local_gguf_engine::tensor::dequantize_q6_k_row;
 using local_gguf_engine::tensor::dequantize_q8_0_block;
+using local_gguf_engine::tensor::dot_q4_k_row_f32;
+using local_gguf_engine::tensor::dot_q6_k_row_f32;
 using local_gguf_engine::tensor::q4_k_block_count;
 using local_gguf_engine::tensor::q4_k_block_view;
 using local_gguf_engine::tensor::q6_k_block_count;
@@ -287,6 +293,123 @@ void test_rejects_tensor_descriptor_with_invalid_shape_dtype_combination() {
     }
 }
 
+void write_little_endian_u16(std::span<std::uint8_t> bytes, std::size_t offset, std::uint16_t value) {
+    bytes[offset] = static_cast<std::uint8_t>(value & 0xFFU);
+    bytes[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
+}
+
+void set_q4_k_scale_min(
+    std::span<std::uint8_t> block_bytes,
+    std::size_t group_index,
+    std::uint8_t scale,
+    std::uint8_t min
+) {
+    auto scale_min = block_bytes.subspan(4, Q4_KBlockView::scale_min_byte_count);
+    scale = static_cast<std::uint8_t>(scale & 0x3FU);
+    min = static_cast<std::uint8_t>(min & 0x3FU);
+
+    if (group_index < 4U) {
+        scale_min[group_index] = static_cast<std::uint8_t>((scale_min[group_index] & 0xC0U) | scale);
+        scale_min[group_index + 4U] = static_cast<std::uint8_t>((scale_min[group_index + 4U] & 0xC0U) | min);
+        return;
+    }
+
+    const auto scale_high_bits = static_cast<std::uint8_t>((scale & 0x30U) << 2U);
+    const auto min_high_bits = static_cast<std::uint8_t>((min & 0x30U) << 2U);
+    scale_min[group_index - 4U] =
+        static_cast<std::uint8_t>((scale_min[group_index - 4U] & 0x3FU) | scale_high_bits);
+    scale_min[group_index] = static_cast<std::uint8_t>((scale_min[group_index] & 0x3FU) | min_high_bits);
+    scale_min[group_index + 4U] = static_cast<std::uint8_t>((scale & 0x0FU) | ((min & 0x0FU) << 4U));
+}
+
+void set_q4_k_quantized_nibble(
+    std::span<std::uint8_t> block_bytes,
+    std::size_t element_index,
+    std::uint8_t value
+) {
+    auto quantized = block_bytes.subspan(16, Q4_KBlockView::quantized_byte_count);
+    const auto super_group_base = (element_index / 64U) * 32U;
+    const auto index_in_super_group = element_index % 64U;
+    const auto byte_index = super_group_base + (index_in_super_group % 32U);
+    const auto shift = index_in_super_group < 32U ? 0U : 4U;
+    const auto mask = static_cast<std::uint8_t>(0x0FU << shift);
+    quantized[byte_index] = static_cast<std::uint8_t>(
+        (quantized[byte_index] & ~mask) | ((value & 0x0FU) << shift)
+    );
+}
+
+TensorStorage q4_k_reference_tensor() {
+    std::array<std::uint8_t, Q4_KBlockView::byte_count> bytes {};
+    write_little_endian_u16(std::span<std::uint8_t>(bytes), 0, 0x3C00U);
+    write_little_endian_u16(std::span<std::uint8_t>(bytes), 2, 0x3800U);
+
+    set_q4_k_scale_min(std::span<std::uint8_t>(bytes), 0, 2, 1);
+    set_q4_k_scale_min(std::span<std::uint8_t>(bytes), 1, 3, 2);
+    set_q4_k_scale_min(std::span<std::uint8_t>(bytes), 4, 6, 5);
+    set_q4_k_quantized_nibble(std::span<std::uint8_t>(bytes), 0, 4);
+    set_q4_k_quantized_nibble(std::span<std::uint8_t>(bytes), 31, 15);
+    set_q4_k_quantized_nibble(std::span<std::uint8_t>(bytes), 32, 5);
+    set_q4_k_quantized_nibble(std::span<std::uint8_t>(bytes), 63, 6);
+    set_q4_k_quantized_nibble(std::span<std::uint8_t>(bytes), 128, 7);
+
+    return TensorStorage::from_bytes(
+        TensorDescriptor::from(Shape::from({1, 256}), DType::q4_k),
+        std::span<const std::uint8_t>(bytes)
+    );
+}
+
+void set_q6_k_scale(std::span<std::uint8_t> block_bytes, std::size_t group_index, std::int8_t value) {
+    block_bytes[Q6_KBlockView::low_bit_byte_count + Q6_KBlockView::high_bit_byte_count + group_index] =
+        std::bit_cast<std::uint8_t>(value);
+}
+
+void set_q6_k_quantized_value(
+    std::span<std::uint8_t> block_bytes,
+    std::size_t element_index,
+    std::int8_t value
+) {
+    const auto encoded = static_cast<std::uint8_t>(static_cast<std::int16_t>(value) + 32);
+    const auto low = static_cast<std::uint8_t>(encoded & 0x0FU);
+    const auto high = static_cast<std::uint8_t>((encoded >> 4U) & 0x03U);
+    const auto half_block_index = element_index / 128U;
+    const auto index_in_half_block = element_index % 128U;
+    const auto lane_index = index_in_half_block % 32U;
+
+    const auto low_base = half_block_index * 64U;
+    const auto low_plane_offset = ((index_in_half_block / 32U) % 2U) * 32U;
+    const auto low_shift = index_in_half_block < 64U ? 0U : 4U;
+    const auto low_mask = static_cast<std::uint8_t>(0x0FU << low_shift);
+    auto& low_byte = block_bytes[low_base + low_plane_offset + lane_index];
+    low_byte = static_cast<std::uint8_t>((low_byte & ~low_mask) | (low << low_shift));
+
+    const auto high_base = Q6_KBlockView::low_bit_byte_count + half_block_index * 32U;
+    const auto high_shift = (index_in_half_block / 32U) * 2U;
+    const auto high_mask = static_cast<std::uint8_t>(0x03U << high_shift);
+    auto& high_byte = block_bytes[high_base + lane_index];
+    high_byte = static_cast<std::uint8_t>((high_byte & ~high_mask) | (high << high_shift));
+}
+
+TensorStorage q6_k_reference_tensor() {
+    std::array<std::uint8_t, Q6_KBlockView::byte_count> bytes {};
+    write_little_endian_u16(std::span<std::uint8_t>(bytes), Q6_KBlockView::byte_count - 2U, 0x3800U);
+
+    set_q6_k_scale(std::span<std::uint8_t>(bytes), 0, 2);
+    set_q6_k_scale(std::span<std::uint8_t>(bytes), 1, 3);
+    set_q6_k_scale(std::span<std::uint8_t>(bytes), 2, -3);
+    set_q6_k_scale(std::span<std::uint8_t>(bytes), 4, 4);
+    set_q6_k_scale(std::span<std::uint8_t>(bytes), 8, -2);
+    set_q6_k_quantized_value(std::span<std::uint8_t>(bytes), 0, -32);
+    set_q6_k_quantized_value(std::span<std::uint8_t>(bytes), 31, 31);
+    set_q6_k_quantized_value(std::span<std::uint8_t>(bytes), 32, -1);
+    set_q6_k_quantized_value(std::span<std::uint8_t>(bytes), 64, 5);
+    set_q6_k_quantized_value(std::span<std::uint8_t>(bytes), 128, 7);
+
+    return TensorStorage::from_bytes(
+        TensorDescriptor::from(Shape::from({1, 256}), DType::q6_k),
+        std::span<const std::uint8_t>(bytes)
+    );
+}
+
 void test_decodes_q8_0_block_values() {
     const auto descriptor = TensorDescriptor::from(Shape::from({32}), DType::q8_0);
     const std::array<std::uint8_t, Q8_0BlockView::byte_count> bytes {
@@ -316,6 +439,120 @@ void test_decodes_q8_0_block_values() {
     expect(values[2] == -1.0F, "Q8_0 dequantized value 2 mismatch");
     expect(values[3] == 63.5F, "Q8_0 dequantized value 3 mismatch");
     expect(values[4] == -64.0F, "Q8_0 dequantized value 4 mismatch");
+}
+
+void test_decodes_q4_k_reference_block_values() {
+    const auto storage = q4_k_reference_tensor();
+    const auto block = q4_k_block_view(storage, 0);
+
+    expect(block.scale_value(0) == 2, "Q4_K scale group 0 mismatch");
+    expect(block.min_value(0) == 1, "Q4_K min group 0 mismatch");
+    expect(block.scale_value(4) == 6, "Q4_K scale group 4 mismatch");
+    expect(block.min_value(4) == 5, "Q4_K min group 4 mismatch");
+    expect(block.quantized_nibble(0) == 4, "Q4_K quant group 0 start mismatch");
+    expect(block.quantized_nibble(31) == 15, "Q4_K quant group 0 final mismatch");
+    expect(block.quantized_nibble(32) == 5, "Q4_K quant group 1 start mismatch");
+    expect(block.quantized_nibble(63) == 6, "Q4_K quant group 1 final mismatch");
+    expect(block.quantized_nibble(128) == 7, "Q4_K quant group 4 start mismatch");
+    expect_close(block.dequantized_value(0), 7.5F, 0.0F, "Q4_K dequantized value 0 mismatch");
+    expect_close(block.dequantized_value(32), 14.0F, 0.0F, "Q4_K dequantized value 32 mismatch");
+    expect_close(block.dequantized_value(128), 39.5F, 0.0F, "Q4_K dequantized value 128 mismatch");
+
+    const auto values = dequantize_q4_k_block(storage, 0);
+    expect_close(values[31], 29.5F, 0.0F, "Q4_K dequantized value 31 mismatch");
+    expect_close(values[63], 17.0F, 0.0F, "Q4_K dequantized value 63 mismatch");
+}
+
+void test_dequantizes_q4_k_reference_row_and_dot() {
+    const auto storage = q4_k_reference_tensor();
+    const auto row = dequantize_q4_k_row(storage, 0);
+    std::array<float, 256> input {};
+    input[0] = 1.0F;
+    input[32] = 2.0F;
+    input[128] = -1.0F;
+
+    expect(row.size() == input.size(), "Q4_K row dequantized width mismatch");
+    expect_close(row[0], 7.5F, 0.0F, "Q4_K row value 0 mismatch");
+    expect_close(row[32], 14.0F, 0.0F, "Q4_K row value 32 mismatch");
+    expect_close(row[128], 39.5F, 0.0F, "Q4_K row value 128 mismatch");
+    expect_close(
+        dot_q4_k_row_f32(storage, 0, std::span<const float>(input)),
+        -4.0F,
+        0.0F,
+        "Q4_K row dot mismatch"
+    );
+}
+
+void test_decodes_q6_k_reference_block_values() {
+    const auto storage = q6_k_reference_tensor();
+    const auto block = q6_k_block_view(storage, 0);
+
+    expect(block.scale_value(0) == 2, "Q6_K scale group 0 mismatch");
+    expect(block.scale_value(2) == -3, "Q6_K scale group 2 mismatch");
+    expect(block.low_nibble(0) == 0, "Q6_K low nibble value 0 mismatch");
+    expect(block.high_bits(0) == 0, "Q6_K high bits value 0 mismatch");
+    expect(block.quantized_value(0) == -32, "Q6_K quantized value 0 mismatch");
+    expect(block.low_nibble(32) == 15, "Q6_K low nibble value 32 mismatch");
+    expect(block.high_bits(32) == 1, "Q6_K high bits value 32 mismatch");
+    expect(block.quantized_value(32) == -1, "Q6_K quantized value 32 mismatch");
+    expect(block.low_nibble(64) == 5, "Q6_K low nibble value 64 mismatch");
+    expect(block.high_bits(64) == 2, "Q6_K high bits value 64 mismatch");
+    expect(block.quantized_value(64) == 5, "Q6_K quantized value 64 mismatch");
+    expect_close(block.dequantized_value(0), -32.0F, 0.0F, "Q6_K dequantized value 0 mismatch");
+    expect_close(block.dequantized_value(32), 1.5F, 0.0F, "Q6_K dequantized value 32 mismatch");
+    expect_close(block.dequantized_value(64), 10.0F, 0.0F, "Q6_K dequantized value 64 mismatch");
+
+    const auto values = dequantize_q6_k_block(storage, 0);
+    expect_close(values[31], 46.5F, 0.0F, "Q6_K dequantized value 31 mismatch");
+    expect_close(values[128], -7.0F, 0.0F, "Q6_K dequantized value 128 mismatch");
+}
+
+void test_dequantizes_q6_k_reference_row_and_dot() {
+    const auto storage = q6_k_reference_tensor();
+    const auto row = dequantize_q6_k_row(storage, 0);
+    std::array<float, 256> input {};
+    input[0] = 1.0F;
+    input[32] = 2.0F;
+    input[64] = -1.0F;
+    input[128] = 3.0F;
+
+    expect(row.size() == input.size(), "Q6_K row dequantized width mismatch");
+    expect_close(row[0], -32.0F, 0.0F, "Q6_K row value 0 mismatch");
+    expect_close(row[32], 1.5F, 0.0F, "Q6_K row value 32 mismatch");
+    expect_close(row[64], 10.0F, 0.0F, "Q6_K row value 64 mismatch");
+    expect_close(
+        dot_q6_k_row_f32(storage, 0, std::span<const float>(input)),
+        -60.0F,
+        0.0F,
+        "Q6_K row dot mismatch"
+    );
+}
+
+void test_rejects_q4_k_reference_row_width_mismatch() {
+    const auto storage = q4_k_reference_tensor();
+    std::array<float, 255> input {};
+
+    try {
+        (void)dot_q4_k_row_f32(storage, 0, std::span<const float>(input));
+        throw TestFailure("Q4_K row dot should reject input width mismatch");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "Q4_K width mismatch error code mismatch");
+        expect(error.expected_value() == 256, "Q4_K width mismatch expected value mismatch");
+        expect(error.actual_value() == 255, "Q4_K width mismatch actual value mismatch");
+    }
+}
+
+void test_rejects_q6_k_reference_row_out_of_range() {
+    const auto storage = q6_k_reference_tensor();
+
+    try {
+        (void)dequantize_q6_k_row(storage, 1);
+        throw TestFailure("Q6_K row dequantize should reject row out of range");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_index_out_of_range, "Q6_K row range error code mismatch");
+        expect(error.expected_value() == 1, "Q6_K row range expected value mismatch");
+        expect(error.actual_value() == 1, "Q6_K row range actual value mismatch");
+    }
 }
 
 void test_views_loaded_gguf_q8_0_block() {
@@ -349,7 +586,7 @@ void test_views_loaded_gguf_q4_k_block() {
     expect(block.scale_min_bytes()[11] == 0x1B, "Q4_K scale final byte mismatch");
     expect(block.quantized_bytes().size() == Q4_KBlockView::quantized_byte_count, "Q4_K quant byte count mismatch");
     expect(block.quantized_bytes()[127] == 0x7F, "Q4_K quant final byte mismatch");
-    expect(block.quantized_nibble(2) == 1, "Q4_K quantized nibble 2 mismatch");
+    expect(block.quantized_nibble(2) == 2, "Q4_K quantized nibble 2 mismatch");
     expect(block.quantized_nibble(255) == 7, "Q4_K quantized final nibble mismatch");
 }
 
@@ -369,8 +606,8 @@ void test_views_loaded_gguf_q6_k_block() {
     expect(block.high_bit_bytes()[0] == 0x80, "Q6_K high byte 0 mismatch");
     expect(block.scale_bits() == 0x4000U, "Q6_K scale bits mismatch");
     expect(block.scale() == 2.0F, "Q6_K scale decode mismatch");
-    expect(block.low_nibble(2) == 1, "Q6_K low nibble 2 mismatch");
-    expect(block.high_bits(3) == 2, "Q6_K high bits 3 mismatch");
+    expect(block.low_nibble(2) == 2, "Q6_K low nibble 2 mismatch");
+    expect(block.high_bits(3) == 3, "Q6_K high bits 3 mismatch");
     expect(block.scale_value(0) == static_cast<std::int8_t>(-16), "Q6_K scale value 0 mismatch");
     expect(block.scale_value(15) == static_cast<std::int8_t>(-1), "Q6_K scale value 15 mismatch");
 }
@@ -2232,6 +2469,12 @@ const TestCase tensor_core_tests[] = {
         test_rejects_tensor_descriptor_with_invalid_shape_dtype_combination,
     },
     {"decodes Q8_0 block values", test_decodes_q8_0_block_values},
+    {"decodes Q4_K reference block values", test_decodes_q4_k_reference_block_values},
+    {"dequantizes Q4_K reference row and dot", test_dequantizes_q4_k_reference_row_and_dot},
+    {"decodes Q6_K reference block values", test_decodes_q6_k_reference_block_values},
+    {"dequantizes Q6_K reference row and dot", test_dequantizes_q6_k_reference_row_and_dot},
+    {"rejects Q4_K reference row width mismatch", test_rejects_q4_k_reference_row_width_mismatch},
+    {"rejects Q6_K reference row out of range", test_rejects_q6_k_reference_row_out_of_range},
     {"views loaded GGUF Q8_0 block", test_views_loaded_gguf_q8_0_block},
     {"views loaded GGUF Q4_K block", test_views_loaded_gguf_q4_k_block},
     {"views loaded GGUF Q6_K block", test_views_loaded_gguf_q6_k_block},

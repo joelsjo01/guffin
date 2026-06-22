@@ -24,6 +24,7 @@ enum class TokenizerErrorCode {
     token_id_out_of_range,
     no_matching_token,
     unsupported_chat_template,
+    invalid_chat_message,
 };
 
 class TokenizerError final : public std::runtime_error {
@@ -70,6 +71,13 @@ struct TokenizerDecodeOptions {
 struct PromptFormatResult {
     std::string text;
     bool encode_special_tokens = false;
+    std::optional<bool> add_bos;
+    std::optional<bool> add_eos;
+};
+
+struct ChatMessage {
+    std::string_view role;
+    std::string_view content;
 };
 
 class Tokenizer final {
@@ -134,6 +142,11 @@ private:
 };
 
 [[nodiscard]] std::string_view tokenizer_model_name(TokenizerModel model) noexcept;
+[[nodiscard]] PromptFormatResult format_chat_prompt_from_gguf_metadata(
+    const model_format::GGUFMetadataSection& metadata,
+    std::span<const ChatMessage> messages,
+    bool add_generation_prompt
+);
 [[nodiscard]] PromptFormatResult format_generate_prompt_from_gguf_metadata(
     const model_format::GGUFMetadataSection& metadata,
     std::string_view prompt

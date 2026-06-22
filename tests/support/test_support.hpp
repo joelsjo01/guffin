@@ -46,6 +46,7 @@ local_gguf_engine::model_format::GGUFMetadataSection metadata_section(
     std::vector<local_gguf_engine::model_format::GGUFMetadataEntry> entries
 );
 std::string smollm2_chat_template_fixture();
+std::string gemma2_chat_template_fixture();
 std::vector<std::uint8_t> fixture(std::string_view name);
 
 }  // namespace local_gguf_engine::tests

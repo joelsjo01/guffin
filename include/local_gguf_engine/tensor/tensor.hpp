@@ -23,6 +23,8 @@ private:
     TensorDescriptor(Shape shape, DType dtype, std::uint64_t element_count, std::size_t byte_count);
 };
 
+class TensorView;
+
 class TensorStorage final {
 public:
     [[nodiscard]] static TensorStorage allocate(const TensorDescriptor& descriptor);
@@ -34,12 +36,31 @@ public:
     [[nodiscard]] const TensorDescriptor& descriptor() const noexcept;
     [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept;
     [[nodiscard]] std::span<std::uint8_t> mutable_bytes() noexcept;
+    [[nodiscard]] TensorView view() const noexcept;
 
 private:
     TensorStorage(TensorDescriptor descriptor, std::vector<std::uint8_t> bytes);
 
     TensorDescriptor descriptor_;
     std::vector<std::uint8_t> bytes_;
+};
+
+class TensorView final {
+public:
+    // Borrowed tensor bytes; the mapped file or storage backing the span must outlive this view.
+    [[nodiscard]] static TensorView from_bytes(
+        const TensorDescriptor& descriptor,
+        std::span<const std::uint8_t> bytes
+    );
+
+    [[nodiscard]] const TensorDescriptor& descriptor() const noexcept;
+    [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept;
+
+private:
+    TensorView(TensorDescriptor descriptor, std::span<const std::uint8_t> bytes);
+
+    TensorDescriptor descriptor_;
+    std::span<const std::uint8_t> bytes_;
 };
 
 }  // namespace local_gguf_engine::tensor

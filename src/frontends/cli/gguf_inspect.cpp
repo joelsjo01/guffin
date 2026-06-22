@@ -7,13 +7,10 @@
 #include "local_gguf_engine/tensor/tensor_error.hpp"
 
 #include <algorithm>
-#include <filesystem>
-#include <fstream>
 #include <limits>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
-#include <system_error>
 #include <utility>
 #include <variant>
 
@@ -27,15 +24,11 @@ using model_format::GGUFReadError;
 using model_format::GGUFReadErrorCode;
 using model_format::GGUFTensorDirectory;
 using model_format::GGUFTensorInfo;
-using model_format::load_gguf_tensor_payload;
+using model_format::read_file_backed_gguf_model;
 using model_format::read_gguf_model_view;
 using model_format::read_gguf_tensor_directory;
+using model_format::view_gguf_tensor_payload;
 using tensor::TensorError;
-
-class GGUFFileReadError final : public std::runtime_error {
-public:
-    explicit GGUFFileReadError(std::string message) : std::runtime_error(std::move(message)) {}
-};
 
 [[nodiscard]] bool gguf_type_is_supported(std::uint32_t type_id) noexcept {
     return type_id == 0 || type_id == 1 || type_id == 8 || type_id == 12 || type_id == 14;
@@ -148,40 +141,6 @@ void add_supported_payload_bytes(GGUFInspectionSummary& summary, std::size_t byt
     summary.total_supported_payload_bytes += byte_count;
 }
 
-[[nodiscard]] std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
-    std::error_code error_code;
-    const auto file_size = std::filesystem::file_size(path, error_code);
-    if (error_code) {
-        throw GGUFFileReadError("could not read '" + path.string() + "': " + error_code.message());
-    }
-
-    if (file_size > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
-        throw GGUFFileReadError("could not read '" + path.string() + "': file is too large");
-    }
-
-    if (file_size > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
-        throw GGUFFileReadError("could not read '" + path.string() + "': file is too large");
-    }
-
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        throw GGUFFileReadError("could not open '" + path.string() + "' for reading");
-    }
-
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(file_size));
-    if (!bytes.empty()) {
-        input.read(
-            reinterpret_cast<char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size())
-        );
-        if (!input) {
-            throw GGUFFileReadError("could not read entire file '" + path.string() + "'");
-        }
-    }
-
-    return bytes;
-}
-
 [[nodiscard]] bool is_payload_malformed_error(GGUFReadErrorCode code) noexcept {
     return code == GGUFReadErrorCode::truncated_tensor_payload
         || code == GGUFReadErrorCode::invalid_tensor_size;
@@ -229,8 +188,8 @@ GGUFInspectionSummary inspect_gguf_bytes(std::span<const std::uint8_t> bytes, st
 
     const auto model = read_gguf_model_view(bytes);
     for (const auto& payload : model.tensor_payloads) {
-        const auto loaded = load_gguf_tensor_payload(payload);
-        add_supported_payload_bytes(summary, loaded.storage.bytes().size());
+        const auto borrowed = view_gguf_tensor_payload(payload);
+        add_supported_payload_bytes(summary, borrowed.view.bytes().size());
     }
 
     return summary;
@@ -284,12 +243,10 @@ int run_gguf_inspect(int argc, const char* const* argv, std::ostream& output, st
 
     const std::string path = argv[1];
     try {
-        const auto bytes = read_file_bytes(path);
-        const auto summary = inspect_gguf_bytes(std::span<const std::uint8_t>(bytes));
+        const auto model = read_file_backed_gguf_model(path);
+        const auto summary = inspect_gguf_bytes(model.bytes());
         write_gguf_inspection_summary(summary, path, output);
         return 0;
-    } catch (const GGUFFileReadError& read_error) {
-        error << "error: " << read_error.what() << '\n';
     } catch (const GGUFReadError& read_error) {
         if (read_error.code() == GGUFReadErrorCode::unsupported_tensor_type) {
             error << "error: " << unsupported_tensor_message(read_error) << '\n';

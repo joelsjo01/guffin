@@ -23,8 +23,11 @@ using local_gguf_engine::tests::metadata_section;
 using local_gguf_engine::tests::metadata_string;
 using local_gguf_engine::tests::metadata_string_array;
 using local_gguf_engine::tests::metadata_u32;
+using local_gguf_engine::tests::gemma2_chat_template_fixture;
 using local_gguf_engine::tests::smollm2_chat_template_fixture;
 using local_gguf_engine::tests::tiny_llama_metadata;
+using local_gguf_engine::tokenizer::ChatMessage;
+using local_gguf_engine::tokenizer::format_chat_prompt_from_gguf_metadata;
 using local_gguf_engine::tokenizer::format_generate_prompt_from_gguf_metadata;
 using local_gguf_engine::tokenizer::load_tokenizer_from_gguf_metadata;
 using local_gguf_engine::tokenizer::TokenizerDecodeOptions;
@@ -142,6 +145,58 @@ std::vector<GGUFMetadataEntry> tiny_gpt2_special_tokenizer_metadata() {
     return metadata;
 }
 
+std::vector<std::string> tiny_gemma2_token_texts() {
+    std::vector<std::string> tokens;
+    tokens.reserve(110);
+    for (std::uint32_t token_id = 0; token_id < 110; ++token_id) {
+        tokens.push_back("<unused" + std::to_string(token_id) + ">");
+    }
+
+    tokens[0] = "<pad>";
+    tokens[1] = "<eos>";
+    tokens[2] = "<bos>";
+    tokens[3] = "<unk>";
+    tokens[4] = "<mask>";
+    tokens[5] = "Hello";
+    tokens[6] = "First";
+    tokens[7] = "Second";
+    tokens[8] = "Answer";
+    tokens[9] = "user\n";
+    tokens[10] = "model\n";
+    tokens[11] = "\n";
+    tokens[106] = "<start_of_turn>";
+    tokens[107] = "<end_of_turn>";
+    return tokens;
+}
+
+std::vector<std::int32_t> tiny_gemma2_token_types() {
+    std::vector<std::int32_t> token_types(110, 1);
+    token_types[0] = 3;
+    token_types[1] = 3;
+    token_types[2] = 3;
+    token_types[3] = 2;
+    token_types[4] = 3;
+    token_types[106] = 3;
+    token_types[107] = 3;
+    return token_types;
+}
+
+std::vector<GGUFMetadataEntry> tiny_gemma2_tokenizer_metadata() {
+    return {
+        metadata_string("general.architecture", "gemma2"),
+        metadata_string("tokenizer.ggml.model", "llama"),
+        metadata_string_array("tokenizer.ggml.tokens", tiny_gemma2_token_texts()),
+        metadata_i32_array("tokenizer.ggml.token_type", tiny_gemma2_token_types()),
+        metadata_u32("tokenizer.ggml.bos_token_id", 2),
+        metadata_u32("tokenizer.ggml.eos_token_id", 1),
+        metadata_u32("tokenizer.ggml.unknown_token_id", 3),
+        metadata_bool("tokenizer.ggml.add_bos_token", true),
+        metadata_bool("tokenizer.ggml.add_eos_token", false),
+        metadata_bool("tokenizer.ggml.add_space_prefix", false),
+        metadata_string("tokenizer.chat_template", gemma2_chat_template_fixture()),
+    };
+}
+
 void test_loads_llama_tokenizer_from_metadata() {
     const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_llama_tokenizer_metadata()));
 
@@ -251,6 +306,124 @@ void test_formats_smollm2_generate_prompt_from_chat_template() {
         formatted.text == smollm2_formatted_prompt_fixture("Hello"),
         "SmolLM2 chat-formatted prompt mismatch"
     );
+}
+
+void test_loads_gemma2_llama_tokenizer_from_metadata() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_gemma2_tokenizer_metadata()));
+
+    expect(tokenizer.model() == TokenizerModel::llama, "Gemma2 tokenizer model enum mismatch");
+    expect(tokenizer.vocabulary().size() == 110, "Gemma2 tokenizer vocabulary size mismatch");
+    expect(tokenizer.vocabulary()[0].text == "<pad>", "Gemma2 PAD token text mismatch");
+    expect(tokenizer.vocabulary()[1].text == "<eos>", "Gemma2 EOS token text mismatch");
+    expect(tokenizer.vocabulary()[2].text == "<bos>", "Gemma2 BOS token text mismatch");
+    expect(tokenizer.vocabulary()[3].text == "<unk>", "Gemma2 unknown token text mismatch");
+    expect(tokenizer.vocabulary()[4].text == "<mask>", "Gemma2 mask token text mismatch");
+    expect(tokenizer.vocabulary()[106].text == "<start_of_turn>", "Gemma2 start-of-turn token text mismatch");
+    expect(tokenizer.vocabulary()[107].text == "<end_of_turn>", "Gemma2 end-of-turn token text mismatch");
+    expect(tokenizer.special_tokens().bos_token_id == 2, "Gemma2 BOS token id mismatch");
+    expect(tokenizer.special_tokens().eos_token_id == 1, "Gemma2 EOS token id mismatch");
+    expect(tokenizer.special_tokens().unknown_token_id == 3, "Gemma2 unknown token id mismatch");
+
+    const auto options = tokenizer.default_encode_options();
+    expect(options.add_bos, "Gemma2 tokenizer default should add BOS");
+    expect(!options.add_eos, "Gemma2 tokenizer default should not add EOS");
+}
+
+void test_formats_gemma2_generate_prompt_from_chat_template() {
+    const auto formatted = format_generate_prompt_from_gguf_metadata(
+        metadata_section(tiny_gemma2_tokenizer_metadata()),
+        "  Hello\n"
+    );
+
+    expect(formatted.encode_special_tokens, "Gemma2 prompt should encode special tokens");
+    expect(formatted.add_bos.has_value() && !*formatted.add_bos, "Gemma2 prompt should suppress automatic BOS");
+    expect(formatted.add_eos.has_value() && !*formatted.add_eos, "Gemma2 prompt should suppress automatic EOS");
+    expect(
+        formatted.text == "<bos><start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\n",
+        "Gemma2 generate prompt mismatch"
+    );
+}
+
+void test_formats_gemma2_multi_turn_chat_prompt() {
+    const std::array<ChatMessage, 3> messages {{
+        ChatMessage {.role = "user", .content = " First "},
+        ChatMessage {.role = "assistant", .content = "\nAnswer\n"},
+        ChatMessage {.role = "user", .content = "\tSecond\t"},
+    }};
+
+    const auto formatted = format_chat_prompt_from_gguf_metadata(
+        metadata_section(tiny_gemma2_tokenizer_metadata()),
+        std::span<const ChatMessage>(messages),
+        true
+    );
+
+    expect(
+        formatted.text == "<bos><start_of_turn>user\nFirst<end_of_turn>\n"
+            "<start_of_turn>model\nAnswer<end_of_turn>\n"
+            "<start_of_turn>user\nSecond<end_of_turn>\n"
+            "<start_of_turn>model\n",
+        "Gemma2 multi-turn chat prompt mismatch"
+    );
+}
+
+void test_encodes_gemma2_prompt_special_tokens_without_double_bos() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_gemma2_tokenizer_metadata()));
+    const auto formatted = format_generate_prompt_from_gguf_metadata(
+        metadata_section(tiny_gemma2_tokenizer_metadata()),
+        "Hello"
+    );
+    const auto defaults = tokenizer.default_encode_options();
+    const auto ids = tokenizer.encode(
+        formatted.text,
+        TokenizerEncodeOptions {
+            .add_bos = formatted.add_bos.value_or(defaults.add_bos),
+            .add_eos = formatted.add_eos.value_or(defaults.add_eos),
+            .encode_special_tokens = formatted.encode_special_tokens,
+        }
+    );
+
+    const std::array<std::uint32_t, 8> expected {2, 106, 9, 5, 107, 11, 106, 10};
+    expect(ids.size() == expected.size(), "Gemma2 encoded prompt count mismatch");
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        expect(ids[index] == expected[index], "Gemma2 encoded prompt token mismatch");
+    }
+}
+
+void test_rejects_gemma2_system_chat_message() {
+    const std::array<ChatMessage, 1> messages {{
+        ChatMessage {.role = "system", .content = "Nope"},
+    }};
+
+    try {
+        (void)format_chat_prompt_from_gguf_metadata(
+            metadata_section(tiny_gemma2_tokenizer_metadata()),
+            std::span<const ChatMessage>(messages),
+            true
+        );
+        throw TestFailure("Gemma2 formatter should reject system role");
+    } catch (const TokenizerError& error) {
+        expect(error.code() == TokenizerErrorCode::invalid_chat_message, "Gemma2 system role error mismatch");
+        expect(error.detail() == "system", "Gemma2 system role detail mismatch");
+    }
+}
+
+void test_rejects_gemma2_chat_role_alternation() {
+    const std::array<ChatMessage, 2> messages {{
+        ChatMessage {.role = "user", .content = "First"},
+        ChatMessage {.role = "user", .content = "Second"},
+    }};
+
+    try {
+        (void)format_chat_prompt_from_gguf_metadata(
+            metadata_section(tiny_gemma2_tokenizer_metadata()),
+            std::span<const ChatMessage>(messages),
+            true
+        );
+        throw TestFailure("Gemma2 formatter should reject invalid role alternation");
+    } catch (const TokenizerError& error) {
+        expect(error.code() == TokenizerErrorCode::invalid_chat_message, "Gemma2 alternation error mismatch");
+        expect(error.detail() == "role alternation", "Gemma2 alternation detail mismatch");
+    }
 }
 
 void test_keeps_raw_generate_prompt_without_chat_template() {
@@ -404,6 +577,18 @@ std::span<const TestCase> tokenizer_test_cases() {
             "formats SmolLM2 generate prompt from chat template",
             test_formats_smollm2_generate_prompt_from_chat_template,
         },
+        {"loads Gemma2 Llama tokenizer from metadata", test_loads_gemma2_llama_tokenizer_from_metadata},
+        {
+            "formats Gemma2 generate prompt from chat template",
+            test_formats_gemma2_generate_prompt_from_chat_template,
+        },
+        {"formats Gemma2 multi-turn chat prompt", test_formats_gemma2_multi_turn_chat_prompt},
+        {
+            "encodes Gemma2 prompt special tokens without double BOS",
+            test_encodes_gemma2_prompt_special_tokens_without_double_bos,
+        },
+        {"rejects Gemma2 system chat message", test_rejects_gemma2_system_chat_message},
+        {"rejects Gemma2 chat role alternation", test_rejects_gemma2_chat_role_alternation},
         {"keeps raw generate prompt without chat template", test_keeps_raw_generate_prompt_without_chat_template},
         {"rejects unsupported chat template", test_rejects_unsupported_chat_template},
         {"rejects chat template invalid type", test_rejects_chat_template_invalid_type},

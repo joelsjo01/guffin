@@ -52,6 +52,7 @@ using local_gguf_engine::tests::metadata_i32_array;
 using local_gguf_engine::tests::metadata_string;
 using local_gguf_engine::tests::metadata_string_array;
 using local_gguf_engine::tests::metadata_u32;
+using local_gguf_engine::tests::gemma2_chat_template_fixture;
 using local_gguf_engine::tests::smollm2_chat_template_fixture;
 using local_gguf_engine::tests::TestFailure;
 using local_gguf_engine::tests::expect;
@@ -614,6 +615,39 @@ TinyGGUFTensor tiny_zero_tensor(std::string name, std::vector<std::uint64_t> dim
     return "blk." + std::to_string(block_index) + "." + std::string(suffix);
 }
 
+std::vector<std::string> tiny_gemma2_generate_cli_token_texts() {
+    std::vector<std::string> tokens;
+    tokens.reserve(110);
+    for (std::uint32_t token_id = 0; token_id < 110; ++token_id) {
+        tokens.push_back("<unused" + std::to_string(token_id) + ">");
+    }
+
+    tokens[0] = "<pad>";
+    tokens[1] = "<eos>";
+    tokens[2] = "<bos>";
+    tokens[3] = "<unk>";
+    tokens[4] = "<mask>";
+    tokens[5] = "Hello";
+    tokens[9] = "user\n";
+    tokens[10] = "model\n";
+    tokens[11] = "\n";
+    tokens[106] = "<start_of_turn>";
+    tokens[107] = "<end_of_turn>";
+    return tokens;
+}
+
+std::vector<std::int32_t> tiny_gemma2_generate_cli_token_types() {
+    std::vector<std::int32_t> token_types(110, 1);
+    token_types[0] = 3;
+    token_types[1] = 3;
+    token_types[2] = 3;
+    token_types[3] = 2;
+    token_types[4] = 3;
+    token_types[106] = 3;
+    token_types[107] = 3;
+    return token_types;
+}
+
 std::vector<GGUFMetadataEntry> tiny_gemma2_generate_cli_metadata() {
     return {
         metadata_string("general.architecture", "gemma2"),
@@ -631,17 +665,22 @@ std::vector<GGUFMetadataEntry> tiny_gemma2_generate_cli_metadata() {
         metadata_f32("gemma2.attn_logit_softcapping", 50.0F),
         metadata_f32("gemma2.final_logit_softcapping", 30.0F),
         metadata_string("tokenizer.ggml.model", "llama"),
-        metadata_string_array("tokenizer.ggml.tokens", {"<pad>", "<eos>", "<bos>", "Hello"}),
+        metadata_string_array("tokenizer.ggml.tokens", tiny_gemma2_generate_cli_token_texts()),
+        metadata_i32_array("tokenizer.ggml.token_type", tiny_gemma2_generate_cli_token_types()),
         metadata_u32("tokenizer.ggml.bos_token_id", 2),
         metadata_u32("tokenizer.ggml.eos_token_id", 1),
         metadata_u32("tokenizer.ggml.unknown_token_id", 3),
+        metadata_bool("tokenizer.ggml.add_bos_token", true),
+        metadata_bool("tokenizer.ggml.add_eos_token", false),
+        metadata_bool("tokenizer.ggml.add_space_prefix", false),
+        metadata_string("tokenizer.chat_template", gemma2_chat_template_fixture()),
     };
 }
 
 std::vector<TinyGGUFTensor> tiny_gemma2_generate_cli_tensors() {
     std::vector<TinyGGUFTensor> tensors;
     tensors.reserve(13);
-    tensors.push_back(tiny_zero_tensor("token_embd.weight", {256, 4}, DType::f16));
+    tensors.push_back(tiny_zero_tensor("token_embd.weight", {256, 110}, DType::f16));
     tensors.push_back(tiny_zero_tensor("output_norm.weight", {256}, DType::f32));
     tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_norm.weight"), {256}, DType::f32));
     tensors.push_back(tiny_zero_tensor(
@@ -744,6 +783,34 @@ void test_rejects_generate_gemma2_runtime_not_implemented() {
     expect(
         error.str().find("Gemma 2 generation runtime is not implemented yet") != std::string::npos,
         "generate Gemma2 unsupported runtime error missing"
+    );
+}
+
+void test_rejects_generate_gemma2_unsupported_chat_template_before_runtime() {
+    auto metadata = tiny_gemma2_generate_cli_metadata();
+    for (auto& entry : metadata) {
+        if (entry.key == "tokenizer.chat_template") {
+            entry = metadata_string("tokenizer.chat_template", "{{ messages }}");
+            break;
+        }
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(metadata, tiny_gemma2_generate_cli_tensors());
+    const TempBinaryFile model("tiny-gemma2-bad-template", std::span<const std::uint8_t>(bytes));
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_for_path(model.path(), "Hello", "1", output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate Gemma2 unsupported template exit code mismatch");
+    expect(output.str().empty(), "generate Gemma2 unsupported template should not write stdout");
+    expect(
+        error.str().find("unsupported chat template: tokenizer.chat_template") != std::string::npos,
+        "generate Gemma2 unsupported template error missing"
+    );
+    expect(
+        error.str().find("Gemma 2 generation runtime is not implemented yet") == std::string::npos,
+        "generate Gemma2 unsupported template should fail before runtime"
     );
 }
 
@@ -1148,6 +1215,10 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     {
         "rejects generate Gemma2 runtime not implemented",
         test_rejects_generate_gemma2_runtime_not_implemented,
+    },
+    {
+        "rejects generate Gemma2 unsupported chat template before runtime",
+        test_rejects_generate_gemma2_unsupported_chat_template_before_runtime,
     },
     {"runs generate with greedy option", test_runs_generate_with_greedy_option},
     {"runs generate with CPU backend option", test_runs_generate_with_cpu_backend_option},

@@ -79,6 +79,11 @@ struct EngineTensor {
     tensor::TensorStorage storage;
 };
 
+struct EngineTensorView {
+    std::string name;
+    tensor::TensorView view;
+};
+
 class EngineModel final {
 public:
     EngineModel(
@@ -94,13 +99,23 @@ public:
         Gemma2ModelConfig gemma2_config,
         std::vector<EngineTensor> tensors
     );
+    EngineModel(
+        ModelArchitecture architecture,
+        std::optional<std::string> name,
+        LlamaModelConfig llama_config,
+        Gemma2ModelConfig gemma2_config,
+        std::vector<EngineTensor> tensors,
+        std::vector<EngineTensorView> tensor_views
+    );
 
     [[nodiscard]] ModelArchitecture architecture() const noexcept;
     [[nodiscard]] const std::optional<std::string>& name() const noexcept;
     [[nodiscard]] const LlamaModelConfig& llama_config() const noexcept;
     [[nodiscard]] const Gemma2ModelConfig& gemma2_config() const noexcept;
     [[nodiscard]] const std::vector<EngineTensor>& tensors() const noexcept;
+    [[nodiscard]] const std::vector<EngineTensorView>& tensor_views() const noexcept;
     [[nodiscard]] const EngineTensor* find_tensor(std::string_view name) const noexcept;
+    [[nodiscard]] const EngineTensorView* find_tensor_view(std::string_view name) const noexcept;
 
 private:
     ModelArchitecture architecture_;
@@ -108,6 +123,7 @@ private:
     LlamaModelConfig llama_config_;
     Gemma2ModelConfig gemma2_config_;
     std::vector<EngineTensor> tensors_;
+    std::vector<EngineTensorView> tensor_views_;
 };
 
 [[nodiscard]] std::string_view model_architecture_name(ModelArchitecture architecture) noexcept;

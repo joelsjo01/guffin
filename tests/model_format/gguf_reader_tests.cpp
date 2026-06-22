@@ -5,9 +5,12 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <variant>
 #include <vector>
 
@@ -20,12 +23,48 @@ using local_gguf_engine::model_format::GGUFMetadataValueType;
 using local_gguf_engine::model_format::GGUFReadError;
 using local_gguf_engine::model_format::GGUFReadErrorCode;
 using local_gguf_engine::model_format::read_gguf_header;
+using local_gguf_engine::model_format::read_file_backed_gguf_model;
 using local_gguf_engine::model_format::read_gguf_metadata_section;
 using local_gguf_engine::model_format::read_gguf_model_view;
 using local_gguf_engine::model_format::read_gguf_tensor_directory;
 using local_gguf_engine::tests::TestFailure;
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::fixture;
+
+class TempBinaryFile final {
+public:
+    TempBinaryFile(std::string_view name, std::span<const std::uint8_t> bytes)
+        : path_(std::filesystem::temp_directory_path() / ("local-gguf-engine-" + std::string(name) + ".gguf")) {
+        std::ofstream output(path_, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            throw TestFailure("could not create temp GGUF file: " + path_.string());
+        }
+
+        output.write(
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size())
+        );
+        if (!output) {
+            throw TestFailure("could not write temp GGUF file: " + path_.string());
+        }
+    }
+
+    ~TempBinaryFile() {
+        remove_now();
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+
+    void remove_now() noexcept {
+        std::error_code ignored;
+        std::filesystem::remove(path_, ignored);
+    }
+
+private:
+    std::filesystem::path path_;
+};
 
 template <typename Value>
 const Value& metadata_data(
@@ -511,6 +550,24 @@ void test_reads_tensor_payload_views_without_copying() {
     expect(model.tensor_payloads[0].bytes[7] == 0x40, "payload byte 7 mismatch");
 }
 
+void test_reads_file_backed_tensor_payload_views_with_owner_lifetime() {
+    const auto bytes = fixture("valid-tensor-payload-view");
+    TempBinaryFile file("valid-file-backed-tensor-payload-view", std::span<const std::uint8_t>(bytes));
+    const auto model = read_file_backed_gguf_model(file.path());
+    const auto& view = model.view();
+
+    expect(model.bytes().size() == bytes.size(), "file-backed byte count mismatch");
+    expect(view.tensor_payloads.size() == 1, "file-backed payload view count mismatch");
+    expect(
+        view.tensor_payloads[0].bytes.data() == model.bytes().data() + 64,
+        "file-backed payload view should point into mapped owner bytes"
+    );
+
+    file.remove_now();
+    expect(view.tensor_payloads[0].bytes[0] == 0x00, "file-backed payload byte 0 mismatch after unlink");
+    expect(view.tensor_payloads[0].bytes[7] == 0x40, "file-backed payload byte 7 mismatch after unlink");
+}
+
 void test_reads_q8_0_tensor_payload_view() {
     const auto bytes = fixture("valid-q8-0-tensor-payload-view");
     const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
@@ -589,6 +646,21 @@ void test_rejects_truncated_tensor_payload() {
     }
 }
 
+void test_rejects_file_backed_truncated_tensor_payload() {
+    const auto bytes = fixture("truncated-tensor-payload");
+    TempBinaryFile file("truncated-file-backed-tensor-payload", std::span<const std::uint8_t>(bytes));
+
+    try {
+        (void)read_file_backed_gguf_model(file.path());
+        throw TestFailure("file-backed truncated tensor payload should throw");
+    } catch (const GGUFReadError& error) {
+        expect(
+            error.code() == GGUFReadErrorCode::truncated_tensor_payload,
+            "file-backed error code should be truncated_tensor_payload"
+        );
+    }
+}
+
 void test_rejects_unsupported_tensor_payload_type() {
     const auto bytes = fixture("unsupported-tensor-payload-type");
 
@@ -652,11 +724,19 @@ std::span<const TestCase> gguf_reader_test_cases() {
         {"rejects invalid GGUF tensor padding", test_rejects_invalid_tensor_padding},
         {"rejects truncated GGUF tensor directory", test_rejects_truncated_tensor_directory},
         {"reads GGUF tensor payload views without copying", test_reads_tensor_payload_views_without_copying},
+        {
+            "reads file-backed GGUF tensor payload views with owner lifetime",
+            test_reads_file_backed_tensor_payload_views_with_owner_lifetime,
+        },
         {"reads Q8_0 GGUF tensor payload view", test_reads_q8_0_tensor_payload_view},
         {"reads Q4_K GGUF tensor payload view", test_reads_q4_k_tensor_payload_view},
         {"reads Q6_K GGUF tensor payload view", test_reads_q6_k_tensor_payload_view},
         {"reads F16 GGUF tensor payload view", test_reads_f16_tensor_payload_view},
         {"rejects truncated GGUF tensor payload", test_rejects_truncated_tensor_payload},
+        {
+            "rejects file-backed truncated GGUF tensor payload",
+            test_rejects_file_backed_truncated_tensor_payload,
+        },
         {"rejects unsupported GGUF tensor payload type", test_rejects_unsupported_tensor_payload_type},
         {"rejects invalid Q4_K GGUF tensor row size", test_rejects_invalid_q4_k_tensor_row_size},
         {"rejects invalid quantized GGUF tensor payload size", test_rejects_invalid_quantized_tensor_payload_size},

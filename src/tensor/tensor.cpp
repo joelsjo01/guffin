@@ -66,8 +66,32 @@ std::span<std::uint8_t> TensorStorage::mutable_bytes() noexcept {
     return std::span<std::uint8_t>(bytes_.data(), bytes_.size());
 }
 
+TensorView TensorStorage::view() const noexcept {
+    return TensorView::from_bytes(descriptor_, bytes());
+}
+
 TensorStorage::TensorStorage(TensorDescriptor descriptor, std::vector<std::uint8_t> bytes)
     : descriptor_(descriptor),
       bytes_(std::move(bytes)) {}
+
+TensorView TensorView::from_bytes(
+    const TensorDescriptor& descriptor,
+    std::span<const std::uint8_t> bytes
+) {
+    validate_storage_byte_count(descriptor, bytes.size());
+    return TensorView(descriptor, bytes);
+}
+
+const TensorDescriptor& TensorView::descriptor() const noexcept {
+    return descriptor_;
+}
+
+std::span<const std::uint8_t> TensorView::bytes() const noexcept {
+    return bytes_;
+}
+
+TensorView::TensorView(TensorDescriptor descriptor, std::span<const std::uint8_t> bytes)
+    : descriptor_(descriptor),
+      bytes_(bytes) {}
 
 }  // namespace local_gguf_engine::tensor

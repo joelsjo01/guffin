@@ -14,14 +14,11 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
 #include <limits>
 #include <ostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -42,6 +39,7 @@ using engine::ModelArchitecture;
 using engine::run_llama_model_logits_with_kv_cache_f32;
 using engine::top_logit_tokens_f32;
 using model_format::GGUFReadError;
+using model_format::read_file_backed_gguf_model;
 using model_format::read_gguf_model_view;
 using runtime::BackendError;
 using runtime::BackendKind;
@@ -62,11 +60,6 @@ constexpr engine::SamplingConfig default_cli_sampling {
     .seed = 1,
 };
 
-class GenerateFileReadError final : public std::runtime_error {
-public:
-    explicit GenerateFileReadError(std::string message) : std::runtime_error(std::move(message)) {}
-};
-
 struct EncodedGeneratePrompt {
     PromptFormatResult formatted_prompt;
     std::vector<std::uint32_t> token_ids;
@@ -77,40 +70,6 @@ void write_generate_usage(std::ostream& error) {
           << " [--greedy] [--temperature <value>] [--top-k <count>] [--top-p <value>]"
           << " [--repeat-penalty <value>] [--seed <integer>] [--backend cpu|metal]"
           << " [--debug-first-token]\n";
-}
-
-[[nodiscard]] std::vector<std::uint8_t> read_file_bytes(const std::filesystem::path& path) {
-    std::error_code error_code;
-    const auto file_size = std::filesystem::file_size(path, error_code);
-    if (error_code) {
-        throw GenerateFileReadError("could not read '" + path.string() + "': " + error_code.message());
-    }
-
-    if (file_size > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
-        throw GenerateFileReadError("could not read '" + path.string() + "': file is too large");
-    }
-
-    if (file_size > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
-        throw GenerateFileReadError("could not read '" + path.string() + "': file is too large");
-    }
-
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        throw GenerateFileReadError("could not open '" + path.string() + "' for reading");
-    }
-
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(file_size));
-    if (!bytes.empty()) {
-        input.read(
-            reinterpret_cast<char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size())
-        );
-        if (!input) {
-            throw GenerateFileReadError("could not read entire file '" + path.string() + "'");
-        }
-    }
-
-    return bytes;
 }
 
 [[nodiscard]] bool parse_positive_size(std::string_view text, std::size_t& value) noexcept {
@@ -369,8 +328,8 @@ void write_generate_usage(std::ostream& error) {
     const auto prompt_token_ids = tokenizer.encode(
         formatted_prompt.text,
         TokenizerEncodeOptions {
-            .add_bos = default_encode_options.add_bos,
-            .add_eos = default_encode_options.add_eos,
+            .add_bos = formatted_prompt.add_bos.value_or(default_encode_options.add_bos),
+            .add_eos = formatted_prompt.add_eos.value_or(default_encode_options.add_eos),
             .encode_special_tokens = formatted_prompt.encode_special_tokens,
         }
     );
@@ -443,27 +402,16 @@ void reject_unsupported_gemma2_generation_runtime(const engine::EngineModel& mod
     throw std::runtime_error("Gemma 2 generation runtime is not implemented yet");
 }
 
-}  // namespace
-
-std::string generate_text_from_gguf_bytes(
-    std::span<const std::uint8_t> bytes,
-    std::string_view prompt,
-    std::size_t max_new_tokens
-) {
-    return generate_text_from_gguf_bytes(bytes, prompt, max_new_tokens, GenerateOptions {});
-}
-
-std::string generate_text_from_gguf_bytes(
-    std::span<const std::uint8_t> bytes,
+[[nodiscard]] std::string generate_text_from_gguf_model_view(
+    const model_format::GGUFModelView& model_view,
     std::string_view prompt,
     std::size_t max_new_tokens,
     const GenerateOptions& options
 ) {
-    const auto model_view = read_gguf_model_view(bytes);
     const auto model = load_engine_model_from_gguf(model_view);
-    reject_unsupported_gemma2_generation_runtime(model);
     const auto tokenizer = load_tokenizer_from_gguf_metadata(model_view.directory.metadata);
     const auto encoded_prompt = encode_generate_prompt(model_view.directory.metadata, tokenizer, prompt);
+    reject_unsupported_gemma2_generation_runtime(model);
     const auto weights = bind_llama_model_weights(model);
     std::vector<std::uint32_t> output_token_ids;
     if (options.backend == BackendKind::cpu) {
@@ -496,30 +444,16 @@ std::string generate_text_from_gguf_bytes(
     );
 }
 
-GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_bytes(
-    std::span<const std::uint8_t> bytes,
-    std::string_view prompt,
-    std::size_t top_token_count
-) {
-    return inspect_generate_first_token_from_gguf_bytes(
-        bytes,
-        prompt,
-        top_token_count,
-        GenerateOptions {}
-    );
-}
-
-GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_bytes(
-    std::span<const std::uint8_t> bytes,
+[[nodiscard]] GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_model_view(
+    const model_format::GGUFModelView& model_view,
     std::string_view prompt,
     std::size_t top_token_count,
     const GenerateOptions& options
 ) {
-    const auto model_view = read_gguf_model_view(bytes);
     const auto model = load_engine_model_from_gguf(model_view);
-    reject_unsupported_gemma2_generation_runtime(model);
     const auto tokenizer = load_tokenizer_from_gguf_metadata(model_view.directory.metadata);
     auto encoded_prompt = encode_generate_prompt(model_view.directory.metadata, tokenizer, prompt);
+    reject_unsupported_gemma2_generation_runtime(model);
     if (encoded_prompt.token_ids.empty()) {
         throw std::invalid_argument("Llama token id span must not be empty");
     }
@@ -573,6 +507,49 @@ GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_bytes(
     };
 }
 
+}  // namespace
+
+std::string generate_text_from_gguf_bytes(
+    std::span<const std::uint8_t> bytes,
+    std::string_view prompt,
+    std::size_t max_new_tokens
+) {
+    return generate_text_from_gguf_bytes(bytes, prompt, max_new_tokens, GenerateOptions {});
+}
+
+std::string generate_text_from_gguf_bytes(
+    std::span<const std::uint8_t> bytes,
+    std::string_view prompt,
+    std::size_t max_new_tokens,
+    const GenerateOptions& options
+) {
+    const auto model_view = read_gguf_model_view(bytes);
+    return generate_text_from_gguf_model_view(model_view, prompt, max_new_tokens, options);
+}
+
+GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_bytes(
+    std::span<const std::uint8_t> bytes,
+    std::string_view prompt,
+    std::size_t top_token_count
+) {
+    return inspect_generate_first_token_from_gguf_bytes(
+        bytes,
+        prompt,
+        top_token_count,
+        GenerateOptions {}
+    );
+}
+
+GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_bytes(
+    std::span<const std::uint8_t> bytes,
+    std::string_view prompt,
+    std::size_t top_token_count,
+    const GenerateOptions& options
+) {
+    const auto model_view = read_gguf_model_view(bytes);
+    return inspect_generate_first_token_from_gguf_model_view(model_view, prompt, top_token_count, options);
+}
+
 void write_generate_first_token_debug(
     const GenerateFirstTokenDebugInfo& info,
     std::ostream& output
@@ -613,11 +590,11 @@ int run_generate(int argc, const char* const* argv, std::ostream& output, std::o
     }
 
     try {
-        const auto bytes = read_file_bytes(argv[1]);
+        const auto file_model = read_file_backed_gguf_model(argv[1]);
         if (options.debug_first_token) {
             write_generate_first_token_debug(
-                inspect_generate_first_token_from_gguf_bytes(
-                    std::span<const std::uint8_t>(bytes),
+                inspect_generate_first_token_from_gguf_model_view(
+                    file_model.view(),
                     argv[2],
                     default_debug_top_token_count,
                     options
@@ -626,11 +603,9 @@ int run_generate(int argc, const char* const* argv, std::ostream& output, std::o
             );
         }
 
-        output << generate_text_from_gguf_bytes(std::span<const std::uint8_t>(bytes), argv[2], max_new_tokens, options)
+        output << generate_text_from_gguf_model_view(file_model.view(), argv[2], max_new_tokens, options)
                << '\n';
         return 0;
-    } catch (const GenerateFileReadError& read_error) {
-        error << "error: " << read_error.what() << '\n';
     } catch (const GGUFReadError& read_error) {
         error << "error: invalid GGUF: " << read_error.what() << '\n';
     } catch (const EngineModelError& model_error) {
