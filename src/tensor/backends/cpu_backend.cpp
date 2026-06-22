@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <span>
 
 namespace local_gguf_engine::tensor::backends::cpu {
 
@@ -124,6 +125,34 @@ BackendBuffer allocate_cpu_backend_buffer(const TensorDescriptor& descriptor) {
 TensorStorage copy_tensor_from_cpu_backend(const detail::BackendBufferStorage& storage) {
     const auto& cpu_storage = require_cpu_backend_buffer(storage).storage();
     return TensorStorage::from_bytes(cpu_storage.descriptor(), cpu_storage.bytes());
+}
+
+BackendBuffer embed_f16_gguf_weight_token_ids_with_cpu_buffer(
+    std::span<const std::uint32_t> token_ids,
+    const CpuBackendBufferStorage& embedding_weight,
+    float scale
+) {
+    const auto& embedding = embedding_weight.storage();
+    const auto hidden = embedding.descriptor().shape.dimension(0);
+    auto output = TensorStorage::allocate(TensorDescriptor::from(
+        Shape::from({static_cast<std::uint64_t>(token_ids.size()), hidden}),
+        DType::f32
+    ));
+
+    for (std::size_t token_index = 0; token_index < token_ids.size(); ++token_index) {
+        const auto token_id = static_cast<std::uint64_t>(token_ids[token_index]);
+        for (std::uint64_t hidden_index = 0; hidden_index < hidden; ++hidden_index) {
+            const auto embedding_index = token_id * hidden + hidden_index;
+            const auto output_index = static_cast<std::uint64_t>(token_index) * hidden + hidden_index;
+            write_f32_linear(
+                output,
+                output_index,
+                read_f16_linear_as_f32(embedding, embedding_index) * scale
+            );
+        }
+    }
+
+    return copy_tensor_to_cpu_backend(output);
 }
 
 TensorStorage matmul_f32_f16_gguf_weight(

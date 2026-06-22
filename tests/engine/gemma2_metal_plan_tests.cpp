@@ -1,6 +1,7 @@
 #include "gemma2_metal_plan_tests.hpp"
 
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
+#include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
@@ -9,8 +10,12 @@
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
+#include "local_gguf_engine/tensor/typed_access.hpp"
+
+#include "tensor_test_support.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -32,6 +37,7 @@ using local_gguf_engine::engine::Gemma2ModelConfig;
 using local_gguf_engine::engine::LlamaModelConfig;
 using local_gguf_engine::engine::ModelArchitecture;
 using local_gguf_engine::engine::create_gemma2_metal_decode_schedule;
+using local_gguf_engine::engine::create_gemma2_metal_generation_runtime_shell;
 using local_gguf_engine::engine::create_gemma2_metal_model_plan;
 using local_gguf_engine::engine::create_gemma2_metal_prefill_schedule;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
@@ -50,13 +56,16 @@ using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorDescriptor;
 using local_gguf_engine::tensor::backend_buffer_storage;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
+using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tests::TestCase;
 using local_gguf_engine::tests::TestFailure;
 using local_gguf_engine::tests::expect;
+using local_gguf_engine::tests::expect_close;
 using local_gguf_engine::tests::metadata_f32;
 using local_gguf_engine::tests::metadata_string;
 using local_gguf_engine::tests::metadata_u32;
+using local_gguf_engine::tests::tensor_f16_gguf_matrix;
 
 GGUFModelView tiny_model_view(
     std::vector<GGUFMetadataEntry> metadata_entries,
@@ -482,6 +491,77 @@ void test_gemma2_metal_schedule_retains_buffers_after_plan_lifetime_when_availab
     );
 }
 
+void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store();
+    std::vector<float> embedding_values(256U * 4U, 0.0F);
+    embedding_values[0] = 1.0F;
+    embedding_values[1] = 2.0F;
+    embedding_values[2] = 3.0F;
+    embedding_values[3] = 4.0F;
+    embedding_values[4] = 10.0F;
+    embedding_values[5] = 20.0F;
+    embedding_values[6] = 30.0F;
+    embedding_values[7] = 40.0F;
+    const auto embedding = tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values));
+    std::copy(embedding.bytes().begin(), embedding.bytes().end(), payload_store.bytes[0].begin());
+
+    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const std::array<std::uint32_t, 2> prompt_token_ids {3, 1};
+
+    const auto shell = create_gemma2_metal_generation_runtime_shell(
+        model,
+        std::span<const std::uint32_t>(prompt_token_ids)
+    );
+    const auto hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
+
+    expect(shell.prefill_input.token_ids == std::vector<std::uint32_t>({3, 1}), "Gemma2 shell token ids mismatch");
+    expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
+    expect(shell.prefill_input.hidden_states.backend() == BackendKind::metal, "Gemma2 shell input backend mismatch");
+    expect(
+        shell.prefill_input.hidden_states.descriptor().shape == Shape::from({2, 256}),
+        "Gemma2 shell input hidden state shape mismatch"
+    );
+    expect(
+        shell.prefill_input.hidden_states.descriptor().dtype == DType::f32,
+        "Gemma2 shell input hidden state dtype mismatch"
+    );
+    expect(hidden_states.descriptor() == shell.prefill_input.hidden_states.descriptor(), "Gemma2 shell input readback descriptor mismatch");
+
+    const std::array<std::uint64_t, 2> token_0_hidden_0 {0, 0};
+    const std::array<std::uint64_t, 2> token_0_hidden_1 {0, 1};
+    const std::array<std::uint64_t, 2> token_1_hidden_0 {1, 0};
+    const std::array<std::uint64_t, 2> token_1_hidden_1 {1, 1};
+    expect_close(
+        read_f32(hidden_states, std::span<const std::uint64_t>(token_0_hidden_0)),
+        64.0F,
+        0.0F,
+        "Gemma2 shell token 0 hidden 0 mismatch"
+    );
+    expect_close(
+        read_f32(hidden_states, std::span<const std::uint64_t>(token_0_hidden_1)),
+        640.0F,
+        0.0F,
+        "Gemma2 shell token 0 hidden 1 mismatch"
+    );
+    expect_close(
+        read_f32(hidden_states, std::span<const std::uint64_t>(token_1_hidden_0)),
+        32.0F,
+        0.0F,
+        "Gemma2 shell token 1 hidden 0 mismatch"
+    );
+    expect_close(
+        read_f32(hidden_states, std::span<const std::uint64_t>(token_1_hidden_1)),
+        320.0F,
+        0.0F,
+        "Gemma2 shell token 1 hidden 1 mismatch"
+    );
+}
+
 void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -603,6 +683,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 Metal schedule retains buffers after plan lifetime when available",
         test_gemma2_metal_schedule_retains_buffers_after_plan_lifetime_when_available,
+    },
+    {
+        "Gemma2 Metal runtime shell embeds prefill prompt when available",
+        test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available,
     },
     {
         "rejects invalid Gemma2 Metal schedule shapes when available",

@@ -5,6 +5,7 @@
 #include "metal_context.hpp"
 
 #include "local_gguf_engine/runtime/backend_error.hpp"
+#include "local_gguf_engine/tensor/ops/embedding.hpp"
 #include "local_gguf_engine/tensor/tensor_error.hpp"
 #include "../../ops/validation.hpp"
 
@@ -25,6 +26,13 @@ struct MatmulDimensions {
     std::uint32_t rows = 0;
     std::uint32_t shared = 0;
     std::uint32_t columns = 0;
+};
+
+struct EmbeddingDimensions {
+    std::uint32_t tokens = 0;
+    std::uint32_t hidden = 0;
+    std::uint32_t vocab = 0;
+    float scale = 1.0F;
 };
 
 struct ElementwiseDimensions {
@@ -415,6 +423,79 @@ BackendBuffer matmul_f32_f16_gguf_weight_with_metal_buffers(
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal backend-buffer matmul command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return make_metal_backend_buffer(output_descriptor, output_buffer);
+}
+
+BackendBuffer embed_f16_gguf_weight_token_ids_with_metal_buffer(
+    std::span<const std::uint32_t> token_ids,
+    const MetalBackendBufferStorage& embedding_weight,
+    float scale
+) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto hidden = embedding_weight.descriptor().shape.dimension(0);
+    const auto vocab = embedding_weight.descriptor().shape.dimension(1);
+    const EmbeddingDimensions dims {
+        .tokens = require_u32_dimension(token_ids.size(), "tokens"),
+        .hidden = require_u32_dimension(hidden, "hidden"),
+        .vocab = require_u32_dimension(vocab, "vocab"),
+        .scale = scale,
+    };
+    const auto output_descriptor = TensorDescriptor::from(
+        Shape::from({static_cast<std::uint64_t>(token_ids.size()), hidden}),
+        DType::f32
+    );
+
+    id<MTLBuffer> token_ids_buffer = [state.device newBufferWithBytes:token_ids.data()
+                                                               length:static_cast<NSUInteger>(token_ids.size_bytes())
+                                                              options:MTLResourceStorageModeShared];
+    id<MTLBuffer> output_buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(
+                                      output_descriptor.byte_count
+                                   )
+                                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(EmbeddingDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (token_ids_buffer == nil || output_buffer == nil || dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal F16 GGUF token embedding buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (command_buffer == nil || encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal F16 GGUF token embedding command encoding failed"
+        );
+    }
+
+    [encoder setComputePipelineState:state.embedding_pipeline];
+    [encoder setBuffer:token_ids_buffer offset:0 atIndex:0];
+    [encoder setBuffer:embedding_weight.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:output_buffer offset:0 atIndex:2];
+    [encoder setBuffer:dims_buffer offset:0 atIndex:3];
+
+    const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+    const auto threadgroup_hidden = static_cast<NSUInteger>((hidden + 15U) / 16U);
+    const auto threadgroup_tokens = static_cast<NSUInteger>((token_ids.size() + 15U) / 16U);
+    const MTLSize threadgroups = MTLSizeMake(threadgroup_hidden, threadgroup_tokens, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal F16 GGUF token embedding command failed: "
+                + ns_error_message(execution_error, "unknown error")
         );
     }
 
@@ -1128,6 +1209,69 @@ TensorStorage matmul_f32_quantized_gguf_weight(const TensorStorage& left, const 
 }  // namespace local_gguf_engine::tensor::backends::metal
 
 namespace local_gguf_engine::tensor::ops {
+
+namespace {
+
+void require_embedding_weight_descriptor(const TensorDescriptor& descriptor) {
+    backends::metal::require_matrix_descriptor(descriptor);
+    require_f16_descriptor(descriptor);
+}
+
+void require_token_ids(
+    std::span<const std::uint32_t> token_ids,
+    std::uint64_t vocab
+) {
+    if (token_ids.empty()) {
+        throw std::invalid_argument("token embedding token ids must not be empty");
+    }
+
+    for (const auto token_id : token_ids) {
+        if (static_cast<std::uint64_t>(token_id) >= vocab) {
+            throw TensorError(TensorErrorCode::tensor_index_out_of_range, vocab, token_id);
+        }
+    }
+}
+
+void require_token_embedding_scale(float scale) {
+    if (!(scale > 0.0F) || !std::isfinite(scale)) {
+        throw std::invalid_argument("token embedding scale must be positive and finite");
+    }
+}
+
+}  // namespace
+
+BackendBuffer embed_f16_gguf_weight_token_ids_to_backend(
+    std::span<const std::uint32_t> token_ids,
+    const BackendBuffer& embedding_weight,
+    float scale
+) {
+    require_embedding_weight_descriptor(embedding_weight.descriptor());
+    require_token_ids(token_ids, embedding_weight.descriptor().shape.dimension(1));
+    require_token_embedding_scale(scale);
+
+    switch (embedding_weight.backend()) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::embed_f16_gguf_weight_token_ids_with_cpu_buffer(
+                token_ids,
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(embedding_weight)),
+                scale
+            );
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::embed_f16_gguf_weight_token_ids_with_metal_buffer(
+                    token_ids,
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(embedding_weight)),
+                    scale
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        embedding_weight.backend(),
+        "unsupported backend buffer for F16 GGUF token embedding"
+    );
+}
 
 TensorStorage matmul_f32_f16_gguf_weight(const TensorStorage& left, const BackendBuffer& right) {
     backends::metal::require_f32_f16_matmul_gguf_weight_operands(left, right.descriptor());

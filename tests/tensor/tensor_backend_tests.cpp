@@ -7,6 +7,7 @@
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
+#include "local_gguf_engine/tensor/ops/embedding.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
@@ -42,11 +43,14 @@ using local_gguf_engine::tensor::Q6_KBlockView;
 using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorDescriptor;
+using local_gguf_engine::tensor::TensorError;
+using local_gguf_engine::tensor::TensorErrorCode;
 using local_gguf_engine::tensor::TensorStorage;
 using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tensor::tensor_backend_unavailable_reason;
 using local_gguf_engine::tensor::write_f32;
 using local_gguf_engine::tensor::ops::add_f32;
+using local_gguf_engine::tensor::ops::embed_f16_gguf_weight_token_ids_to_backend;
 using local_gguf_engine::tensor::ops::gated_silu_projection_f32_f16_gguf_weight_to_backend;
 using local_gguf_engine::tensor::ops::llama_cached_attention_f32_to_backend;
 using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight;
@@ -441,6 +445,109 @@ void test_multiplies_backend_f32_by_backend_f16_gguf_weight_to_cpu_backend_buffe
 
     expect(output_buffer.backend() == BackendKind::cpu, "CPU backend-buffer GGUF matmul output backend mismatch");
     expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer GGUF matmul output");
+}
+
+void test_embeds_f16_gguf_token_ids_to_cpu_backend_buffer() {
+    const std::array<float, 12> embedding_values {
+        1.0F, 2.0F, 3.0F, 4.0F,
+        10.0F, 20.0F, 30.0F, 40.0F,
+        100.0F, 200.0F, 300.0F, 400.0F,
+    };
+    const std::array<std::uint32_t, 2> token_ids {3, 1};
+    const auto embedding = tensor_f16_gguf_matrix(3, 4, std::span<const float>(embedding_values));
+    const auto embedding_buffer = copy_tensor_to_backend(embedding, BackendKind::cpu);
+
+    const auto output_buffer = embed_f16_gguf_weight_token_ids_to_backend(
+        std::span<const std::uint32_t>(token_ids),
+        embedding_buffer,
+        0.5F
+    );
+    const auto output = copy_tensor_from_backend(output_buffer);
+
+    const std::array<float, 6> expected_values {
+        2.0F, 20.0F, 200.0F,
+        1.0F, 10.0F, 100.0F,
+    };
+    const auto expected = tensor_f32_matrix(2, 3, std::span<const float>(expected_values));
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU token embedding output backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "CPU token embedding output");
+}
+
+void test_rejects_invalid_f16_gguf_token_embedding_inputs() {
+    const std::array<float, 4> embedding_values {
+        1.0F, 2.0F,
+        10.0F, 20.0F,
+    };
+    const auto embedding = tensor_f16_gguf_matrix(2, 2, std::span<const float>(embedding_values));
+    const auto embedding_buffer = copy_tensor_to_backend(embedding, BackendKind::cpu);
+
+    try {
+        (void)embed_f16_gguf_weight_token_ids_to_backend(
+            std::span<const std::uint32_t>(),
+            embedding_buffer,
+            1.0F
+        );
+        throw TestFailure("token embedding should reject empty token ids");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "token embedding token ids must not be empty",
+            "empty token embedding error mismatch"
+        );
+    }
+
+    const std::array<std::uint32_t, 1> out_of_range_ids {2};
+    try {
+        (void)embed_f16_gguf_weight_token_ids_to_backend(
+            std::span<const std::uint32_t>(out_of_range_ids),
+            embedding_buffer,
+            1.0F
+        );
+        throw TestFailure("token embedding should reject out-of-range token id");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_index_out_of_range, "token id range error code mismatch");
+        expect(error.expected_value() == 2, "token id range expected value mismatch");
+        expect(error.actual_value() == 2, "token id range actual value mismatch");
+    }
+
+    const std::array<std::uint32_t, 1> token_ids {1};
+    try {
+        (void)embed_f16_gguf_weight_token_ids_to_backend(
+            std::span<const std::uint32_t>(token_ids),
+            embedding_buffer,
+            0.0F
+        );
+        throw TestFailure("token embedding should reject non-positive scale");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "token embedding scale must be positive and finite",
+            "token embedding scale error mismatch"
+        );
+    }
+
+    const auto wrong_dtype = tensor_f32_matrix(2, 2, std::span<const float>(embedding_values));
+    const auto wrong_dtype_buffer = copy_tensor_to_backend(wrong_dtype, BackendKind::cpu);
+    try {
+        (void)embed_f16_gguf_weight_token_ids_to_backend(
+            std::span<const std::uint32_t>(token_ids),
+            wrong_dtype_buffer,
+            1.0F
+        );
+        throw TestFailure("token embedding should reject non-F16 weight");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_operator_dtype,
+            "token embedding dtype error code mismatch"
+        );
+        expect(
+            error.expected_value() == static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::f16)),
+            "token embedding dtype expected value mismatch"
+        );
+        expect(
+            error.actual_value() == static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::f32)),
+            "token embedding dtype actual value mismatch"
+        );
+    }
 }
 
 void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers() {
@@ -911,6 +1018,45 @@ void test_multiplies_backend_f32_by_backend_f16_gguf_weight_to_metal_backend_buf
 
     expect(output_buffer.backend() == BackendKind::metal, "Metal backend-buffer GGUF matmul output backend mismatch");
     expect_f32_matrix_close(output, expected, 1.0e-3F, "Metal backend-buffer GGUF matmul output");
+}
+
+void test_matches_f16_gguf_token_embedding_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 16> embedding_values {
+        0.25F, -0.5F, 1.0F, 2.0F,
+        1.25F, 0.75F, -2.0F, 0.5F,
+        -0.25F, 1.5F, 0.125F, -1.0F,
+        2.5F, -1.25F, 0.625F, 1.75F,
+    };
+    const std::array<std::uint32_t, 3> token_ids {2, 0, 3};
+    const auto embedding = tensor_f16_gguf_matrix(4, 4, std::span<const float>(embedding_values));
+    const auto cpu_embedding_buffer = copy_tensor_to_backend(embedding, BackendKind::cpu);
+    const auto metal_embedding_buffer = copy_tensor_to_backend(embedding, BackendKind::metal);
+
+    const auto cpu_output_buffer = embed_f16_gguf_weight_token_ids_to_backend(
+        std::span<const std::uint32_t>(token_ids),
+        cpu_embedding_buffer,
+        1.25F
+    );
+    const auto metal_output_buffer = embed_f16_gguf_weight_token_ids_to_backend(
+        std::span<const std::uint32_t>(token_ids),
+        metal_embedding_buffer,
+        1.25F
+    );
+
+    expect(
+        metal_output_buffer.backend() == BackendKind::metal,
+        "Metal token embedding output backend mismatch"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_output_buffer),
+        copy_tensor_from_backend(cpu_output_buffer),
+        0.0F,
+        "Metal token embedding output"
+    );
 }
 
 void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_metal_backend_buffers_when_available() {
@@ -1591,6 +1737,14 @@ const TestCase tensor_backend_tests[] {
         test_multiplies_backend_f32_by_backend_f16_gguf_weight_to_cpu_backend_buffer,
     },
     {
+        "embeds F16 GGUF token ids to CPU backend buffer",
+        test_embeds_f16_gguf_token_ids_to_cpu_backend_buffer,
+    },
+    {
+        "rejects invalid F16 GGUF token embedding inputs",
+        test_rejects_invalid_f16_gguf_token_embedding_inputs,
+    },
+    {
         "multiplies backend F32 by three backend F16 GGUF weights to CPU backend buffers",
         test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers,
     },
@@ -1636,6 +1790,10 @@ const TestCase tensor_backend_tests[] {
     {
         "multiplies backend F32 by backend F16 GGUF weight to Metal backend buffer when available",
         test_multiplies_backend_f32_by_backend_f16_gguf_weight_to_metal_backend_buffer_when_available,
+    },
+    {
+        "matches F16 GGUF token embedding to Metal backend buffer when available",
+        test_matches_f16_gguf_token_embedding_to_metal_backend_buffer_when_available,
     },
     {
         "multiplies backend F32 by three backend F16 GGUF weights to Metal backend buffers when available",

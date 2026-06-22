@@ -19,7 +19,8 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | Packed Q4_K/Q6_K Metal matmul | Representative Gemma projection shapes consume packed weights directly and pass CPU/reference parity. |
 | Done | Separate prefill and decode | Prompt prefill and one-token decode have distinct resident-plan schedules with explicit KV, scratch, and layer phase shapes. |
 | Done | Gemma generation runtime shell | The real Gemma generate path builds the resident Metal plan and phase schedules, then stops at an explicit unsupported execution boundary. |
-| Current | First scheduled Gemma execution primitive | A tiny Gemma prefill/decode execution step runs through the runtime shell with resident buffers, without claiming full generation. |
+| Done | First scheduled Gemma execution primitive | Prompt token IDs become backend-resident Gemma hidden states through the runtime shell, with CPU/Metal parity and validation tests. |
+| Current | First scheduled Gemma layer input primitive | A tiny layer-input step consumes resident hidden states and produces explicit scheduled layer outputs, without claiming full generation. |
 | Planned | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |
 

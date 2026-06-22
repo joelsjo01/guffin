@@ -5,19 +5,20 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma execution primitive behind the Metal runtime
+Add the first scheduled Gemma layer input primitive behind the Metal runtime
 shell.
 
 ## Why
 
 Gemma now reaches the real generate path far enough to load file-backed tensor
-views, tokenize the prompt, upload the resident Metal model plan, and build
-separate prefill/decode schedules. The next blocker is proving that a small
-piece of actual Gemma execution can run through that shell while keeping
-weights, KV, scratch, and layer state resident.
+views, tokenize the prompt, upload the resident Metal model plan, build
+separate prefill/decode schedules, and turn prompt token IDs into backend-
+resident hidden states with the Gemma embedding scale.
 
-The first primitive should be tiny and replaceable: enough to move real token
-IDs/control data into a resident execution step, but not enough to pretend
+The next blocker is moving those hidden states into the first layer's scheduled
+attention setup without breaking the resident model plan. Keep this slice tiny
+and replaceable: enough to prove the scheduled layer path can consume resident
+input activations and write explicit phase outputs, but not enough to pretend
 full generation exists.
 
 ## Read
@@ -34,9 +35,9 @@ full generation exists.
 
 - Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
   and `src/engine`
-- Metal backend/tensor code only for one narrow primitive and its tests
+- Metal backend/tensor code only for the narrow primitive and its tests
 - `tests/engine`
-- `tests/tensor` only if adding a backend primitive
+- `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
   execution boundary changes
 - `docs/GEMMA_Q4_MILESTONES.md`
@@ -45,6 +46,8 @@ full generation exists.
 ## Do Not
 
 - Do not add full Gemma generation or a full Gemma layer chain.
+- Do not add full attention softmax/KV-cache update/output projection unless a
+  smaller tested primitive genuinely requires it.
 - Do not add full 9B CPU execution, sampling changes, broad graph
   abstractions, or benchmark work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -54,8 +57,10 @@ full generation exists.
 
 ## Verify
 
-- Add deterministic tests for the primitive shape, resource ownership, and
-  unavailable-Metal behavior if it creates Metal resources directly.
+- Add deterministic tests for primitive shape/resource ownership and CPU/Metal
+  parity when a tensor primitive is introduced.
+- Keep unavailable-Metal behavior explicit if the primitive creates Metal
+  resources directly.
 - Keep the real Gemma CLI failure as explicit unsupported Gemma execution until
   enough scheduled execution exists to return logits.
 - Run focused engine/tensor/CLI tests touched by the primitive.
@@ -65,6 +70,7 @@ full generation exists.
 
 ## Stop When
 
-One small scheduled Gemma execution primitive is reachable from the runtime
-shell with resident buffers and deterministic tests, while full Gemma generation
-remains explicitly unsupported.
+One small scheduled Gemma layer-input primitive consumes the runtime shell's
+resident prefill hidden states and produces explicit resident or phase-local
+outputs with deterministic tests, while full Gemma generation remains
+explicitly unsupported.

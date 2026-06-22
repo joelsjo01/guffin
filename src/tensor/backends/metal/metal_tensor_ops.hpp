@@ -5,6 +5,7 @@
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 
 #include <cstdint>
+#include <span>
 
 namespace local_gguf_engine::tensor::backends::metal {
 
@@ -70,6 +71,11 @@ void require_f32_f16_matmul_gguf_weight_triple_operands(
 [[nodiscard]] BackendBuffer matmul_f32_f16_gguf_weight_with_metal_buffers(
     const MetalBackendBufferStorage& left,
     const MetalBackendBufferStorage& right
+);
+[[nodiscard]] BackendBuffer embed_f16_gguf_weight_token_ids_with_metal_buffer(
+    std::span<const std::uint32_t> token_ids,
+    const MetalBackendBufferStorage& embedding_weight,
+    float scale
 );
 [[nodiscard]] BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
     const MetalBackendBufferStorage& left,

@@ -25,6 +25,13 @@ struct MatmulDimensions {
     uint columns;
 };
 
+struct EmbeddingDimensions {
+    uint tokens;
+    uint hidden;
+    uint vocab;
+    float scale;
+};
+
 kernel void matmul_f32_f16_gguf_weight_kernel(
     const device float* left [[buffer(0)]],
     const device half* right [[buffer(1)]],
@@ -44,6 +51,28 @@ kernel void matmul_f32_f16_gguf_weight_kernel(
     }
 
     output[row * dims.columns + column] = sum;
+}
+
+kernel void embed_f16_gguf_weight_token_ids_kernel(
+    const device uint* token_ids [[buffer(0)]],
+    const device half* embedding [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant EmbeddingDimensions& dims [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint hidden_index = gid.x;
+    const uint token_index = gid.y;
+    if (token_index >= dims.tokens || hidden_index >= dims.hidden) {
+        return;
+    }
+
+    const uint token_id = token_ids[token_index];
+    if (token_id >= dims.vocab) {
+        return;
+    }
+
+    output[token_index * dims.hidden + hidden_index] =
+        float(embedding[token_id * dims.hidden + hidden_index]) * dims.scale;
 }
 
 inline ushort read_little_endian_u16(const device uchar* bytes, uint offset) {

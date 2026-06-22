@@ -27,6 +27,7 @@ struct LlamaCachedBlockScratchBuffers {
 struct MatmulPipelineState {
     id<MTLDevice> device = nil;
     id<MTLComputePipelineState> matmul_pipeline = nil;
+    id<MTLComputePipelineState> embedding_pipeline = nil;
     id<MTLComputePipelineState> matmul_q4_k_pipeline = nil;
     id<MTLComputePipelineState> matmul_q6_k_pipeline = nil;
     id<MTLComputePipelineState> matmul_add_pipeline = nil;

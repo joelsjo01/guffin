@@ -69,6 +69,26 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> embedding_function =
+        [library newFunctionWithName:@"embed_f16_gguf_weight_token_ids_kernel"];
+    if (embedding_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal F16 GGUF token embedding kernel function was not found"
+        );
+    }
+
+    NSError* embedding_pipeline_error = nil;
+    embedding_pipeline = [device newComputePipelineStateWithFunction:embedding_function
+                                                               error:&embedding_pipeline_error];
+    if (embedding_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal F16 GGUF token embedding pipeline creation failed: "
+                + ns_error_message(embedding_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> matmul_q4_k_function =
         [library newFunctionWithName:@"matmul_f32_q4_k_gguf_weight_kernel"];
     if (matmul_q4_k_function == nil) {

@@ -2,16 +2,25 @@
 
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 #include "local_gguf_engine/engine/model.hpp"
+#include "local_gguf_engine/tensor/backend_buffer.hpp"
 
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace local_gguf_engine::engine {
+
+struct Gemma2MetalInputActivations {
+    std::vector<std::uint32_t> token_ids;
+    tensor::BackendBuffer hidden_states;
+    float embedding_scale = 0.0F;
+};
 
 struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalModelPlan plan;
     Gemma2MetalSchedule prefill;
     Gemma2MetalSchedule first_decode;
+    Gemma2MetalInputActivations prefill_input;
 };
 
 [[nodiscard]] Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(

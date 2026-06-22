@@ -4,6 +4,7 @@
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
+#include <span>
 #include <string>
 
 namespace local_gguf_engine::tensor::backends::cpu {
@@ -32,6 +33,11 @@ private:
 [[nodiscard]] BackendBuffer allocate_cpu_backend_buffer(const TensorDescriptor& descriptor);
 [[nodiscard]] TensorStorage copy_tensor_from_cpu_backend(
     const detail::BackendBufferStorage& storage
+);
+[[nodiscard]] BackendBuffer embed_f16_gguf_weight_token_ids_with_cpu_buffer(
+    std::span<const std::uint32_t> token_ids,
+    const CpuBackendBufferStorage& embedding_weight,
+    float scale
 );
 
 [[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight(
