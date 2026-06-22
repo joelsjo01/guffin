@@ -4,6 +4,7 @@
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -37,6 +38,9 @@ using model_format::load_gguf_tensor_payload;
             break;
         case EngineModelErrorCode::missing_tensor:
             message = "missing model tensor";
+            break;
+        case EngineModelErrorCode::invalid_tensor:
+            message = "invalid model tensor";
             break;
     }
 
@@ -141,6 +145,10 @@ using model_format::load_gguf_tensor_payload;
         return ModelArchitecture::llama;
     }
 
+    if (architecture == "gemma2") {
+        return ModelArchitecture::gemma2;
+    }
+
     throw EngineModelError(EngineModelErrorCode::unsupported_architecture, architecture);
 }
 
@@ -158,6 +166,87 @@ using model_format::load_gguf_tensor_payload;
         .vocab_size = require_metadata_u32(metadata, "llama.vocab_size"),
         .rope_freq_base = require_metadata_f32(metadata, "llama.rope.freq_base"),
         .rms_norm_epsilon = require_metadata_f32(metadata, "llama.attention.layer_norm_rms_epsilon"),
+    };
+}
+
+[[nodiscard]] const model_format::GGUFTensorPayloadView* find_tensor_payload(
+    const model_format::GGUFModelView& model,
+    std::string_view name
+) noexcept {
+    const auto found = std::find_if(
+        model.tensor_payloads.begin(),
+        model.tensor_payloads.end(),
+        [name](const model_format::GGUFTensorPayloadView& payload) {
+            return payload.tensor.name == name;
+        }
+    );
+
+    if (found == model.tensor_payloads.end()) {
+        return nullptr;
+    }
+
+    return &*found;
+}
+
+[[nodiscard]] const model_format::GGUFTensorPayloadView& require_tensor_payload(
+    const model_format::GGUFModelView& model,
+    std::string_view name
+) {
+    const auto* payload = find_tensor_payload(model, name);
+    if (payload == nullptr) {
+        throw EngineModelError(EngineModelErrorCode::missing_tensor, std::string(name));
+    }
+
+    return *payload;
+}
+
+[[nodiscard]] std::uint32_t checked_tensor_dimension_u32(
+    const model_format::GGUFTensorInfo& tensor,
+    std::size_t dimension_index
+) {
+    if (dimension_index >= tensor.dimensions.size()) {
+        throw EngineModelError(EngineModelErrorCode::invalid_tensor, tensor.name);
+    }
+
+    const auto dimension = tensor.dimensions[dimension_index];
+    if (dimension > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+        throw EngineModelError(EngineModelErrorCode::invalid_tensor, tensor.name);
+    }
+
+    return static_cast<std::uint32_t>(dimension);
+}
+
+[[nodiscard]] std::uint32_t infer_vocab_size_from_token_embedding(
+    const model_format::GGUFModelView& model,
+    std::uint32_t embedding_length
+) {
+    const auto& token_embedding = require_tensor_payload(model, "token_embd.weight").tensor;
+    if (token_embedding.dimensions.size() != 2 || checked_tensor_dimension_u32(token_embedding, 0) != embedding_length) {
+        throw EngineModelError(EngineModelErrorCode::invalid_tensor, token_embedding.name);
+    }
+
+    return checked_tensor_dimension_u32(token_embedding, 1);
+}
+
+[[nodiscard]] Gemma2ModelConfig load_gemma2_config(const model_format::GGUFModelView& model) {
+    const auto& metadata = model.directory.metadata;
+    const auto embedding_length = require_metadata_u32(metadata, "gemma2.embedding_length");
+
+    return Gemma2ModelConfig {
+        .context_length = require_metadata_u32(metadata, "gemma2.context_length"),
+        .embedding_length = embedding_length,
+        .block_count = require_metadata_u32(metadata, "gemma2.block_count"),
+        .feed_forward_length = require_metadata_u32(metadata, "gemma2.feed_forward_length"),
+        .attention_head_count = require_metadata_u32(metadata, "gemma2.attention.head_count"),
+        .attention_head_count_kv = require_metadata_u32(metadata, "gemma2.attention.head_count_kv"),
+        .attention_key_length = require_metadata_u32(metadata, "gemma2.attention.key_length"),
+        .attention_value_length = require_metadata_u32(metadata, "gemma2.attention.value_length"),
+        .sliding_window = require_metadata_u32(metadata, "gemma2.attention.sliding_window"),
+        .vocab_size = infer_vocab_size_from_token_embedding(model, embedding_length),
+        .rms_norm_epsilon = require_metadata_f32(metadata, "gemma2.attention.layer_norm_rms_epsilon"),
+        .attention_logit_softcap = require_metadata_f32(metadata, "gemma2.attn_logit_softcapping"),
+        .final_logit_softcap = require_metadata_f32(metadata, "gemma2.final_logit_softcapping"),
+        .uses_tied_output_weight = find_tensor_payload(model, "output.weight") == nullptr,
     };
 }
 
@@ -204,9 +293,25 @@ EngineModel::EngineModel(
     LlamaModelConfig llama_config,
     std::vector<EngineTensor> tensors
 )
+    : EngineModel(
+        architecture,
+        std::move(name),
+        llama_config,
+        Gemma2ModelConfig {},
+        std::move(tensors)
+    ) {}
+
+EngineModel::EngineModel(
+    ModelArchitecture architecture,
+    std::optional<std::string> name,
+    LlamaModelConfig llama_config,
+    Gemma2ModelConfig gemma2_config,
+    std::vector<EngineTensor> tensors
+)
     : architecture_(architecture),
       name_(std::move(name)),
       llama_config_(llama_config),
+      gemma2_config_(gemma2_config),
       tensors_(std::move(tensors)) {}
 
 ModelArchitecture EngineModel::architecture() const noexcept {
@@ -219,6 +324,10 @@ const std::optional<std::string>& EngineModel::name() const noexcept {
 
 const LlamaModelConfig& EngineModel::llama_config() const noexcept {
     return llama_config_;
+}
+
+const Gemma2ModelConfig& EngineModel::gemma2_config() const noexcept {
+    return gemma2_config_;
 }
 
 const std::vector<EngineTensor>& EngineModel::tensors() const noexcept {
@@ -245,6 +354,8 @@ std::string_view model_architecture_name(ModelArchitecture architecture) noexcep
     switch (architecture) {
         case ModelArchitecture::llama:
             return "llama";
+        case ModelArchitecture::gemma2:
+            return "gemma2";
     }
 
     return "unknown";
@@ -252,11 +363,27 @@ std::string_view model_architecture_name(ModelArchitecture architecture) noexcep
 
 EngineModel load_engine_model_from_gguf(const model_format::GGUFModelView& model) {
     const auto architecture = parse_architecture(model.directory.metadata);
+    const auto name = optional_metadata_string(model.directory.metadata, "general.name");
+
+    if (architecture == ModelArchitecture::gemma2) {
+        const auto gemma2_config = load_gemma2_config(model);
+        auto tensors = load_unique_tensors(model);
+        return EngineModel(
+            architecture,
+            name,
+            LlamaModelConfig {},
+            gemma2_config,
+            std::move(tensors)
+        );
+    }
+
+    const auto llama_config = load_llama_config(model.directory.metadata);
+    auto tensors = load_unique_tensors(model);
     return EngineModel(
         architecture,
-        optional_metadata_string(model.directory.metadata, "general.name"),
-        load_llama_config(model.directory.metadata),
-        load_unique_tensors(model)
+        name,
+        llama_config,
+        std::move(tensors)
     );
 }
 

@@ -8,6 +8,7 @@ GENERATE_BINARY := $(BUILD_DIR)/local-gguf-generate
 BENCHMARK_BINARY := $(BUILD_DIR)/local-gguf-bench
 
 ENGINE_SOURCES := \
+	src/engine/gemma2_model.cpp \
 	src/engine/kv_cache.cpp \
 	src/engine/llama_layer.cpp \
 	src/engine/llama_model.cpp \

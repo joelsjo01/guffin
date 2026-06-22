@@ -5,15 +5,17 @@ completed implementation slice.
 
 ## Objective
 
-Add Gemma 2 config parsing and weight binding for the local Gemma 2 9B Q4 file.
+Add Gemma tokenizer and chat-template prompt formatting for the local Gemma 2
+9B Q4 file.
 
 ## Why
 
-Q4_K/Q6_K tensor layout support now lets `models/gemma-2-9b-Q4.gguf` inspect
-through payload validation. The next blocker is architecture binding:
-`general.architecture = "gemma2"` and Gemma tensor names/config keys need to
-bind beside the current Llama path before tokenizer, reference fixtures, or
-Metal planning can be exercised.
+Gemma 2 config parsing and weight binding now succeed far enough for
+`models/gemma-2-9b-Q4.gguf` to fail explicitly at unsupported Gemma runtime
+execution. The next blocker is prompt preparation: the file reports
+`general.architecture = "gemma2"`, `tokenizer.ggml.model = "llama"`, and a
+Gemma-specific `tokenizer.chat_template` that the current SmolLM2-only prompt
+formatter does not support.
 
 ## Read
 
@@ -27,11 +29,12 @@ Metal planning can be exercised.
 
 ## Touch
 
-- `include/local_gguf_engine/engine/model.hpp`
-- `src/engine/model.cpp`
-- Gemma-specific engine config/weight files if a split keeps the slice small
-- `tests/engine/engine_model_tests.cpp`
-- `tests/model_format` only if additional GGUF metadata fixtures are needed
+- `include/local_gguf_engine/tokenizer/tokenizer.hpp`
+- `src/tokenizer/tokenizer.cpp`
+- `src/frontends/cli/generate.cpp` only to move the Gemma runtime stop after
+  tokenizer/prompt validation
+- `tests/tokenizer/tokenizer_tests.cpp`
+- `tests/frontends/cli/generate_cli_tests.cpp` if the CLI boundary changes
 - `docs/GEMMA_Q4_MILESTONES.md`
 - `docs/NEXT_TASK.md`
 
@@ -41,25 +44,24 @@ Metal planning can be exercised.
 - Do not optimize the old CPU/Llama path unless it directly proves the current
   slice.
 - Do not read broad docs or benchmark artifacts unless named above.
-- Do not add generation, tokenizer/chat-template support, full Gemma CPU
-  execution, Metal kernels, or broad model architecture refactors in this
+- Do not add Gemma generation execution, full Gemma CPU execution, Metal
+  kernels, a broad Jinja runtime, or broad model architecture refactors in this
   slice.
 
 ## Verify
 
-- Add deterministic tests for `gemma2` metadata parsing, required config keys,
-  required tensor-name binding, mixed Q4_K/Q6_K projection binding, and missing
-  or malformed metadata/tensor failures.
-- Run the focused tests that cover engine model binding and any touched
-  `model_format` fixtures.
+- Add deterministic tests for Gemma prompt formatting, role validation,
+  BOS/EOS behavior, unsupported template rejection, and the generation prompt
+  suffix.
+- Run the focused tokenizer and generate CLI tests.
 - Run a local Gemma load/generation command far enough to prove any remaining
-  failure is an explicit unsupported Gemma execution/runtime error, not
-  architecture or tensor binding.
+  failure is an explicit unsupported Gemma runtime error after tokenizer and
+  prompt preparation, not tokenizer/chat-template support.
 - Run `bash scripts/ci.sh` after implementation changes.
 
 ## Stop When
 
-The local Gemma GGUF metadata and required tensor names bind into a Gemma-owned
-config/weights representation beside Llama, mixed Q4_K/Q6_K tensors remain
-packed, and execution still fails explicitly later for unsupported Gemma
-runtime work rather than architecture, metadata, tensor type, or binding.
+The local Gemma GGUF tokenizer metadata can format and encode Gemma IT prompts
+with deterministic tests, and generation still fails explicitly later for
+unsupported Gemma runtime work rather than architecture, tensor binding,
+tokenizer, or chat-template handling.

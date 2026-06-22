@@ -11,8 +11,8 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Status | Milestone | Exit Proof |
 | --- | --- | --- |
 | Done | Q4_K/Q6_K layout support | Gemma GGUF tensor directory gets past type `12`/`14` validation with deterministic layout tests. |
-| Current | Gemma 2 config and weight binding | `gemma2` metadata and required tensor names bind beside Llama, with unsupported execution errors where runtime work is unfinished. |
-| Planned | Gemma tokenizer and chat template | Local Gemma IT prompt formatting, role validation, BOS/EOS behavior, and generation prompt suffix have tests. |
+| Done | Gemma 2 config and weight binding | `gemma2` metadata and required tensor names bind beside Llama, with unsupported execution errors where runtime work is unfinished. |
+| Current | Gemma tokenizer and chat template | Local Gemma IT prompt formatting, role validation, BOS/EOS behavior, and generation prompt suffix have tests. |
 | Planned | Tiny reference correctness fixtures | Small Q4_K/Q6_K and Gemma semantic fixtures exist for parity, without becoming a full 9B CPU runtime. |
 | Planned | File-backed loading | Large tensor payloads can flow from validated file-backed views to backend upload without eager duplicate host copies. |
 | Planned | Metal resident model plan | Packed weights, KV cache, scratch, and per-layer state are owned by a reusable Gemma Metal plan. |

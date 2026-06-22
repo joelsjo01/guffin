@@ -41,6 +41,8 @@ using local_gguf_engine::model_format::GGUFMetadataValue;
 using local_gguf_engine::model_format::GGUFMetadataValueType;
 using local_gguf_engine::runtime::BackendKind;
 using local_gguf_engine::tensor::DType;
+using local_gguf_engine::tensor::Shape;
+using local_gguf_engine::tensor::TensorDescriptor;
 using local_gguf_engine::tensor::TensorStorage;
 using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tests::metadata_bool;
@@ -593,6 +595,83 @@ std::vector<std::uint8_t> tiny_chat_template_generate_cli_gguf_bytes() {
     );
 }
 
+std::vector<std::uint8_t> zero_tensor_bytes(std::span<const std::uint64_t> dimensions, DType dtype) {
+    return std::vector<std::uint8_t>(
+        TensorDescriptor::from(Shape::from(dimensions), dtype).byte_count
+    );
+}
+
+TinyGGUFTensor tiny_zero_tensor(std::string name, std::vector<std::uint64_t> dimensions, DType dtype) {
+    return TinyGGUFTensor {
+        .name = std::move(name),
+        .dimensions = dimensions,
+        .type_id = gguf_type_id_for_dtype(dtype),
+        .bytes = zero_tensor_bytes(std::span<const std::uint64_t>(dimensions), dtype),
+    };
+}
+
+[[nodiscard]] std::string gemma2_block_tensor_name(std::uint32_t block_index, std::string_view suffix) {
+    return "blk." + std::to_string(block_index) + "." + std::string(suffix);
+}
+
+std::vector<GGUFMetadataEntry> tiny_gemma2_generate_cli_metadata() {
+    return {
+        metadata_string("general.architecture", "gemma2"),
+        metadata_string("general.name", "Tiny Gemma 2 Generate Fixture"),
+        metadata_u32("gemma2.context_length", 16),
+        metadata_u32("gemma2.embedding_length", 256),
+        metadata_u32("gemma2.block_count", 1),
+        metadata_u32("gemma2.feed_forward_length", 256),
+        metadata_u32("gemma2.attention.head_count", 1),
+        metadata_u32("gemma2.attention.head_count_kv", 1),
+        metadata_u32("gemma2.attention.key_length", 256),
+        metadata_u32("gemma2.attention.value_length", 256),
+        metadata_u32("gemma2.attention.sliding_window", 8),
+        metadata_f32("gemma2.attention.layer_norm_rms_epsilon", 0.000001F),
+        metadata_f32("gemma2.attn_logit_softcapping", 50.0F),
+        metadata_f32("gemma2.final_logit_softcapping", 30.0F),
+        metadata_string("tokenizer.ggml.model", "llama"),
+        metadata_string_array("tokenizer.ggml.tokens", {"<pad>", "<eos>", "<bos>", "Hello"}),
+        metadata_u32("tokenizer.ggml.bos_token_id", 2),
+        metadata_u32("tokenizer.ggml.eos_token_id", 1),
+        metadata_u32("tokenizer.ggml.unknown_token_id", 3),
+    };
+}
+
+std::vector<TinyGGUFTensor> tiny_gemma2_generate_cli_tensors() {
+    std::vector<TinyGGUFTensor> tensors;
+    tensors.reserve(13);
+    tensors.push_back(tiny_zero_tensor("token_embd.weight", {256, 4}, DType::f16));
+    tensors.push_back(tiny_zero_tensor("output_norm.weight", {256}, DType::f32));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_norm.weight"), {256}, DType::f32));
+    tensors.push_back(tiny_zero_tensor(
+        gemma2_block_tensor_name(0, "post_attention_norm.weight"),
+        {256},
+        DType::f32
+    ));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_q.weight"), {256, 256}, DType::q4_k));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_k.weight"), {256, 256}, DType::q4_k));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_v.weight"), {256, 256}, DType::q6_k));
+    tensors.push_back(tiny_zero_tensor(
+        gemma2_block_tensor_name(0, "attn_output.weight"),
+        {256, 256},
+        DType::q4_k
+    ));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "ffn_norm.weight"), {256}, DType::f32));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "post_ffw_norm.weight"), {256}, DType::f32));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "ffn_gate.weight"), {256, 256}, DType::q4_k));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "ffn_up.weight"), {256, 256}, DType::q4_k));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "ffn_down.weight"), {256, 256}, DType::q6_k));
+    return tensors;
+}
+
+std::vector<std::uint8_t> tiny_gemma2_generate_cli_gguf_bytes() {
+    return write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(),
+        tiny_gemma2_generate_cli_tensors()
+    );
+}
+
 void test_generates_text_from_gguf_bytes_with_cached_argmax() {
     const auto bytes = tiny_generate_cli_gguf_bytes();
 
@@ -650,6 +729,22 @@ void test_generates_text_from_gguf_bytes_with_cpu_backend_option() {
     const auto text = generate_text_from_gguf_bytes(std::span<const std::uint8_t>(bytes), "", 2, options);
 
     expect(text == "!", "generate text CPU backend option should preserve cached argmax output");
+}
+
+void test_rejects_generate_gemma2_runtime_not_implemented() {
+    const auto bytes = tiny_gemma2_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-gemma2-generate", std::span<const std::uint8_t>(bytes));
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_for_path(model.path(), "Hello", "1", output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate Gemma2 unsupported runtime exit code mismatch");
+    expect(output.str().empty(), "generate Gemma2 unsupported runtime should not write stdout");
+    expect(
+        error.str().find("Gemma 2 generation runtime is not implemented yet") != std::string::npos,
+        "generate Gemma2 unsupported runtime error missing"
+    );
 }
 
 void test_runs_generate_success_path() {
@@ -1050,6 +1145,10 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
         test_generates_text_from_gguf_bytes_with_cpu_backend_option,
     },
     {"runs generate success path", test_runs_generate_success_path},
+    {
+        "rejects generate Gemma2 runtime not implemented",
+        test_rejects_generate_gemma2_runtime_not_implemented,
+    },
     {"runs generate with greedy option", test_runs_generate_with_greedy_option},
     {"runs generate with CPU backend option", test_runs_generate_with_cpu_backend_option},
     {

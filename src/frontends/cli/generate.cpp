@@ -1,5 +1,6 @@
 #include "local_gguf_engine/frontends/cli/generate.hpp"
 
+#include "local_gguf_engine/engine/gemma2_model.hpp"
 #include "local_gguf_engine/engine/kv_cache.hpp"
 #include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
@@ -29,6 +30,7 @@ namespace local_gguf_engine::frontends::cli {
 namespace {
 
 using engine::bind_llama_model_weights;
+using engine::bind_gemma2_model_weights;
 using engine::copy_llama_model_inference_weights_to_backend;
 using engine::create_llama_backend_kv_cache;
 using engine::create_llama_kv_cache;
@@ -36,6 +38,7 @@ using engine::EngineModelError;
 using engine::generate_llama_sampled_tokens_with_kv_cache_f32;
 using engine::LlamaModelInferenceConfig;
 using engine::load_engine_model_from_gguf;
+using engine::ModelArchitecture;
 using engine::run_llama_model_logits_with_kv_cache_f32;
 using engine::top_logit_tokens_f32;
 using model_format::GGUFReadError;
@@ -431,6 +434,15 @@ void write_token_id_list(std::ostream& output, std::span<const std::uint32_t> to
     output << ']';
 }
 
+void reject_unsupported_gemma2_generation_runtime(const engine::EngineModel& model) {
+    if (model.architecture() != ModelArchitecture::gemma2) {
+        return;
+    }
+
+    (void)bind_gemma2_model_weights(model);
+    throw std::runtime_error("Gemma 2 generation runtime is not implemented yet");
+}
+
 }  // namespace
 
 std::string generate_text_from_gguf_bytes(
@@ -449,6 +461,7 @@ std::string generate_text_from_gguf_bytes(
 ) {
     const auto model_view = read_gguf_model_view(bytes);
     const auto model = load_engine_model_from_gguf(model_view);
+    reject_unsupported_gemma2_generation_runtime(model);
     const auto tokenizer = load_tokenizer_from_gguf_metadata(model_view.directory.metadata);
     const auto encoded_prompt = encode_generate_prompt(model_view.directory.metadata, tokenizer, prompt);
     const auto weights = bind_llama_model_weights(model);
@@ -504,6 +517,7 @@ GenerateFirstTokenDebugInfo inspect_generate_first_token_from_gguf_bytes(
 ) {
     const auto model_view = read_gguf_model_view(bytes);
     const auto model = load_engine_model_from_gguf(model_view);
+    reject_unsupported_gemma2_generation_runtime(model);
     const auto tokenizer = load_tokenizer_from_gguf_metadata(model_view.directory.metadata);
     auto encoded_prompt = encode_generate_prompt(model_view.directory.metadata, tokenizer, prompt);
     if (encoded_prompt.token_ids.empty()) {
