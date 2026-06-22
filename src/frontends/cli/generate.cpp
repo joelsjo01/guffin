@@ -1,11 +1,13 @@
 #include "local_gguf_engine/frontends/cli/generate.hpp"
 
 #include "local_gguf_engine/engine/gemma2_model.hpp"
+#include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/kv_cache.hpp"
 #include "local_gguf_engine/engine/llama_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
+#include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/tensor_error.hpp"
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
@@ -26,9 +28,10 @@ namespace local_gguf_engine::frontends::cli {
 
 namespace {
 
-using engine::bind_llama_model_weights;
 using engine::bind_gemma2_model_weights;
+using engine::bind_llama_model_weights;
 using engine::copy_llama_model_inference_weights_to_backend;
+using engine::create_gemma2_metal_generation_runtime_shell;
 using engine::create_llama_backend_kv_cache;
 using engine::create_llama_kv_cache;
 using engine::EngineModelError;
@@ -43,6 +46,7 @@ using model_format::read_file_backed_gguf_model;
 using model_format::read_gguf_model_view;
 using runtime::BackendError;
 using runtime::BackendKind;
+using tensor::tensor_backend_is_available;
 using tensor::TensorError;
 using tokenizer::format_generate_prompt_from_gguf_metadata;
 using tokenizer::load_tokenizer_from_gguf_metadata;
@@ -393,12 +397,21 @@ void write_token_id_list(std::ostream& output, std::span<const std::uint32_t> to
     output << ']';
 }
 
-void reject_unsupported_gemma2_generation_runtime(const engine::EngineModel& model) {
+void reject_unsupported_gemma2_generation_runtime(
+    const engine::EngineModel& model,
+    std::span<const std::uint32_t> prompt_token_ids,
+    BackendKind requested_backend
+) {
     if (model.architecture() != ModelArchitecture::gemma2) {
         return;
     }
 
-    (void)bind_gemma2_model_weights(model);
+    if (tensor_backend_is_available(BackendKind::metal) || requested_backend == BackendKind::metal) {
+        const auto runtime_shell = create_gemma2_metal_generation_runtime_shell(model, prompt_token_ids);
+        (void)runtime_shell;
+    } else {
+        (void)bind_gemma2_model_weights(model);
+    }
     throw std::runtime_error("Gemma 2 generation runtime is not implemented yet");
 }
 
@@ -411,7 +424,11 @@ void reject_unsupported_gemma2_generation_runtime(const engine::EngineModel& mod
     const auto model = load_engine_model_from_gguf(model_view);
     const auto tokenizer = load_tokenizer_from_gguf_metadata(model_view.directory.metadata);
     const auto encoded_prompt = encode_generate_prompt(model_view.directory.metadata, tokenizer, prompt);
-    reject_unsupported_gemma2_generation_runtime(model);
+    reject_unsupported_gemma2_generation_runtime(
+        model,
+        std::span<const std::uint32_t>(encoded_prompt.token_ids),
+        options.backend
+    );
     const auto weights = bind_llama_model_weights(model);
     std::vector<std::uint32_t> output_token_ids;
     if (options.backend == BackendKind::cpu) {
@@ -453,7 +470,11 @@ void reject_unsupported_gemma2_generation_runtime(const engine::EngineModel& mod
     const auto model = load_engine_model_from_gguf(model_view);
     const auto tokenizer = load_tokenizer_from_gguf_metadata(model_view.directory.metadata);
     auto encoded_prompt = encode_generate_prompt(model_view.directory.metadata, tokenizer, prompt);
-    reject_unsupported_gemma2_generation_runtime(model);
+    reject_unsupported_gemma2_generation_runtime(
+        model,
+        std::span<const std::uint32_t>(encoded_prompt.token_ids),
+        options.backend
+    );
     if (encoded_prompt.token_ids.empty()) {
         throw std::invalid_argument("Llama token id span must not be empty");
     }

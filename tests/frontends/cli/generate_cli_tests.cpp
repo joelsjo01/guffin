@@ -648,11 +648,11 @@ std::vector<std::int32_t> tiny_gemma2_generate_cli_token_types() {
     return token_types;
 }
 
-std::vector<GGUFMetadataEntry> tiny_gemma2_generate_cli_metadata() {
+std::vector<GGUFMetadataEntry> tiny_gemma2_generate_cli_metadata(std::uint32_t context_length = 16) {
     return {
         metadata_string("general.architecture", "gemma2"),
         metadata_string("general.name", "Tiny Gemma 2 Generate Fixture"),
-        metadata_u32("gemma2.context_length", 16),
+        metadata_u32("gemma2.context_length", context_length),
         metadata_u32("gemma2.embedding_length", 256),
         metadata_u32("gemma2.block_count", 1),
         metadata_u32("gemma2.feed_forward_length", 256),
@@ -771,6 +771,10 @@ void test_generates_text_from_gguf_bytes_with_cpu_backend_option() {
 }
 
 void test_rejects_generate_gemma2_runtime_not_implemented() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
     const auto bytes = tiny_gemma2_generate_cli_gguf_bytes();
     const TempBinaryFile model("tiny-gemma2-generate", std::span<const std::uint8_t>(bytes));
     std::ostringstream output;
@@ -783,6 +787,72 @@ void test_rejects_generate_gemma2_runtime_not_implemented() {
     expect(
         error.str().find("Gemma 2 generation runtime is not implemented yet") != std::string::npos,
         "generate Gemma2 unsupported runtime error missing"
+    );
+}
+
+void test_reports_generate_gemma2_metal_runtime_shell_unavailable_when_missing() {
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = tiny_gemma2_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-gemma2-generate-metal-missing", std::span<const std::uint8_t>(bytes));
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = model.path().string();
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "Hello",
+        "1",
+        "--backend",
+        "metal",
+    };
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate(6, argv, output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate Gemma2 unavailable runtime shell exit code mismatch");
+    expect(output.str().empty(), "generate Gemma2 unavailable runtime shell should not write stdout");
+    expect(
+        error.str().find("error: backend:") != std::string::npos,
+        "generate Gemma2 unavailable runtime shell error prefix missing"
+    );
+    expect(
+        error.str().find("Metal backend unavailable") != std::string::npos,
+        "generate Gemma2 unavailable runtime shell message missing"
+    );
+    expect(
+        error.str().find("Gemma 2 generation runtime is not implemented yet") == std::string::npos,
+        "generate Gemma2 unavailable runtime shell should fail before execution boundary"
+    );
+}
+
+void test_rejects_generate_gemma2_after_decode_schedule_context_full_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(8),
+        tiny_gemma2_generate_cli_tensors()
+    );
+    const TempBinaryFile model("tiny-gemma2-decode-context-full", std::span<const std::uint8_t>(bytes));
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_for_path(model.path(), "Hello", "1", output, error);
+
+    expect(exit_code == EXIT_FAILURE, "generate Gemma2 decode schedule context-full exit code mismatch");
+    expect(output.str().empty(), "generate Gemma2 decode schedule context-full should not write stdout");
+    expect(
+        error.str().find("Gemma2 Metal decode schedule cached token count must leave room for one token")
+            != std::string::npos,
+        "generate Gemma2 decode schedule context-full error missing"
+    );
+    expect(
+        error.str().find("Gemma 2 generation runtime is not implemented yet") == std::string::npos,
+        "generate Gemma2 decode schedule context-full should fail before execution boundary"
     );
 }
 
@@ -1215,6 +1285,14 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     {
         "rejects generate Gemma2 runtime not implemented",
         test_rejects_generate_gemma2_runtime_not_implemented,
+    },
+    {
+        "reports generate Gemma2 Metal runtime shell unavailable when missing",
+        test_reports_generate_gemma2_metal_runtime_shell_unavailable_when_missing,
+    },
+    {
+        "rejects generate Gemma2 after decode schedule context full when available",
+        test_rejects_generate_gemma2_after_decode_schedule_context_full_when_available,
     },
     {
         "rejects generate Gemma2 unsupported chat template before runtime",

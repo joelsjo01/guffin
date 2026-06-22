@@ -11,6 +11,7 @@ ENGINE_SOURCES := \
 	src/engine/gemma2_model.cpp \
 	src/engine/gemma2_metal_plan.cpp \
 	src/engine/gemma2_reference.cpp \
+	src/engine/gemma2_runtime.cpp \
 	src/engine/kv_cache.cpp \
 	src/engine/llama_layer.cpp \
 	src/engine/llama_model.cpp \
