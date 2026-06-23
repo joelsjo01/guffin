@@ -154,7 +154,12 @@ GGUFTensorPayloadView tensor_payload_view(
     };
 }
 
-std::vector<GGUFMetadataEntry> tiny_gemma2_metadata(std::uint32_t block_count = 1) {
+std::vector<GGUFMetadataEntry> tiny_gemma2_metadata(
+    std::uint32_t block_count = 1,
+    std::uint32_t attention_head_count = 1,
+    std::uint32_t attention_head_count_kv = 1,
+    std::uint32_t attention_value_length = 256
+) {
     return {
         metadata_string("general.architecture", "gemma2"),
         metadata_string("general.name", "Tiny Gemma 2 Metal Plan Fixture"),
@@ -162,10 +167,10 @@ std::vector<GGUFMetadataEntry> tiny_gemma2_metadata(std::uint32_t block_count = 
         metadata_u32("gemma2.embedding_length", 256),
         metadata_u32("gemma2.block_count", block_count),
         metadata_u32("gemma2.feed_forward_length", 256),
-        metadata_u32("gemma2.attention.head_count", 1),
-        metadata_u32("gemma2.attention.head_count_kv", 1),
+        metadata_u32("gemma2.attention.head_count", attention_head_count),
+        metadata_u32("gemma2.attention.head_count_kv", attention_head_count_kv),
         metadata_u32("gemma2.attention.key_length", 256),
-        metadata_u32("gemma2.attention.value_length", 256),
+        metadata_u32("gemma2.attention.value_length", attention_value_length),
         metadata_u32("gemma2.attention.sliding_window", 8),
         metadata_f32("gemma2.attention.layer_norm_rms_epsilon", 0.000001F),
         metadata_f32("gemma2.attn_logit_softcapping", 50.0F),
@@ -492,6 +497,7 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(scratch.attention_scores)
         + backend_buffer_byte_count(scratch.attention_probabilities)
         + backend_buffer_byte_count(scratch.attention_output)
+        + backend_buffer_byte_count(scratch.projected_attention_output)
         + backend_buffer_byte_count(scratch.feed_forward_gate)
         + backend_buffer_byte_count(scratch.feed_forward_up)
         + backend_buffer_byte_count(scratch.feed_forward_gated)
@@ -506,6 +512,7 @@ std::size_t schedule_scratch_byte_count(const local_gguf_engine::engine::Gemma2M
         + scratch.attention_scores.byte_count
         + scratch.attention_probabilities.byte_count
         + scratch.attention_output.byte_count
+        + scratch.projected_attention_output.byte_count
         + scratch.feed_forward_gate.byte_count
         + scratch.feed_forward_up.byte_count
         + scratch.feed_forward_gated.byte_count
@@ -572,6 +579,10 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
     expect(
         plan.decode_scratch().logits.descriptor().shape == Shape::from({1, 4}),
         "Gemma2 Metal logits scratch shape mismatch"
+    );
+    expect(
+        plan.decode_scratch().projected_attention_output.descriptor().shape == Shape::from({1, 256}),
+        "Gemma2 Metal projected attention output scratch shape mismatch"
     );
 }
 
@@ -643,6 +654,10 @@ void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_availa
         "Gemma2 prefill attention probability scratch shape mismatch"
     );
     expect(
+        prefill.scratch().projected_attention_output.shape == Shape::from({12, 256}),
+        "Gemma2 prefill projected attention output scratch shape mismatch"
+    );
+    expect(
         decode.scratch().normalized_hidden.shape == Shape::from({1, 256}),
         "Gemma2 decode normalized hidden scratch shape mismatch"
     );
@@ -673,6 +688,38 @@ void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_availa
     expect(prefill.layers()[1].attention_token_count == 12, "Gemma2 prefill full attention count mismatch");
     expect(decode.layers()[0].attention_token_count == 8, "Gemma2 decode sliding attention count mismatch");
     expect(decode.layers()[1].attention_token_count == 13, "Gemma2 decode full attention count mismatch");
+}
+
+void test_gemma2_metal_plan_tracks_projected_attention_output_shape_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store();
+    auto metadata = tiny_gemma2_metadata(1, 2, 1, 256);
+    auto view = tiny_model_view(std::move(metadata), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const auto plan = create_gemma2_metal_model_plan(model);
+
+    const auto prefill = create_gemma2_metal_prefill_schedule(plan, 3);
+    const auto decode = create_gemma2_metal_decode_schedule(plan, 3);
+
+    expect(
+        prefill.scratch().attention_output.shape == Shape::from({3, 512}),
+        "Gemma2 prefill attention output scratch should follow query heads times value length"
+    );
+    expect(
+        prefill.scratch().projected_attention_output.shape == Shape::from({3, 256}),
+        "Gemma2 prefill projected attention output scratch should return to hidden width"
+    );
+    expect(
+        decode.scratch().attention_output.shape == Shape::from({1, 512}),
+        "Gemma2 decode attention output scratch should follow query heads times value length"
+    );
+    expect(
+        decode.scratch().projected_attention_output.shape == Shape::from({1, 256}),
+        "Gemma2 decode projected attention output scratch should return to hidden width"
+    );
 }
 
 void test_gemma2_metal_schedules_share_resident_buffers_when_available() {
@@ -707,6 +754,13 @@ void test_gemma2_metal_schedules_share_resident_buffers_when_available() {
     expect(
         shares_backend_storage(decode.resident_decode_scratch().logits, plan.decode_scratch().logits),
         "Gemma2 decode schedule should share resident logits scratch buffer"
+    );
+    expect(
+        shares_backend_storage(
+            decode.resident_decode_scratch().projected_attention_output,
+            plan.decode_scratch().projected_attention_output
+        ),
+        "Gemma2 decode schedule should share resident projected attention output scratch buffer"
     );
     expect(
         prefill.resident_weight_byte_count() == plan.uploaded_weight_byte_count(),
@@ -745,6 +799,10 @@ void test_gemma2_metal_schedule_retains_buffers_after_plan_lifetime_when_availab
     expect(
         schedule.resident_decode_scratch().logits.descriptor().shape == Shape::from({1, 4}),
         "Gemma2 Metal schedule retained logits scratch shape mismatch"
+    );
+    expect(
+        schedule.resident_decode_scratch().projected_attention_output.descriptor().shape == Shape::from({1, 256}),
+        "Gemma2 Metal schedule retained projected attention output scratch shape mismatch"
     );
 }
 
@@ -1104,7 +1162,7 @@ void test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_availa
     expect_f32_matrix_close(positioned_key, expected_key, metal_rope_shell_tolerance, "Gemma2 shell positioned key");
 }
 
-void test_gemma2_metal_runtime_shell_aggregates_first_layer_attention_values_when_available() {
+void test_gemma2_metal_runtime_shell_projects_first_layer_attention_output_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
@@ -1130,9 +1188,11 @@ void test_gemma2_metal_runtime_shell_aggregates_first_layer_attention_values_whe
     const auto query_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 1);
     const auto key_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 2);
     const auto value_weight = tensor_q6_k_gguf_weight_matrix(256, 256, 3);
+    const auto output_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 4);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_q.weight"), query_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_k.weight"), key_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_v.weight"), value_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_output.weight"), output_weight);
 
     auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
@@ -1147,6 +1207,7 @@ void test_gemma2_metal_runtime_shell_aggregates_first_layer_attention_values_whe
     const auto& scores = shell.prefill_first_layer_attention_scores;
     const auto& probabilities = shell.prefill_first_layer_attention_probabilities;
     const auto& values = shell.prefill_first_layer_attention_values;
+    const auto& output_projection = shell.prefill_first_layer_attention_output_projection;
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
     const auto positioned_key = copy_tensor_from_backend(position.key);
@@ -1173,6 +1234,14 @@ void test_gemma2_metal_runtime_shell_aggregates_first_layer_attention_values_whe
         shell.plan.config().attention_head_count_kv,
         shell.plan.config().attention_value_length,
         shell.prefill.layers().front().attention_token_count
+    );
+    const auto projected_attention_output = copy_tensor_from_backend(
+        output_projection.projected_attention_output
+    );
+    const auto expected_projected_attention_output = matmul_f32_quantized_gguf_weight(
+        attention_value_output,
+        output_weight,
+        BackendKind::cpu
     );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
@@ -1324,6 +1393,54 @@ void test_gemma2_metal_runtime_shell_aggregates_first_layer_attention_values_whe
         1.0e-3F,
         "Gemma2 shell attention values"
     );
+
+    expect(
+        output_projection.layer_index == 0,
+        "Gemma2 shell first layer attention output projection index mismatch"
+    );
+    expect(
+        output_projection.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell first layer attention output projection phase mismatch"
+    );
+    expect(
+        output_projection.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell first layer attention output projection scratch ownership mismatch"
+    );
+    expect(
+        output_projection.attention_output_width
+            == shell.plan.config().attention_head_count * shell.plan.config().attention_value_length,
+        "Gemma2 shell first layer attention output projection input width mismatch"
+    );
+    expect(
+        output_projection.hidden_width == shell.plan.config().embedding_length,
+        "Gemma2 shell first layer attention output projection hidden width mismatch"
+    );
+    expect(
+        output_projection.projected_attention_output.backend() == BackendKind::metal,
+        "Gemma2 shell projected attention output backend mismatch"
+    );
+    expect(
+        output_projection.projected_attention_output.descriptor()
+            == shell.prefill.scratch().projected_attention_output,
+        "Gemma2 shell projected attention output scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(output_projection.projected_attention_output, values.attention_output),
+        "Gemma2 shell projected attention output should not alias attention value output"
+    );
+    expect(
+        !shares_backend_storage(
+            output_projection.projected_attention_output,
+            shell.plan.weights().blocks[0].attention.output_weight
+        ),
+        "Gemma2 shell projected attention output should not alias attention output weight"
+    );
+    expect_f32_matrix_close(
+        projected_attention_output,
+        expected_projected_attention_output,
+        1.0e-2F,
+        "Gemma2 shell projected attention output"
+    );
 }
 
 void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
@@ -1441,6 +1558,10 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_available,
     },
     {
+        "Gemma2 Metal plan tracks projected attention output shape when available",
+        test_gemma2_metal_plan_tracks_projected_attention_output_shape_when_available,
+    },
+    {
         "Gemma2 Metal schedules share resident buffers when available",
         test_gemma2_metal_schedules_share_resident_buffers_when_available,
     },
@@ -1461,8 +1582,8 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_available,
     },
     {
-        "Gemma2 Metal runtime shell aggregates first layer attention values when available",
-        test_gemma2_metal_runtime_shell_aggregates_first_layer_attention_values_when_available,
+        "Gemma2 Metal runtime shell projects first layer attention output when available",
+        test_gemma2_metal_runtime_shell_projects_first_layer_attention_output_when_available,
     },
     {
         "rejects invalid Gemma2 Metal schedule shapes when available",

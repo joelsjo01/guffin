@@ -235,6 +235,48 @@ void require_attention_value_output_shape(
     }
 }
 
+void require_prefill_attention_values_match_schedule(
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalAttentionValueActivations& values
+) {
+    if (prefill.phase() != Gemma2MetalSchedulePhase::prefill) {
+        throw std::invalid_argument("Gemma2 Metal attention output projection primitive requires a prefill schedule");
+    }
+    if (values.phase != prefill.phase()) {
+        throw std::invalid_argument("Gemma2 Metal attention output projection input phase must match schedule");
+    }
+    if (values.scratch_ownership != prefill.scratch_ownership()) {
+        throw std::invalid_argument(
+            "Gemma2 Metal attention output projection input scratch ownership must match schedule"
+        );
+    }
+    if (prefill.layers().empty()) {
+        throw std::invalid_argument("Gemma2 Metal attention output projection primitive requires at least one layer");
+    }
+    if (values.layer_index != prefill.layers().front().layer_index) {
+        throw std::invalid_argument("Gemma2 Metal attention output projection input layer must match schedule");
+    }
+    if (values.attention_output.backend() != prefill.backend()) {
+        throw std::invalid_argument("Gemma2 Metal attention output projection input must use the schedule backend");
+    }
+    if (values.attention_output.descriptor() != prefill.scratch().attention_output) {
+        throw std::invalid_argument(
+            "Gemma2 Metal attention output projection input must match scheduled attention output shape"
+        );
+    }
+}
+
+void require_projected_attention_output_shape(
+    const tensor::BackendBuffer& output,
+    const tensor::TensorDescriptor& expected
+) {
+    if (output.descriptor() != expected) {
+        throw std::invalid_argument(
+            "Gemma2 Metal projected attention output must match scheduled scratch shape"
+        );
+    }
+}
+
 [[nodiscard]] Gemma2MetalLayerInputActivations create_gemma2_metal_prefill_first_layer_input(
     const Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& prefill,
@@ -430,6 +472,35 @@ void require_attention_value_output_shape(
     };
 }
 
+[[nodiscard]] Gemma2MetalAttentionOutputProjectionActivations
+create_gemma2_metal_prefill_first_layer_attention_output_projection(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalAttentionValueActivations& values
+) {
+    require_prefill_attention_values_match_schedule(prefill, values);
+    const auto& first_layer = prefill.layers().front();
+    const auto& attention = plan.weights().blocks.at(first_layer.layer_index).attention;
+    auto projected_attention_output = tensor::ops::matmul_f32_quantized_gguf_weight_to_backend(
+        values.attention_output,
+        attention.output_weight
+    );
+
+    require_projected_attention_output_shape(
+        projected_attention_output,
+        prefill.scratch().projected_attention_output
+    );
+
+    return Gemma2MetalAttentionOutputProjectionActivations {
+        .layer_index = first_layer.layer_index,
+        .phase = prefill.phase(),
+        .scratch_ownership = prefill.scratch_ownership(),
+        .attention_output_width = values.query_head_count * values.value_length,
+        .hidden_width = plan.config().embedding_length,
+        .projected_attention_output = std::move(projected_attention_output),
+    };
+}
+
 }  // namespace
 
 Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
@@ -485,6 +556,12 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
             prefill_first_layer_attention_projection,
             prefill_first_layer_attention_probabilities
         );
+    auto prefill_first_layer_attention_output_projection =
+        create_gemma2_metal_prefill_first_layer_attention_output_projection(
+            plan,
+            prefill,
+            prefill_first_layer_attention_values
+        );
 
     return Gemma2MetalGenerationRuntimeShell {
         .plan = std::move(plan),
@@ -497,6 +574,8 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
         .prefill_first_layer_attention_scores = std::move(prefill_first_layer_attention_scores),
         .prefill_first_layer_attention_probabilities = std::move(prefill_first_layer_attention_probabilities),
         .prefill_first_layer_attention_values = std::move(prefill_first_layer_attention_values),
+        .prefill_first_layer_attention_output_projection =
+            std::move(prefill_first_layer_attention_output_projection),
     };
 }
 
