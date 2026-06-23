@@ -4,6 +4,7 @@
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
+#include <cstdint>
 #include <span>
 #include <string>
 
@@ -43,6 +44,14 @@ private:
     const CpuBackendBufferStorage& input,
     const CpuBackendBufferStorage& weight,
     float epsilon
+);
+[[nodiscard]] BackendBuffer rope_f32_by_heads_with_cpu_buffer(
+    const CpuBackendBufferStorage& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
 );
 
 [[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight(

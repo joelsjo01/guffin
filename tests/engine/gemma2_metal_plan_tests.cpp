@@ -10,6 +10,7 @@
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
+#include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
@@ -62,6 +63,7 @@ using local_gguf_engine::tensor::backend_buffer_storage;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
 using local_gguf_engine::tensor::ops::matmul_f32_quantized_gguf_weight;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
+using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
 using local_gguf_engine::tensor::Q4_KBlockView;
 using local_gguf_engine::tensor::Q6_KBlockView;
 using local_gguf_engine::tensor::read_f32;
@@ -927,6 +929,129 @@ void test_gemma2_metal_runtime_shell_projects_first_layer_attention_when_availab
     expect_f32_matrix_close(value, expected_value, 1.0e-2F, "Gemma2 shell value projection");
 }
 
+void test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store();
+    std::vector<float> embedding_values(256U * 4U, 0.0F);
+    embedding_values[0] = 1.0F;
+    embedding_values[1] = 2.0F;
+    embedding_values[2] = 3.0F;
+    embedding_values[3] = 4.0F;
+    embedding_values[4] = 10.0F;
+    embedding_values[5] = 20.0F;
+    embedding_values[6] = 30.0F;
+    embedding_values[7] = 40.0F;
+    const auto embedding = tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values));
+    overwrite_payload_bytes(payload_store, "token_embd.weight", embedding);
+
+    std::vector<float> attention_norm_values(256U, 1.0F);
+    attention_norm_values[1] = 0.5F;
+    const auto attention_norm = tensor_f32_vector(std::span<const float>(attention_norm_values));
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_norm.weight"), attention_norm);
+
+    const auto query_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 1);
+    const auto key_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 2);
+    const auto value_weight = tensor_q6_k_gguf_weight_matrix(256, 256, 3);
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_q.weight"), query_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_k.weight"), key_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_v.weight"), value_weight);
+
+    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const std::array<std::uint32_t, 2> prompt_token_ids {3, 1};
+
+    const auto shell = create_gemma2_metal_generation_runtime_shell(
+        model,
+        std::span<const std::uint32_t>(prompt_token_ids)
+    );
+    const auto& projection = shell.prefill_first_layer_attention_projection;
+    const auto& position = shell.prefill_first_layer_attention_position;
+    const auto projection_query = copy_tensor_from_backend(projection.query);
+    const auto projection_key = copy_tensor_from_backend(projection.key);
+    const auto positioned_query = copy_tensor_from_backend(position.query);
+    const auto positioned_key = copy_tensor_from_backend(position.key);
+    const auto expected_query = rope_f32_by_heads_with_position_start(
+        projection_query,
+        shell.prefill.cache_position(),
+        shell.plan.config().attention_head_count,
+        shell.plan.config().attention_key_length,
+        shell.plan.config().attention_key_length,
+        10000.0F
+    );
+    const auto expected_key = rope_f32_by_heads_with_position_start(
+        projection_key,
+        shell.prefill.cache_position(),
+        shell.plan.config().attention_head_count_kv,
+        shell.plan.config().attention_key_length,
+        shell.plan.config().attention_key_length,
+        10000.0F
+    );
+
+    expect(position.layer_index == 0, "Gemma2 shell first layer attention position index mismatch");
+    expect(
+        position.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell first layer attention position phase mismatch"
+    );
+    expect(
+        position.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell first layer attention position scratch ownership mismatch"
+    );
+    expect(
+        position.position_start == shell.prefill.cache_position(),
+        "Gemma2 shell attention position start mismatch"
+    );
+    expect(
+        position.query_head_count == shell.plan.config().attention_head_count,
+        "Gemma2 shell attention position query head count mismatch"
+    );
+    expect(
+        position.key_head_count == shell.plan.config().attention_head_count_kv,
+        "Gemma2 shell attention position key head count mismatch"
+    );
+    expect(
+        position.head_dimension == shell.plan.config().attention_key_length,
+        "Gemma2 shell attention position head dimension mismatch"
+    );
+    expect(
+        position.rope_dimension_count == shell.plan.config().attention_key_length,
+        "Gemma2 shell attention position RoPE dimension mismatch"
+    );
+    expect_close(
+        position.rope_frequency_base,
+        10000.0F,
+        0.0F,
+        "Gemma2 shell attention position RoPE frequency base mismatch"
+    );
+    expect(position.query.backend() == BackendKind::metal, "Gemma2 shell positioned query backend mismatch");
+    expect(position.key.backend() == BackendKind::metal, "Gemma2 shell positioned key backend mismatch");
+    expect(
+        position.query.descriptor() == shell.prefill.scratch().query,
+        "Gemma2 shell positioned query scheduled descriptor mismatch"
+    );
+    expect(
+        position.key.descriptor() == shell.prefill.scratch().key,
+        "Gemma2 shell positioned key scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(position.query, projection.query),
+        "Gemma2 shell positioned query should be an explicit output buffer"
+    );
+    expect(
+        !shares_backend_storage(position.key, projection.key),
+        "Gemma2 shell positioned key should be an explicit output buffer"
+    );
+    expect(
+        !shares_backend_storage(position.query, position.key),
+        "Gemma2 shell positioned query and key should be distinct buffers"
+    );
+
+    expect_f32_matrix_close(positioned_query, expected_query, 1.0e-4F, "Gemma2 shell positioned query");
+    expect_f32_matrix_close(positioned_key, expected_key, 1.0e-4F, "Gemma2 shell positioned key");
+}
+
 void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -1056,6 +1181,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 Metal runtime shell projects first layer attention when available",
         test_gemma2_metal_runtime_shell_projects_first_layer_attention_when_available,
+    },
+    {
+        "Gemma2 Metal runtime shell positions first layer attention when available",
+        test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_available,
     },
     {
         "rejects invalid Gemma2 Metal schedule shapes when available",

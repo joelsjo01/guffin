@@ -11,6 +11,7 @@
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
+#include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
@@ -62,6 +63,8 @@ using local_gguf_engine::tensor::ops::multiply_f32;
 using local_gguf_engine::tensor::ops::residual_gated_silu_projection_f32_f16_gguf_weight_to_backend;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32_to_backend;
+using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
+using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start_to_backend;
 using local_gguf_engine::tensor::ops::silu_f32;
 using local_gguf_engine::tensor::ops::silu_multiply_f32_to_backend;
 using local_gguf_engine::tests::expect;
@@ -568,6 +571,31 @@ void test_applies_rms_norm_to_cpu_backend_buffers() {
 
     expect(output_buffer.backend() == BackendKind::cpu, "CPU RMSNorm output backend mismatch");
     expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer RMSNorm output");
+}
+
+void test_applies_headwise_rope_to_cpu_backend_buffer() {
+    const std::array<float, 12> input_values {
+        1.0F, 0.0F, 9.0F,
+        0.0F, 1.0F, 8.0F,
+        1.0F, 1.0F, 7.0F,
+        2.0F, 0.0F, 6.0F,
+    };
+    const auto input = tensor_f32_matrix(2, 6, std::span<const float>(input_values));
+    const auto input_buffer = copy_tensor_to_backend(input, BackendKind::cpu);
+
+    const auto output_buffer = rope_f32_by_heads_with_position_start_to_backend(
+        input_buffer,
+        1,
+        2,
+        3,
+        2,
+        1.0F
+    );
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = rope_f32_by_heads_with_position_start(input, 1, 2, 3, 2, 1.0F);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU headwise RoPE output backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer headwise RoPE output");
 }
 
 void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers() {
@@ -1108,6 +1136,44 @@ void test_matches_rms_norm_to_metal_backend_buffer_when_available() {
         copy_tensor_from_backend(cpu_output_buffer),
         1.0e-5F,
         "Metal backend-buffer RMSNorm output"
+    );
+}
+
+void test_matches_headwise_rope_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 12> input_values {
+        1.0F, 0.0F, 9.0F,
+        0.0F, 1.0F, 8.0F,
+        1.0F, 1.0F, 7.0F,
+        2.0F, 0.0F, 6.0F,
+    };
+    const auto input = tensor_f32_matrix(2, 6, std::span<const float>(input_values));
+    const auto cpu_output_buffer = rope_f32_by_heads_with_position_start_to_backend(
+        copy_tensor_to_backend(input, BackendKind::cpu),
+        1,
+        2,
+        3,
+        2,
+        1.0F
+    );
+    const auto metal_output_buffer = rope_f32_by_heads_with_position_start_to_backend(
+        copy_tensor_to_backend(input, BackendKind::metal),
+        1,
+        2,
+        3,
+        2,
+        1.0F
+    );
+
+    expect(metal_output_buffer.backend() == BackendKind::metal, "Metal headwise RoPE output backend mismatch");
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_output_buffer),
+        copy_tensor_from_backend(cpu_output_buffer),
+        1.0e-5F,
+        "Metal backend-buffer headwise RoPE output"
     );
 }
 
@@ -1797,6 +1863,7 @@ const TestCase tensor_backend_tests[] {
         test_rejects_invalid_f16_gguf_token_embedding_inputs,
     },
     {"applies RMSNorm to CPU backend buffers", test_applies_rms_norm_to_cpu_backend_buffers},
+    {"applies headwise RoPE to CPU backend buffer", test_applies_headwise_rope_to_cpu_backend_buffer},
     {
         "multiplies backend F32 by three backend F16 GGUF weights to CPU backend buffers",
         test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers,
@@ -1851,6 +1918,10 @@ const TestCase tensor_backend_tests[] {
     {
         "matches RMSNorm to Metal backend buffer when available",
         test_matches_rms_norm_to_metal_backend_buffer_when_available,
+    },
+    {
+        "matches headwise RoPE to Metal backend buffer when available",
+        test_matches_headwise_rope_to_metal_backend_buffer_when_available,
     },
     {
         "multiplies backend F32 by three backend F16 GGUF weights to Metal backend buffers when available",

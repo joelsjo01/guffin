@@ -263,6 +263,15 @@ struct RMSNormDimensions {
     float epsilon;
 };
 
+struct RoPEByHeadsDimensions {
+    uint rows;
+    uint head_count;
+    uint head_dimension;
+    uint rope_dimension_count;
+    uint position_start;
+    float frequency_base;
+};
+
 kernel void rms_norm_f32_kernel(
     const device float* input [[buffer(0)]],
     const device float* weight [[buffer(1)]],
@@ -285,6 +294,55 @@ kernel void rms_norm_f32_kernel(
     for (uint column = 0; column < dims.hidden; ++column) {
         output[row_offset + column] = input[row_offset + column] * inverse_rms * weight[column];
     }
+}
+
+inline float rope_angle(
+    uint position,
+    uint pair_offset,
+    uint rope_dimension_count,
+    float frequency_base
+) {
+    return float(position) / pow(frequency_base, float(pair_offset) / float(rope_dimension_count));
+}
+
+kernel void rope_f32_by_heads_kernel(
+    const device float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant RoPEByHeadsDimensions& dims [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint column = gid.x;
+    const uint row = gid.y;
+    const uint row_width = dims.head_count * dims.head_dimension;
+    if (row >= dims.rows || column >= row_width) {
+        return;
+    }
+
+    const uint row_offset = row * row_width;
+    const uint head_column = column % dims.head_dimension;
+    const uint input_index = row_offset + column;
+    if (head_column >= dims.rope_dimension_count) {
+        output[input_index] = input[input_index];
+        return;
+    }
+
+    const uint pair_column = head_column - (head_column % 2);
+    const uint head_first_column = column - head_column;
+    const uint first_index = row_offset + head_first_column + pair_column;
+    const float first = input[first_index];
+    const float second = input[first_index + 1];
+    const float angle = rope_angle(
+        dims.position_start + row,
+        pair_column,
+        dims.rope_dimension_count,
+        dims.frequency_base
+    );
+    const float angle_cos = cos(angle);
+    const float angle_sin = sin(angle);
+
+    output[input_index] = head_column == pair_column
+        ? first * angle_cos - second * angle_sin
+        : first * angle_sin + second * angle_cos;
 }
 
 struct LlamaCachedAttentionDimensions {

@@ -87,6 +87,7 @@ using local_gguf_engine::tensor::ops::multiply_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rms_f32;
 using local_gguf_engine::tensor::ops::rope_f32;
+using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
 using local_gguf_engine::tensor::ops::rope_f32_with_position_start;
 using local_gguf_engine::tensor::ops::scaled_dot_product_attention_f32;
 using local_gguf_engine::tensor::ops::silu_f32;
@@ -1513,6 +1514,60 @@ void test_applies_f32_rope_to_batched_rows_with_position_start() {
     expect_close(read_f32(output, std::span<const std::uint64_t>(row1_col3)), row1_sine, 0.000001F, "F32 rowwise RoPE batch value 1,3 mismatch");
 }
 
+void test_applies_f32_rope_to_batched_heads_with_position_start() {
+    const std::array<float, 12> values {
+        1.0F, 0.0F, 9.0F,
+        0.0F, 1.0F, 8.0F,
+        1.0F, 1.0F, 7.0F,
+        2.0F, 0.0F, 6.0F,
+    };
+    const auto input = tensor_f32_matrix(2, 6, std::span<const float>(values));
+
+    const auto output = rope_f32_by_heads_with_position_start(input, 1, 2, 3, 2, 1.0F);
+    const auto row0_cosine = static_cast<float>(std::cos(1.0));
+    const auto row0_sine = static_cast<float>(std::sin(1.0));
+    const auto row1_cosine = static_cast<float>(std::cos(2.0));
+    const auto row1_sine = static_cast<float>(std::sin(2.0));
+
+    expect(output.descriptor() == input.descriptor(), "F32 headwise RoPE descriptor mismatch");
+    expect(output.bytes().data() != input.bytes().data(), "F32 headwise RoPE output should not alias input");
+
+    const std::array<std::uint64_t, 2> row0_head0_col0 {0, 0};
+    const std::array<std::uint64_t, 2> row0_head0_col1 {0, 1};
+    const std::array<std::uint64_t, 2> row0_head0_trailing {0, 2};
+    const std::array<std::uint64_t, 2> row0_head1_col0 {0, 3};
+    const std::array<std::uint64_t, 2> row0_head1_col1 {0, 4};
+    const std::array<std::uint64_t, 2> row0_head1_trailing {0, 5};
+    const std::array<std::uint64_t, 2> row1_head0_col0 {1, 0};
+    const std::array<std::uint64_t, 2> row1_head0_col1 {1, 1};
+    const std::array<std::uint64_t, 2> row1_head0_trailing {1, 2};
+    const std::array<std::uint64_t, 2> row1_head1_col0 {1, 3};
+    const std::array<std::uint64_t, 2> row1_head1_col1 {1, 4};
+    const std::array<std::uint64_t, 2> row1_head1_trailing {1, 5};
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_head0_col0)), row0_cosine, 0.000001F, "F32 headwise RoPE row 0 head 0 col 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_head0_col1)), row0_sine, 0.000001F, "F32 headwise RoPE row 0 head 0 col 1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(row0_head0_trailing)) == 9.0F, "F32 headwise RoPE row 0 head 0 trailing mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_head1_col0)), -row0_sine, 0.000001F, "F32 headwise RoPE row 0 head 1 col 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_head1_col1)), row0_cosine, 0.000001F, "F32 headwise RoPE row 0 head 1 col 1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(row0_head1_trailing)) == 8.0F, "F32 headwise RoPE row 0 head 1 trailing mismatch");
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row1_head0_col0)),
+        row1_cosine - row1_sine,
+        0.000001F,
+        "F32 headwise RoPE row 1 head 0 col 0 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row1_head0_col1)),
+        row1_sine + row1_cosine,
+        0.000001F,
+        "F32 headwise RoPE row 1 head 0 col 1 mismatch"
+    );
+    expect(read_f32(output, std::span<const std::uint64_t>(row1_head0_trailing)) == 7.0F, "F32 headwise RoPE row 1 head 0 trailing mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head1_col0)), 2.0F * row1_cosine, 0.000001F, "F32 headwise RoPE row 1 head 1 col 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head1_col1)), 2.0F * row1_sine, 0.000001F, "F32 headwise RoPE row 1 head 1 col 1 mismatch");
+    expect(read_f32(output, std::span<const std::uint64_t>(row1_head1_trailing)) == 6.0F, "F32 headwise RoPE row 1 head 1 trailing mismatch");
+}
+
 void test_applies_f32_rope_frequency_base_by_pair() {
     auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({4}), DType::f32));
     const std::array<std::uint64_t, 1> index_0 {0};
@@ -2535,6 +2590,10 @@ const TestCase tensor_core_tests[] = {
     {
         "applies F32 RoPE to batched rows with position start",
         test_applies_f32_rope_to_batched_rows_with_position_start,
+    },
+    {
+        "applies F32 RoPE to batched heads with position start",
+        test_applies_f32_rope_to_batched_heads_with_position_start,
     },
     {"applies F32 RoPE frequency base by pair", test_applies_f32_rope_frequency_base_by_pair},
     {"rejects F32 RoPE dtype mismatch", test_rejects_f32_rope_dtype_mismatch},

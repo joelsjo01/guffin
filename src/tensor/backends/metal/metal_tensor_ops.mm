@@ -7,6 +7,7 @@
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/ops/embedding.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
+#include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/tensor_error.hpp"
 #include "../../ops/validation.hpp"
 
@@ -46,6 +47,15 @@ struct RMSNormDimensions {
     float epsilon = 0.0F;
 };
 
+struct RoPEByHeadsDimensions {
+    std::uint32_t rows = 0;
+    std::uint32_t head_count = 0;
+    std::uint32_t head_dimension = 0;
+    std::uint32_t rope_dimension_count = 0;
+    std::uint32_t position_start = 0;
+    float frequency_base = 0.0F;
+};
+
 void require_matmul_inner_dimensions(const TensorDescriptor& left, const TensorDescriptor& right) {
     const auto left_columns = left.shape.dimension(1);
     const auto right_rows = right.shape.dimension(0);
@@ -75,6 +85,53 @@ void require_quantized_gguf_weight_inner_block_alignment(const TensorDescriptor&
             k_quant_block_elements,
             inner_width
         );
+    }
+}
+
+void require_valid_rope_dimension_count(std::uint64_t rope_dimension_count) {
+    if (rope_dimension_count == 0 || rope_dimension_count % 2 != 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 2, rope_dimension_count);
+    }
+}
+
+void require_positive_head_layout(std::uint64_t head_count, std::uint64_t head_dimension) {
+    if (head_count == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, head_count);
+    }
+    if (head_dimension == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, head_dimension);
+    }
+}
+
+void require_head_width(
+    const TensorDescriptor& descriptor,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension
+) {
+    if (head_count > std::numeric_limits<std::uint64_t>::max() / head_dimension) {
+        throw TensorError(TensorErrorCode::element_count_overflow, head_count, head_dimension);
+    }
+
+    const auto expected_width = head_count * head_dimension;
+    const auto actual_width = descriptor.shape.dimension(1);
+    if (actual_width != expected_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, expected_width, actual_width);
+    }
+}
+
+void require_rope_dimension_within_head(std::uint64_t head_dimension, std::uint64_t rope_dimension_count) {
+    if (rope_dimension_count > head_dimension) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, head_dimension, rope_dimension_count);
+    }
+}
+
+void require_row_position_window(std::uint64_t row_count, std::uint64_t position_start) {
+    if (row_count == 0) {
+        return;
+    }
+
+    if (position_start > std::numeric_limits<std::uint64_t>::max() - (row_count - 1)) {
+        throw std::invalid_argument("RoPE row positions overflow");
     }
 }
 
@@ -239,6 +296,26 @@ void require_rms_norm_f32_operands(
         throw TensorError(TensorErrorCode::tensor_shape_mismatch, hidden, weight_hidden);
     }
     require_positive_epsilon(epsilon);
+}
+
+void require_rope_f32_by_heads_operands(
+    const TensorDescriptor& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    ops::require_f32_descriptor(input);
+    require_matrix_descriptor(input);
+    require_positive_head_layout(head_count, head_dimension);
+    require_head_width(input, head_count, head_dimension);
+    require_valid_rope_dimension_count(rope_dimension_count);
+    require_rope_dimension_within_head(head_dimension, rope_dimension_count);
+    if (!(frequency_base > 0.0F)) {
+        throw std::invalid_argument("RoPE frequency base must be positive");
+    }
+    require_row_position_window(input.shape.dimension(0), position_start);
 }
 
 void require_positive_finite_scale(float scale) {
@@ -577,6 +654,76 @@ BackendBuffer rms_norm_f32_with_metal_buffers(
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal RMSNorm command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return make_metal_backend_buffer(output_descriptor, output_buffer);
+}
+
+BackendBuffer rope_f32_by_heads_with_metal_buffer(
+    const MetalBackendBufferStorage& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto rows = input.descriptor().shape.dimension(0);
+    const auto columns = input.descriptor().shape.dimension(1);
+    const RoPEByHeadsDimensions dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .head_count = require_u32_dimension(head_count, "head_count"),
+        .head_dimension = require_u32_dimension(head_dimension, "head_dimension"),
+        .rope_dimension_count = require_u32_dimension(rope_dimension_count, "rope_dimension_count"),
+        .position_start = require_u32_dimension(position_start, "position_start"),
+        .frequency_base = frequency_base,
+    };
+    const auto output_descriptor = input.descriptor();
+
+    id<MTLBuffer> output_buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(
+                                      output_descriptor.byte_count
+                                   )
+                                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(RoPEByHeadsDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (output_buffer == nil || dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal RoPE-by-heads buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (command_buffer == nil || encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal RoPE-by-heads command encoding failed"
+        );
+    }
+
+    [encoder setComputePipelineState:state.rope_by_heads_pipeline];
+    [encoder setBuffer:input.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:output_buffer offset:0 atIndex:1];
+    [encoder setBuffer:dims_buffer offset:0 atIndex:2];
+
+    const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+    const auto threadgroup_columns = static_cast<NSUInteger>((columns + 15U) / 16U);
+    const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
+    const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal RoPE-by-heads command failed: " + ns_error_message(execution_error, "unknown error")
         );
     }
 
@@ -1383,6 +1530,53 @@ BackendBuffer rms_norm_f32_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         input.backend(),
         "unsupported backend buffers for RMSNorm"
+    );
+}
+
+BackendBuffer rope_f32_by_heads_with_position_start_to_backend(
+    const BackendBuffer& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    backends::metal::require_rope_f32_by_heads_operands(
+        input.descriptor(),
+        position_start,
+        head_count,
+        head_dimension,
+        rope_dimension_count,
+        frequency_base
+    );
+
+    switch (input.backend()) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::rope_f32_by_heads_with_cpu_buffer(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(input)),
+                position_start,
+                head_count,
+                head_dimension,
+                rope_dimension_count,
+                frequency_base
+            );
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::rope_f32_by_heads_with_metal_buffer(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(input)),
+                    position_start,
+                    head_count,
+                    head_dimension,
+                    rope_dimension_count,
+                    frequency_base
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        input.backend(),
+        "unsupported backend buffer for RoPE-by-heads"
     );
 }
 

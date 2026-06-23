@@ -50,6 +50,14 @@ void require_rms_norm_f32_operands(
     const TensorDescriptor& weight,
     float epsilon
 );
+void require_rope_f32_by_heads_operands(
+    const TensorDescriptor& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+);
 void require_positive_finite_scale(float scale);
 void require_positive_frequency_base(float frequency_base);
 void require_residual_gated_silu_projection_f32_f16_gguf_weight_operands(
@@ -86,6 +94,14 @@ void require_f32_f16_matmul_gguf_weight_triple_operands(
     const MetalBackendBufferStorage& input,
     const MetalBackendBufferStorage& weight,
     float epsilon
+);
+[[nodiscard]] BackendBuffer rope_f32_by_heads_with_metal_buffer(
+    const MetalBackendBufferStorage& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
 );
 [[nodiscard]] BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
     const MetalBackendBufferStorage& left,

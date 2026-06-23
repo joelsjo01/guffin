@@ -5,8 +5,8 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma attention position setup primitive behind the
-Metal runtime shell.
+Add the first scheduled Gemma attention score setup primitive behind the Metal
+runtime shell.
 
 ## Why
 
@@ -15,13 +15,15 @@ views, tokenize the prompt, upload the resident Metal model plan, build
 separate prefill/decode schedules, turn prompt token IDs into backend-resident
 hidden states with the Gemma embedding scale, normalize the first-layer
 attention input with `blk.0.attn_norm.weight`, and produce explicit
-backend-resident Q/K/V projection outputs for the first prefill layer.
+backend-resident Q/K/V projection outputs for the first prefill layer. The
+runtime shell also applies Gemma position/RoPE setup to the first-layer Q/K
+projection outputs and keeps the positioned Q/K outputs explicit.
 
-The next blocker is preparing those first-layer Q/K projections for Gemma
-positions without breaking the resident model plan. Keep this slice tiny and
-replaceable: enough to prove scheduled projection outputs can flow into
-explicit position-aware Q/K outputs, but not enough to pretend full attention
-or generation exists.
+The next blocker is proving those positioned Q/K outputs can flow into the
+scheduled attention-score workspace without breaking the resident model plan.
+Keep this slice tiny and replaceable: enough to produce explicit pre-softmax
+score outputs for the first prefill layer, but not enough to pretend full
+attention or generation exists.
 
 ## Read
 
@@ -37,8 +39,8 @@ or generation exists.
 
 - Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
   and `src/engine`
-- Metal backend/tensor code only for narrow backend-buffer RoPE or position
-  helpers and tests
+- Metal backend/tensor code only for narrow backend-buffer score helpers and
+  tests
 - `tests/engine`
 - `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
@@ -49,8 +51,8 @@ or generation exists.
 ## Do Not
 
 - Do not add full Gemma generation or a full Gemma layer chain.
-- Do not add attention softmax, KV-cache update, attention output projection,
-  FFN work, logits, or sampling changes.
+- Do not add attention softmax, KV-cache update, value aggregation, attention
+  output projection, FFN work, logits, or sampling changes.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -73,7 +75,7 @@ or generation exists.
 
 ## Stop When
 
-One small scheduled Gemma position setup primitive consumes the runtime shell's
-first-layer Q/K projection outputs and produces explicit resident or
-phase-local position-aware Q/K outputs with deterministic tests, while full
-Gemma generation remains explicitly unsupported.
+One small scheduled Gemma attention-score setup primitive consumes the runtime
+shell's first-layer positioned Q/K outputs and produces an explicit resident or
+phase-local pre-softmax score output with deterministic tests, while full Gemma
+generation remains explicitly unsupported.

@@ -220,6 +220,25 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> rope_by_heads_function = [library newFunctionWithName:@"rope_f32_by_heads_kernel"];
+    if (rope_by_heads_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal RoPE-by-heads kernel function was not found"
+        );
+    }
+
+    NSError* rope_by_heads_pipeline_error = nil;
+    rope_by_heads_pipeline = [device newComputePipelineStateWithFunction:rope_by_heads_function
+                                                                   error:&rope_by_heads_pipeline_error];
+    if (rope_by_heads_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal RoPE-by-heads pipeline creation failed: "
+                + ns_error_message(rope_by_heads_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> llama_cached_decode_qkv_projection_function =
         [library newFunctionWithName:@"llama_cached_decode_qkv_projection_f32_f16_kernel"];
     if (llama_cached_decode_qkv_projection_function == nil) {

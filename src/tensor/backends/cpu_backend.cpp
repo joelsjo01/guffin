@@ -4,6 +4,7 @@
 #include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
+#include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
 
 #include <cstdint>
@@ -161,6 +162,24 @@ BackendBuffer rms_norm_f32_with_cpu_buffers(
     float epsilon
 ) {
     return copy_tensor_to_cpu_backend(ops::rms_norm_f32(input.storage(), weight.storage(), epsilon));
+}
+
+BackendBuffer rope_f32_by_heads_with_cpu_buffer(
+    const CpuBackendBufferStorage& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    return copy_tensor_to_cpu_backend(ops::rope_f32_by_heads_with_position_start(
+        input.storage(),
+        position_start,
+        head_count,
+        head_dimension,
+        rope_dimension_count,
+        frequency_base
+    ));
 }
 
 TensorStorage matmul_f32_f16_gguf_weight(
