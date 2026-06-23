@@ -51,6 +51,30 @@ struct F32RoPEMatrixColumnView {
     std::uint64_t query_position_start
 );
 
+[[nodiscard]] TensorStorage causal_grouped_attention_scores_f32(
+    const TensorStorage& query,
+    const TensorStorage& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+);
+
+[[nodiscard]] BackendBuffer causal_grouped_attention_scores_f32_to_backend(
+    const BackendBuffer& query,
+    const BackendBuffer& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+);
+
 [[nodiscard]] BackendBuffer llama_cached_attention_f32_to_backend(
     const BackendBuffer& query,
     const BackendBuffer& key,

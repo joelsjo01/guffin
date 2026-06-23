@@ -58,6 +58,17 @@ void require_rope_f32_by_heads_operands(
     std::uint64_t rope_dimension_count,
     float frequency_base
 );
+void require_causal_grouped_attention_scores_f32_operands(
+    const TensorDescriptor& query,
+    const TensorDescriptor& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+);
 void require_positive_finite_scale(float scale);
 void require_positive_frequency_base(float frequency_base);
 void require_residual_gated_silu_projection_f32_f16_gguf_weight_operands(
@@ -102,6 +113,17 @@ void require_f32_f16_matmul_gguf_weight_triple_operands(
     std::uint64_t head_dimension,
     std::uint64_t rope_dimension_count,
     float frequency_base
+);
+[[nodiscard]] BackendBuffer causal_grouped_attention_scores_f32_with_metal_buffers(
+    const MetalBackendBufferStorage& query,
+    const MetalBackendBufferStorage& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
 );
 [[nodiscard]] BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
     const MetalBackendBufferStorage& left,

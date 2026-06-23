@@ -1,11 +1,13 @@
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
+#include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/embedding.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
 
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -111,6 +113,45 @@ void require_prefill_attention_projection_matches_schedule(
     }
 }
 
+void require_prefill_attention_position_matches_schedule(
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalAttentionPositionActivations& position
+) {
+    if (prefill.phase() != Gemma2MetalSchedulePhase::prefill) {
+        throw std::invalid_argument("Gemma2 Metal attention score primitive requires a prefill schedule");
+    }
+    if (position.phase != prefill.phase()) {
+        throw std::invalid_argument("Gemma2 Metal attention score input phase must match schedule");
+    }
+    if (position.scratch_ownership != prefill.scratch_ownership()) {
+        throw std::invalid_argument("Gemma2 Metal attention score input scratch ownership must match schedule");
+    }
+    if (prefill.layers().empty()) {
+        throw std::invalid_argument("Gemma2 Metal attention score primitive requires at least one layer");
+    }
+    if (position.layer_index != prefill.layers().front().layer_index) {
+        throw std::invalid_argument("Gemma2 Metal attention score input layer must match schedule");
+    }
+    if (position.query.backend() != prefill.backend() || position.key.backend() != prefill.backend()) {
+        throw std::invalid_argument("Gemma2 Metal attention score inputs must use the schedule backend");
+    }
+    if (position.query.descriptor() != prefill.scratch().query) {
+        throw std::invalid_argument("Gemma2 Metal attention score query must match scheduled query shape");
+    }
+    if (position.key.descriptor() != prefill.scratch().key) {
+        throw std::invalid_argument("Gemma2 Metal attention score key must match scheduled key shape");
+    }
+}
+
+void require_attention_score_output_shape(
+    const tensor::BackendBuffer& output,
+    const tensor::TensorDescriptor& expected
+) {
+    if (output.descriptor() != expected) {
+        throw std::invalid_argument("Gemma2 Metal attention score output must match scheduled scratch shape");
+    }
+}
+
 [[nodiscard]] Gemma2MetalLayerInputActivations create_gemma2_metal_prefill_first_layer_input(
     const Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& prefill,
@@ -213,6 +254,45 @@ void require_prefill_attention_projection_matches_schedule(
     };
 }
 
+[[nodiscard]] Gemma2MetalAttentionScoreActivations create_gemma2_metal_prefill_first_layer_attention_scores(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalAttentionPositionActivations& position
+) {
+    require_prefill_attention_position_matches_schedule(prefill, position);
+    const auto& first_layer = prefill.layers().front();
+    const auto key_length = plan.config().attention_key_length;
+    const auto scale = 1.0F / std::sqrt(static_cast<float>(key_length));
+    const auto attention_token_count = first_layer.attention_token_count;
+    auto scores = tensor::ops::causal_grouped_attention_scores_f32_to_backend(
+        position.query,
+        position.key,
+        prefill.cache_position(),
+        plan.config().attention_head_count,
+        plan.config().attention_head_count_kv,
+        key_length,
+        attention_token_count,
+        scale,
+        plan.config().attention_logit_softcap
+    );
+
+    require_attention_score_output_shape(scores, prefill.scratch().attention_scores);
+
+    return Gemma2MetalAttentionScoreActivations {
+        .layer_index = first_layer.layer_index,
+        .phase = prefill.phase(),
+        .scratch_ownership = prefill.scratch_ownership(),
+        .query_position_start = prefill.cache_position(),
+        .attention_token_count = attention_token_count,
+        .query_head_count = plan.config().attention_head_count,
+        .key_head_count = plan.config().attention_head_count_kv,
+        .key_length = key_length,
+        .scale = scale,
+        .logit_softcap = plan.config().attention_logit_softcap,
+        .scores = std::move(scores),
+    };
+}
+
 }  // namespace
 
 Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
@@ -250,6 +330,12 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
             prefill,
             prefill_first_layer_attention_projection
         );
+    auto prefill_first_layer_attention_scores =
+        create_gemma2_metal_prefill_first_layer_attention_scores(
+            plan,
+            prefill,
+            prefill_first_layer_attention_position
+        );
 
     return Gemma2MetalGenerationRuntimeShell {
         .plan = std::move(plan),
@@ -259,6 +345,7 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
         .prefill_first_layer_input = std::move(prefill_first_layer_input),
         .prefill_first_layer_attention_projection = std::move(prefill_first_layer_attention_projection),
         .prefill_first_layer_attention_position = std::move(prefill_first_layer_attention_position),
+        .prefill_first_layer_attention_scores = std::move(prefill_first_layer_attention_scores),
     };
 }
 

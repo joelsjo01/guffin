@@ -5,6 +5,7 @@
 #include "metal_context.hpp"
 
 #include "local_gguf_engine/runtime/backend_error.hpp"
+#include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/embedding.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
@@ -54,6 +55,18 @@ struct RoPEByHeadsDimensions {
     std::uint32_t rope_dimension_count = 0;
     std::uint32_t position_start = 0;
     float frequency_base = 0.0F;
+};
+
+struct GroupedAttentionScoreDimensions {
+    std::uint32_t query_rows = 0;
+    std::uint32_t key_rows = 0;
+    std::uint32_t head_count = 0;
+    std::uint32_t kv_head_count = 0;
+    std::uint32_t key_length = 0;
+    std::uint32_t attention_token_count = 0;
+    std::uint32_t query_position_start = 0;
+    float scale = 0.0F;
+    float logit_softcap = 0.0F;
 };
 
 void require_matmul_inner_dimensions(const TensorDescriptor& left, const TensorDescriptor& right) {
@@ -132,6 +145,63 @@ void require_row_position_window(std::uint64_t row_count, std::uint64_t position
 
     if (position_start > std::numeric_limits<std::uint64_t>::max() - (row_count - 1)) {
         throw std::invalid_argument("RoPE row positions overflow");
+    }
+}
+
+void require_causal_position_window(
+    std::uint64_t query_rows,
+    std::uint64_t key_rows,
+    std::uint64_t query_position_start
+) {
+    if (query_position_start > std::numeric_limits<std::uint64_t>::max() - query_rows) {
+        throw std::invalid_argument("attention causal query positions overflow");
+    }
+
+    const auto query_position_end = query_position_start + query_rows;
+    if (query_position_end > key_rows) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_rows, query_position_end);
+    }
+}
+
+void require_grouped_attention_layout(
+    const TensorDescriptor& query,
+    const TensorDescriptor& key,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count
+) {
+    if (head_count == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, head_count);
+    }
+    if (kv_head_count == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, kv_head_count);
+    }
+    if (key_length == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, key_length);
+    }
+    if (attention_token_count == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, attention_token_count);
+    }
+    if (head_count % kv_head_count != 0) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, kv_head_count, head_count);
+    }
+    if (head_count > std::numeric_limits<std::uint64_t>::max() / key_length) {
+        throw TensorError(TensorErrorCode::element_count_overflow, head_count, key_length);
+    }
+    if (kv_head_count > std::numeric_limits<std::uint64_t>::max() / key_length) {
+        throw TensorError(TensorErrorCode::element_count_overflow, kv_head_count, key_length);
+    }
+
+    const auto expected_query_width = head_count * key_length;
+    const auto expected_key_width = kv_head_count * key_length;
+    const auto actual_query_width = query.shape.dimension(1);
+    const auto actual_key_width = key.shape.dimension(1);
+    if (actual_query_width != expected_query_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, expected_query_width, actual_query_width);
+    }
+    if (actual_key_width != expected_key_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, expected_key_width, actual_key_width);
     }
 }
 
@@ -322,6 +392,33 @@ void require_positive_finite_scale(float scale) {
     if (!(scale > 0.0F) || !std::isfinite(scale)) {
         throw std::invalid_argument("attention scale must be positive and finite");
     }
+}
+
+void require_positive_finite_logit_softcap(float logit_softcap) {
+    if (!(logit_softcap > 0.0F) || !std::isfinite(logit_softcap)) {
+        throw std::invalid_argument("attention logit softcap must be positive and finite");
+    }
+}
+
+void require_causal_grouped_attention_scores_f32_operands(
+    const TensorDescriptor& query,
+    const TensorDescriptor& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+) {
+    ops::require_f32_descriptor(query);
+    ops::require_f32_descriptor(key);
+    require_matrix_descriptor(query);
+    require_matrix_descriptor(key);
+    require_grouped_attention_layout(query, key, head_count, kv_head_count, key_length, attention_token_count);
+    require_causal_position_window(query.shape.dimension(0), key.shape.dimension(0), query_position_start);
+    require_positive_finite_scale(scale);
+    require_positive_finite_logit_softcap(logit_softcap);
 }
 
 void require_positive_frequency_base(float frequency_base) {
@@ -724,6 +821,88 @@ BackendBuffer rope_f32_by_heads_with_metal_buffer(
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal RoPE-by-heads command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return make_metal_backend_buffer(output_descriptor, output_buffer);
+}
+
+BackendBuffer causal_grouped_attention_scores_f32_with_metal_buffers(
+    const MetalBackendBufferStorage& query,
+    const MetalBackendBufferStorage& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto query_rows = query.descriptor().shape.dimension(0);
+    const auto key_rows = key.descriptor().shape.dimension(0);
+    const GroupedAttentionScoreDimensions dims {
+        .query_rows = require_u32_dimension(query_rows, "query_rows"),
+        .key_rows = require_u32_dimension(key_rows, "key_rows"),
+        .head_count = require_u32_dimension(head_count, "head_count"),
+        .kv_head_count = require_u32_dimension(kv_head_count, "kv_head_count"),
+        .key_length = require_u32_dimension(key_length, "key_length"),
+        .attention_token_count = require_u32_dimension(attention_token_count, "attention_token_count"),
+        .query_position_start = require_u32_dimension(query_position_start, "query_position_start"),
+        .scale = scale,
+        .logit_softcap = logit_softcap,
+    };
+    const auto output_descriptor = TensorDescriptor::from(
+        Shape::from({query_rows, head_count, attention_token_count}),
+        DType::f32
+    );
+
+    id<MTLBuffer> output_buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(
+                                      output_descriptor.byte_count
+                                   )
+                                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(GroupedAttentionScoreDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (output_buffer == nil || dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal causal grouped attention score buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (command_buffer == nil || encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal causal grouped attention score command encoding failed"
+        );
+    }
+
+    [encoder setComputePipelineState:state.causal_grouped_attention_scores_pipeline];
+    [encoder setBuffer:query.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:key.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:output_buffer offset:0 atIndex:2];
+    [encoder setBuffer:dims_buffer offset:0 atIndex:3];
+
+    const MTLSize threads_per_threadgroup = MTLSizeMake(8, 8, 2);
+    const auto threadgroup_columns = static_cast<NSUInteger>((attention_token_count + 7U) / 8U);
+    const auto threadgroup_heads = static_cast<NSUInteger>((head_count + 7U) / 8U);
+    const auto threadgroup_rows = static_cast<NSUInteger>((query_rows + 1U) / 2U);
+    const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_heads, threadgroup_rows);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal causal grouped attention score command failed: "
+                + ns_error_message(execution_error, "unknown error")
         );
     }
 
@@ -1577,6 +1756,66 @@ BackendBuffer rope_f32_by_heads_with_position_start_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         input.backend(),
         "unsupported backend buffer for RoPE-by-heads"
+    );
+}
+
+BackendBuffer causal_grouped_attention_scores_f32_to_backend(
+    const BackendBuffer& query,
+    const BackendBuffer& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+) {
+    backends::metal::require_causal_grouped_attention_scores_f32_operands(
+        query.descriptor(),
+        key.descriptor(),
+        query_position_start,
+        head_count,
+        kv_head_count,
+        key_length,
+        attention_token_count,
+        scale,
+        logit_softcap
+    );
+    backends::metal::require_same_backend(query.backend(), key.backend(), "causal grouped attention scores");
+
+    switch (query.backend()) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::causal_grouped_attention_scores_f32_with_cpu_buffers(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(query)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(key)),
+                query_position_start,
+                head_count,
+                kv_head_count,
+                key_length,
+                attention_token_count,
+                scale,
+                logit_softcap
+            );
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::causal_grouped_attention_scores_f32_with_metal_buffers(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(query)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(key)),
+                    query_position_start,
+                    head_count,
+                    kv_head_count,
+                    key_length,
+                    attention_token_count,
+                    scale,
+                    logit_softcap
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        query.backend(),
+        "unsupported backend buffers for causal grouped attention scores"
     );
 }
 

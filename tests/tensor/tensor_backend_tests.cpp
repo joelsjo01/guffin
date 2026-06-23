@@ -51,6 +51,8 @@ using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tensor::tensor_backend_unavailable_reason;
 using local_gguf_engine::tensor::write_f32;
 using local_gguf_engine::tensor::ops::add_f32;
+using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
+using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32_to_backend;
 using local_gguf_engine::tensor::ops::embed_f16_gguf_weight_token_ids_to_backend;
 using local_gguf_engine::tensor::ops::gated_silu_projection_f32_f16_gguf_weight_to_backend;
 using local_gguf_engine::tensor::ops::llama_cached_attention_f32_to_backend;
@@ -97,6 +99,41 @@ void expect_f32_matrix_close(
                 tolerance,
                 message
             );
+        }
+    }
+}
+
+void expect_f32_rank3_close(
+    const TensorStorage& actual,
+    const TensorStorage& expected,
+    float tolerance,
+    std::string_view message
+) {
+    expect(actual.descriptor() == expected.descriptor(), std::string(message) + " descriptor mismatch");
+    expect(actual.descriptor().dtype == DType::f32, std::string(message) + " dtype mismatch");
+    expect(actual.descriptor().shape.rank() == 3, std::string(message) + " rank mismatch");
+
+    const auto dim0 = actual.descriptor().shape.dimension(0);
+    const auto dim1 = actual.descriptor().shape.dimension(1);
+    const auto dim2 = actual.descriptor().shape.dimension(2);
+    for (std::uint64_t index0 = 0; index0 < dim0; ++index0) {
+        for (std::uint64_t index1 = 0; index1 < dim1; ++index1) {
+            for (std::uint64_t index2 = 0; index2 < dim2; ++index2) {
+                const std::array<std::uint64_t, 3> index {index0, index1, index2};
+                const auto actual_value = read_f32(actual, std::span<const std::uint64_t>(index));
+                const auto expected_value = read_f32(expected, std::span<const std::uint64_t>(index));
+                if (std::isinf(actual_value) || std::isinf(expected_value)) {
+                    expect(
+                        std::isinf(actual_value)
+                            && std::isinf(expected_value)
+                            && std::signbit(actual_value) == std::signbit(expected_value),
+                        std::string(message) + " infinity mismatch"
+                    );
+                    continue;
+                }
+
+                expect_close(actual_value, expected_value, tolerance, message);
+            }
         }
     }
 }
@@ -596,6 +633,40 @@ void test_applies_headwise_rope_to_cpu_backend_buffer() {
 
     expect(output_buffer.backend() == BackendKind::cpu, "CPU headwise RoPE output backend mismatch");
     expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer headwise RoPE output");
+}
+
+void test_applies_causal_grouped_attention_scores_to_cpu_backend_buffers() {
+    const std::array<float, 12> query_values {
+        1.0F, 0.0F, 0.0F, 1.0F,
+        2.0F, 0.0F, 0.0F, 2.0F,
+        1.0F, 1.0F, 2.0F, 1.0F,
+    };
+    const std::array<float, 6> key_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+        1.0F, 1.0F,
+    };
+    const auto query = tensor_f32_matrix(3, 4, std::span<const float>(query_values));
+    const auto key = tensor_f32_matrix(3, 2, std::span<const float>(key_values));
+    const auto query_buffer = copy_tensor_to_backend(query, BackendKind::cpu);
+    const auto key_buffer = copy_tensor_to_backend(key, BackendKind::cpu);
+
+    const auto output_buffer = causal_grouped_attention_scores_f32_to_backend(
+        query_buffer,
+        key_buffer,
+        0,
+        2,
+        1,
+        2,
+        2,
+        0.5F,
+        10.0F
+    );
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = causal_grouped_attention_scores_f32(query, key, 0, 2, 1, 2, 2, 0.5F, 10.0F);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU causal grouped attention score backend mismatch");
+    expect_f32_rank3_close(output, expected, 0.0F, "CPU backend-buffer causal grouped attention scores");
 }
 
 void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers() {
@@ -1174,6 +1245,58 @@ void test_matches_headwise_rope_to_metal_backend_buffer_when_available() {
         copy_tensor_from_backend(cpu_output_buffer),
         1.0e-5F,
         "Metal backend-buffer headwise RoPE output"
+    );
+}
+
+void test_matches_causal_grouped_attention_scores_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 12> query_values {
+        1.0F, 0.0F, 0.0F, 1.0F,
+        2.0F, 0.0F, 0.0F, 2.0F,
+        1.0F, 1.0F, 2.0F, 1.0F,
+    };
+    const std::array<float, 6> key_values {
+        1.0F, 0.0F,
+        0.0F, 1.0F,
+        1.0F, 1.0F,
+    };
+    const auto query = tensor_f32_matrix(3, 4, std::span<const float>(query_values));
+    const auto key = tensor_f32_matrix(3, 2, std::span<const float>(key_values));
+    const auto cpu_output_buffer = causal_grouped_attention_scores_f32_to_backend(
+        copy_tensor_to_backend(query, BackendKind::cpu),
+        copy_tensor_to_backend(key, BackendKind::cpu),
+        0,
+        2,
+        1,
+        2,
+        2,
+        0.5F,
+        10.0F
+    );
+    const auto metal_output_buffer = causal_grouped_attention_scores_f32_to_backend(
+        copy_tensor_to_backend(query, BackendKind::metal),
+        copy_tensor_to_backend(key, BackendKind::metal),
+        0,
+        2,
+        1,
+        2,
+        2,
+        0.5F,
+        10.0F
+    );
+
+    expect(
+        metal_output_buffer.backend() == BackendKind::metal,
+        "Metal causal grouped attention score backend mismatch"
+    );
+    expect_f32_rank3_close(
+        copy_tensor_from_backend(metal_output_buffer),
+        copy_tensor_from_backend(cpu_output_buffer),
+        1.0e-5F,
+        "Metal backend-buffer causal grouped attention scores"
     );
 }
 
@@ -1865,6 +1988,10 @@ const TestCase tensor_backend_tests[] {
     {"applies RMSNorm to CPU backend buffers", test_applies_rms_norm_to_cpu_backend_buffers},
     {"applies headwise RoPE to CPU backend buffer", test_applies_headwise_rope_to_cpu_backend_buffer},
     {
+        "applies causal grouped attention scores to CPU backend buffers",
+        test_applies_causal_grouped_attention_scores_to_cpu_backend_buffers,
+    },
+    {
         "multiplies backend F32 by three backend F16 GGUF weights to CPU backend buffers",
         test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers,
     },
@@ -1922,6 +2049,10 @@ const TestCase tensor_backend_tests[] {
     {
         "matches headwise RoPE to Metal backend buffer when available",
         test_matches_headwise_rope_to_metal_backend_buffer_when_available,
+    },
+    {
+        "matches causal grouped attention scores to Metal backend buffer when available",
+        test_matches_causal_grouped_attention_scores_to_metal_backend_buffer_when_available,
     },
     {
         "multiplies backend F32 by three backend F16 GGUF weights to Metal backend buffers when available",

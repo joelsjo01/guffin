@@ -239,6 +239,27 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> causal_grouped_attention_scores_function =
+        [library newFunctionWithName:@"causal_grouped_attention_scores_f32_kernel"];
+    if (causal_grouped_attention_scores_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal causal grouped attention scores kernel function was not found"
+        );
+    }
+
+    NSError* causal_grouped_attention_scores_pipeline_error = nil;
+    causal_grouped_attention_scores_pipeline =
+        [device newComputePipelineStateWithFunction:causal_grouped_attention_scores_function
+                                              error:&causal_grouped_attention_scores_pipeline_error];
+    if (causal_grouped_attention_scores_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal causal grouped attention scores pipeline creation failed: "
+                + ns_error_message(causal_grouped_attention_scores_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> llama_cached_decode_qkv_projection_function =
         [library newFunctionWithName:@"llama_cached_decode_qkv_projection_f32_f16_kernel"];
     if (llama_cached_decode_qkv_projection_function == nil) {

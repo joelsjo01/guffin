@@ -111,6 +111,12 @@ void require_positive_finite_scale(float scale) {
     }
 }
 
+void require_positive_finite_logit_softcap(float logit_softcap) {
+    if (!(logit_softcap > 0.0F) || !std::isfinite(logit_softcap)) {
+        throw std::invalid_argument("attention logit softcap must be positive and finite");
+    }
+}
+
 void require_causal_position_window(
     std::uint64_t query_rows,
     std::uint64_t key_rows,
@@ -123,6 +129,48 @@ void require_causal_position_window(
     const auto query_position_end = query_position_start + query_rows;
     if (query_position_end > key_rows) {
         throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_rows, query_position_end);
+    }
+}
+
+void require_grouped_attention_layout(
+    const TensorDescriptor& query,
+    const TensorDescriptor& key,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count
+) {
+    if (head_count == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, head_count);
+    }
+    if (kv_head_count == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, kv_head_count);
+    }
+    if (key_length == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, key_length);
+    }
+    if (attention_token_count == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, attention_token_count);
+    }
+    if (head_count % kv_head_count != 0) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, kv_head_count, head_count);
+    }
+    if (head_count > std::numeric_limits<std::uint64_t>::max() / key_length) {
+        throw TensorError(TensorErrorCode::element_count_overflow, head_count, key_length);
+    }
+    if (kv_head_count > std::numeric_limits<std::uint64_t>::max() / key_length) {
+        throw TensorError(TensorErrorCode::element_count_overflow, kv_head_count, key_length);
+    }
+
+    const auto expected_query_width = head_count * key_length;
+    const auto expected_key_width = kv_head_count * key_length;
+    const auto actual_query_width = query.shape.dimension(1);
+    const auto actual_key_width = key.shape.dimension(1);
+    if (actual_query_width != expected_query_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, expected_query_width, actual_query_width);
+    }
+    if (actual_key_width != expected_key_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, expected_key_width, actual_key_width);
     }
 }
 
@@ -374,6 +422,76 @@ void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float 
     return output;
 }
 
+[[nodiscard]] TensorStorage causal_grouped_attention_scores_impl_f32(
+    const TensorStorage& query,
+    const TensorStorage& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+) {
+    require_f32_operand(query);
+    require_f32_operand(key);
+    require_matrix_descriptor(query.descriptor());
+    require_matrix_descriptor(key.descriptor());
+    require_grouped_attention_layout(
+        query.descriptor(),
+        key.descriptor(),
+        head_count,
+        kv_head_count,
+        key_length,
+        attention_token_count
+    );
+    require_positive_finite_scale(scale);
+    require_positive_finite_logit_softcap(logit_softcap);
+
+    const auto query_rows = query.descriptor().shape.dimension(0);
+    const auto key_rows = key.descriptor().shape.dimension(0);
+    require_causal_position_window(query_rows, key_rows, query_position_start);
+    const auto query_width = head_count * key_length;
+    const auto key_width = kv_head_count * key_length;
+    const auto kv_group_size = head_count / kv_head_count;
+    auto output = TensorStorage::allocate(TensorDescriptor::from(
+        Shape::from({query_rows, head_count, attention_token_count}),
+        DType::f32
+    ));
+
+    for (std::uint64_t query_row = 0; query_row < query_rows; ++query_row) {
+        const auto query_position = query_position_start + query_row;
+        const auto first_key_position = (query_position + 1 > attention_token_count)
+            ? query_position + 1 - attention_token_count
+            : 0;
+        for (std::uint64_t head = 0; head < head_count; ++head) {
+            const auto kv_head = head / kv_group_size;
+            const auto query_first_column = head * key_length;
+            const auto key_first_column = kv_head * key_length;
+            for (std::uint64_t score_column = 0; score_column < attention_token_count; ++score_column) {
+                const auto key_row = first_key_position + score_column;
+                const auto output_index = (query_row * head_count + head) * attention_token_count + score_column;
+                if (key_row > query_position || key_row >= key_rows) {
+                    write_f32_linear(output, output_index, -std::numeric_limits<float>::infinity());
+                    continue;
+                }
+
+                float dot = 0.0F;
+                for (std::uint64_t column = 0; column < key_length; ++column) {
+                    dot += read_f32_linear(query, query_row * query_width + query_first_column + column)
+                        * read_f32_linear(key, key_row * key_width + key_first_column + column);
+                }
+
+                const auto scaled = dot * scale;
+                const auto softcapped = std::tanh(scaled / logit_softcap) * logit_softcap;
+                write_f32_linear(output, output_index, softcapped);
+            }
+        }
+    }
+
+    return output;
+}
+
 }  // namespace
 
 TensorStorage scaled_dot_product_attention_f32(
@@ -424,6 +542,30 @@ TensorStorage causal_scaled_dot_product_attention_f32(
         value,
         scale,
         query_position_start
+    );
+}
+
+TensorStorage causal_grouped_attention_scores_f32(
+    const TensorStorage& query,
+    const TensorStorage& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+) {
+    return causal_grouped_attention_scores_impl_f32(
+        query,
+        key,
+        query_position_start,
+        head_count,
+        kv_head_count,
+        key_length,
+        attention_token_count,
+        scale,
+        logit_softcap
     );
 }
 

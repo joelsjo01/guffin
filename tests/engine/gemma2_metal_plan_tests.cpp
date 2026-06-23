@@ -8,6 +8,7 @@
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
+#include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
@@ -21,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -61,6 +63,7 @@ using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorDescriptor;
 using local_gguf_engine::tensor::backend_buffer_storage;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
+using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_quantized_gguf_weight;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
@@ -275,6 +278,41 @@ void expect_f32_matrix_close(
                 tolerance,
                 message
             );
+        }
+    }
+}
+
+void expect_f32_rank3_close(
+    const local_gguf_engine::tensor::TensorStorage& actual,
+    const local_gguf_engine::tensor::TensorStorage& expected,
+    float tolerance,
+    std::string_view message
+) {
+    expect(actual.descriptor() == expected.descriptor(), std::string(message) + " descriptor mismatch");
+    expect(actual.descriptor().dtype == DType::f32, std::string(message) + " dtype mismatch");
+    expect(actual.descriptor().shape.rank() == 3, std::string(message) + " rank mismatch");
+
+    const auto dim0 = actual.descriptor().shape.dimension(0);
+    const auto dim1 = actual.descriptor().shape.dimension(1);
+    const auto dim2 = actual.descriptor().shape.dimension(2);
+    for (std::uint64_t index0 = 0; index0 < dim0; ++index0) {
+        for (std::uint64_t index1 = 0; index1 < dim1; ++index1) {
+            for (std::uint64_t index2 = 0; index2 < dim2; ++index2) {
+                const std::array<std::uint64_t, 3> index {index0, index1, index2};
+                const auto actual_value = read_f32(actual, std::span<const std::uint64_t>(index));
+                const auto expected_value = read_f32(expected, std::span<const std::uint64_t>(index));
+                if (std::isinf(actual_value) || std::isinf(expected_value)) {
+                    expect(
+                        std::isinf(actual_value)
+                            && std::isinf(expected_value)
+                            && std::signbit(actual_value) == std::signbit(expected_value),
+                        std::string(message) + " infinity mismatch"
+                    );
+                    continue;
+                }
+
+                expect_close(actual_value, expected_value, tolerance, message);
+            }
         }
     }
 }
@@ -1052,6 +1090,119 @@ void test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_availa
     expect_f32_matrix_close(positioned_key, expected_key, 1.0e-4F, "Gemma2 shell positioned key");
 }
 
+void test_gemma2_metal_runtime_shell_scores_first_layer_attention_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store();
+    std::vector<float> embedding_values(256U * 4U, 0.0F);
+    embedding_values[0] = 1.0F;
+    embedding_values[1] = 2.0F;
+    embedding_values[2] = 3.0F;
+    embedding_values[3] = 4.0F;
+    embedding_values[4] = 10.0F;
+    embedding_values[5] = 20.0F;
+    embedding_values[6] = 30.0F;
+    embedding_values[7] = 40.0F;
+    const auto embedding = tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values));
+    overwrite_payload_bytes(payload_store, "token_embd.weight", embedding);
+
+    std::vector<float> attention_norm_values(256U, 1.0F);
+    attention_norm_values[1] = 0.5F;
+    const auto attention_norm = tensor_f32_vector(std::span<const float>(attention_norm_values));
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_norm.weight"), attention_norm);
+
+    const auto query_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 1);
+    const auto key_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 2);
+    const auto value_weight = tensor_q6_k_gguf_weight_matrix(256, 256, 3);
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_q.weight"), query_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_k.weight"), key_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_v.weight"), value_weight);
+
+    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const std::array<std::uint32_t, 2> prompt_token_ids {3, 1};
+
+    const auto shell = create_gemma2_metal_generation_runtime_shell(
+        model,
+        std::span<const std::uint32_t>(prompt_token_ids)
+    );
+    const auto& position = shell.prefill_first_layer_attention_position;
+    const auto& scores = shell.prefill_first_layer_attention_scores;
+    const auto positioned_query = copy_tensor_from_backend(position.query);
+    const auto positioned_key = copy_tensor_from_backend(position.key);
+    const auto score_output = copy_tensor_from_backend(scores.scores);
+    const auto expected_scores = causal_grouped_attention_scores_f32(
+        positioned_query,
+        positioned_key,
+        shell.prefill.cache_position(),
+        shell.plan.config().attention_head_count,
+        shell.plan.config().attention_head_count_kv,
+        shell.plan.config().attention_key_length,
+        shell.prefill.layers().front().attention_token_count,
+        scores.scale,
+        shell.plan.config().attention_logit_softcap
+    );
+
+    expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
+    expect(
+        scores.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell first layer attention score phase mismatch"
+    );
+    expect(
+        scores.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell first layer attention score scratch ownership mismatch"
+    );
+    expect(
+        scores.query_position_start == shell.prefill.cache_position(),
+        "Gemma2 shell attention score query position start mismatch"
+    );
+    expect(
+        scores.attention_token_count == shell.prefill.layers().front().attention_token_count,
+        "Gemma2 shell attention score token count mismatch"
+    );
+    expect(
+        scores.query_head_count == shell.plan.config().attention_head_count,
+        "Gemma2 shell attention score query head count mismatch"
+    );
+    expect(
+        scores.key_head_count == shell.plan.config().attention_head_count_kv,
+        "Gemma2 shell attention score key head count mismatch"
+    );
+    expect(
+        scores.key_length == shell.plan.config().attention_key_length,
+        "Gemma2 shell attention score key length mismatch"
+    );
+    expect_close(scores.scale, 1.0F / 16.0F, 0.0F, "Gemma2 shell attention score scale mismatch");
+    expect_close(
+        scores.logit_softcap,
+        shell.plan.config().attention_logit_softcap,
+        0.0F,
+        "Gemma2 shell attention score softcap mismatch"
+    );
+    expect(scores.scores.backend() == BackendKind::metal, "Gemma2 shell attention score backend mismatch");
+    expect(
+        scores.scores.descriptor() == shell.prefill.scratch().attention_scores,
+        "Gemma2 shell attention score scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(scores.scores, position.query),
+        "Gemma2 shell attention scores should not alias positioned query"
+    );
+    expect(
+        !shares_backend_storage(scores.scores, position.key),
+        "Gemma2 shell attention scores should not alias positioned key"
+    );
+
+    const std::array<std::uint64_t, 3> masked_score {0, 0, 1};
+    expect(
+        std::isinf(read_f32(expected_scores, std::span<const std::uint64_t>(masked_score))),
+        "Gemma2 shell attention score fixture should include causal mask"
+    );
+    expect_f32_rank3_close(score_output, expected_scores, 1.0e-3F, "Gemma2 shell attention scores");
+}
+
 void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -1185,6 +1336,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 Metal runtime shell positions first layer attention when available",
         test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_available,
+    },
+    {
+        "Gemma2 Metal runtime shell scores first layer attention when available",
+        test_gemma2_metal_runtime_shell_scores_first_layer_attention_when_available,
     },
     {
         "rejects invalid Gemma2 Metal schedule shapes when available",

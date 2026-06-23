@@ -53,6 +53,17 @@ private:
     std::uint64_t rope_dimension_count,
     float frequency_base
 );
+[[nodiscard]] BackendBuffer causal_grouped_attention_scores_f32_with_cpu_buffers(
+    const CpuBackendBufferStorage& query,
+    const CpuBackendBufferStorage& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+);
 
 [[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight(
     const TensorStorage& left,

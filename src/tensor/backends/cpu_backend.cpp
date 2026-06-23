@@ -2,6 +2,7 @@
 
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
+#include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
@@ -179,6 +180,30 @@ BackendBuffer rope_f32_by_heads_with_cpu_buffer(
         head_dimension,
         rope_dimension_count,
         frequency_base
+    ));
+}
+
+BackendBuffer causal_grouped_attention_scores_f32_with_cpu_buffers(
+    const CpuBackendBufferStorage& query,
+    const CpuBackendBufferStorage& key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+) {
+    return copy_tensor_to_cpu_backend(ops::causal_grouped_attention_scores_f32(
+        query.storage(),
+        key.storage(),
+        query_position_start,
+        head_count,
+        kv_head_count,
+        key_length,
+        attention_token_count,
+        scale,
+        logit_softcap
     ));
 }
 

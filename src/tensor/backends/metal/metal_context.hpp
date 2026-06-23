@@ -36,6 +36,7 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> noop_pipeline = nil;
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
     id<MTLComputePipelineState> rope_by_heads_pipeline = nil;
+    id<MTLComputePipelineState> causal_grouped_attention_scores_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_decode_qkv_projection_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_kv_append_pipeline = nil;
     id<MTLComputePipelineState> llama_cached_attention_output_pipeline = nil;
