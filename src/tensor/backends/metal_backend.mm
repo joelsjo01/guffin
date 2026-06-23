@@ -284,6 +284,16 @@ struct GroupedAttentionScoreDimensions {
     float logit_softcap;
 };
 
+struct GroupedAttentionValueDimensions {
+    uint query_rows;
+    uint value_rows;
+    uint head_count;
+    uint kv_head_count;
+    uint value_length;
+    uint attention_token_count;
+    uint query_position_start;
+};
+
 struct SoftmaxDimensions {
     uint rows;
     uint columns;
@@ -403,6 +413,47 @@ kernel void causal_grouped_attention_scores_f32_kernel(
 
     const float scaled = dot * dims.scale;
     output[output_index] = tanh(scaled / dims.logit_softcap) * dims.logit_softcap;
+}
+
+kernel void causal_grouped_attention_values_f32_kernel(
+    const device float* probabilities [[buffer(0)]],
+    const device float* value [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant GroupedAttentionValueDimensions& dims [[buffer(3)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    const uint value_column = gid.x;
+    const uint head = gid.y;
+    const uint query_row = gid.z;
+    if (query_row >= dims.query_rows || head >= dims.head_count || value_column >= dims.value_length) {
+        return;
+    }
+
+    const uint query_position = dims.query_position_start + query_row;
+    const uint first_value_position = query_position + 1 > dims.attention_token_count
+        ? query_position + 1 - dims.attention_token_count
+        : 0;
+    const uint value_width = dims.kv_head_count * dims.value_length;
+    const uint kv_group_size = dims.head_count / dims.kv_head_count;
+    const uint kv_head = head / kv_group_size;
+    const uint value_first_column = kv_head * dims.value_length;
+    const uint output_width = dims.head_count * dims.value_length;
+    const uint output_index = query_row * output_width + head * dims.value_length + value_column;
+
+    float sum = 0.0f;
+    for (uint score_column = 0; score_column < dims.attention_token_count; ++score_column) {
+        const uint value_row = first_value_position + score_column;
+        if (value_row > query_position || value_row >= dims.value_rows) {
+            continue;
+        }
+
+        const uint probability_index =
+            (query_row * dims.head_count + head) * dims.attention_token_count + score_column;
+        sum += probabilities[probability_index]
+            * value[value_row * value_width + value_first_column + value_column];
+    }
+
+    output[output_index] = sum;
 }
 
 kernel void softmax_f32_kernel(

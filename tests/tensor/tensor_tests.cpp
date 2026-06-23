@@ -75,6 +75,7 @@ using local_gguf_engine::tensor::write_f16_from_f32;
 using local_gguf_engine::tensor::write_f32;
 using local_gguf_engine::tensor::ops::add_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
+using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32;
 using local_gguf_engine::tensor::ops::causal_scaled_dot_product_attention_f32;
 using local_gguf_engine::tensor::ops::copy_f32;
 using local_gguf_engine::tensor::ops::F32MatrixColumnView;
@@ -2133,6 +2134,70 @@ void test_applies_f32_causal_grouped_attention_scores() {
     );
 }
 
+void test_applies_f32_causal_grouped_attention_values() {
+    auto probabilities = TensorStorage::allocate(TensorDescriptor::from(Shape::from({3, 2, 2}), DType::f32));
+    const std::array<float, 12> probability_values {
+        1.0F, 0.0F,
+        1.0F, 0.0F,
+        0.25F, 0.75F,
+        0.5F, 0.5F,
+        0.2F, 0.8F,
+        1.0F, 0.0F,
+    };
+    std::uint64_t linear_probability = 0;
+    for (std::uint64_t row = 0; row < 3; ++row) {
+        for (std::uint64_t head = 0; head < 2; ++head) {
+            for (std::uint64_t column = 0; column < 2; ++column) {
+                const std::array<std::uint64_t, 3> index {row, head, column};
+                write_f32(probabilities, std::span<const std::uint64_t>(index), probability_values[linear_probability]);
+                ++linear_probability;
+            }
+        }
+    }
+
+    const std::array<float, 6> value_values {
+        10.0F, 100.0F,
+        20.0F, 200.0F,
+        30.0F, 300.0F,
+    };
+    const auto value = tensor_f32_matrix(3, 2, std::span<const float>(value_values));
+
+    const auto output = causal_grouped_attention_values_f32(probabilities, value, 0, 2, 1, 2, 2);
+
+    expect(
+        output.descriptor() == TensorDescriptor::from(Shape::from({3, 4}), DType::f32),
+        "F32 causal grouped attention values descriptor mismatch"
+    );
+    expect(output.bytes().data() != probabilities.bytes().data(), "F32 causal grouped values should not alias probabilities");
+    expect(output.bytes().data() != value.bytes().data(), "F32 causal grouped values should not alias value");
+
+    const std::array<std::uint64_t, 2> row0_head0_value0 {0, 0};
+    const std::array<std::uint64_t, 2> row0_head0_value1 {0, 1};
+    const std::array<std::uint64_t, 2> row0_head1_value0 {0, 2};
+    const std::array<std::uint64_t, 2> row0_head1_value1 {0, 3};
+    const std::array<std::uint64_t, 2> row1_head0_value0 {1, 0};
+    const std::array<std::uint64_t, 2> row1_head0_value1 {1, 1};
+    const std::array<std::uint64_t, 2> row1_head1_value0 {1, 2};
+    const std::array<std::uint64_t, 2> row1_head1_value1 {1, 3};
+    const std::array<std::uint64_t, 2> row2_head0_value0 {2, 0};
+    const std::array<std::uint64_t, 2> row2_head0_value1 {2, 1};
+    const std::array<std::uint64_t, 2> row2_head1_value0 {2, 2};
+    const std::array<std::uint64_t, 2> row2_head1_value1 {2, 3};
+
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_head0_value0)), 10.0F, 0.000001F, "F32 grouped value row 0 head 0 value 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_head0_value1)), 100.0F, 0.000001F, "F32 grouped value row 0 head 0 value 1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_head1_value0)), 10.0F, 0.000001F, "F32 grouped value row 0 head 1 value 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_head1_value1)), 100.0F, 0.000001F, "F32 grouped value row 0 head 1 value 1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head0_value0)), 17.5F, 0.000001F, "F32 grouped value row 1 head 0 value 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head0_value1)), 175.0F, 0.000001F, "F32 grouped value row 1 head 0 value 1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head1_value0)), 15.0F, 0.000001F, "F32 grouped value row 1 head 1 value 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head1_value1)), 150.0F, 0.000001F, "F32 grouped value row 1 head 1 value 1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row2_head0_value0)), 28.0F, 0.000001F, "F32 grouped value row 2 head 0 value 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row2_head0_value1)), 280.0F, 0.000001F, "F32 grouped value row 2 head 0 value 1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row2_head1_value0)), 20.0F, 0.000001F, "F32 grouped value row 2 head 1 value 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row2_head1_value1)), 200.0F, 0.000001F, "F32 grouped value row 2 head 1 value 1 mismatch");
+}
+
 void test_applies_f32_causal_attention_with_column_views() {
     const std::array<float, 4> query_values {
         1.0F, 0.0F,
@@ -2781,6 +2846,10 @@ const TestCase tensor_core_tests[] = {
     {
         "applies F32 causal grouped attention scores",
         test_applies_f32_causal_grouped_attention_scores,
+    },
+    {
+        "applies F32 causal grouped attention values",
+        test_applies_f32_causal_grouped_attention_values,
     },
     {
         "applies F32 causal attention with column views",

@@ -25,6 +25,17 @@ void require_matrix_descriptor(const TensorDescriptor& descriptor) {
     }
 }
 
+void require_rank3_descriptor(const TensorDescriptor& descriptor) {
+    constexpr std::size_t rank3 = 3;
+    if (descriptor.shape.rank() != rank3) {
+        throw TensorError(
+            TensorErrorCode::invalid_shape_rank,
+            static_cast<std::uint64_t>(rank3),
+            static_cast<std::uint64_t>(descriptor.shape.rank())
+        );
+    }
+}
+
 void require_query_key_hidden_match(const TensorDescriptor& query, const TensorDescriptor& key) {
     const auto query_hidden = query.shape.dimension(1);
     const auto key_hidden = key.shape.dimension(1);
@@ -171,6 +182,52 @@ void require_grouped_attention_layout(
     }
     if (actual_key_width != expected_key_width) {
         throw TensorError(TensorErrorCode::tensor_shape_mismatch, expected_key_width, actual_key_width);
+    }
+}
+
+void require_grouped_attention_value_layout(
+    const TensorDescriptor& probabilities,
+    const TensorDescriptor& value,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t value_length,
+    std::uint64_t attention_token_count
+) {
+    if (head_count == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, head_count);
+    }
+    if (kv_head_count == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, kv_head_count);
+    }
+    if (value_length == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, value_length);
+    }
+    if (attention_token_count == 0) {
+        throw TensorError(TensorErrorCode::invalid_shape_dimension, 1, attention_token_count);
+    }
+    if (head_count % kv_head_count != 0) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, kv_head_count, head_count);
+    }
+    if (kv_head_count > std::numeric_limits<std::uint64_t>::max() / value_length) {
+        throw TensorError(TensorErrorCode::element_count_overflow, kv_head_count, value_length);
+    }
+    if (head_count > std::numeric_limits<std::uint64_t>::max() / value_length) {
+        throw TensorError(TensorErrorCode::element_count_overflow, head_count, value_length);
+    }
+
+    const auto probability_heads = probabilities.shape.dimension(1);
+    const auto probability_columns = probabilities.shape.dimension(2);
+    if (probability_heads != head_count) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, head_count, probability_heads);
+    }
+    if (probability_columns != attention_token_count) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, attention_token_count, probability_columns);
+    }
+
+    const auto expected_value_width = kv_head_count * value_length;
+    const auto actual_value_width = value.shape.dimension(1);
+    if (actual_value_width != expected_value_width) {
+        throw TensorError(TensorErrorCode::tensor_shape_mismatch, expected_value_width, actual_value_width);
     }
 }
 
@@ -492,6 +549,74 @@ void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float 
     return output;
 }
 
+[[nodiscard]] TensorStorage causal_grouped_attention_values_impl_f32(
+    const TensorStorage& probabilities,
+    const TensorStorage& value,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t value_length,
+    std::uint64_t attention_token_count
+) {
+    require_f32_operand(probabilities);
+    require_f32_operand(value);
+    require_rank3_descriptor(probabilities.descriptor());
+    require_matrix_descriptor(value.descriptor());
+    require_grouped_attention_value_layout(
+        probabilities.descriptor(),
+        value.descriptor(),
+        head_count,
+        kv_head_count,
+        value_length,
+        attention_token_count
+    );
+
+    const auto query_rows = probabilities.descriptor().shape.dimension(0);
+    const auto value_rows = value.descriptor().shape.dimension(0);
+    require_causal_position_window(query_rows, value_rows, query_position_start);
+    const auto output_width = head_count * value_length;
+    const auto value_width = kv_head_count * value_length;
+    const auto kv_group_size = head_count / kv_head_count;
+    auto output = TensorStorage::allocate(TensorDescriptor::from(
+        Shape::from({query_rows, output_width}),
+        DType::f32
+    ));
+
+    for (std::uint64_t query_row = 0; query_row < query_rows; ++query_row) {
+        const auto query_position = query_position_start + query_row;
+        const auto first_value_position = (query_position + 1 > attention_token_count)
+            ? query_position + 1 - attention_token_count
+            : 0;
+        for (std::uint64_t head = 0; head < head_count; ++head) {
+            const auto kv_head = head / kv_group_size;
+            const auto value_first_column = kv_head * value_length;
+            const auto output_first_column = head * value_length;
+            for (std::uint64_t value_column = 0; value_column < value_length; ++value_column) {
+                float sum = 0.0F;
+                for (std::uint64_t score_column = 0; score_column < attention_token_count; ++score_column) {
+                    const auto value_row = first_value_position + score_column;
+                    if (value_row > query_position || value_row >= value_rows) {
+                        continue;
+                    }
+
+                    const auto probability_index =
+                        (query_row * head_count + head) * attention_token_count + score_column;
+                    sum += read_f32_linear(probabilities, probability_index)
+                        * read_f32_linear(value, value_row * value_width + value_first_column + value_column);
+                }
+
+                write_f32_linear(
+                    output,
+                    query_row * output_width + output_first_column + value_column,
+                    sum
+                );
+            }
+        }
+    }
+
+    return output;
+}
+
 }  // namespace
 
 TensorStorage scaled_dot_product_attention_f32(
@@ -566,6 +691,26 @@ TensorStorage causal_grouped_attention_scores_f32(
         attention_token_count,
         scale,
         logit_softcap
+    );
+}
+
+TensorStorage causal_grouped_attention_values_f32(
+    const TensorStorage& probabilities,
+    const TensorStorage& value,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t value_length,
+    std::uint64_t attention_token_count
+) {
+    return causal_grouped_attention_values_impl_f32(
+        probabilities,
+        value,
+        query_position_start,
+        head_count,
+        kv_head_count,
+        value_length,
+        attention_token_count
     );
 }
 

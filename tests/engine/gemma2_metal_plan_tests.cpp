@@ -65,6 +65,7 @@ using local_gguf_engine::tensor::TensorDescriptor;
 using local_gguf_engine::tensor::backend_buffer_storage;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
+using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_quantized_gguf_weight;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
@@ -1103,7 +1104,7 @@ void test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_availa
     expect_f32_matrix_close(positioned_key, expected_key, metal_rope_shell_tolerance, "Gemma2 shell positioned key");
 }
 
-void test_gemma2_metal_runtime_shell_softmaxes_first_layer_attention_when_available() {
+void test_gemma2_metal_runtime_shell_aggregates_first_layer_attention_values_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
@@ -1141,9 +1142,12 @@ void test_gemma2_metal_runtime_shell_softmaxes_first_layer_attention_when_availa
         model,
         std::span<const std::uint32_t>(prompt_token_ids)
     );
+    const auto& projection = shell.prefill_first_layer_attention_projection;
     const auto& position = shell.prefill_first_layer_attention_position;
     const auto& scores = shell.prefill_first_layer_attention_scores;
     const auto& probabilities = shell.prefill_first_layer_attention_probabilities;
+    const auto& values = shell.prefill_first_layer_attention_values;
+    const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
     const auto positioned_key = copy_tensor_from_backend(position.key);
     const auto score_output = copy_tensor_from_backend(scores.scores);
@@ -1160,6 +1164,16 @@ void test_gemma2_metal_runtime_shell_softmaxes_first_layer_attention_when_availa
     );
     const auto probability_output = copy_tensor_from_backend(probabilities.probabilities);
     const auto expected_probabilities = softmax_f32(expected_scores);
+    const auto attention_value_output = copy_tensor_from_backend(values.attention_output);
+    const auto expected_attention_values = causal_grouped_attention_values_f32(
+        probability_output,
+        projected_value,
+        shell.prefill.cache_position(),
+        shell.plan.config().attention_head_count,
+        shell.plan.config().attention_head_count_kv,
+        shell.plan.config().attention_value_length,
+        shell.prefill.layers().front().attention_token_count
+    );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
     expect(
@@ -1260,6 +1274,55 @@ void test_gemma2_metal_runtime_shell_softmaxes_first_layer_attention_when_availa
         expected_probabilities,
         1.0e-4F,
         "Gemma2 shell attention probabilities"
+    );
+
+    expect(values.layer_index == 0, "Gemma2 shell first layer attention value index mismatch");
+    expect(
+        values.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell first layer attention value phase mismatch"
+    );
+    expect(
+        values.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell first layer attention value scratch ownership mismatch"
+    );
+    expect(
+        values.query_position_start == shell.prefill.cache_position(),
+        "Gemma2 shell attention value query position start mismatch"
+    );
+    expect(
+        values.attention_token_count == shell.prefill.layers().front().attention_token_count,
+        "Gemma2 shell attention value token count mismatch"
+    );
+    expect(
+        values.query_head_count == shell.plan.config().attention_head_count,
+        "Gemma2 shell attention value query head count mismatch"
+    );
+    expect(
+        values.value_head_count == shell.plan.config().attention_head_count_kv,
+        "Gemma2 shell attention value KV head count mismatch"
+    );
+    expect(
+        values.value_length == shell.plan.config().attention_value_length,
+        "Gemma2 shell attention value length mismatch"
+    );
+    expect(values.attention_output.backend() == BackendKind::metal, "Gemma2 shell attention value backend mismatch");
+    expect(
+        values.attention_output.descriptor() == shell.prefill.scratch().attention_output,
+        "Gemma2 shell attention value scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(values.attention_output, probabilities.probabilities),
+        "Gemma2 shell attention value output should not alias probabilities"
+    );
+    expect(
+        !shares_backend_storage(values.attention_output, projection.value),
+        "Gemma2 shell attention value output should not alias value projection"
+    );
+    expect_f32_matrix_close(
+        attention_value_output,
+        expected_attention_values,
+        1.0e-3F,
+        "Gemma2 shell attention values"
     );
 }
 
@@ -1398,8 +1461,8 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_available,
     },
     {
-        "Gemma2 Metal runtime shell softmaxes first layer attention when available",
-        test_gemma2_metal_runtime_shell_softmaxes_first_layer_attention_when_available,
+        "Gemma2 Metal runtime shell aggregates first layer attention values when available",
+        test_gemma2_metal_runtime_shell_aggregates_first_layer_attention_values_when_available,
     },
     {
         "rejects invalid Gemma2 Metal schedule shapes when available",

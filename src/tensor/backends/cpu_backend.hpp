@@ -64,6 +64,15 @@ private:
     float scale,
     float logit_softcap
 );
+[[nodiscard]] BackendBuffer causal_grouped_attention_values_f32_with_cpu_buffers(
+    const CpuBackendBufferStorage& probabilities,
+    const CpuBackendBufferStorage& value,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t value_length,
+    std::uint64_t attention_token_count
+);
 [[nodiscard]] BackendBuffer softmax_f32_with_cpu_buffer(const CpuBackendBufferStorage& input);
 
 [[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight(

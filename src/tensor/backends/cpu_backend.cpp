@@ -208,6 +208,26 @@ BackendBuffer causal_grouped_attention_scores_f32_with_cpu_buffers(
     ));
 }
 
+BackendBuffer causal_grouped_attention_values_f32_with_cpu_buffers(
+    const CpuBackendBufferStorage& probabilities,
+    const CpuBackendBufferStorage& value,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t value_length,
+    std::uint64_t attention_token_count
+) {
+    return copy_tensor_to_cpu_backend(ops::causal_grouped_attention_values_f32(
+        probabilities.storage(),
+        value.storage(),
+        query_position_start,
+        head_count,
+        kv_head_count,
+        value_length,
+        attention_token_count
+    ));
+}
+
 BackendBuffer softmax_f32_with_cpu_buffer(const CpuBackendBufferStorage& input) {
     return copy_tensor_to_cpu_backend(ops::softmax_f32(input.storage()));
 }

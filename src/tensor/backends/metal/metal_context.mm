@@ -260,6 +260,27 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> causal_grouped_attention_values_function =
+        [library newFunctionWithName:@"causal_grouped_attention_values_f32_kernel"];
+    if (causal_grouped_attention_values_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal causal grouped attention values kernel function was not found"
+        );
+    }
+
+    NSError* causal_grouped_attention_values_pipeline_error = nil;
+    causal_grouped_attention_values_pipeline =
+        [device newComputePipelineStateWithFunction:causal_grouped_attention_values_function
+                                              error:&causal_grouped_attention_values_pipeline_error];
+    if (causal_grouped_attention_values_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal causal grouped attention values pipeline creation failed: "
+                + ns_error_message(causal_grouped_attention_values_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> softmax_function = [library newFunctionWithName:@"softmax_f32_kernel"];
     if (softmax_function == nil) {
         throw metal_error(

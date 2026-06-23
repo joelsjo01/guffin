@@ -69,6 +69,18 @@ struct Gemma2MetalAttentionProbabilityActivations {
     tensor::BackendBuffer probabilities;
 };
 
+struct Gemma2MetalAttentionValueActivations {
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::prefill;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::phase_local;
+    std::uint32_t query_position_start = 0;
+    std::uint32_t attention_token_count = 0;
+    std::uint32_t query_head_count = 0;
+    std::uint32_t value_head_count = 0;
+    std::uint32_t value_length = 0;
+    tensor::BackendBuffer attention_output;
+};
+
 struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalModelPlan plan;
     Gemma2MetalSchedule prefill;
@@ -79,6 +91,7 @@ struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalAttentionPositionActivations prefill_first_layer_attention_position;
     Gemma2MetalAttentionScoreActivations prefill_first_layer_attention_scores;
     Gemma2MetalAttentionProbabilityActivations prefill_first_layer_attention_probabilities;
+    Gemma2MetalAttentionValueActivations prefill_first_layer_attention_values;
 };
 
 [[nodiscard]] Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(

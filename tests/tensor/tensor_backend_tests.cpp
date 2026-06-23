@@ -55,6 +55,8 @@ using local_gguf_engine::tensor::write_f32;
 using local_gguf_engine::tensor::ops::add_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32_to_backend;
+using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32;
+using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32_to_backend;
 using local_gguf_engine::tensor::ops::embed_f16_gguf_weight_token_ids_to_backend;
 using local_gguf_engine::tensor::ops::gated_silu_projection_f32_f16_gguf_weight_to_backend;
 using local_gguf_engine::tensor::ops::llama_cached_attention_f32_to_backend;
@@ -163,6 +165,40 @@ TensorStorage attention_score_softmax_fixture() {
     }
 
     return scores;
+}
+
+TensorStorage grouped_attention_value_probability_fixture() {
+    auto probabilities = TensorStorage::allocate(TensorDescriptor::from(Shape::from({3, 2, 2}), DType::f32));
+    const std::array<float, 12> values {
+        1.0F, 0.0F,
+        1.0F, 0.0F,
+        0.25F, 0.75F,
+        0.5F, 0.5F,
+        0.2F, 0.8F,
+        1.0F, 0.0F,
+    };
+
+    std::uint64_t linear_index = 0;
+    for (std::uint64_t token = 0; token < 3; ++token) {
+        for (std::uint64_t head = 0; head < 2; ++head) {
+            for (std::uint64_t column = 0; column < 2; ++column) {
+                const std::array<std::uint64_t, 3> index {token, head, column};
+                write_f32(probabilities, std::span<const std::uint64_t>(index), values[linear_index]);
+                ++linear_index;
+            }
+        }
+    }
+
+    return probabilities;
+}
+
+TensorStorage grouped_attention_value_fixture() {
+    const std::array<float, 6> values {
+        10.0F, 100.0F,
+        20.0F, 200.0F,
+        30.0F, 300.0F,
+    };
+    return tensor_f32_matrix(3, 2, std::span<const float>(values));
 }
 
 void write_little_endian_u16(std::span<std::uint8_t> bytes, std::size_t offset, std::uint16_t value) {
@@ -694,6 +730,28 @@ void test_applies_causal_grouped_attention_scores_to_cpu_backend_buffers() {
 
     expect(output_buffer.backend() == BackendKind::cpu, "CPU causal grouped attention score backend mismatch");
     expect_f32_rank3_close(output, expected, 0.0F, "CPU backend-buffer causal grouped attention scores");
+}
+
+void test_applies_causal_grouped_attention_values_to_cpu_backend_buffers() {
+    const auto probabilities = grouped_attention_value_probability_fixture();
+    const auto value = grouped_attention_value_fixture();
+    const auto probability_buffer = copy_tensor_to_backend(probabilities, BackendKind::cpu);
+    const auto value_buffer = copy_tensor_to_backend(value, BackendKind::cpu);
+
+    const auto output_buffer = causal_grouped_attention_values_f32_to_backend(
+        probability_buffer,
+        value_buffer,
+        0,
+        2,
+        1,
+        2,
+        2
+    );
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = causal_grouped_attention_values_f32(probabilities, value, 0, 2, 1, 2, 2);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU causal grouped attention value backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer causal grouped attention values");
 }
 
 void test_applies_softmax_to_cpu_backend_buffer() {
@@ -1336,6 +1394,44 @@ void test_matches_causal_grouped_attention_scores_to_metal_backend_buffer_when_a
         copy_tensor_from_backend(cpu_output_buffer),
         1.0e-5F,
         "Metal backend-buffer causal grouped attention scores"
+    );
+}
+
+void test_matches_causal_grouped_attention_values_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto probabilities = grouped_attention_value_probability_fixture();
+    const auto value = grouped_attention_value_fixture();
+    const auto cpu_output_buffer = causal_grouped_attention_values_f32_to_backend(
+        copy_tensor_to_backend(probabilities, BackendKind::cpu),
+        copy_tensor_to_backend(value, BackendKind::cpu),
+        0,
+        2,
+        1,
+        2,
+        2
+    );
+    const auto metal_output_buffer = causal_grouped_attention_values_f32_to_backend(
+        copy_tensor_to_backend(probabilities, BackendKind::metal),
+        copy_tensor_to_backend(value, BackendKind::metal),
+        0,
+        2,
+        1,
+        2,
+        2
+    );
+
+    expect(
+        metal_output_buffer.backend() == BackendKind::metal,
+        "Metal causal grouped attention value backend mismatch"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_output_buffer),
+        copy_tensor_from_backend(cpu_output_buffer),
+        1.0e-5F,
+        "Metal backend-buffer causal grouped attention values"
     );
 }
 
@@ -2048,6 +2144,10 @@ const TestCase tensor_backend_tests[] {
         "applies causal grouped attention scores to CPU backend buffers",
         test_applies_causal_grouped_attention_scores_to_cpu_backend_buffers,
     },
+    {
+        "applies causal grouped attention values to CPU backend buffers",
+        test_applies_causal_grouped_attention_values_to_cpu_backend_buffers,
+    },
     {"applies softmax to CPU backend buffer", test_applies_softmax_to_cpu_backend_buffer},
     {
         "multiplies backend F32 by three backend F16 GGUF weights to CPU backend buffers",
@@ -2111,6 +2211,10 @@ const TestCase tensor_backend_tests[] {
     {
         "matches causal grouped attention scores to Metal backend buffer when available",
         test_matches_causal_grouped_attention_scores_to_metal_backend_buffer_when_available,
+    },
+    {
+        "matches causal grouped attention values to Metal backend buffer when available",
+        test_matches_causal_grouped_attention_values_to_metal_backend_buffer_when_available,
     },
     {
         "matches softmax to Metal backend buffer when available",

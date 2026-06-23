@@ -5,7 +5,7 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma attention value aggregation setup primitive behind
+Add the first scheduled Gemma attention output projection setup primitive behind
 the Metal runtime shell.
 
 ## Why
@@ -15,14 +15,15 @@ views, tokenize the prompt, upload the resident Metal model plan, build
 separate prefill/decode schedules, turn prompt token IDs into backend-resident
 hidden states with the Gemma embedding scale, normalize the first-layer
 attention input, produce Q/K/V projection outputs, apply Q/K RoPE positioning,
-produce pre-softmax attention scores, and softmax those scores into explicit
-phase-local attention probabilities.
+produce pre-softmax attention scores, softmax those scores into explicit
+phase-local attention probabilities, and aggregate those probabilities with the
+first-layer V projection into an explicit phase-local attention value output.
 
-The next blocker is proving those probability outputs can combine with the
-first-layer V projection output to produce an explicit attention value output
-without breaking the resident model plan. Keep this slice tiny and replaceable:
-enough to aggregate values for the first prefill layer, but not enough to update
-KV cache, run attention output projection, or pretend full generation exists.
+The next blocker is proving that first-layer attention value output can project
+through `blk.0.attn_output.weight` back to hidden width without breaking the
+resident model plan. Keep this slice tiny and replaceable: enough to produce
+the first projected attention output, but not enough to apply post-attention
+norm/residual work or pretend full generation exists.
 
 ## Read
 
@@ -38,8 +39,8 @@ KV cache, run attention output projection, or pretend full generation exists.
 
 - Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
   and `src/engine`
-- Metal backend/tensor code only for narrow backend-buffer value aggregation
-  helpers and tests
+- Tensor/Metal backend code only for narrow backend-buffer projection helpers
+  and tests if existing matmul helpers are not enough
 - `tests/engine`
 - `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
@@ -51,8 +52,8 @@ KV cache, run attention output projection, or pretend full generation exists.
 
 - Do not add full Gemma generation or a full Gemma layer chain.
 - Do not update KV cache.
-- Do not implement attention output projection, post-attention residual work,
-  FFN work, logits, or sampling changes.
+- Do not implement post-attention norm, residual add, FFN work, logits, or
+  sampling changes.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -75,8 +76,7 @@ KV cache, run attention output projection, or pretend full generation exists.
 
 ## Stop When
 
-One small scheduled Gemma attention value aggregation setup primitive consumes
-the runtime shell's first-layer probability and V projection outputs and
-produces an explicit resident or phase-local attention value output with
-deterministic tests, while full Gemma generation remains explicitly
-unsupported.
+One small scheduled Gemma attention output projection setup primitive consumes
+the runtime shell's first-layer attention value output and produces an explicit
+resident or phase-local projected attention output with deterministic tests,
+while full Gemma generation remains explicitly unsupported.
