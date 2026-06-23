@@ -2,10 +2,12 @@
 
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
 #include "local_gguf_engine/tensor/ops/embedding.hpp"
+#include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace local_gguf_engine::engine {
@@ -38,6 +40,44 @@ void require_prefill_hidden_states_match_schedule(
     }
 }
 
+void require_prefill_layer_input_matches_schedule(
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalLayerInputActivations& layer_input
+) {
+    if (prefill.phase() != Gemma2MetalSchedulePhase::prefill) {
+        throw std::invalid_argument("Gemma2 Metal attention projection primitive requires a prefill schedule");
+    }
+    if (layer_input.phase != prefill.phase()) {
+        throw std::invalid_argument("Gemma2 Metal attention projection input phase must match schedule");
+    }
+    if (layer_input.scratch_ownership != prefill.scratch_ownership()) {
+        throw std::invalid_argument("Gemma2 Metal attention projection input scratch ownership must match schedule");
+    }
+    if (prefill.layers().empty()) {
+        throw std::invalid_argument("Gemma2 Metal attention projection primitive requires at least one layer");
+    }
+    if (layer_input.layer_index != prefill.layers().front().layer_index) {
+        throw std::invalid_argument("Gemma2 Metal attention projection input layer must match schedule");
+    }
+    if (layer_input.normalized_attention_input.backend() != prefill.backend()) {
+        throw std::invalid_argument("Gemma2 Metal attention projection input must use the schedule backend");
+    }
+    if (layer_input.normalized_attention_input.descriptor() != prefill.scratch().normalized_hidden) {
+        throw std::invalid_argument("Gemma2 Metal attention projection input must match scheduled normalized hidden shape");
+    }
+}
+
+void require_attention_projection_output_shape(
+    const tensor::BackendBuffer& output,
+    const tensor::TensorDescriptor& expected,
+    const char* name
+) {
+    if (output.descriptor() != expected) {
+        throw std::invalid_argument(std::string("Gemma2 Metal attention projection ") + name
+            + " output must match scheduled scratch shape");
+    }
+}
+
 [[nodiscard]] Gemma2MetalLayerInputActivations create_gemma2_metal_prefill_first_layer_input(
     const Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& prefill,
@@ -56,6 +96,42 @@ void require_prefill_hidden_states_match_schedule(
         .phase = prefill.phase(),
         .scratch_ownership = prefill.scratch_ownership(),
         .normalized_attention_input = std::move(normalized_attention_input),
+    };
+}
+
+[[nodiscard]] Gemma2MetalAttentionProjectionActivations create_gemma2_metal_prefill_first_layer_attention_projection(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalLayerInputActivations& layer_input
+) {
+    require_prefill_layer_input_matches_schedule(prefill, layer_input);
+    const auto& first_layer = prefill.layers().front();
+    const auto& attention = plan.weights().blocks.at(first_layer.layer_index).attention;
+
+    auto query = tensor::ops::matmul_f32_quantized_gguf_weight_to_backend(
+        layer_input.normalized_attention_input,
+        attention.query_weight
+    );
+    auto key = tensor::ops::matmul_f32_quantized_gguf_weight_to_backend(
+        layer_input.normalized_attention_input,
+        attention.key_weight
+    );
+    auto value = tensor::ops::matmul_f32_quantized_gguf_weight_to_backend(
+        layer_input.normalized_attention_input,
+        attention.value_weight
+    );
+
+    require_attention_projection_output_shape(query, prefill.scratch().query, "query");
+    require_attention_projection_output_shape(key, prefill.scratch().key, "key");
+    require_attention_projection_output_shape(value, prefill.scratch().value, "value");
+
+    return Gemma2MetalAttentionProjectionActivations {
+        .layer_index = first_layer.layer_index,
+        .phase = prefill.phase(),
+        .scratch_ownership = prefill.scratch_ownership(),
+        .query = std::move(query),
+        .key = std::move(key),
+        .value = std::move(value),
     };
 }
 
@@ -84,6 +160,12 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
         prefill,
         prefill_input
     );
+    auto prefill_first_layer_attention_projection =
+        create_gemma2_metal_prefill_first_layer_attention_projection(
+            plan,
+            prefill,
+            prefill_first_layer_input
+        );
 
     return Gemma2MetalGenerationRuntimeShell {
         .plan = std::move(plan),
@@ -91,6 +173,7 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
         .first_decode = std::move(first_decode),
         .prefill_input = std::move(prefill_input),
         .prefill_first_layer_input = std::move(prefill_first_layer_input),
+        .prefill_first_layer_attention_projection = std::move(prefill_first_layer_attention_projection),
     };
 }
 

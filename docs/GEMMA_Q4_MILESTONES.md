@@ -21,7 +21,8 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | Gemma generation runtime shell | The real Gemma generate path builds the resident Metal plan and phase schedules, then stops at an explicit unsupported execution boundary. |
 | Done | First scheduled Gemma execution primitive | Prompt token IDs become backend-resident Gemma hidden states through the runtime shell, with CPU/Metal parity and validation tests. |
 | Done | First scheduled Gemma layer input primitive | First-layer attention RMSNorm consumes resident prefill hidden states and produces explicit scheduled layer input, without claiming full generation. |
-| Current | First scheduled Gemma attention projection setup | First-layer normalized attention input produces explicit Q/K/V projection outputs, without attention softmax, KV update, output projection, or logits. |
+| Done | First scheduled Gemma attention projection setup | First-layer normalized attention input produces explicit Q/K/V projection outputs, without attention softmax, KV update, output projection, or logits. |
+| Current | First scheduled Gemma attention position setup | First-layer Q/K projection outputs are prepared for Gemma positions/RoPE as explicit scheduled outputs, without KV update, attention softmax, output projection, or logits. |
 | Planned | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |
 

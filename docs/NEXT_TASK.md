@@ -5,23 +5,23 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma attention projection setup primitive behind the
+Add the first scheduled Gemma attention position setup primitive behind the
 Metal runtime shell.
 
 ## Why
 
 Gemma now reaches the real generate path far enough to load file-backed tensor
 views, tokenize the prompt, upload the resident Metal model plan, build
-separate prefill/decode schedules, and turn prompt token IDs into backend-
-resident hidden states with the Gemma embedding scale. The first layer now also
-consumes those resident prefill hidden states through `blk.0.attn_norm.weight`
-and produces an explicit backend-resident normalized attention input.
+separate prefill/decode schedules, turn prompt token IDs into backend-resident
+hidden states with the Gemma embedding scale, normalize the first-layer
+attention input with `blk.0.attn_norm.weight`, and produce explicit
+backend-resident Q/K/V projection outputs for the first prefill layer.
 
-The next blocker is moving that normalized first-layer input into the scheduled
-Q/K/V setup without breaking the resident model plan. Keep this slice tiny and
-replaceable: enough to prove first-layer projection setup can consume explicit
-scheduled activations and write explicit phase outputs, but not enough to
-pretend full generation exists.
+The next blocker is preparing those first-layer Q/K projections for Gemma
+positions without breaking the resident model plan. Keep this slice tiny and
+replaceable: enough to prove scheduled projection outputs can flow into
+explicit position-aware Q/K outputs, but not enough to pretend full attention
+or generation exists.
 
 ## Read
 
@@ -37,7 +37,8 @@ pretend full generation exists.
 
 - Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
   and `src/engine`
-- Metal backend/tensor code only for narrow packed projection helpers and tests
+- Metal backend/tensor code only for narrow backend-buffer RoPE or position
+  helpers and tests
 - `tests/engine`
 - `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
@@ -50,8 +51,8 @@ pretend full generation exists.
 - Do not add full Gemma generation or a full Gemma layer chain.
 - Do not add attention softmax, KV-cache update, attention output projection,
   FFN work, logits, or sampling changes.
-- Do not add full 9B CPU execution, sampling changes, broad graph
-  abstractions, or benchmark work in this slice.
+- Do not add full 9B CPU execution, broad graph abstractions, or benchmark
+  work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
 - Do not replace the resident plan with per-op host round trips.
 - Do not make `local-gguf-generate` claim Gemma success yet.
@@ -72,7 +73,7 @@ pretend full generation exists.
 
 ## Stop When
 
-One small scheduled Gemma projection-setup primitive consumes the runtime
-shell's first-layer normalized attention input and produces explicit
-resident or phase-local Q/K/V outputs with deterministic tests, while full
+One small scheduled Gemma position setup primitive consumes the runtime shell's
+first-layer Q/K projection outputs and produces explicit resident or
+phase-local position-aware Q/K outputs with deterministic tests, while full
 Gemma generation remains explicitly unsupported.

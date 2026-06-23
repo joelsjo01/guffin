@@ -23,12 +23,22 @@ struct Gemma2MetalLayerInputActivations {
     tensor::BackendBuffer normalized_attention_input;
 };
 
+struct Gemma2MetalAttentionProjectionActivations {
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::prefill;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::phase_local;
+    tensor::BackendBuffer query;
+    tensor::BackendBuffer key;
+    tensor::BackendBuffer value;
+};
+
 struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalModelPlan plan;
     Gemma2MetalSchedule prefill;
     Gemma2MetalSchedule first_decode;
     Gemma2MetalInputActivations prefill_input;
     Gemma2MetalLayerInputActivations prefill_first_layer_input;
+    Gemma2MetalAttentionProjectionActivations prefill_first_layer_attention_projection;
 };
 
 [[nodiscard]] Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
