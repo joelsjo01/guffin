@@ -64,6 +64,7 @@ private:
     float scale,
     float logit_softcap
 );
+[[nodiscard]] BackendBuffer softmax_f32_with_cpu_buffer(const CpuBackendBufferStorage& input);
 
 [[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight(
     const TensorStorage& left,

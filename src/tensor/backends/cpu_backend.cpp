@@ -6,6 +6,7 @@
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
+#include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
 
 #include <cstdint>
@@ -205,6 +206,10 @@ BackendBuffer causal_grouped_attention_scores_f32_with_cpu_buffers(
         scale,
         logit_softcap
     ));
+}
+
+BackendBuffer softmax_f32_with_cpu_buffer(const CpuBackendBufferStorage& input) {
+    return copy_tensor_to_cpu_backend(ops::softmax_f32(input.storage()));
 }
 
 TensorStorage matmul_f32_f16_gguf_weight(

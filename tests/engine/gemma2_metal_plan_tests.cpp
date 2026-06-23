@@ -12,6 +12,7 @@
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
+#include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
@@ -67,6 +68,7 @@ using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_quantized_gguf_weight;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
+using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::Q4_KBlockView;
 using local_gguf_engine::tensor::Q6_KBlockView;
 using local_gguf_engine::tensor::read_f32;
@@ -487,6 +489,7 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(scratch.key)
         + backend_buffer_byte_count(scratch.value)
         + backend_buffer_byte_count(scratch.attention_scores)
+        + backend_buffer_byte_count(scratch.attention_probabilities)
         + backend_buffer_byte_count(scratch.attention_output)
         + backend_buffer_byte_count(scratch.feed_forward_gate)
         + backend_buffer_byte_count(scratch.feed_forward_up)
@@ -500,6 +503,7 @@ std::size_t schedule_scratch_byte_count(const local_gguf_engine::engine::Gemma2M
         + scratch.key.byte_count
         + scratch.value.byte_count
         + scratch.attention_scores.byte_count
+        + scratch.attention_probabilities.byte_count
         + scratch.attention_output.byte_count
         + scratch.feed_forward_gate.byte_count
         + scratch.feed_forward_up.byte_count
@@ -634,12 +638,20 @@ void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_availa
         "Gemma2 prefill attention score scratch shape mismatch"
     );
     expect(
+        prefill.scratch().attention_probabilities.shape == Shape::from({12, 1, 12}),
+        "Gemma2 prefill attention probability scratch shape mismatch"
+    );
+    expect(
         decode.scratch().normalized_hidden.shape == Shape::from({1, 256}),
         "Gemma2 decode normalized hidden scratch shape mismatch"
     );
     expect(
         decode.scratch().attention_scores.shape == Shape::from({1, 1, 16}),
         "Gemma2 decode resident attention score scratch shape mismatch"
+    );
+    expect(
+        decode.scratch().attention_probabilities.shape == Shape::from({1, 1, 16}),
+        "Gemma2 decode resident attention probability scratch shape mismatch"
     );
     expect(
         prefill.phase_scratch_byte_count() == schedule_scratch_byte_count(prefill.scratch()),
@@ -1091,7 +1103,7 @@ void test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_availa
     expect_f32_matrix_close(positioned_key, expected_key, metal_rope_shell_tolerance, "Gemma2 shell positioned key");
 }
 
-void test_gemma2_metal_runtime_shell_scores_first_layer_attention_when_available() {
+void test_gemma2_metal_runtime_shell_softmaxes_first_layer_attention_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
@@ -1131,6 +1143,7 @@ void test_gemma2_metal_runtime_shell_scores_first_layer_attention_when_available
     );
     const auto& position = shell.prefill_first_layer_attention_position;
     const auto& scores = shell.prefill_first_layer_attention_scores;
+    const auto& probabilities = shell.prefill_first_layer_attention_probabilities;
     const auto positioned_query = copy_tensor_from_backend(position.query);
     const auto positioned_key = copy_tensor_from_backend(position.key);
     const auto score_output = copy_tensor_from_backend(scores.scores);
@@ -1145,6 +1158,8 @@ void test_gemma2_metal_runtime_shell_scores_first_layer_attention_when_available
         scores.scale,
         shell.plan.config().attention_logit_softcap
     );
+    const auto probability_output = copy_tensor_from_backend(probabilities.probabilities);
+    const auto expected_probabilities = softmax_f32(expected_scores);
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
     expect(
@@ -1202,6 +1217,50 @@ void test_gemma2_metal_runtime_shell_scores_first_layer_attention_when_available
         "Gemma2 shell attention score fixture should include causal mask"
     );
     expect_f32_rank3_close(score_output, expected_scores, 1.0e-3F, "Gemma2 shell attention scores");
+
+    expect(probabilities.layer_index == 0, "Gemma2 shell first layer attention probability index mismatch");
+    expect(
+        probabilities.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell first layer attention probability phase mismatch"
+    );
+    expect(
+        probabilities.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell first layer attention probability scratch ownership mismatch"
+    );
+    expect(
+        probabilities.attention_token_count == shell.prefill.layers().front().attention_token_count,
+        "Gemma2 shell attention probability token count mismatch"
+    );
+    expect(
+        probabilities.query_head_count == shell.plan.config().attention_head_count,
+        "Gemma2 shell attention probability query head count mismatch"
+    );
+    expect(
+        probabilities.probabilities.backend() == BackendKind::metal,
+        "Gemma2 shell attention probability backend mismatch"
+    );
+    expect(
+        probabilities.probabilities.descriptor() == shell.prefill.scratch().attention_probabilities,
+        "Gemma2 shell attention probability scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(probabilities.probabilities, scores.scores),
+        "Gemma2 shell attention probabilities should not alias scores"
+    );
+    expect(
+        !shares_backend_storage(probabilities.probabilities, position.query),
+        "Gemma2 shell attention probabilities should not alias positioned query"
+    );
+    expect(
+        !shares_backend_storage(probabilities.probabilities, position.key),
+        "Gemma2 shell attention probabilities should not alias positioned key"
+    );
+    expect_f32_rank3_close(
+        probability_output,
+        expected_probabilities,
+        1.0e-4F,
+        "Gemma2 shell attention probabilities"
+    );
 }
 
 void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
@@ -1339,8 +1398,8 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_available,
     },
     {
-        "Gemma2 Metal runtime shell scores first layer attention when available",
-        test_gemma2_metal_runtime_shell_scores_first_layer_attention_when_available,
+        "Gemma2 Metal runtime shell softmaxes first layer attention when available",
+        test_gemma2_metal_runtime_shell_softmaxes_first_layer_attention_when_available,
     },
     {
         "rejects invalid Gemma2 Metal schedule shapes when available",

@@ -6,6 +6,7 @@
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
+#include "local_gguf_engine/tensor/ops/softmax.hpp"
 
 #include <cmath>
 #include <limits>
@@ -152,6 +153,42 @@ void require_attention_score_output_shape(
     }
 }
 
+void require_prefill_attention_scores_matches_schedule(
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalAttentionScoreActivations& scores
+) {
+    if (prefill.phase() != Gemma2MetalSchedulePhase::prefill) {
+        throw std::invalid_argument("Gemma2 Metal attention probability primitive requires a prefill schedule");
+    }
+    if (scores.phase != prefill.phase()) {
+        throw std::invalid_argument("Gemma2 Metal attention probability input phase must match schedule");
+    }
+    if (scores.scratch_ownership != prefill.scratch_ownership()) {
+        throw std::invalid_argument("Gemma2 Metal attention probability input scratch ownership must match schedule");
+    }
+    if (prefill.layers().empty()) {
+        throw std::invalid_argument("Gemma2 Metal attention probability primitive requires at least one layer");
+    }
+    if (scores.layer_index != prefill.layers().front().layer_index) {
+        throw std::invalid_argument("Gemma2 Metal attention probability input layer must match schedule");
+    }
+    if (scores.scores.backend() != prefill.backend()) {
+        throw std::invalid_argument("Gemma2 Metal attention probability input must use the schedule backend");
+    }
+    if (scores.scores.descriptor() != prefill.scratch().attention_scores) {
+        throw std::invalid_argument("Gemma2 Metal attention probability input must match scheduled score shape");
+    }
+}
+
+void require_attention_probability_output_shape(
+    const tensor::BackendBuffer& output,
+    const tensor::TensorDescriptor& expected
+) {
+    if (output.descriptor() != expected) {
+        throw std::invalid_argument("Gemma2 Metal attention probability output must match scheduled scratch shape");
+    }
+}
+
 [[nodiscard]] Gemma2MetalLayerInputActivations create_gemma2_metal_prefill_first_layer_input(
     const Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& prefill,
@@ -293,6 +330,25 @@ void require_attention_score_output_shape(
     };
 }
 
+[[nodiscard]] Gemma2MetalAttentionProbabilityActivations create_gemma2_metal_prefill_first_layer_attention_probabilities(
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalAttentionScoreActivations& scores
+) {
+    require_prefill_attention_scores_matches_schedule(prefill, scores);
+    const auto& first_layer = prefill.layers().front();
+    auto probabilities = tensor::ops::softmax_f32_to_backend(scores.scores);
+    require_attention_probability_output_shape(probabilities, prefill.scratch().attention_probabilities);
+
+    return Gemma2MetalAttentionProbabilityActivations {
+        .layer_index = first_layer.layer_index,
+        .phase = prefill.phase(),
+        .scratch_ownership = prefill.scratch_ownership(),
+        .attention_token_count = first_layer.attention_token_count,
+        .query_head_count = scores.query_head_count,
+        .probabilities = std::move(probabilities),
+    };
+}
+
 }  // namespace
 
 Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
@@ -336,6 +392,11 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
             prefill,
             prefill_first_layer_attention_position
         );
+    auto prefill_first_layer_attention_probabilities =
+        create_gemma2_metal_prefill_first_layer_attention_probabilities(
+            prefill,
+            prefill_first_layer_attention_scores
+        );
 
     return Gemma2MetalGenerationRuntimeShell {
         .plan = std::move(plan),
@@ -346,6 +407,7 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
         .prefill_first_layer_attention_projection = std::move(prefill_first_layer_attention_projection),
         .prefill_first_layer_attention_position = std::move(prefill_first_layer_attention_position),
         .prefill_first_layer_attention_scores = std::move(prefill_first_layer_attention_scores),
+        .prefill_first_layer_attention_probabilities = std::move(prefill_first_layer_attention_probabilities),
     };
 }
 

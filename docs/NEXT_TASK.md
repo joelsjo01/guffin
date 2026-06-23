@@ -5,8 +5,8 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma attention probability setup primitive behind the
-Metal runtime shell.
+Add the first scheduled Gemma attention value aggregation setup primitive behind
+the Metal runtime shell.
 
 ## Why
 
@@ -14,18 +14,15 @@ Gemma now reaches the real generate path far enough to load file-backed tensor
 views, tokenize the prompt, upload the resident Metal model plan, build
 separate prefill/decode schedules, turn prompt token IDs into backend-resident
 hidden states with the Gemma embedding scale, normalize the first-layer
-attention input with `blk.0.attn_norm.weight`, and produce explicit
-backend-resident Q/K/V projection outputs for the first prefill layer. The
-runtime shell also applies Gemma position/RoPE setup to the first-layer Q/K
-projection outputs, keeps the positioned Q/K outputs explicit, and produces
-explicit pre-softmax attention scores for the first layer with Gemma scaling,
-softcap, GQA head mapping, and causal/window masking.
+attention input, produce Q/K/V projection outputs, apply Q/K RoPE positioning,
+produce pre-softmax attention scores, and softmax those scores into explicit
+phase-local attention probabilities.
 
-The next blocker is proving those scheduled score outputs can flow into
-attention probabilities without breaking the resident model plan. Keep this
-slice tiny and replaceable: enough to produce explicit softmax probability
-outputs for the first prefill layer, but not enough to aggregate values or
-pretend full attention or generation exists.
+The next blocker is proving those probability outputs can combine with the
+first-layer V projection output to produce an explicit attention value output
+without breaking the resident model plan. Keep this slice tiny and replaceable:
+enough to aggregate values for the first prefill layer, but not enough to update
+KV cache, run attention output projection, or pretend full generation exists.
 
 ## Read
 
@@ -34,15 +31,15 @@ pretend full attention or generation exists.
 - `docs/GRAPH.md` only to locate files/tests
 - `docs/GEMMA_Q4_MILESTONES.md`
 - `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md`, especially
-  `## Current Inference Path And Bottlenecks` and
-  `## Target Architecture Proposal`
+  `## Current Inference Path And Bottlenecks`,
+  `## Target Architecture Proposal`, and attention semantics if needed
 
 ## Touch
 
 - Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
   and `src/engine`
-- Metal backend/tensor code only for narrow backend-buffer probability helpers
-  and tests
+- Metal backend/tensor code only for narrow backend-buffer value aggregation
+  helpers and tests
 - `tests/engine`
 - `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
@@ -53,7 +50,8 @@ pretend full attention or generation exists.
 ## Do Not
 
 - Do not add full Gemma generation or a full Gemma layer chain.
-- Do not add KV-cache update, value aggregation, attention output projection,
+- Do not update KV cache.
+- Do not implement attention output projection, post-attention residual work,
   FFN work, logits, or sampling changes.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
@@ -77,7 +75,8 @@ pretend full attention or generation exists.
 
 ## Stop When
 
-One small scheduled Gemma attention-probability setup primitive consumes the
-runtime shell's first-layer score outputs and produces an explicit resident or
-phase-local softmax probability output with deterministic tests, while full
-Gemma generation remains explicitly unsupported.
+One small scheduled Gemma attention value aggregation setup primitive consumes
+the runtime shell's first-layer probability and V projection outputs and
+produces an explicit resident or phase-local attention value output with
+deterministic tests, while full Gemma generation remains explicitly
+unsupported.

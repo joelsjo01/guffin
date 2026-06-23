@@ -1755,6 +1755,47 @@ void test_applies_f32_softmax_to_batched_rows() {
     );
 }
 
+void test_applies_f32_softmax_to_rank3_rows() {
+    auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2, 3}), DType::f32));
+    const std::array<std::uint64_t, 3> row0_head0_col0 {0, 0, 0};
+    const std::array<std::uint64_t, 3> row0_head0_col1 {0, 0, 1};
+    const std::array<std::uint64_t, 3> row0_head0_col2 {0, 0, 2};
+    const std::array<std::uint64_t, 3> row1_head1_col0 {1, 1, 0};
+    const std::array<std::uint64_t, 3> row1_head1_col1 {1, 1, 1};
+    const std::array<std::uint64_t, 3> row1_head1_col2 {1, 1, 2};
+    write_f32(
+        input,
+        std::span<const std::uint64_t>(row0_head0_col0),
+        -std::numeric_limits<float>::infinity()
+    );
+    write_f32(input, std::span<const std::uint64_t>(row0_head0_col1), 1.0F);
+    write_f32(input, std::span<const std::uint64_t>(row0_head0_col2), 3.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_head1_col0), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_head1_col1), 0.0F);
+    write_f32(input, std::span<const std::uint64_t>(row1_head1_col2), 0.0F);
+
+    const auto output = softmax_f32(input);
+    const auto denominator = std::exp(-2.0) + 1.0;
+
+    expect(output.descriptor() == input.descriptor(), "F32 softmax rank-3 output descriptor mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row0_head0_col0)), 0.0F, 0.0F, "F32 softmax masked rank-3 value mismatch");
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row0_head0_col1)),
+        static_cast<float>(std::exp(-2.0) / denominator),
+        0.000001F,
+        "F32 softmax rank-3 value 1 mismatch"
+    );
+    expect_close(
+        read_f32(output, std::span<const std::uint64_t>(row0_head0_col2)),
+        static_cast<float>(1.0 / denominator),
+        0.000001F,
+        "F32 softmax rank-3 value 2 mismatch"
+    );
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head1_col0)), 1.0F / 3.0F, 0.000001F, "F32 softmax rank-3 row 1 value 0 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head1_col1)), 1.0F / 3.0F, 0.000001F, "F32 softmax rank-3 row 1 value 1 mismatch");
+    expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head1_col2)), 1.0F / 3.0F, 0.000001F, "F32 softmax rank-3 row 1 value 2 mismatch");
+}
+
 void test_applies_f32_softmax_to_large_values() {
     auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({3}), DType::f32));
     const std::array<std::uint64_t, 1> index_0 {0};
@@ -1800,16 +1841,16 @@ void test_rejects_f32_softmax_dtype_mismatch() {
     }
 }
 
-void test_rejects_f32_softmax_input_rank_above_two() {
-    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 2, 2}), DType::f32));
+void test_rejects_f32_softmax_input_rank_above_three() {
+    const auto input = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 1, 2, 2}), DType::f32));
 
     try {
         (void)softmax_f32(input);
-        throw TestFailure("F32 softmax should reject rank-three input");
+        throw TestFailure("F32 softmax should reject rank-four input");
     } catch (const TensorError& error) {
         expect(error.code() == TensorErrorCode::invalid_shape_rank, "F32 softmax rank error code mismatch");
-        expect(error.expected_value() == 2, "F32 softmax expected rank mismatch");
-        expect(error.actual_value() == 3, "F32 softmax actual rank mismatch");
+        expect(error.expected_value() == 3, "F32 softmax expected rank mismatch");
+        expect(error.actual_value() == 4, "F32 softmax actual rank mismatch");
     }
 }
 
@@ -2720,9 +2761,10 @@ const TestCase tensor_core_tests[] = {
     {"rejects F32 RoPE row position overflow", test_rejects_f32_rope_row_position_overflow},
     {"applies F32 softmax to vector", test_applies_f32_softmax_to_vector},
     {"applies F32 softmax to batched rows", test_applies_f32_softmax_to_batched_rows},
+    {"applies F32 softmax to rank-3 rows", test_applies_f32_softmax_to_rank3_rows},
     {"applies F32 softmax to large values", test_applies_f32_softmax_to_large_values},
     {"rejects F32 softmax dtype mismatch", test_rejects_f32_softmax_dtype_mismatch},
-    {"rejects F32 softmax input rank above two", test_rejects_f32_softmax_input_rank_above_two},
+    {"rejects F32 softmax input rank above three", test_rejects_f32_softmax_input_rank_above_three},
     {"applies F32 scaled dot product attention", test_applies_f32_scaled_dot_product_attention},
     {
         "applies F32 scaled dot product attention with distinct value width",

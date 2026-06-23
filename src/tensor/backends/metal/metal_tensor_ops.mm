@@ -9,6 +9,7 @@
 #include "local_gguf_engine/tensor/ops/embedding.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
+#include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/tensor_error.hpp"
 #include "../../ops/validation.hpp"
 
@@ -67,6 +68,11 @@ struct GroupedAttentionScoreDimensions {
     std::uint32_t query_position_start = 0;
     float scale = 0.0F;
     float logit_softcap = 0.0F;
+};
+
+struct SoftmaxDimensions {
+    std::uint32_t rows = 0;
+    std::uint32_t columns = 0;
 };
 
 void require_matmul_inner_dimensions(const TensorDescriptor& left, const TensorDescriptor& right) {
@@ -419,6 +425,18 @@ void require_causal_grouped_attention_scores_f32_operands(
     require_causal_position_window(query.shape.dimension(0), key.shape.dimension(0), query_position_start);
     require_positive_finite_scale(scale);
     require_positive_finite_logit_softcap(logit_softcap);
+}
+
+void require_softmax_f32_operand(const TensorDescriptor& input) {
+    ops::require_f32_descriptor(input);
+    const auto rank = input.shape.rank();
+    if (rank < 1 || rank > 3) {
+        throw TensorError(
+            TensorErrorCode::invalid_shape_rank,
+            3,
+            static_cast<std::uint64_t>(rank)
+        );
+    }
 }
 
 void require_positive_frequency_base(float frequency_base) {
@@ -907,6 +925,66 @@ BackendBuffer causal_grouped_attention_scores_f32_with_metal_buffers(
     }
 
     return make_metal_backend_buffer(output_descriptor, output_buffer);
+}
+
+BackendBuffer softmax_f32_with_metal_buffer(const MetalBackendBufferStorage& input) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto& input_descriptor = input.descriptor();
+    const auto columns = input_descriptor.shape.dimension(input_descriptor.shape.rank() - 1U);
+    const auto rows = input_descriptor.element_count / columns;
+    const SoftmaxDimensions dims {
+        .rows = require_u32_dimension(rows, "softmax rows"),
+        .columns = require_u32_dimension(columns, "softmax columns"),
+    };
+
+    id<MTLBuffer> output_buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(
+                                      input_descriptor.byte_count
+                                   )
+                                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(SoftmaxDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (output_buffer == nil || dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal softmax buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (command_buffer == nil || encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal softmax command encoding failed"
+        );
+    }
+
+    [encoder setComputePipelineState:state.softmax_pipeline];
+    [encoder setBuffer:input.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:output_buffer offset:0 atIndex:1];
+    [encoder setBuffer:dims_buffer offset:0 atIndex:2];
+
+    constexpr NSUInteger threads_per_threadgroup_count = 64U;
+    const MTLSize threads_per_threadgroup = MTLSizeMake(threads_per_threadgroup_count, 1, 1);
+    const auto threadgroup_rows = static_cast<NSUInteger>((rows + threads_per_threadgroup_count - 1U)
+        / threads_per_threadgroup_count);
+    const MTLSize threadgroups = MTLSizeMake(threadgroup_rows, 1, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal softmax command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return make_metal_backend_buffer(input_descriptor, output_buffer);
 }
 
 BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
@@ -1709,6 +1787,29 @@ BackendBuffer rms_norm_f32_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         input.backend(),
         "unsupported backend buffers for RMSNorm"
+    );
+}
+
+BackendBuffer softmax_f32_to_backend(const BackendBuffer& input) {
+    backends::metal::require_softmax_f32_operand(input.descriptor());
+
+    switch (input.backend()) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::softmax_f32_with_cpu_buffer(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(input))
+            );
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::softmax_f32_with_metal_buffer(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(input))
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        input.backend(),
+        "unsupported backend buffer for softmax"
     );
 }
 

@@ -284,6 +284,11 @@ struct GroupedAttentionScoreDimensions {
     float logit_softcap;
 };
 
+struct SoftmaxDimensions {
+    uint rows;
+    uint columns;
+};
+
 kernel void rms_norm_f32_kernel(
     const device float* input [[buffer(0)]],
     const device float* weight [[buffer(1)]],
@@ -398,6 +403,34 @@ kernel void causal_grouped_attention_scores_f32_kernel(
 
     const float scaled = dot * dims.scale;
     output[output_index] = tanh(scaled / dims.logit_softcap) * dims.logit_softcap;
+}
+
+kernel void softmax_f32_kernel(
+    const device float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant SoftmaxDimensions& dims [[buffer(2)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= dims.rows) {
+        return;
+    }
+
+    const uint row_offset = row * dims.columns;
+    float max_value = input[row_offset];
+    for (uint column = 1; column < dims.columns; ++column) {
+        max_value = max(max_value, input[row_offset + column]);
+    }
+
+    float exp_sum = 0.0f;
+    for (uint column = 0; column < dims.columns; ++column) {
+        const float exp_value = exp(input[row_offset + column] - max_value);
+        exp_sum += exp_value;
+        output[row_offset + column] = exp_value;
+    }
+
+    for (uint column = 0; column < dims.columns; ++column) {
+        output[row_offset + column] = output[row_offset + column] / exp_sum;
+    }
 }
 
 struct LlamaCachedAttentionDimensions {

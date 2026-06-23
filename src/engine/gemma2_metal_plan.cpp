@@ -181,6 +181,10 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
             f32_descriptor({1, config.attention_head_count, config.context_length}),
             allocated_byte_count
         ),
+        .attention_probabilities = allocate_buffer(
+            f32_descriptor({1, config.attention_head_count, config.context_length}),
+            allocated_byte_count
+        ),
         .attention_output = allocate_buffer(f32_descriptor({1, attention_output_width(config)}), allocated_byte_count),
         .feed_forward_gate = allocate_buffer(f32_descriptor({1, config.feed_forward_length}), allocated_byte_count),
         .feed_forward_up = allocate_buffer(f32_descriptor({1, config.feed_forward_length}), allocated_byte_count),
@@ -211,6 +215,7 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
         .key = scratch.key.descriptor(),
         .value = scratch.value.descriptor(),
         .attention_scores = scratch.attention_scores.descriptor(),
+        .attention_probabilities = scratch.attention_probabilities.descriptor(),
         .attention_output = scratch.attention_output.descriptor(),
         .feed_forward_gate = scratch.feed_forward_gate.descriptor(),
         .feed_forward_up = scratch.feed_forward_up.descriptor(),
@@ -268,6 +273,7 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
         .key = f32_descriptor({token_count, attention_key_width(config)}),
         .value = f32_descriptor({token_count, attention_value_width(config)}),
         .attention_scores = f32_descriptor({token_count, config.attention_head_count, attention_token_count}),
+        .attention_probabilities = f32_descriptor({token_count, config.attention_head_count, attention_token_count}),
         .attention_output = f32_descriptor({token_count, attention_output_width(config)}),
         .feed_forward_gate = f32_descriptor({token_count, config.feed_forward_length}),
         .feed_forward_up = f32_descriptor({token_count, config.feed_forward_length}),
@@ -283,6 +289,7 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     checked_add_bytes(total, scratch.key.byte_count);
     checked_add_bytes(total, scratch.value.byte_count);
     checked_add_bytes(total, scratch.attention_scores.byte_count);
+    checked_add_bytes(total, scratch.attention_probabilities.byte_count);
     checked_add_bytes(total, scratch.attention_output.byte_count);
     checked_add_bytes(total, scratch.feed_forward_gate.byte_count);
     checked_add_bytes(total, scratch.feed_forward_up.byte_count);

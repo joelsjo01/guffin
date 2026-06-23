@@ -260,6 +260,25 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> softmax_function = [library newFunctionWithName:@"softmax_f32_kernel"];
+    if (softmax_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal softmax kernel function was not found"
+        );
+    }
+
+    NSError* softmax_pipeline_error = nil;
+    softmax_pipeline = [device newComputePipelineStateWithFunction:softmax_function
+                                                             error:&softmax_pipeline_error];
+    if (softmax_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal softmax pipeline creation failed: "
+                + ns_error_message(softmax_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> llama_cached_decode_qkv_projection_function =
         [library newFunctionWithName:@"llama_cached_decode_qkv_projection_f32_f16_kernel"];
     if (llama_cached_decode_qkv_projection_function == nil) {

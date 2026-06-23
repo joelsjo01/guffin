@@ -12,6 +12,7 @@
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
+#include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
@@ -22,6 +23,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -69,6 +71,8 @@ using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
 using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start_to_backend;
 using local_gguf_engine::tensor::ops::silu_f32;
 using local_gguf_engine::tensor::ops::silu_multiply_f32_to_backend;
+using local_gguf_engine::tensor::ops::softmax_f32;
+using local_gguf_engine::tensor::ops::softmax_f32_to_backend;
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::expect_close;
 using local_gguf_engine::tests::tensor_f16_gguf_matrix;
@@ -136,6 +140,29 @@ void expect_f32_rank3_close(
             }
         }
     }
+}
+
+TensorStorage attention_score_softmax_fixture() {
+    auto scores = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2, 3}), DType::f32));
+    const std::array<float, 12> values {
+        -std::numeric_limits<float>::infinity(), 0.0F, 2.0F,
+        1.0F, 1.0F, 1.0F,
+        -1.0F, 0.0F, 1.0F,
+        3.0F, 2.0F, 1.0F,
+    };
+
+    std::uint64_t linear_index = 0;
+    for (std::uint64_t token = 0; token < 2; ++token) {
+        for (std::uint64_t head = 0; head < 2; ++head) {
+            for (std::uint64_t column = 0; column < 3; ++column) {
+                const std::array<std::uint64_t, 3> index {token, head, column};
+                write_f32(scores, std::span<const std::uint64_t>(index), values[linear_index]);
+                ++linear_index;
+            }
+        }
+    }
+
+    return scores;
 }
 
 void write_little_endian_u16(std::span<std::uint8_t> bytes, std::size_t offset, std::uint16_t value) {
@@ -667,6 +694,18 @@ void test_applies_causal_grouped_attention_scores_to_cpu_backend_buffers() {
 
     expect(output_buffer.backend() == BackendKind::cpu, "CPU causal grouped attention score backend mismatch");
     expect_f32_rank3_close(output, expected, 0.0F, "CPU backend-buffer causal grouped attention scores");
+}
+
+void test_applies_softmax_to_cpu_backend_buffer() {
+    const auto input = attention_score_softmax_fixture();
+    const auto input_buffer = copy_tensor_to_backend(input, BackendKind::cpu);
+
+    const auto output_buffer = softmax_f32_to_backend(input_buffer);
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = softmax_f32(input);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU softmax backend mismatch");
+    expect_f32_rank3_close(output, expected, 0.0F, "CPU backend-buffer softmax");
 }
 
 void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers() {
@@ -1297,6 +1336,24 @@ void test_matches_causal_grouped_attention_scores_to_metal_backend_buffer_when_a
         copy_tensor_from_backend(cpu_output_buffer),
         1.0e-5F,
         "Metal backend-buffer causal grouped attention scores"
+    );
+}
+
+void test_matches_softmax_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto input = attention_score_softmax_fixture();
+    const auto cpu_output_buffer = softmax_f32_to_backend(copy_tensor_to_backend(input, BackendKind::cpu));
+    const auto metal_output_buffer = softmax_f32_to_backend(copy_tensor_to_backend(input, BackendKind::metal));
+
+    expect(metal_output_buffer.backend() == BackendKind::metal, "Metal softmax backend mismatch");
+    expect_f32_rank3_close(
+        copy_tensor_from_backend(metal_output_buffer),
+        copy_tensor_from_backend(cpu_output_buffer),
+        1.0e-6F,
+        "Metal backend-buffer softmax"
     );
 }
 
@@ -1991,6 +2048,7 @@ const TestCase tensor_backend_tests[] {
         "applies causal grouped attention scores to CPU backend buffers",
         test_applies_causal_grouped_attention_scores_to_cpu_backend_buffers,
     },
+    {"applies softmax to CPU backend buffer", test_applies_softmax_to_cpu_backend_buffer},
     {
         "multiplies backend F32 by three backend F16 GGUF weights to CPU backend buffers",
         test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers,
@@ -2053,6 +2111,10 @@ const TestCase tensor_backend_tests[] {
     {
         "matches causal grouped attention scores to Metal backend buffer when available",
         test_matches_causal_grouped_attention_scores_to_metal_backend_buffer_when_available,
+    },
+    {
+        "matches softmax to Metal backend buffer when available",
+        test_matches_softmax_to_metal_backend_buffer_when_available,
     },
     {
         "multiplies backend F32 by three backend F16 GGUF weights to Metal backend buffers when available",
