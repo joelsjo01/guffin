@@ -1060,6 +1060,14 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         !shell.prefill_second_layer_attention_probabilities.has_value(),
         "Gemma2 shell one-layer fixture should not prepare second-layer attention probabilities"
     );
+    expect(
+        !shell.prefill_second_layer_attention_values.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare second-layer attention values"
+    );
+    expect(
+        !shell.prefill_second_layer_attention_output_projection.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare second-layer attention output projection"
+    );
     expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
     expect(shell.prefill_input.hidden_states.backend() == BackendKind::metal, "Gemma2 shell input backend mismatch");
     expect(
@@ -1419,6 +1427,7 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     const auto second_key_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 9);
     const auto second_value_weight = tensor_q6_k_gguf_weight_matrix(256, 256, 10);
     const auto output_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 4);
+    const auto second_output_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 11);
     std::vector<float> feed_forward_norm_values(256U, 1.0F);
     feed_forward_norm_values[0] = 1.25F;
     feed_forward_norm_values[1] = 0.5F;
@@ -1439,6 +1448,7 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_k.weight"), second_key_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_v.weight"), second_value_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_output.weight"), output_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_output.weight"), second_output_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_norm.weight"), feed_forward_norm);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "post_ffw_norm.weight"), post_feed_forward_norm);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_gate.weight"), feed_forward_gate_weight);
@@ -1487,6 +1497,16 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         "Gemma2 shell should prepare second-layer attention probabilities when a second layer exists"
     );
     const auto& second_layer_probabilities = *shell.prefill_second_layer_attention_probabilities;
+    expect(
+        shell.prefill_second_layer_attention_values.has_value(),
+        "Gemma2 shell should prepare second-layer attention values when a second layer exists"
+    );
+    const auto& second_layer_values = *shell.prefill_second_layer_attention_values;
+    expect(
+        shell.prefill_second_layer_attention_output_projection.has_value(),
+        "Gemma2 shell should prepare second-layer attention output projection when a second layer exists"
+    );
+    const auto& second_layer_output_projection = *shell.prefill_second_layer_attention_output_projection;
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -1633,6 +1653,26 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         second_layer_probabilities.probabilities
     );
     const auto expected_second_layer_probabilities = softmax_f32(expected_second_layer_scores);
+    const auto second_layer_attention_value_output = copy_tensor_from_backend(
+        second_layer_values.attention_output
+    );
+    const auto expected_second_layer_attention_values = causal_grouped_attention_values_f32(
+        second_layer_probability_output,
+        second_layer_value,
+        shell.prefill.cache_position(),
+        shell.plan.config().attention_head_count,
+        shell.plan.config().attention_head_count_kv,
+        shell.plan.config().attention_value_length,
+        shell.prefill.layers()[1].attention_token_count
+    );
+    const auto second_layer_projected_attention_output = copy_tensor_from_backend(
+        second_layer_output_projection.projected_attention_output
+    );
+    const auto expected_second_layer_projected_attention_output = matmul_f32_quantized_gguf_weight(
+        second_layer_attention_value_output,
+        second_output_weight,
+        BackendKind::cpu
+    );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
     expect(
@@ -2453,6 +2493,123 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         expected_second_layer_probabilities,
         1.0e-4F,
         "Gemma2 shell second layer attention probabilities"
+    );
+
+    expect(
+        second_layer_values.layer_index == 1,
+        "Gemma2 shell second layer attention value index mismatch"
+    );
+    expect(
+        second_layer_values.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell second layer attention value phase mismatch"
+    );
+    expect(
+        second_layer_values.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell second layer attention value scratch ownership mismatch"
+    );
+    expect(
+        second_layer_values.query_position_start == shell.prefill.cache_position(),
+        "Gemma2 shell second layer attention value query position start mismatch"
+    );
+    expect(
+        second_layer_values.attention_token_count == shell.prefill.layers()[1].attention_token_count,
+        "Gemma2 shell second layer attention value token count mismatch"
+    );
+    expect(
+        second_layer_values.query_head_count == shell.plan.config().attention_head_count,
+        "Gemma2 shell second layer attention value query head count mismatch"
+    );
+    expect(
+        second_layer_values.value_head_count == shell.plan.config().attention_head_count_kv,
+        "Gemma2 shell second layer attention value KV head count mismatch"
+    );
+    expect(
+        second_layer_values.value_length == shell.plan.config().attention_value_length,
+        "Gemma2 shell second layer attention value length mismatch"
+    );
+    expect(
+        second_layer_values.attention_output.backend() == BackendKind::metal,
+        "Gemma2 shell second layer attention value backend mismatch"
+    );
+    expect(
+        second_layer_values.attention_output.descriptor() == shell.prefill.scratch().attention_output,
+        "Gemma2 shell second layer attention value scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(second_layer_values.attention_output, second_layer_probabilities.probabilities),
+        "Gemma2 shell second layer attention value output should not alias probabilities"
+    );
+    expect(
+        !shares_backend_storage(second_layer_values.attention_output, second_layer_projection.value),
+        "Gemma2 shell second layer attention value output should not alias value projection"
+    );
+    expect(
+        !shares_backend_storage(second_layer_values.attention_output, values.attention_output),
+        "Gemma2 shell second layer attention value output should not alias first layer value output"
+    );
+    expect_f32_matrix_close(
+        second_layer_attention_value_output,
+        expected_second_layer_attention_values,
+        1.0e-3F,
+        "Gemma2 shell second layer attention values"
+    );
+
+    expect(
+        second_layer_output_projection.layer_index == 1,
+        "Gemma2 shell second layer attention output projection index mismatch"
+    );
+    expect(
+        second_layer_output_projection.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell second layer attention output projection phase mismatch"
+    );
+    expect(
+        second_layer_output_projection.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell second layer attention output projection scratch ownership mismatch"
+    );
+    expect(
+        second_layer_output_projection.attention_output_width
+            == shell.plan.config().attention_head_count * shell.plan.config().attention_value_length,
+        "Gemma2 shell second layer attention output projection input width mismatch"
+    );
+    expect(
+        second_layer_output_projection.hidden_width == shell.plan.config().embedding_length,
+        "Gemma2 shell second layer attention output projection hidden width mismatch"
+    );
+    expect(
+        second_layer_output_projection.projected_attention_output.backend() == BackendKind::metal,
+        "Gemma2 shell second layer projected attention output backend mismatch"
+    );
+    expect(
+        second_layer_output_projection.projected_attention_output.descriptor()
+            == shell.prefill.scratch().projected_attention_output,
+        "Gemma2 shell second layer projected attention output scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_output_projection.projected_attention_output,
+            second_layer_values.attention_output
+        ),
+        "Gemma2 shell second layer projected attention output should not alias attention value output"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_output_projection.projected_attention_output,
+            shell.plan.weights().blocks[1].attention.output_weight
+        ),
+        "Gemma2 shell second layer projected attention output should not alias attention output weight"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_output_projection.projected_attention_output,
+            output_projection.projected_attention_output
+        ),
+        "Gemma2 shell second layer projected attention output should not alias first layer projection"
+    );
+    expect_f32_matrix_close(
+        second_layer_projected_attention_output,
+        expected_second_layer_projected_attention_output,
+        1.0e-2F,
+        "Gemma2 shell second layer projected attention output"
     );
 }
 

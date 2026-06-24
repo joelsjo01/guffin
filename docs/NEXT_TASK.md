@@ -5,8 +5,8 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma layer-1 attention value aggregation setup
-primitive behind the Metal runtime shell.
+Add the first scheduled Gemma layer-1 post-attention residual setup primitive
+behind the Metal runtime shell.
 
 ## Why
 
@@ -31,17 +31,21 @@ normalized attention input through `blk.1.attn_q.weight`,
 positioning to the layer-1 Q/K projection outputs, then produce explicit
 layer-1 pre-softmax attention scores with the Gemma scale, logit softcap, GQA
 head mapping, and causal/window masking, then softmax those scores into
-explicit layer-1 attention probabilities.
+explicit layer-1 attention probabilities, then aggregate those probabilities
+with the layer-1 V projection into an explicit layer-1 attention value output,
+then project that attention value output through `blk.1.attn_output.weight`
+back to hidden width.
 
-The next blocker is proving layer-1 attention value aggregation without taking
-the full layer loop at once: consume
-`prefill_second_layer_attention_probabilities->probabilities` and
-`prefill_second_layer_attention_projection->value`, apply Gemma's GQA head
-mapping and causal/window attention-token bounds, and produce an explicit
-resident or phase-local layer-1 attention value output. Keep this slice tiny
-and replaceable: enough to prove layer-1 value aggregation, but not enough to
-run attention output projection, FFN, logits, sampling, KV cache updates, or
-generation success.
+The next blocker is proving layer-1 post-attention residual setup without
+taking the full layer loop at once: consume
+`prefill_second_layer_attention_output_projection->projected_attention_output`
+and the layer-1 residual input from
+`prefill_first_layer_feed_forward_output.feed_forward_residual`, normalize the
+projected attention output with `blk.1.post_attention_norm.weight`, add the
+residual input, and produce an explicit resident or phase-local layer-1
+post-attention residual. Keep this slice tiny and replaceable: enough to prove
+layer-1 post-attention residual setup, but not enough to run FFN, logits,
+sampling, KV cache updates, or generation success.
 
 ## Read
 
@@ -69,9 +73,8 @@ generation success.
 
 - Do not add full Gemma generation or a full Gemma layer chain.
 - Do not update KV cache.
-- Do not implement layer-1 attention output projection, FFN, logits, or
-  sampling changes.
-- Do not run past layer-1 attention value aggregation outputs.
+- Do not implement layer-1 FFN, logits, or sampling changes.
+- Do not run past layer-1 post-attention residual output.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -94,8 +97,8 @@ generation success.
 
 ## Stop When
 
-One small scheduled Gemma layer-1 attention value aggregation primitive
-consumes the runtime shell's layer-1 probability and V projection outputs and
-produces an explicit resident or phase-local layer-1 attention value buffer
-with deterministic tests, while full Gemma generation remains explicitly
-unsupported.
+One small scheduled Gemma layer-1 post-attention residual primitive consumes
+the runtime shell's layer-1 projected attention output and layer-1 residual
+input and produces an explicit resident or phase-local layer-1 post-attention
+residual with deterministic tests, while full Gemma generation remains
+explicitly unsupported.

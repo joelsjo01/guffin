@@ -149,6 +149,9 @@ struct Gemma2MetalGenerationRuntimeShell {
     std::optional<Gemma2MetalAttentionPositionActivations> prefill_second_layer_attention_position;
     std::optional<Gemma2MetalAttentionScoreActivations> prefill_second_layer_attention_scores;
     std::optional<Gemma2MetalAttentionProbabilityActivations> prefill_second_layer_attention_probabilities;
+    std::optional<Gemma2MetalAttentionValueActivations> prefill_second_layer_attention_values;
+    std::optional<Gemma2MetalAttentionOutputProjectionActivations>
+        prefill_second_layer_attention_output_projection;
 };
 
 [[nodiscard]] Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
