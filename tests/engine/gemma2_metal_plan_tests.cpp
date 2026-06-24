@@ -1044,6 +1044,10 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         !shell.prefill_second_layer_input.has_value(),
         "Gemma2 shell one-layer fixture should not prepare a second-layer input"
     );
+    expect(
+        !shell.prefill_second_layer_attention_projection.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare a second-layer attention projection"
+    );
     expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
     expect(shell.prefill_input.hidden_states.backend() == BackendKind::metal, "Gemma2 shell input backend mismatch");
     expect(
@@ -1399,6 +1403,9 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     const auto query_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 1);
     const auto key_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 2);
     const auto value_weight = tensor_q6_k_gguf_weight_matrix(256, 256, 3);
+    const auto second_query_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 8);
+    const auto second_key_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 9);
+    const auto second_value_weight = tensor_q6_k_gguf_weight_matrix(256, 256, 10);
     const auto output_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 4);
     std::vector<float> feed_forward_norm_values(256U, 1.0F);
     feed_forward_norm_values[0] = 1.25F;
@@ -1416,6 +1423,9 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_q.weight"), query_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_k.weight"), key_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_v.weight"), value_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_q.weight"), second_query_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_k.weight"), second_key_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_v.weight"), second_value_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_output.weight"), output_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_norm.weight"), feed_forward_norm);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "post_ffw_norm.weight"), post_feed_forward_norm);
@@ -1445,6 +1455,11 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         "Gemma2 shell should prepare a second-layer input when a second layer exists"
     );
     const auto& second_layer_input = *shell.prefill_second_layer_input;
+    expect(
+        shell.prefill_second_layer_attention_projection.has_value(),
+        "Gemma2 shell should prepare a second-layer attention projection when a second layer exists"
+    );
+    const auto& second_layer_projection = *shell.prefill_second_layer_attention_projection;
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -1538,6 +1553,24 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         feed_forward_residual_output,
         second_attention_norm,
         shell.plan.config().rms_norm_epsilon
+    );
+    const auto second_layer_query = copy_tensor_from_backend(second_layer_projection.query);
+    const auto expected_second_layer_query = matmul_f32_quantized_gguf_weight(
+        second_layer_normalized_attention_input,
+        second_query_weight,
+        BackendKind::cpu
+    );
+    const auto second_layer_key = copy_tensor_from_backend(second_layer_projection.key);
+    const auto expected_second_layer_key = matmul_f32_quantized_gguf_weight(
+        second_layer_normalized_attention_input,
+        second_key_weight,
+        BackendKind::cpu
+    );
+    const auto second_layer_value = copy_tensor_from_backend(second_layer_projection.value);
+    const auto expected_second_layer_value = matmul_f32_quantized_gguf_weight(
+        second_layer_normalized_attention_input,
+        second_value_weight,
+        BackendKind::cpu
     );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
@@ -2038,6 +2071,112 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         expected_second_layer_normalized_attention_input,
         1.0e-5F,
         "Gemma2 shell second layer normalized attention input"
+    );
+
+    expect(
+        second_layer_projection.layer_index == 1,
+        "Gemma2 shell second layer attention projection index mismatch"
+    );
+    expect(
+        second_layer_projection.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell second layer attention projection phase mismatch"
+    );
+    expect(
+        second_layer_projection.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell second layer attention projection scratch ownership mismatch"
+    );
+    expect(
+        second_layer_projection.query.backend() == BackendKind::metal,
+        "Gemma2 shell second layer query backend mismatch"
+    );
+    expect(
+        second_layer_projection.key.backend() == BackendKind::metal,
+        "Gemma2 shell second layer key backend mismatch"
+    );
+    expect(
+        second_layer_projection.value.backend() == BackendKind::metal,
+        "Gemma2 shell second layer value backend mismatch"
+    );
+    expect(
+        second_layer_projection.query.descriptor() == shell.prefill.scratch().query,
+        "Gemma2 shell second layer query scheduled descriptor mismatch"
+    );
+    expect(
+        second_layer_projection.key.descriptor() == shell.prefill.scratch().key,
+        "Gemma2 shell second layer key scheduled descriptor mismatch"
+    );
+    expect(
+        second_layer_projection.value.descriptor() == shell.prefill.scratch().value,
+        "Gemma2 shell second layer value scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_projection.query,
+            second_layer_input.normalized_attention_input
+        ),
+        "Gemma2 shell second layer query should not alias normalized layer input"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.key, second_layer_input.normalized_attention_input),
+        "Gemma2 shell second layer key should not alias normalized layer input"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.value, second_layer_input.normalized_attention_input),
+        "Gemma2 shell second layer value should not alias normalized layer input"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.query, projection.query),
+        "Gemma2 shell second layer query should not alias first layer query"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.key, projection.key),
+        "Gemma2 shell second layer key should not alias first layer key"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.value, projection.value),
+        "Gemma2 shell second layer value should not alias first layer value"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.query, second_layer_projection.key),
+        "Gemma2 shell second layer query and key outputs should be distinct buffers"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.query, second_layer_projection.value),
+        "Gemma2 shell second layer query and value outputs should be distinct buffers"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.key, second_layer_projection.value),
+        "Gemma2 shell second layer key and value outputs should be distinct buffers"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.query, shell.plan.weights().blocks[1].attention.query_weight),
+        "Gemma2 shell second layer query output should not alias query weight"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.key, shell.plan.weights().blocks[1].attention.key_weight),
+        "Gemma2 shell second layer key output should not alias key weight"
+    );
+    expect(
+        !shares_backend_storage(second_layer_projection.value, shell.plan.weights().blocks[1].attention.value_weight),
+        "Gemma2 shell second layer value output should not alias value weight"
+    );
+    expect_f32_matrix_close(
+        second_layer_query,
+        expected_second_layer_query,
+        1.0e-2F,
+        "Gemma2 shell second layer query projection"
+    );
+    expect_f32_matrix_close(
+        second_layer_key,
+        expected_second_layer_key,
+        1.0e-2F,
+        "Gemma2 shell second layer key projection"
+    );
+    expect_f32_matrix_close(
+        second_layer_value,
+        expected_second_layer_value,
+        1.0e-2F,
+        "Gemma2 shell second layer value projection"
     );
 }
 

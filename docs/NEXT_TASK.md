@@ -5,8 +5,8 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma layer-1 attention projection setup primitive
-behind the Metal runtime shell.
+Add the first scheduled Gemma layer-1 attention position setup primitive behind
+the Metal runtime shell.
 
 ## Why
 
@@ -25,17 +25,19 @@ the normalized FFN input through `blk.0.ffn_gate.weight` and
 `blk.0.ffn_up.weight`, apply Gemma's gated FFN activation, project through
 `blk.0.ffn_down.weight`, then apply `blk.0.post_ffw_norm.weight` and the FFN
 residual add, then normalize that first-layer FFN residual with
-`blk.1.attn_norm.weight` when a second layer exists.
+`blk.1.attn_norm.weight` when a second layer exists, and project that layer-1
+normalized attention input through `blk.1.attn_q.weight`,
+`blk.1.attn_k.weight`, and `blk.1.attn_v.weight`.
 
-The next blocker is proving that the layer-1 normalized attention input can
-feed the same scheduled projection shape as layer 0 without taking the full
+The next blocker is proving layer-1 position setup without taking the full
 layer loop at once: consume
-`prefill_second_layer_input->normalized_attention_input` and project it through
-`blk.1.attn_q.weight`, `blk.1.attn_k.weight`, and `blk.1.attn_v.weight`.
-Keep this slice tiny and replaceable: enough to prove layer-1 Q/K/V projection
-setup, but not enough to run layer-1 RoPE, attention scores, probabilities,
-value aggregation, output projection, FFN, logits, sampling, KV cache updates,
-or generation success.
+`prefill_second_layer_attention_projection->query` and
+`prefill_second_layer_attention_projection->key`, apply Gemma RoPE positioning,
+and produce explicit resident or phase-local layer-1 positioned Q/K outputs.
+Keep this slice tiny and replaceable: enough to prove layer-1 Q/K position
+setup, but not enough to run layer-1 attention scores, probabilities, value
+aggregation, output projection, FFN, logits, sampling, KV cache updates, or
+generation success.
 
 ## Read
 
@@ -63,9 +65,9 @@ or generation success.
 
 - Do not add full Gemma generation or a full Gemma layer chain.
 - Do not update KV cache.
-- Do not implement layer-1 RoPE, attention scores, probabilities, value
-  aggregation, output projection, FFN, logits, or sampling changes.
-- Do not run past layer-1 Q/K/V projection outputs.
+- Do not implement layer-1 attention scores, probabilities, value aggregation,
+  output projection, FFN, logits, or sampling changes.
+- Do not run past layer-1 Q/K RoPE/positioned outputs.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -88,7 +90,7 @@ or generation success.
 
 ## Stop When
 
-One small scheduled Gemma layer-1 attention projection primitive consumes the
-runtime shell's layer-1 normalized attention input and produces explicit
-resident or phase-local layer-1 Q/K/V projection outputs with deterministic
-tests, while full Gemma generation remains explicitly unsupported.
+One small scheduled Gemma layer-1 attention position primitive consumes the
+runtime shell's layer-1 Q/K projection outputs and produces explicit resident
+or phase-local layer-1 positioned Q/K outputs with deterministic tests, while
+full Gemma generation remains explicitly unsupported.

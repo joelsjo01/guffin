@@ -465,6 +465,40 @@ void require_layer_handoff_output_shape(
     }
 }
 
+void require_prefill_second_layer_input_matches_schedule(
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalLayerHandoffActivations& second_layer_input
+) {
+    if (prefill.phase() != Gemma2MetalSchedulePhase::prefill) {
+        throw std::invalid_argument("Gemma2 Metal layer-1 attention projection primitive requires a prefill schedule");
+    }
+    if (second_layer_input.phase != prefill.phase()) {
+        throw std::invalid_argument("Gemma2 Metal layer-1 attention projection input phase must match schedule");
+    }
+    if (second_layer_input.scratch_ownership != prefill.scratch_ownership()) {
+        throw std::invalid_argument(
+            "Gemma2 Metal layer-1 attention projection input scratch ownership must match schedule"
+        );
+    }
+    if (prefill.layers().size() < 2U) {
+        throw std::invalid_argument("Gemma2 Metal layer-1 attention projection primitive requires at least two layers");
+    }
+    if (second_layer_input.layer_index != prefill.layers()[1].layer_index) {
+        throw std::invalid_argument("Gemma2 Metal layer-1 attention projection input layer must match schedule");
+    }
+    if (second_layer_input.normalized_attention_input.backend() != prefill.backend()) {
+        throw std::invalid_argument("Gemma2 Metal layer-1 attention projection input must use the schedule backend");
+    }
+    if (
+        second_layer_input.normalized_attention_input.descriptor()
+        != prefill.scratch().layer_handoff_normalized_attention_input
+    ) {
+        throw std::invalid_argument(
+            "Gemma2 Metal layer-1 attention projection input must match scheduled handoff shape"
+        );
+    }
+}
+
 [[nodiscard]] Gemma2MetalLayerInputActivations create_gemma2_metal_prefill_first_layer_input(
     const Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& prefill,
@@ -846,6 +880,47 @@ create_gemma2_metal_prefill_second_layer_input(
     };
 }
 
+[[nodiscard]] std::optional<Gemma2MetalAttentionProjectionActivations>
+create_gemma2_metal_prefill_second_layer_attention_projection(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& prefill,
+    const std::optional<Gemma2MetalLayerHandoffActivations>& second_layer_input
+) {
+    if (!second_layer_input.has_value()) {
+        return std::nullopt;
+    }
+
+    require_prefill_second_layer_input_matches_schedule(prefill, *second_layer_input);
+    const auto& second_layer = prefill.layers()[1];
+    const auto& attention = plan.weights().blocks.at(second_layer.layer_index).attention;
+
+    auto query = tensor::ops::matmul_f32_quantized_gguf_weight_to_backend(
+        second_layer_input->normalized_attention_input,
+        attention.query_weight
+    );
+    auto key = tensor::ops::matmul_f32_quantized_gguf_weight_to_backend(
+        second_layer_input->normalized_attention_input,
+        attention.key_weight
+    );
+    auto value = tensor::ops::matmul_f32_quantized_gguf_weight_to_backend(
+        second_layer_input->normalized_attention_input,
+        attention.value_weight
+    );
+
+    require_attention_projection_output_shape(query, prefill.scratch().query, "layer-1 query");
+    require_attention_projection_output_shape(key, prefill.scratch().key, "layer-1 key");
+    require_attention_projection_output_shape(value, prefill.scratch().value, "layer-1 value");
+
+    return Gemma2MetalAttentionProjectionActivations {
+        .layer_index = second_layer.layer_index,
+        .phase = prefill.phase(),
+        .scratch_ownership = prefill.scratch_ownership(),
+        .query = std::move(query),
+        .key = std::move(key),
+        .value = std::move(value),
+    };
+}
+
 }  // namespace
 
 Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
@@ -932,6 +1007,12 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
         prefill,
         prefill_first_layer_feed_forward_output
     );
+    auto prefill_second_layer_attention_projection =
+        create_gemma2_metal_prefill_second_layer_attention_projection(
+            plan,
+            prefill,
+            prefill_second_layer_input
+        );
 
     return Gemma2MetalGenerationRuntimeShell {
         .plan = std::move(plan),
@@ -953,6 +1034,8 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
         .prefill_first_layer_feed_forward_output =
             std::move(prefill_first_layer_feed_forward_output),
         .prefill_second_layer_input = std::move(prefill_second_layer_input),
+        .prefill_second_layer_attention_projection =
+            std::move(prefill_second_layer_attention_projection),
     };
 }
 
