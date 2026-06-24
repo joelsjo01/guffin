@@ -509,6 +509,7 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(scratch.feed_forward_gated)
         + backend_buffer_byte_count(scratch.projected_feed_forward_output)
         + backend_buffer_byte_count(scratch.feed_forward_residual)
+        + backend_buffer_byte_count(scratch.layer_handoff_normalized_attention_input)
         + backend_buffer_byte_count(scratch.logits);
 }
 
@@ -528,6 +529,7 @@ std::size_t schedule_scratch_byte_count(const local_gguf_engine::engine::Gemma2M
         + scratch.feed_forward_gated.byte_count
         + scratch.projected_feed_forward_output.byte_count
         + scratch.feed_forward_residual.byte_count
+        + scratch.layer_handoff_normalized_attention_input.byte_count
         + scratch.logits.byte_count;
 }
 
@@ -615,6 +617,10 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
     expect(
         plan.decode_scratch().feed_forward_residual.descriptor().shape == Shape::from({1, 256}),
         "Gemma2 Metal FFN residual scratch shape mismatch"
+    );
+    expect(
+        plan.decode_scratch().layer_handoff_normalized_attention_input.descriptor().shape == Shape::from({1, 256}),
+        "Gemma2 Metal layer handoff normalized attention input scratch shape mismatch"
     );
 }
 
@@ -718,6 +724,10 @@ void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_availa
         "Gemma2 prefill FFN residual scratch shape mismatch"
     );
     expect(
+        prefill.scratch().layer_handoff_normalized_attention_input.shape == Shape::from({12, 256}),
+        "Gemma2 prefill layer handoff normalized attention input scratch shape mismatch"
+    );
+    expect(
         decode.scratch().normalized_hidden.shape == Shape::from({1, 256}),
         "Gemma2 decode normalized hidden scratch shape mismatch"
     );
@@ -740,6 +750,10 @@ void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_availa
     expect(
         decode.scratch().feed_forward_residual.shape == Shape::from({1, 256}),
         "Gemma2 decode resident FFN residual scratch shape mismatch"
+    );
+    expect(
+        decode.scratch().layer_handoff_normalized_attention_input.shape == Shape::from({1, 256}),
+        "Gemma2 decode resident layer handoff normalized attention input scratch shape mismatch"
     );
     expect(
         prefill.phase_scratch_byte_count() == schedule_scratch_byte_count(prefill.scratch()),
@@ -813,6 +827,10 @@ void test_gemma2_metal_plan_tracks_projected_attention_output_shape_when_availab
         "Gemma2 prefill FFN residual scratch should stay at hidden width"
     );
     expect(
+        prefill.scratch().layer_handoff_normalized_attention_input.shape == Shape::from({3, 256}),
+        "Gemma2 prefill layer handoff normalized attention input scratch should stay at hidden width"
+    );
+    expect(
         decode.scratch().attention_output.shape == Shape::from({1, 512}),
         "Gemma2 decode attention output scratch should follow query heads times value length"
     );
@@ -835,6 +853,10 @@ void test_gemma2_metal_plan_tracks_projected_attention_output_shape_when_availab
     expect(
         decode.scratch().feed_forward_residual.shape == Shape::from({1, 256}),
         "Gemma2 decode FFN residual scratch should stay at hidden width"
+    );
+    expect(
+        decode.scratch().layer_handoff_normalized_attention_input.shape == Shape::from({1, 256}),
+        "Gemma2 decode layer handoff normalized attention input scratch should stay at hidden width"
     );
 }
 
@@ -907,6 +929,13 @@ void test_gemma2_metal_schedules_share_resident_buffers_when_available() {
         "Gemma2 decode schedule should share resident FFN residual scratch buffer"
     );
     expect(
+        shares_backend_storage(
+            decode.resident_decode_scratch().layer_handoff_normalized_attention_input,
+            plan.decode_scratch().layer_handoff_normalized_attention_input
+        ),
+        "Gemma2 decode schedule should share resident layer handoff normalized attention input scratch buffer"
+    );
+    expect(
         prefill.resident_weight_byte_count() == plan.uploaded_weight_byte_count(),
         "Gemma2 prefill resident weight byte count mismatch"
     );
@@ -964,6 +993,11 @@ void test_gemma2_metal_schedule_retains_buffers_after_plan_lifetime_when_availab
         schedule.resident_decode_scratch().feed_forward_residual.descriptor().shape == Shape::from({1, 256}),
         "Gemma2 Metal schedule retained FFN residual scratch shape mismatch"
     );
+    expect(
+        schedule.resident_decode_scratch().layer_handoff_normalized_attention_input.descriptor().shape
+            == Shape::from({1, 256}),
+        "Gemma2 Metal schedule retained layer handoff normalized attention input scratch shape mismatch"
+    );
 }
 
 void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
@@ -1006,6 +1040,10 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
     );
 
     expect(shell.prefill_input.token_ids == std::vector<std::uint32_t>({3, 1}), "Gemma2 shell token ids mismatch");
+    expect(
+        !shell.prefill_second_layer_input.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare a second-layer input"
+    );
     expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
     expect(shell.prefill_input.hidden_states.backend() == BackendKind::metal, "Gemma2 shell input backend mismatch");
     expect(
@@ -1327,7 +1365,7 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         return;
     }
 
-    auto payload_store = tiny_gemma2_payload_store();
+    auto payload_store = tiny_gemma2_payload_store(true, 2);
     std::vector<float> embedding_values(256U * 4U, 0.0F);
     embedding_values[0] = 1.0F;
     embedding_values[1] = 2.0F;
@@ -1344,6 +1382,13 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     attention_norm_values[1] = 0.5F;
     const auto attention_norm = tensor_f32_vector(std::span<const float>(attention_norm_values));
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_norm.weight"), attention_norm);
+    std::vector<float> second_attention_norm_values(256U, 1.0F);
+    second_attention_norm_values[0] = 1.5F;
+    second_attention_norm_values[1] = 0.25F;
+    const auto second_attention_norm = tensor_f32_vector(
+        std::span<const float>(second_attention_norm_values)
+    );
+    overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_norm.weight"), second_attention_norm);
 
     std::vector<float> post_attention_norm_values(256U, 1.0F);
     post_attention_norm_values[0] = 0.25F;
@@ -1378,7 +1423,7 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_up.weight"), feed_forward_up_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_down.weight"), feed_forward_down_weight);
 
-    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
     const std::array<std::uint32_t, 2> prompt_token_ids {3, 1};
 
@@ -1395,6 +1440,11 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     const auto& post_attention_residual = shell.prefill_first_layer_post_attention_residual;
     const auto& feed_forward_gate_up = shell.prefill_first_layer_feed_forward_gate_up;
     const auto& feed_forward_output = shell.prefill_first_layer_feed_forward_output;
+    expect(
+        shell.prefill_second_layer_input.has_value(),
+        "Gemma2 shell should prepare a second-layer input when a second layer exists"
+    );
+    const auto& second_layer_input = *shell.prefill_second_layer_input;
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -1480,6 +1530,14 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
             post_feed_forward_norm,
             shell.plan.config().rms_norm_epsilon
         )
+    );
+    const auto second_layer_normalized_attention_input = copy_tensor_from_backend(
+        second_layer_input.normalized_attention_input
+    );
+    const auto expected_second_layer_normalized_attention_input = rms_norm_f32(
+        feed_forward_residual_output,
+        second_attention_norm,
+        shell.plan.config().rms_norm_epsilon
     );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
@@ -1930,6 +1988,56 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         expected_feed_forward_residual,
         1.0e-2F,
         "Gemma2 shell FFN residual"
+    );
+
+    expect(second_layer_input.layer_index == 1, "Gemma2 shell second layer input index mismatch");
+    expect(
+        second_layer_input.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell second layer input phase mismatch"
+    );
+    expect(
+        second_layer_input.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell second layer input scratch ownership mismatch"
+    );
+    expect(
+        second_layer_input.hidden_width == shell.plan.config().embedding_length,
+        "Gemma2 shell second layer input hidden width mismatch"
+    );
+    expect(
+        second_layer_input.normalized_attention_input.backend() == BackendKind::metal,
+        "Gemma2 shell second layer normalized attention input backend mismatch"
+    );
+    expect(
+        second_layer_input.normalized_attention_input.descriptor()
+            == shell.prefill.scratch().layer_handoff_normalized_attention_input,
+        "Gemma2 shell second layer normalized attention input scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_input.normalized_attention_input,
+            feed_forward_output.feed_forward_residual
+        ),
+        "Gemma2 shell second layer normalized attention input should not alias FFN residual"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_input.normalized_attention_input,
+            shell.prefill_first_layer_input.normalized_attention_input
+        ),
+        "Gemma2 shell second layer normalized attention input should not alias first layer input"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_input.normalized_attention_input,
+            shell.plan.weights().blocks[1].attention.attention_norm_weight
+        ),
+        "Gemma2 shell second layer normalized attention input should not alias second attention norm weight"
+    );
+    expect_f32_matrix_close(
+        second_layer_normalized_attention_input,
+        expected_second_layer_normalized_attention_input,
+        1.0e-5F,
+        "Gemma2 shell second layer normalized attention input"
     );
 }
 

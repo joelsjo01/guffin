@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -426,6 +427,44 @@ void require_feed_forward_output_shape(
     }
 }
 
+void require_prefill_feed_forward_output_matches_schedule(
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalFeedForwardOutputActivations& feed_forward_output
+) {
+    if (prefill.phase() != Gemma2MetalSchedulePhase::prefill) {
+        throw std::invalid_argument("Gemma2 Metal layer handoff primitive requires a prefill schedule");
+    }
+    if (feed_forward_output.phase != prefill.phase()) {
+        throw std::invalid_argument("Gemma2 Metal layer handoff input phase must match schedule");
+    }
+    if (feed_forward_output.scratch_ownership != prefill.scratch_ownership()) {
+        throw std::invalid_argument("Gemma2 Metal layer handoff input scratch ownership must match schedule");
+    }
+    if (prefill.layers().empty()) {
+        throw std::invalid_argument("Gemma2 Metal layer handoff primitive requires at least one layer");
+    }
+    if (feed_forward_output.layer_index != prefill.layers().front().layer_index) {
+        throw std::invalid_argument("Gemma2 Metal layer handoff input layer must match schedule");
+    }
+    if (feed_forward_output.feed_forward_residual.backend() != prefill.backend()) {
+        throw std::invalid_argument("Gemma2 Metal layer handoff input must use the schedule backend");
+    }
+    if (feed_forward_output.feed_forward_residual.descriptor() != prefill.scratch().feed_forward_residual) {
+        throw std::invalid_argument("Gemma2 Metal layer handoff input must match scheduled FFN residual shape");
+    }
+}
+
+void require_layer_handoff_output_shape(
+    const tensor::BackendBuffer& output,
+    const tensor::TensorDescriptor& expected
+) {
+    if (output.descriptor() != expected) {
+        throw std::invalid_argument(
+            "Gemma2 Metal layer handoff output must match scheduled scratch shape"
+        );
+    }
+}
+
 [[nodiscard]] Gemma2MetalLayerInputActivations create_gemma2_metal_prefill_first_layer_input(
     const Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& prefill,
@@ -774,6 +813,39 @@ create_gemma2_metal_prefill_first_layer_post_attention_residual(
     };
 }
 
+[[nodiscard]] std::optional<Gemma2MetalLayerHandoffActivations>
+create_gemma2_metal_prefill_second_layer_input(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalFeedForwardOutputActivations& feed_forward_output
+) {
+    require_prefill_feed_forward_output_matches_schedule(prefill, feed_forward_output);
+    if (prefill.layers().size() < 2U) {
+        return std::nullopt;
+    }
+
+    const auto& second_layer = prefill.layers()[1];
+    const auto& attention = plan.weights().blocks.at(second_layer.layer_index).attention;
+    auto normalized_attention_input = tensor::ops::rms_norm_f32_to_backend(
+        feed_forward_output.feed_forward_residual,
+        attention.attention_norm_weight,
+        plan.config().rms_norm_epsilon
+    );
+
+    require_layer_handoff_output_shape(
+        normalized_attention_input,
+        prefill.scratch().layer_handoff_normalized_attention_input
+    );
+
+    return Gemma2MetalLayerHandoffActivations {
+        .layer_index = second_layer.layer_index,
+        .phase = prefill.phase(),
+        .scratch_ownership = prefill.scratch_ownership(),
+        .hidden_width = plan.config().embedding_length,
+        .normalized_attention_input = std::move(normalized_attention_input),
+    };
+}
+
 }  // namespace
 
 Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
@@ -855,6 +927,11 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
             prefill_first_layer_post_attention_residual,
             prefill_first_layer_feed_forward_gate_up
         );
+    auto prefill_second_layer_input = create_gemma2_metal_prefill_second_layer_input(
+        plan,
+        prefill,
+        prefill_first_layer_feed_forward_output
+    );
 
     return Gemma2MetalGenerationRuntimeShell {
         .plan = std::move(plan),
@@ -875,6 +952,7 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
             std::move(prefill_first_layer_feed_forward_gate_up),
         .prefill_first_layer_feed_forward_output =
             std::move(prefill_first_layer_feed_forward_output),
+        .prefill_second_layer_input = std::move(prefill_second_layer_input),
     };
 }
 

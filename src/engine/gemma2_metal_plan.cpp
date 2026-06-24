@@ -209,6 +209,10 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
             f32_descriptor({1, config.embedding_length}),
             allocated_byte_count
         ),
+        .layer_handoff_normalized_attention_input = allocate_buffer(
+            f32_descriptor({1, config.embedding_length}),
+            allocated_byte_count
+        ),
         .logits = allocate_buffer(f32_descriptor({1, config.vocab_size}), allocated_byte_count),
     };
 }
@@ -245,6 +249,8 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
         .feed_forward_gated = scratch.feed_forward_gated.descriptor(),
         .projected_feed_forward_output = scratch.projected_feed_forward_output.descriptor(),
         .feed_forward_residual = scratch.feed_forward_residual.descriptor(),
+        .layer_handoff_normalized_attention_input =
+            scratch.layer_handoff_normalized_attention_input.descriptor(),
         .logits = scratch.logits.descriptor(),
     };
 }
@@ -308,6 +314,7 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
         .feed_forward_gated = f32_descriptor({token_count, config.feed_forward_length}),
         .projected_feed_forward_output = f32_descriptor({token_count, config.embedding_length}),
         .feed_forward_residual = f32_descriptor({token_count, config.embedding_length}),
+        .layer_handoff_normalized_attention_input = f32_descriptor({token_count, config.embedding_length}),
         .logits = f32_descriptor({token_count, config.vocab_size}),
     };
 }
@@ -329,6 +336,7 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     checked_add_bytes(total, scratch.feed_forward_gated.byte_count);
     checked_add_bytes(total, scratch.projected_feed_forward_output.byte_count);
     checked_add_bytes(total, scratch.feed_forward_residual.byte_count);
+    checked_add_bytes(total, scratch.layer_handoff_normalized_attention_input.byte_count);
     checked_add_bytes(total, scratch.logits.byte_count);
 
     return total;

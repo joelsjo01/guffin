@@ -60,6 +60,7 @@ struct Gemma2MetalDecodeScratch {
     tensor::BackendBuffer feed_forward_gated;
     tensor::BackendBuffer projected_feed_forward_output;
     tensor::BackendBuffer feed_forward_residual;
+    tensor::BackendBuffer layer_handoff_normalized_attention_input;
     tensor::BackendBuffer logits;
 };
 
@@ -94,6 +95,7 @@ struct Gemma2MetalScheduleScratch {
     tensor::TensorDescriptor feed_forward_gated;
     tensor::TensorDescriptor projected_feed_forward_output;
     tensor::TensorDescriptor feed_forward_residual;
+    tensor::TensorDescriptor layer_handoff_normalized_attention_input;
     tensor::TensorDescriptor logits;
 };
 

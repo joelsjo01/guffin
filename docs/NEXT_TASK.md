@@ -5,8 +5,8 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma layer handoff setup primitive behind the Metal
-runtime shell.
+Add the first scheduled Gemma layer-1 attention projection setup primitive
+behind the Metal runtime shell.
 
 ## Why
 
@@ -24,15 +24,18 @@ normalize that post-attention residual with `blk.0.ffn_norm.weight` and project
 the normalized FFN input through `blk.0.ffn_gate.weight` and
 `blk.0.ffn_up.weight`, apply Gemma's gated FFN activation, project through
 `blk.0.ffn_down.weight`, then apply `blk.0.post_ffw_norm.weight` and the FFN
-residual add.
+residual add, then normalize that first-layer FFN residual with
+`blk.1.attn_norm.weight` when a second layer exists.
 
-The next blocker is crossing exactly one layer boundary without taking the full
-layer chain at once: consume the explicit first-layer FFN residual output,
-normalize it with `blk.1.attn_norm.weight` when a second layer exists, and
-produce an explicit resident or phase-local layer-1 normalized attention input.
-Keep this slice tiny and replaceable: enough to prove hidden-state handoff into
-the next layer, but not enough to run layer-1 attention projections, logits,
-sampling, KV cache updates, or generation success.
+The next blocker is proving that the layer-1 normalized attention input can
+feed the same scheduled projection shape as layer 0 without taking the full
+layer loop at once: consume
+`prefill_second_layer_input->normalized_attention_input` and project it through
+`blk.1.attn_q.weight`, `blk.1.attn_k.weight`, and `blk.1.attn_v.weight`.
+Keep this slice tiny and replaceable: enough to prove layer-1 Q/K/V projection
+setup, but not enough to run layer-1 RoPE, attention scores, probabilities,
+value aggregation, output projection, FFN, logits, sampling, KV cache updates,
+or generation success.
 
 ## Read
 
@@ -40,9 +43,8 @@ sampling, KV cache updates, or generation success.
 - `docs/ENGINE_PRINCIPLES.md`
 - `docs/GRAPH.md` only to locate files/tests
 - `docs/GEMMA_Q4_MILESTONES.md`
-- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md`, especially
-  `## Current Inference Path And Bottlenecks`,
-  `## Target Architecture Proposal`, and attention semantics if needed
+- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` only if Gemma attention semantics
+  are needed
 
 ## Touch
 
@@ -61,10 +63,9 @@ sampling, KV cache updates, or generation success.
 
 - Do not add full Gemma generation or a full Gemma layer chain.
 - Do not update KV cache.
-- Do not implement layer-1 attention projection, attention scores,
-  probabilities, value aggregation, output projection, FFN, logits, or sampling
-  changes.
-- Do not run past the layer-1 attention input normalization.
+- Do not implement layer-1 RoPE, attention scores, probabilities, value
+  aggregation, output projection, FFN, logits, or sampling changes.
+- Do not run past layer-1 Q/K/V projection outputs.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -87,7 +88,7 @@ sampling, KV cache updates, or generation success.
 
 ## Stop When
 
-One small scheduled Gemma layer handoff primitive consumes the runtime shell's
-first-layer FFN residual output and produces an explicit resident or phase-local
-layer-1 normalized attention input with deterministic tests, while full Gemma
-generation remains explicitly unsupported.
+One small scheduled Gemma layer-1 attention projection primitive consumes the
+runtime shell's layer-1 normalized attention input and produces explicit
+resident or phase-local layer-1 Q/K/V projection outputs with deterministic
+tests, while full Gemma generation remains explicitly unsupported.

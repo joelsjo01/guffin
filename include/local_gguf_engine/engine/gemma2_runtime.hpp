@@ -5,6 +5,7 @@
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -120,6 +121,14 @@ struct Gemma2MetalFeedForwardOutputActivations {
     tensor::BackendBuffer feed_forward_residual;
 };
 
+struct Gemma2MetalLayerHandoffActivations {
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::prefill;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::phase_local;
+    std::uint32_t hidden_width = 0;
+    tensor::BackendBuffer normalized_attention_input;
+};
+
 struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalModelPlan plan;
     Gemma2MetalSchedule prefill;
@@ -135,6 +144,7 @@ struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalPostAttentionResidualActivations prefill_first_layer_post_attention_residual;
     Gemma2MetalFeedForwardGateUpActivations prefill_first_layer_feed_forward_gate_up;
     Gemma2MetalFeedForwardOutputActivations prefill_first_layer_feed_forward_output;
+    std::optional<Gemma2MetalLayerHandoffActivations> prefill_second_layer_input;
 };
 
 [[nodiscard]] Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
