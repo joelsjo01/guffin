@@ -109,6 +109,17 @@ struct Gemma2MetalFeedForwardGateUpActivations {
     tensor::BackendBuffer up;
 };
 
+struct Gemma2MetalFeedForwardOutputActivations {
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::prefill;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::phase_local;
+    std::uint32_t hidden_width = 0;
+    std::uint32_t feed_forward_width = 0;
+    tensor::BackendBuffer feed_forward_gated;
+    tensor::BackendBuffer projected_feed_forward_output;
+    tensor::BackendBuffer feed_forward_residual;
+};
+
 struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalModelPlan plan;
     Gemma2MetalSchedule prefill;
@@ -123,6 +134,7 @@ struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalAttentionOutputProjectionActivations prefill_first_layer_attention_output_projection;
     Gemma2MetalPostAttentionResidualActivations prefill_first_layer_post_attention_residual;
     Gemma2MetalFeedForwardGateUpActivations prefill_first_layer_feed_forward_gate_up;
+    Gemma2MetalFeedForwardOutputActivations prefill_first_layer_feed_forward_output;
 };
 
 [[nodiscard]] Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(

@@ -69,8 +69,10 @@ using local_gguf_engine::tensor::ops::add_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_quantized_gguf_weight;
+using local_gguf_engine::tensor::ops::multiply_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
+using local_gguf_engine::tensor::ops::silu_f32;
 using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::Q4_KBlockView;
 using local_gguf_engine::tensor::Q6_KBlockView;
@@ -505,6 +507,8 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(scratch.feed_forward_gate)
         + backend_buffer_byte_count(scratch.feed_forward_up)
         + backend_buffer_byte_count(scratch.feed_forward_gated)
+        + backend_buffer_byte_count(scratch.projected_feed_forward_output)
+        + backend_buffer_byte_count(scratch.feed_forward_residual)
         + backend_buffer_byte_count(scratch.logits);
 }
 
@@ -522,6 +526,8 @@ std::size_t schedule_scratch_byte_count(const local_gguf_engine::engine::Gemma2M
         + scratch.feed_forward_gate.byte_count
         + scratch.feed_forward_up.byte_count
         + scratch.feed_forward_gated.byte_count
+        + scratch.projected_feed_forward_output.byte_count
+        + scratch.feed_forward_residual.byte_count
         + scratch.logits.byte_count;
 }
 
@@ -597,6 +603,18 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
     expect(
         plan.decode_scratch().normalized_feed_forward_input.descriptor().shape == Shape::from({1, 256}),
         "Gemma2 Metal normalized FFN input scratch shape mismatch"
+    );
+    expect(
+        plan.decode_scratch().feed_forward_gated.descriptor().shape == Shape::from({1, 256}),
+        "Gemma2 Metal gated FFN scratch shape mismatch"
+    );
+    expect(
+        plan.decode_scratch().projected_feed_forward_output.descriptor().shape == Shape::from({1, 256}),
+        "Gemma2 Metal projected FFN output scratch shape mismatch"
+    );
+    expect(
+        plan.decode_scratch().feed_forward_residual.descriptor().shape == Shape::from({1, 256}),
+        "Gemma2 Metal FFN residual scratch shape mismatch"
     );
 }
 
@@ -688,6 +706,18 @@ void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_availa
         "Gemma2 prefill FFN up scratch shape mismatch"
     );
     expect(
+        prefill.scratch().feed_forward_gated.shape == Shape::from({12, 256}),
+        "Gemma2 prefill gated FFN scratch shape mismatch"
+    );
+    expect(
+        prefill.scratch().projected_feed_forward_output.shape == Shape::from({12, 256}),
+        "Gemma2 prefill projected FFN output scratch shape mismatch"
+    );
+    expect(
+        prefill.scratch().feed_forward_residual.shape == Shape::from({12, 256}),
+        "Gemma2 prefill FFN residual scratch shape mismatch"
+    );
+    expect(
         decode.scratch().normalized_hidden.shape == Shape::from({1, 256}),
         "Gemma2 decode normalized hidden scratch shape mismatch"
     );
@@ -702,6 +732,14 @@ void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_availa
     expect(
         decode.scratch().normalized_feed_forward_input.shape == Shape::from({1, 256}),
         "Gemma2 decode resident normalized FFN input scratch shape mismatch"
+    );
+    expect(
+        decode.scratch().projected_feed_forward_output.shape == Shape::from({1, 256}),
+        "Gemma2 decode resident projected FFN output scratch shape mismatch"
+    );
+    expect(
+        decode.scratch().feed_forward_residual.shape == Shape::from({1, 256}),
+        "Gemma2 decode resident FFN residual scratch shape mismatch"
     );
     expect(
         prefill.phase_scratch_byte_count() == schedule_scratch_byte_count(prefill.scratch()),
@@ -763,6 +801,18 @@ void test_gemma2_metal_plan_tracks_projected_attention_output_shape_when_availab
         "Gemma2 prefill FFN up scratch should follow feed-forward width"
     );
     expect(
+        prefill.scratch().feed_forward_gated.shape == Shape::from({3, 256}),
+        "Gemma2 prefill gated FFN scratch should follow feed-forward width"
+    );
+    expect(
+        prefill.scratch().projected_feed_forward_output.shape == Shape::from({3, 256}),
+        "Gemma2 prefill projected FFN output scratch should return to hidden width"
+    );
+    expect(
+        prefill.scratch().feed_forward_residual.shape == Shape::from({3, 256}),
+        "Gemma2 prefill FFN residual scratch should stay at hidden width"
+    );
+    expect(
         decode.scratch().attention_output.shape == Shape::from({1, 512}),
         "Gemma2 decode attention output scratch should follow query heads times value length"
     );
@@ -777,6 +827,14 @@ void test_gemma2_metal_plan_tracks_projected_attention_output_shape_when_availab
     expect(
         decode.scratch().normalized_feed_forward_input.shape == Shape::from({1, 256}),
         "Gemma2 decode normalized FFN input scratch should stay at hidden width"
+    );
+    expect(
+        decode.scratch().projected_feed_forward_output.shape == Shape::from({1, 256}),
+        "Gemma2 decode projected FFN output scratch should return to hidden width"
+    );
+    expect(
+        decode.scratch().feed_forward_residual.shape == Shape::from({1, 256}),
+        "Gemma2 decode FFN residual scratch should stay at hidden width"
     );
 }
 
@@ -835,6 +893,20 @@ void test_gemma2_metal_schedules_share_resident_buffers_when_available() {
         "Gemma2 decode schedule should share resident normalized FFN input scratch buffer"
     );
     expect(
+        shares_backend_storage(
+            decode.resident_decode_scratch().projected_feed_forward_output,
+            plan.decode_scratch().projected_feed_forward_output
+        ),
+        "Gemma2 decode schedule should share resident projected FFN output scratch buffer"
+    );
+    expect(
+        shares_backend_storage(
+            decode.resident_decode_scratch().feed_forward_residual,
+            plan.decode_scratch().feed_forward_residual
+        ),
+        "Gemma2 decode schedule should share resident FFN residual scratch buffer"
+    );
+    expect(
         prefill.resident_weight_byte_count() == plan.uploaded_weight_byte_count(),
         "Gemma2 prefill resident weight byte count mismatch"
     );
@@ -883,6 +955,14 @@ void test_gemma2_metal_schedule_retains_buffers_after_plan_lifetime_when_availab
     expect(
         schedule.resident_decode_scratch().normalized_feed_forward_input.descriptor().shape == Shape::from({1, 256}),
         "Gemma2 Metal schedule retained normalized FFN input scratch shape mismatch"
+    );
+    expect(
+        schedule.resident_decode_scratch().projected_feed_forward_output.descriptor().shape == Shape::from({1, 256}),
+        "Gemma2 Metal schedule retained projected FFN output scratch shape mismatch"
+    );
+    expect(
+        schedule.resident_decode_scratch().feed_forward_residual.descriptor().shape == Shape::from({1, 256}),
+        "Gemma2 Metal schedule retained FFN residual scratch shape mismatch"
     );
 }
 
@@ -1242,7 +1322,7 @@ void test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_availa
     expect_f32_matrix_close(positioned_key, expected_key, metal_rope_shell_tolerance, "Gemma2 shell positioned key");
 }
 
-void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_gate_up_when_available() {
+void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
@@ -1279,15 +1359,24 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_gate_up_w
     feed_forward_norm_values[0] = 1.25F;
     feed_forward_norm_values[1] = 0.5F;
     const auto feed_forward_norm = tensor_f32_vector(std::span<const float>(feed_forward_norm_values));
+    std::vector<float> post_feed_forward_norm_values(256U, 1.0F);
+    post_feed_forward_norm_values[0] = 0.5F;
+    post_feed_forward_norm_values[1] = 1.5F;
+    const auto post_feed_forward_norm = tensor_f32_vector(
+        std::span<const float>(post_feed_forward_norm_values)
+    );
     const auto feed_forward_gate_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 5);
     const auto feed_forward_up_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 6);
+    const auto feed_forward_down_weight = tensor_q6_k_gguf_weight_matrix(256, 256, 7);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_q.weight"), query_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_k.weight"), key_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_v.weight"), value_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_output.weight"), output_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_norm.weight"), feed_forward_norm);
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "post_ffw_norm.weight"), post_feed_forward_norm);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_gate.weight"), feed_forward_gate_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_up.weight"), feed_forward_up_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_down.weight"), feed_forward_down_weight);
 
     auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
@@ -1305,6 +1394,7 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_gate_up_w
     const auto& output_projection = shell.prefill_first_layer_attention_output_projection;
     const auto& post_attention_residual = shell.prefill_first_layer_post_attention_residual;
     const auto& feed_forward_gate_up = shell.prefill_first_layer_feed_forward_gate_up;
+    const auto& feed_forward_output = shell.prefill_first_layer_feed_forward_output;
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -1371,6 +1461,25 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_gate_up_w
         normalized_feed_forward_input,
         feed_forward_up_weight,
         BackendKind::cpu
+    );
+    const auto feed_forward_gated = copy_tensor_from_backend(feed_forward_output.feed_forward_gated);
+    const auto expected_feed_forward_gated = multiply_f32(silu_f32(feed_forward_gate), feed_forward_up);
+    const auto projected_feed_forward_output = copy_tensor_from_backend(
+        feed_forward_output.projected_feed_forward_output
+    );
+    const auto expected_projected_feed_forward_output = matmul_f32_quantized_gguf_weight(
+        feed_forward_gated,
+        feed_forward_down_weight,
+        BackendKind::cpu
+    );
+    const auto feed_forward_residual_output = copy_tensor_from_backend(feed_forward_output.feed_forward_residual);
+    const auto expected_feed_forward_residual = add_f32(
+        post_attention_residual_output,
+        rms_norm_f32(
+            projected_feed_forward_output,
+            post_feed_forward_norm,
+            shell.plan.config().rms_norm_epsilon
+        )
     );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
@@ -1718,6 +1827,110 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_gate_up_w
         1.0e-2F,
         "Gemma2 shell FFN up"
     );
+
+    expect(
+        feed_forward_output.layer_index == 0,
+        "Gemma2 shell first layer FFN output index mismatch"
+    );
+    expect(
+        feed_forward_output.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell first layer FFN output phase mismatch"
+    );
+    expect(
+        feed_forward_output.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell first layer FFN output scratch ownership mismatch"
+    );
+    expect(
+        feed_forward_output.hidden_width == shell.plan.config().embedding_length,
+        "Gemma2 shell first layer FFN output hidden width mismatch"
+    );
+    expect(
+        feed_forward_output.feed_forward_width == shell.plan.config().feed_forward_length,
+        "Gemma2 shell first layer FFN output width mismatch"
+    );
+    expect(
+        feed_forward_output.feed_forward_gated.backend() == BackendKind::metal,
+        "Gemma2 shell gated FFN backend mismatch"
+    );
+    expect(
+        feed_forward_output.projected_feed_forward_output.backend() == BackendKind::metal,
+        "Gemma2 shell projected FFN output backend mismatch"
+    );
+    expect(
+        feed_forward_output.feed_forward_residual.backend() == BackendKind::metal,
+        "Gemma2 shell FFN residual backend mismatch"
+    );
+    expect(
+        feed_forward_output.feed_forward_gated.descriptor() == shell.prefill.scratch().feed_forward_gated,
+        "Gemma2 shell gated FFN scheduled descriptor mismatch"
+    );
+    expect(
+        feed_forward_output.projected_feed_forward_output.descriptor()
+            == shell.prefill.scratch().projected_feed_forward_output,
+        "Gemma2 shell projected FFN output scheduled descriptor mismatch"
+    );
+    expect(
+        feed_forward_output.feed_forward_residual.descriptor() == shell.prefill.scratch().feed_forward_residual,
+        "Gemma2 shell FFN residual scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(feed_forward_output.feed_forward_gated, feed_forward_gate_up.gate),
+        "Gemma2 shell gated FFN should not alias gate projection"
+    );
+    expect(
+        !shares_backend_storage(feed_forward_output.feed_forward_gated, feed_forward_gate_up.up),
+        "Gemma2 shell gated FFN should not alias up projection"
+    );
+    expect(
+        !shares_backend_storage(
+            feed_forward_output.projected_feed_forward_output,
+            feed_forward_output.feed_forward_gated
+        ),
+        "Gemma2 shell projected FFN output should not alias gated FFN"
+    );
+    expect(
+        !shares_backend_storage(
+            feed_forward_output.projected_feed_forward_output,
+            shell.plan.weights().blocks[0].feed_forward.down_weight
+        ),
+        "Gemma2 shell projected FFN output should not alias down weight"
+    );
+    expect(
+        !shares_backend_storage(feed_forward_output.feed_forward_residual, post_attention_residual.post_attention_residual),
+        "Gemma2 shell FFN residual should not alias post-attention residual"
+    );
+    expect(
+        !shares_backend_storage(
+            feed_forward_output.feed_forward_residual,
+            feed_forward_output.projected_feed_forward_output
+        ),
+        "Gemma2 shell FFN residual should not alias projected FFN output"
+    );
+    expect(
+        !shares_backend_storage(
+            feed_forward_output.feed_forward_residual,
+            shell.plan.weights().blocks[0].feed_forward.post_feed_forward_norm_weight
+        ),
+        "Gemma2 shell FFN residual should not alias post-FFN norm weight"
+    );
+    expect_f32_matrix_close(
+        feed_forward_gated,
+        expected_feed_forward_gated,
+        1.0e-2F,
+        "Gemma2 shell gated FFN"
+    );
+    expect_f32_matrix_close(
+        projected_feed_forward_output,
+        expected_projected_feed_forward_output,
+        1.0e-2F,
+        "Gemma2 shell projected FFN output"
+    );
+    expect_f32_matrix_close(
+        feed_forward_residual_output,
+        expected_feed_forward_residual,
+        1.0e-2F,
+        "Gemma2 shell FFN residual"
+    );
 }
 
 void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
@@ -1859,8 +2072,8 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_available,
     },
     {
-        "Gemma2 Metal runtime shell prepares first layer FFN gate/up when available",
-        test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_gate_up_when_available,
+        "Gemma2 Metal runtime shell prepares first layer FFN output when available",
+        test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_when_available,
     },
     {
         "rejects invalid Gemma2 Metal schedule shapes when available",
