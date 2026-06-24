@@ -5,8 +5,8 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma layer-1 attention score setup primitive behind
-the Metal runtime shell.
+Add the first scheduled Gemma layer-1 attention value aggregation setup
+primitive behind the Metal runtime shell.
 
 ## Why
 
@@ -28,17 +28,20 @@ residual add, then normalize that first-layer FFN residual with
 `blk.1.attn_norm.weight` when a second layer exists, and project that layer-1
 normalized attention input through `blk.1.attn_q.weight`,
 `blk.1.attn_k.weight`, and `blk.1.attn_v.weight`, then apply Gemma RoPE
-positioning to the layer-1 Q/K projection outputs.
+positioning to the layer-1 Q/K projection outputs, then produce explicit
+layer-1 pre-softmax attention scores with the Gemma scale, logit softcap, GQA
+head mapping, and causal/window masking, then softmax those scores into
+explicit layer-1 attention probabilities.
 
-The next blocker is proving layer-1 pre-softmax attention score setup without
-taking the full layer loop at once: consume
-`prefill_second_layer_attention_position->query` and
-`prefill_second_layer_attention_position->key`, apply the Gemma attention
-scale, logit softcap, GQA head mapping, and causal/window masking, and produce
-an explicit resident or phase-local layer-1 score buffer. Keep this slice tiny
-and replaceable: enough to prove layer-1 score setup, but not enough to run
-layer-1 softmax probabilities, value aggregation, output projection, FFN,
-logits, sampling, KV cache updates, or generation success.
+The next blocker is proving layer-1 attention value aggregation without taking
+the full layer loop at once: consume
+`prefill_second_layer_attention_probabilities->probabilities` and
+`prefill_second_layer_attention_projection->value`, apply Gemma's GQA head
+mapping and causal/window attention-token bounds, and produce an explicit
+resident or phase-local layer-1 attention value output. Keep this slice tiny
+and replaceable: enough to prove layer-1 value aggregation, but not enough to
+run attention output projection, FFN, logits, sampling, KV cache updates, or
+generation success.
 
 ## Read
 
@@ -66,9 +69,9 @@ logits, sampling, KV cache updates, or generation success.
 
 - Do not add full Gemma generation or a full Gemma layer chain.
 - Do not update KV cache.
-- Do not implement layer-1 attention probabilities, value aggregation, output
-  projection, FFN, logits, or sampling changes.
-- Do not run past layer-1 pre-softmax attention score outputs.
+- Do not implement layer-1 attention output projection, FFN, logits, or
+  sampling changes.
+- Do not run past layer-1 attention value aggregation outputs.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -91,7 +94,8 @@ logits, sampling, KV cache updates, or generation success.
 
 ## Stop When
 
-One small scheduled Gemma layer-1 attention score primitive consumes the
-runtime shell's layer-1 positioned Q/K outputs and produces an explicit
-resident or phase-local layer-1 pre-softmax score buffer with deterministic
-tests, while full Gemma generation remains explicitly unsupported.
+One small scheduled Gemma layer-1 attention value aggregation primitive
+consumes the runtime shell's layer-1 probability and V projection outputs and
+produces an explicit resident or phase-local layer-1 attention value buffer
+with deterministic tests, while full Gemma generation remains explicitly
+unsupported.

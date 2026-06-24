@@ -1052,6 +1052,14 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         !shell.prefill_second_layer_attention_position.has_value(),
         "Gemma2 shell one-layer fixture should not prepare a second-layer attention position"
     );
+    expect(
+        !shell.prefill_second_layer_attention_scores.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare second-layer attention scores"
+    );
+    expect(
+        !shell.prefill_second_layer_attention_probabilities.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare second-layer attention probabilities"
+    );
     expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
     expect(shell.prefill_input.hidden_states.backend() == BackendKind::metal, "Gemma2 shell input backend mismatch");
     expect(
@@ -1469,6 +1477,16 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         "Gemma2 shell should prepare a second-layer attention position when a second layer exists"
     );
     const auto& second_layer_position = *shell.prefill_second_layer_attention_position;
+    expect(
+        shell.prefill_second_layer_attention_scores.has_value(),
+        "Gemma2 shell should prepare second-layer attention scores when a second layer exists"
+    );
+    const auto& second_layer_scores = *shell.prefill_second_layer_attention_scores;
+    expect(
+        shell.prefill_second_layer_attention_probabilities.has_value(),
+        "Gemma2 shell should prepare second-layer attention probabilities when a second layer exists"
+    );
+    const auto& second_layer_probabilities = *shell.prefill_second_layer_attention_probabilities;
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -1599,6 +1617,22 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         shell.plan.config().attention_key_length,
         10000.0F
     );
+    const auto second_layer_score_output = copy_tensor_from_backend(second_layer_scores.scores);
+    const auto expected_second_layer_scores = causal_grouped_attention_scores_f32(
+        second_layer_positioned_query,
+        second_layer_positioned_key,
+        shell.prefill.cache_position(),
+        shell.plan.config().attention_head_count,
+        shell.plan.config().attention_head_count_kv,
+        shell.plan.config().attention_key_length,
+        shell.prefill.layers()[1].attention_token_count,
+        second_layer_scores.scale,
+        shell.plan.config().attention_logit_softcap
+    );
+    const auto second_layer_probability_output = copy_tensor_from_backend(
+        second_layer_probabilities.probabilities
+    );
+    const auto expected_second_layer_probabilities = softmax_f32(expected_second_layer_scores);
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
     expect(
@@ -2292,6 +2326,133 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         expected_second_layer_positioned_key,
         metal_layer1_rope_shell_tolerance,
         "Gemma2 shell second layer positioned key"
+    );
+
+    expect(
+        second_layer_scores.layer_index == 1,
+        "Gemma2 shell second layer attention score index mismatch"
+    );
+    expect(
+        second_layer_scores.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell second layer attention score phase mismatch"
+    );
+    expect(
+        second_layer_scores.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell second layer attention score scratch ownership mismatch"
+    );
+    expect(
+        second_layer_scores.query_position_start == shell.prefill.cache_position(),
+        "Gemma2 shell second layer attention score query position start mismatch"
+    );
+    expect(
+        second_layer_scores.attention_token_count == shell.prefill.layers()[1].attention_token_count,
+        "Gemma2 shell second layer attention score token count mismatch"
+    );
+    expect(
+        second_layer_scores.query_head_count == shell.plan.config().attention_head_count,
+        "Gemma2 shell second layer attention score query head count mismatch"
+    );
+    expect(
+        second_layer_scores.key_head_count == shell.plan.config().attention_head_count_kv,
+        "Gemma2 shell second layer attention score key head count mismatch"
+    );
+    expect(
+        second_layer_scores.key_length == shell.plan.config().attention_key_length,
+        "Gemma2 shell second layer attention score key length mismatch"
+    );
+    expect_close(
+        second_layer_scores.scale,
+        1.0F / 16.0F,
+        0.0F,
+        "Gemma2 shell second layer attention score scale mismatch"
+    );
+    expect_close(
+        second_layer_scores.logit_softcap,
+        shell.plan.config().attention_logit_softcap,
+        0.0F,
+        "Gemma2 shell second layer attention score softcap mismatch"
+    );
+    expect(
+        second_layer_scores.scores.backend() == BackendKind::metal,
+        "Gemma2 shell second layer attention score backend mismatch"
+    );
+    expect(
+        second_layer_scores.scores.descriptor() == shell.prefill.scratch().attention_scores,
+        "Gemma2 shell second layer attention score scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(second_layer_scores.scores, second_layer_position.query),
+        "Gemma2 shell second layer attention scores should not alias positioned query"
+    );
+    expect(
+        !shares_backend_storage(second_layer_scores.scores, second_layer_position.key),
+        "Gemma2 shell second layer attention scores should not alias positioned key"
+    );
+    expect(
+        !shares_backend_storage(second_layer_scores.scores, scores.scores),
+        "Gemma2 shell second layer attention scores should not alias first layer scores"
+    );
+    expect(
+        std::isinf(read_f32(expected_second_layer_scores, std::span<const std::uint64_t>(masked_score))),
+        "Gemma2 shell second layer attention score fixture should include causal mask"
+    );
+    expect_f32_rank3_close(
+        second_layer_score_output,
+        expected_second_layer_scores,
+        1.0e-3F,
+        "Gemma2 shell second layer attention scores"
+    );
+
+    expect(
+        second_layer_probabilities.layer_index == 1,
+        "Gemma2 shell second layer attention probability index mismatch"
+    );
+    expect(
+        second_layer_probabilities.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell second layer attention probability phase mismatch"
+    );
+    expect(
+        second_layer_probabilities.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell second layer attention probability scratch ownership mismatch"
+    );
+    expect(
+        second_layer_probabilities.attention_token_count == shell.prefill.layers()[1].attention_token_count,
+        "Gemma2 shell second layer attention probability token count mismatch"
+    );
+    expect(
+        second_layer_probabilities.query_head_count == shell.plan.config().attention_head_count,
+        "Gemma2 shell second layer attention probability query head count mismatch"
+    );
+    expect(
+        second_layer_probabilities.probabilities.backend() == BackendKind::metal,
+        "Gemma2 shell second layer attention probability backend mismatch"
+    );
+    expect(
+        second_layer_probabilities.probabilities.descriptor()
+            == shell.prefill.scratch().attention_probabilities,
+        "Gemma2 shell second layer attention probability scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(second_layer_probabilities.probabilities, second_layer_scores.scores),
+        "Gemma2 shell second layer attention probabilities should not alias scores"
+    );
+    expect(
+        !shares_backend_storage(second_layer_probabilities.probabilities, second_layer_position.query),
+        "Gemma2 shell second layer attention probabilities should not alias positioned query"
+    );
+    expect(
+        !shares_backend_storage(second_layer_probabilities.probabilities, second_layer_position.key),
+        "Gemma2 shell second layer attention probabilities should not alias positioned key"
+    );
+    expect(
+        !shares_backend_storage(second_layer_probabilities.probabilities, probabilities.probabilities),
+        "Gemma2 shell second layer attention probabilities should not alias first layer probabilities"
+    );
+    expect_f32_rank3_close(
+        second_layer_probability_output,
+        expected_second_layer_probabilities,
+        1.0e-4F,
+        "Gemma2 shell second layer attention probabilities"
     );
 }
 
