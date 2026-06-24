@@ -53,6 +53,7 @@ struct Gemma2MetalDecodeScratch {
     tensor::BackendBuffer attention_probabilities;
     tensor::BackendBuffer attention_output;
     tensor::BackendBuffer projected_attention_output;
+    tensor::BackendBuffer post_attention_residual;
     tensor::BackendBuffer feed_forward_gate;
     tensor::BackendBuffer feed_forward_up;
     tensor::BackendBuffer feed_forward_gated;
@@ -83,6 +84,7 @@ struct Gemma2MetalScheduleScratch {
     tensor::TensorDescriptor attention_probabilities;
     tensor::TensorDescriptor attention_output;
     tensor::TensorDescriptor projected_attention_output;
+    tensor::TensorDescriptor post_attention_residual;
     tensor::TensorDescriptor feed_forward_gate;
     tensor::TensorDescriptor feed_forward_up;
     tensor::TensorDescriptor feed_forward_gated;

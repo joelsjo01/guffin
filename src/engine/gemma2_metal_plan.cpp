@@ -190,6 +190,10 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
             f32_descriptor({1, config.embedding_length}),
             allocated_byte_count
         ),
+        .post_attention_residual = allocate_buffer(
+            f32_descriptor({1, config.embedding_length}),
+            allocated_byte_count
+        ),
         .feed_forward_gate = allocate_buffer(f32_descriptor({1, config.feed_forward_length}), allocated_byte_count),
         .feed_forward_up = allocate_buffer(f32_descriptor({1, config.feed_forward_length}), allocated_byte_count),
         .feed_forward_gated = allocate_buffer(f32_descriptor({1, config.feed_forward_length}), allocated_byte_count),
@@ -222,6 +226,7 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
         .attention_probabilities = scratch.attention_probabilities.descriptor(),
         .attention_output = scratch.attention_output.descriptor(),
         .projected_attention_output = scratch.projected_attention_output.descriptor(),
+        .post_attention_residual = scratch.post_attention_residual.descriptor(),
         .feed_forward_gate = scratch.feed_forward_gate.descriptor(),
         .feed_forward_up = scratch.feed_forward_up.descriptor(),
         .feed_forward_gated = scratch.feed_forward_gated.descriptor(),
@@ -281,6 +286,7 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
         .attention_probabilities = f32_descriptor({token_count, config.attention_head_count, attention_token_count}),
         .attention_output = f32_descriptor({token_count, attention_output_width(config)}),
         .projected_attention_output = f32_descriptor({token_count, config.embedding_length}),
+        .post_attention_residual = f32_descriptor({token_count, config.embedding_length}),
         .feed_forward_gate = f32_descriptor({token_count, config.feed_forward_length}),
         .feed_forward_up = f32_descriptor({token_count, config.feed_forward_length}),
         .feed_forward_gated = f32_descriptor({token_count, config.feed_forward_length}),
@@ -298,6 +304,7 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     checked_add_bytes(total, scratch.attention_probabilities.byte_count);
     checked_add_bytes(total, scratch.attention_output.byte_count);
     checked_add_bytes(total, scratch.projected_attention_output.byte_count);
+    checked_add_bytes(total, scratch.post_attention_residual.byte_count);
     checked_add_bytes(total, scratch.feed_forward_gate.byte_count);
     checked_add_bytes(total, scratch.feed_forward_up.byte_count);
     checked_add_bytes(total, scratch.feed_forward_gated.byte_count);

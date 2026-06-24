@@ -6,6 +6,10 @@
 namespace local_gguf_engine::tensor::ops {
 
 [[nodiscard]] TensorStorage add_f32(const TensorStorage& left, const TensorStorage& right);
+[[nodiscard]] BackendBuffer add_f32_to_backend(
+    const BackendBuffer& left,
+    const BackendBuffer& right
+);
 [[nodiscard]] TensorStorage multiply_f32(const TensorStorage& left, const TensorStorage& right);
 [[nodiscard]] TensorStorage silu_f32(const TensorStorage& input);
 [[nodiscard]] BackendBuffer silu_multiply_f32_to_backend(

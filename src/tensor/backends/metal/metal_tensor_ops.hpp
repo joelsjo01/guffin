@@ -162,6 +162,10 @@ matmul_f32_f16_gguf_weight_triple_with_metal_buffers(
     const MetalBackendBufferStorage& gate,
     const MetalBackendBufferStorage& up
 );
+[[nodiscard]] BackendBuffer add_f32_with_metal_buffers(
+    const MetalBackendBufferStorage& left,
+    const MetalBackendBufferStorage& right
+);
 [[nodiscard]] BackendBuffer gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
     const MetalBackendBufferStorage& left,
     const MetalBackendBufferStorage& gate_weight,

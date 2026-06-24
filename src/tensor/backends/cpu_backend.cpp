@@ -325,6 +325,13 @@ BackendBuffer silu_multiply_f32_with_cpu_buffers(
     return copy_tensor_to_cpu_backend(output);
 }
 
+BackendBuffer add_f32_with_cpu_buffers(
+    const CpuBackendBufferStorage& left,
+    const CpuBackendBufferStorage& right
+) {
+    return copy_tensor_to_cpu_backend(ops::add_f32(left.storage(), right.storage()));
+}
+
 BackendBuffer gated_silu_projection_f32_f16_gguf_weight_with_cpu_buffers(
     const CpuBackendBufferStorage& left,
     const CpuBackendBufferStorage& gate_weight,

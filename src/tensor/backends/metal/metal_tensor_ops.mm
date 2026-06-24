@@ -1392,6 +1392,72 @@ BackendBuffer silu_multiply_f32_with_metal_buffers(
     return make_metal_backend_buffer(output_descriptor, output_buffer);
 }
 
+BackendBuffer add_f32_with_metal_buffers(
+    const MetalBackendBufferStorage& left,
+    const MetalBackendBufferStorage& right
+) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto element_count = left.descriptor().element_count;
+    const ElementwiseDimensions dims {
+        .elements = require_u32_dimension(element_count, "elements"),
+    };
+    const auto output_descriptor = left.descriptor();
+
+    id<MTLBuffer> output_buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(
+                                      output_descriptor.byte_count
+                                   )
+                                                           options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(ElementwiseDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (output_buffer == nil || dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal add buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    if (command_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal add command buffer creation failed"
+        );
+    }
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal add command encoding failed"
+        );
+    }
+
+    [encoder setComputePipelineState:state.add_pipeline];
+    [encoder setBuffer:left.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:right.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:output_buffer offset:0 atIndex:2];
+    [encoder setBuffer:dims_buffer offset:0 atIndex:3];
+
+    const MTLSize threads_per_threadgroup = MTLSizeMake(256, 1, 1);
+    const auto threadgroup_count = static_cast<NSUInteger>((element_count + 255U) / 256U);
+    const MTLSize threadgroups = MTLSizeMake(threadgroup_count, 1, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal add command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return make_metal_backend_buffer(output_descriptor, output_buffer);
+}
+
 BackendBuffer gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
     const MetalBackendBufferStorage& left,
     const MetalBackendBufferStorage& gate_weight,
@@ -1887,6 +1953,15 @@ void require_token_embedding_scale(float scale) {
     }
 }
 
+void require_add_f32_backend_operands(
+    const TensorDescriptor& left,
+    const TensorDescriptor& right
+) {
+    require_f32_descriptor(left);
+    require_f32_descriptor(right);
+    require_same_shape(left, right);
+}
+
 }  // namespace
 
 BackendBuffer embed_f16_gguf_weight_token_ids_to_backend(
@@ -2133,6 +2208,35 @@ BackendBuffer causal_grouped_attention_values_f32_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         probabilities.backend(),
         "unsupported backend buffers for causal grouped attention values"
+    );
+}
+
+BackendBuffer add_f32_to_backend(
+    const BackendBuffer& left,
+    const BackendBuffer& right
+) {
+    require_add_f32_backend_operands(left.descriptor(), right.descriptor());
+    backends::metal::require_same_backend(left.backend(), right.backend(), "F32 add");
+
+    switch (left.backend()) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::add_f32_with_cpu_buffers(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(left)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(right))
+            );
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::add_f32_with_metal_buffers(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(left)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(right))
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        left.backend(),
+        "unsupported backend buffers for F32 add"
     );
 }
 

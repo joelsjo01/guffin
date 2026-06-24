@@ -5,8 +5,8 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma post-attention residual setup primitive behind the
-Metal runtime shell.
+Add the first scheduled Gemma FFN gate/up setup primitive behind the Metal
+runtime shell.
 
 ## Why
 
@@ -19,14 +19,15 @@ produce pre-softmax attention scores, softmax those scores into explicit
 phase-local attention probabilities, and aggregate those probabilities with the
 first-layer V projection into an explicit phase-local attention value output,
 then project that attention output through `blk.0.attn_output.weight` back to
-hidden width.
+hidden width and apply Gemma post-attention norm plus the residual add.
 
-The next blocker is proving Gemma's post-attention step: apply
-`blk.0.post_attention_norm.weight` to the projected attention output, then add
-the original first-layer residual hidden states into an explicit resident or
-phase-local post-attention residual output. Keep this slice tiny and
-replaceable: enough to produce the first post-attention residual, but not
-enough to enter FFN work or pretend full generation exists.
+The next blocker is entering the first-layer FFN path without taking the whole
+FFN at once: normalize the post-attention residual with
+`blk.0.ffn_norm.weight`, then project that normalized FFN input through
+`blk.0.ffn_gate.weight` and `blk.0.ffn_up.weight` into explicit resident or
+phase-local gate/up outputs. Keep this slice tiny and replaceable: enough to
+prove the first FFN inputs and projections, but not enough to apply activation,
+down projection, post-FFN residual work, logits, or generation success.
 
 ## Read
 
@@ -42,8 +43,8 @@ enough to enter FFN work or pretend full generation exists.
 
 - Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
   and `src/engine`
-- Tensor/Metal backend code only for narrow backend-buffer norm/add helpers and
-  tests if existing helpers are not enough
+- Tensor/Metal backend code only for narrow backend-buffer norm/matmul helpers
+  and tests if existing helpers are not enough
 - `tests/engine`
 - `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
@@ -55,7 +56,8 @@ enough to enter FFN work or pretend full generation exists.
 
 - Do not add full Gemma generation or a full Gemma layer chain.
 - Do not update KV cache.
-- Do not implement FFN work, logits, or sampling changes.
+- Do not implement FFN activation, down projection, post-FFN norm/residual,
+  logits, or sampling changes.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -78,8 +80,8 @@ enough to enter FFN work or pretend full generation exists.
 
 ## Stop When
 
-One small scheduled Gemma post-attention residual setup primitive consumes the
-runtime shell's first-layer projected attention output and original residual
-hidden states, then produces an explicit resident or phase-local post-attention
-residual output with deterministic tests, while full Gemma generation remains
-explicitly unsupported.
+One small scheduled Gemma FFN gate/up setup primitive consumes the runtime
+shell's first-layer post-attention residual output and produces explicit
+resident or phase-local normalized FFN input plus gate/up projection outputs
+with deterministic tests, while full Gemma generation remains explicitly
+unsupported.

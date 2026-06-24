@@ -53,6 +53,7 @@ using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tensor::tensor_backend_unavailable_reason;
 using local_gguf_engine::tensor::write_f32;
 using local_gguf_engine::tensor::ops::add_f32;
+using local_gguf_engine::tensor::ops::add_f32_to_backend;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32_to_backend;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32;
@@ -671,6 +672,28 @@ void test_applies_rms_norm_to_cpu_backend_buffers() {
 
     expect(output_buffer.backend() == BackendKind::cpu, "CPU RMSNorm output backend mismatch");
     expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer RMSNorm output");
+}
+
+void test_adds_f32_cpu_backend_buffers() {
+    const std::array<float, 6> left_values {
+        2.0F, -4.0F, 8.0F,
+        0.5F, -1.5F, 3.0F,
+    };
+    const std::array<float, 6> right_values {
+        -1.0F, 0.25F, 1.5F,
+        4.0F, -2.0F, 0.75F,
+    };
+    const auto left = tensor_f32_matrix(2, 3, std::span<const float>(left_values));
+    const auto right = tensor_f32_matrix(2, 3, std::span<const float>(right_values));
+    const auto left_buffer = copy_tensor_to_backend(left, BackendKind::cpu);
+    const auto right_buffer = copy_tensor_to_backend(right, BackendKind::cpu);
+
+    const auto output_buffer = add_f32_to_backend(left_buffer, right_buffer);
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = add_f32(left, right);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU F32 add output backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer F32 add output");
 }
 
 void test_applies_headwise_rope_to_cpu_backend_buffer() {
@@ -1304,6 +1327,39 @@ void test_matches_rms_norm_to_metal_backend_buffer_when_available() {
         copy_tensor_from_backend(cpu_output_buffer),
         1.0e-5F,
         "Metal backend-buffer RMSNorm output"
+    );
+}
+
+void test_matches_f32_add_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 8> left_values {
+        2.0F, -4.0F, 8.0F, -1.0F,
+        0.5F, -1.5F, 3.0F, 6.0F,
+    };
+    const std::array<float, 8> right_values {
+        -0.5F, 2.0F, -3.0F, 0.25F,
+        1.5F, 0.75F, -2.0F, 4.0F,
+    };
+    const auto left = tensor_f32_matrix(2, 4, std::span<const float>(left_values));
+    const auto right = tensor_f32_matrix(2, 4, std::span<const float>(right_values));
+    const auto cpu_output_buffer = add_f32_to_backend(
+        copy_tensor_to_backend(left, BackendKind::cpu),
+        copy_tensor_to_backend(right, BackendKind::cpu)
+    );
+    const auto metal_output_buffer = add_f32_to_backend(
+        copy_tensor_to_backend(left, BackendKind::metal),
+        copy_tensor_to_backend(right, BackendKind::metal)
+    );
+
+    expect(metal_output_buffer.backend() == BackendKind::metal, "Metal F32 add output backend mismatch");
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_output_buffer),
+        copy_tensor_from_backend(cpu_output_buffer),
+        0.0F,
+        "Metal backend-buffer F32 add output"
     );
 }
 
@@ -2139,6 +2195,7 @@ const TestCase tensor_backend_tests[] {
         test_rejects_invalid_f16_gguf_token_embedding_inputs,
     },
     {"applies RMSNorm to CPU backend buffers", test_applies_rms_norm_to_cpu_backend_buffers},
+    {"adds F32 CPU backend buffers", test_adds_f32_cpu_backend_buffers},
     {"applies headwise RoPE to CPU backend buffer", test_applies_headwise_rope_to_cpu_backend_buffer},
     {
         "applies causal grouped attention scores to CPU backend buffers",
@@ -2203,6 +2260,10 @@ const TestCase tensor_backend_tests[] {
     {
         "matches RMSNorm to Metal backend buffer when available",
         test_matches_rms_norm_to_metal_backend_buffer_when_available,
+    },
+    {
+        "matches F32 add to Metal backend buffer when available",
+        test_matches_f32_add_to_metal_backend_buffer_when_available,
     },
     {
         "matches headwise RoPE to Metal backend buffer when available",

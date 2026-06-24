@@ -74,6 +74,10 @@ private:
     std::uint64_t attention_token_count
 );
 [[nodiscard]] BackendBuffer softmax_f32_with_cpu_buffer(const CpuBackendBufferStorage& input);
+[[nodiscard]] BackendBuffer add_f32_with_cpu_buffers(
+    const CpuBackendBufferStorage& left,
+    const CpuBackendBufferStorage& right
+);
 
 [[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight(
     const TensorStorage& left,
