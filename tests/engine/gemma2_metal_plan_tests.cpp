@@ -1068,6 +1068,10 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         !shell.prefill_second_layer_attention_output_projection.has_value(),
         "Gemma2 shell one-layer fixture should not prepare second-layer attention output projection"
     );
+    expect(
+        !shell.prefill_second_layer_post_attention_residual.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare second-layer post-attention residual"
+    );
     expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
     expect(shell.prefill_input.hidden_states.backend() == BackendKind::metal, "Gemma2 shell input backend mismatch");
     expect(
@@ -1419,6 +1423,17 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     post_attention_norm_values[1] = 0.75F;
     const auto post_attention_norm = tensor_f32_vector(std::span<const float>(post_attention_norm_values));
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "post_attention_norm.weight"), post_attention_norm);
+    std::vector<float> second_post_attention_norm_values(256U, 1.0F);
+    second_post_attention_norm_values[0] = 1.75F;
+    second_post_attention_norm_values[1] = 0.5F;
+    const auto second_post_attention_norm = tensor_f32_vector(
+        std::span<const float>(second_post_attention_norm_values)
+    );
+    overwrite_payload_bytes(
+        payload_store,
+        block_tensor_name(1, "post_attention_norm.weight"),
+        second_post_attention_norm
+    );
 
     const auto query_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 1);
     const auto key_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 2);
@@ -1507,6 +1522,11 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         "Gemma2 shell should prepare second-layer attention output projection when a second layer exists"
     );
     const auto& second_layer_output_projection = *shell.prefill_second_layer_attention_output_projection;
+    expect(
+        shell.prefill_second_layer_post_attention_residual.has_value(),
+        "Gemma2 shell should prepare second-layer post-attention residual when a second layer exists"
+    );
+    const auto& second_layer_post_attention_residual = *shell.prefill_second_layer_post_attention_residual;
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -1672,6 +1692,17 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         second_layer_attention_value_output,
         second_output_weight,
         BackendKind::cpu
+    );
+    const auto second_layer_post_attention_residual_output = copy_tensor_from_backend(
+        second_layer_post_attention_residual.post_attention_residual
+    );
+    const auto expected_second_layer_post_attention_residual = add_f32(
+        feed_forward_residual_output,
+        rms_norm_f32(
+            second_layer_projected_attention_output,
+            second_post_attention_norm,
+            shell.plan.config().rms_norm_epsilon
+        )
     );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
@@ -2610,6 +2641,66 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         expected_second_layer_projected_attention_output,
         1.0e-2F,
         "Gemma2 shell second layer projected attention output"
+    );
+
+    expect(
+        second_layer_post_attention_residual.layer_index == 1,
+        "Gemma2 shell second layer post-attention residual index mismatch"
+    );
+    expect(
+        second_layer_post_attention_residual.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell second layer post-attention residual phase mismatch"
+    );
+    expect(
+        second_layer_post_attention_residual.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell second layer post-attention residual scratch ownership mismatch"
+    );
+    expect(
+        second_layer_post_attention_residual.hidden_width == shell.plan.config().embedding_length,
+        "Gemma2 shell second layer post-attention residual hidden width mismatch"
+    );
+    expect(
+        second_layer_post_attention_residual.post_attention_residual.backend() == BackendKind::metal,
+        "Gemma2 shell second layer post-attention residual backend mismatch"
+    );
+    expect(
+        second_layer_post_attention_residual.post_attention_residual.descriptor()
+            == shell.prefill.scratch().post_attention_residual,
+        "Gemma2 shell second layer post-attention residual scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_post_attention_residual.post_attention_residual,
+            second_layer_output_projection.projected_attention_output
+        ),
+        "Gemma2 shell second layer post-attention residual should not alias projected attention output"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_post_attention_residual.post_attention_residual,
+            feed_forward_output.feed_forward_residual
+        ),
+        "Gemma2 shell second layer post-attention residual should not alias residual input"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_post_attention_residual.post_attention_residual,
+            shell.plan.weights().blocks[1].attention.post_attention_norm_weight
+        ),
+        "Gemma2 shell second layer post-attention residual should not alias post-attention norm weight"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_post_attention_residual.post_attention_residual,
+            post_attention_residual.post_attention_residual
+        ),
+        "Gemma2 shell second layer post-attention residual should not alias first layer residual"
+    );
+    expect_f32_matrix_close(
+        second_layer_post_attention_residual_output,
+        expected_second_layer_post_attention_residual,
+        1.0e-2F,
+        "Gemma2 shell second layer post-attention residual"
     );
 }
 
