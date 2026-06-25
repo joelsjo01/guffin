@@ -465,6 +465,33 @@ void require_layer_handoff_output_shape(
     }
 }
 
+void require_prefill_second_layer_feed_forward_output_matches_schedule(
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalFeedForwardOutputActivations& feed_forward_output
+) {
+    if (prefill.phase() != Gemma2MetalSchedulePhase::prefill) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 handoff primitive requires a prefill schedule");
+    }
+    if (feed_forward_output.phase != prefill.phase()) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 handoff input phase must match schedule");
+    }
+    if (feed_forward_output.scratch_ownership != prefill.scratch_ownership()) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 handoff input scratch ownership must match schedule");
+    }
+    if (prefill.layers().size() < 2U) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 handoff primitive requires at least two layers");
+    }
+    if (feed_forward_output.layer_index != prefill.layers()[1].layer_index) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 handoff input layer must match schedule");
+    }
+    if (feed_forward_output.feed_forward_residual.backend() != prefill.backend()) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 handoff input must use the schedule backend");
+    }
+    if (feed_forward_output.feed_forward_residual.descriptor() != prefill.scratch().feed_forward_residual) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 handoff input must match scheduled FFN residual shape");
+    }
+}
+
 void require_prefill_second_layer_input_matches_schedule(
     const Gemma2MetalSchedule& prefill,
     const Gemma2MetalLayerHandoffActivations& second_layer_input
@@ -1564,6 +1591,43 @@ create_gemma2_metal_prefill_second_layer_feed_forward_output(
     };
 }
 
+[[nodiscard]] std::optional<Gemma2MetalLayerHandoffActivations>
+create_gemma2_metal_prefill_third_layer_input(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& prefill,
+    const std::optional<Gemma2MetalFeedForwardOutputActivations>& feed_forward_output
+) {
+    if (!feed_forward_output.has_value()) {
+        return std::nullopt;
+    }
+
+    require_prefill_second_layer_feed_forward_output_matches_schedule(prefill, *feed_forward_output);
+    if (prefill.layers().size() < 3U) {
+        return std::nullopt;
+    }
+
+    const auto& third_layer = prefill.layers()[2];
+    const auto& attention = plan.weights().blocks.at(third_layer.layer_index).attention;
+    auto normalized_attention_input = tensor::ops::rms_norm_f32_to_backend(
+        feed_forward_output->feed_forward_residual,
+        attention.attention_norm_weight,
+        plan.config().rms_norm_epsilon
+    );
+
+    require_layer_handoff_output_shape(
+        normalized_attention_input,
+        prefill.scratch().layer_handoff_normalized_attention_input
+    );
+
+    return Gemma2MetalLayerHandoffActivations {
+        .layer_index = third_layer.layer_index,
+        .phase = prefill.phase(),
+        .scratch_ownership = prefill.scratch_ownership(),
+        .hidden_width = plan.config().embedding_length,
+        .normalized_attention_input = std::move(normalized_attention_input),
+    };
+}
+
 }  // namespace
 
 Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
@@ -1706,6 +1770,11 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
             prefill_second_layer_post_attention_residual,
             prefill_second_layer_feed_forward_gate_up
         );
+    auto prefill_third_layer_input = create_gemma2_metal_prefill_third_layer_input(
+        plan,
+        prefill,
+        prefill_second_layer_feed_forward_output
+    );
 
     return Gemma2MetalGenerationRuntimeShell {
         .plan = std::move(plan),
@@ -1745,6 +1814,7 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
             std::move(prefill_second_layer_feed_forward_gate_up),
         .prefill_second_layer_feed_forward_output =
             std::move(prefill_second_layer_feed_forward_output),
+        .prefill_third_layer_input = std::move(prefill_third_layer_input),
     };
 }
 

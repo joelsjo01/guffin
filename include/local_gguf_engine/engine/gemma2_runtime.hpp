@@ -158,6 +158,7 @@ struct Gemma2MetalGenerationRuntimeShell {
         prefill_second_layer_feed_forward_gate_up;
     std::optional<Gemma2MetalFeedForwardOutputActivations>
         prefill_second_layer_feed_forward_output;
+    std::optional<Gemma2MetalLayerHandoffActivations> prefill_third_layer_input;
 };
 
 [[nodiscard]] Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(

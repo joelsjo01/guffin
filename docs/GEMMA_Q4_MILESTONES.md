@@ -40,7 +40,8 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | First scheduled Gemma layer-1 post-attention residual setup | Layer-1 projected attention output applies Gemma post-attention norm and residual add, without FFN, logits, or generation success. |
 | Done | First scheduled Gemma layer-1 FFN gate/up setup | Layer-1 post-attention residual is normalized and projected into FFN gate/up buffers, without activation, down projection, logits, or generation success. |
 | Done | First scheduled Gemma layer-1 FFN output setup | Layer-1 FFN gate/up outputs apply Gemma activation, down projection, post-FFN norm, and residual add, without logits or generation success. |
-| Current | First scheduled Gemma layer-2 handoff setup | Layer-1 FFN residual becomes the next layer's normalized attention input, without running layer 2 attention, logits, or generation success. |
+| Done | First scheduled Gemma layer-2 handoff setup | Layer-1 FFN residual becomes the next layer's normalized attention input, without running layer 2 attention, logits, or generation success. |
+| Current | First scheduled Gemma layer-2 attention projection setup | Layer-2 normalized attention input produces explicit Q/K/V projection outputs, without position setup, attention scores, logits, or generation success. |
 | Planned | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |
 

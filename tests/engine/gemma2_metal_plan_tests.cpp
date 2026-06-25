@@ -1080,6 +1080,10 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         !shell.prefill_second_layer_feed_forward_output.has_value(),
         "Gemma2 shell one-layer fixture should not prepare second-layer FFN output"
     );
+    expect(
+        !shell.prefill_third_layer_input.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare a third-layer input"
+    );
     expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
     expect(shell.prefill_input.hidden_states.backend() == BackendKind::metal, "Gemma2 shell input backend mismatch");
     expect(
@@ -1396,12 +1400,37 @@ void test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_availa
     expect_f32_matrix_close(positioned_key, expected_key, metal_rope_shell_tolerance, "Gemma2 shell positioned key");
 }
 
-void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_when_available() {
+void test_gemma2_metal_runtime_shell_skips_third_layer_input_without_third_layer_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
 
     auto payload_store = tiny_gemma2_payload_store(true, 2);
+    auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const std::array<std::uint32_t, 2> prompt_token_ids {0, 1};
+
+    const auto shell = create_gemma2_metal_generation_runtime_shell(
+        model,
+        std::span<const std::uint32_t>(prompt_token_ids)
+    );
+
+    expect(
+        shell.prefill_second_layer_feed_forward_output.has_value(),
+        "Gemma2 shell two-layer fixture should prepare second-layer FFN output"
+    );
+    expect(
+        !shell.prefill_third_layer_input.has_value(),
+        "Gemma2 shell two-layer fixture should not prepare a third-layer input"
+    );
+}
+
+void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store(true, 3);
     std::vector<float> embedding_values(256U * 4U, 0.0F);
     embedding_values[0] = 1.0F;
     embedding_values[1] = 2.0F;
@@ -1425,6 +1454,13 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         std::span<const float>(second_attention_norm_values)
     );
     overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_norm.weight"), second_attention_norm);
+    std::vector<float> third_attention_norm_values(256U, 1.0F);
+    third_attention_norm_values[0] = 0.625F;
+    third_attention_norm_values[1] = 1.875F;
+    const auto third_attention_norm = tensor_f32_vector(
+        std::span<const float>(third_attention_norm_values)
+    );
+    overwrite_payload_bytes(payload_store, block_tensor_name(2, "attn_norm.weight"), third_attention_norm);
 
     std::vector<float> post_attention_norm_values(256U, 1.0F);
     post_attention_norm_values[0] = 0.25F;
@@ -1502,7 +1538,7 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     overwrite_payload_bytes(payload_store, block_tensor_name(1, "ffn_up.weight"), second_feed_forward_up_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(1, "ffn_down.weight"), second_feed_forward_down_weight);
 
-    auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
+    auto view = tiny_model_view(tiny_gemma2_metadata(3), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
     const std::array<std::uint32_t, 2> prompt_token_ids {3, 1};
 
@@ -1569,6 +1605,11 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         "Gemma2 shell should prepare second-layer FFN output when a second layer exists"
     );
     const auto& second_layer_feed_forward_output = *shell.prefill_second_layer_feed_forward_output;
+    expect(
+        shell.prefill_third_layer_input.has_value(),
+        "Gemma2 shell should prepare a third-layer input when a third layer exists"
+    );
+    const auto& third_layer_input = *shell.prefill_third_layer_input;
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -1791,6 +1832,14 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
             second_post_feed_forward_norm,
             shell.plan.config().rms_norm_epsilon
         )
+    );
+    const auto third_layer_normalized_attention_input = copy_tensor_from_backend(
+        third_layer_input.normalized_attention_input
+    );
+    const auto expected_third_layer_normalized_attention_input = rms_norm_f32(
+        second_layer_feed_forward_residual_output,
+        third_attention_norm,
+        shell.plan.config().rms_norm_epsilon
     );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
@@ -3051,6 +3100,63 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         1.0e-2F,
         "Gemma2 shell second layer FFN residual"
     );
+
+    expect(third_layer_input.layer_index == 2, "Gemma2 shell third layer input index mismatch");
+    expect(
+        third_layer_input.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell third layer input phase mismatch"
+    );
+    expect(
+        third_layer_input.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell third layer input scratch ownership mismatch"
+    );
+    expect(
+        third_layer_input.hidden_width == shell.plan.config().embedding_length,
+        "Gemma2 shell third layer input hidden width mismatch"
+    );
+    expect(
+        third_layer_input.normalized_attention_input.backend() == BackendKind::metal,
+        "Gemma2 shell third layer normalized attention input backend mismatch"
+    );
+    expect(
+        third_layer_input.normalized_attention_input.descriptor()
+            == shell.prefill.scratch().layer_handoff_normalized_attention_input,
+        "Gemma2 shell third layer normalized attention input scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(
+            third_layer_input.normalized_attention_input,
+            second_layer_feed_forward_output.feed_forward_residual
+        ),
+        "Gemma2 shell third layer normalized attention input should not alias second-layer FFN residual"
+    );
+    expect(
+        !shares_backend_storage(
+            third_layer_input.normalized_attention_input,
+            second_layer_input.normalized_attention_input
+        ),
+        "Gemma2 shell third layer normalized attention input should not alias second-layer input"
+    );
+    expect(
+        !shares_backend_storage(
+            third_layer_input.normalized_attention_input,
+            shell.prefill_first_layer_input.normalized_attention_input
+        ),
+        "Gemma2 shell third layer normalized attention input should not alias first-layer input"
+    );
+    expect(
+        !shares_backend_storage(
+            third_layer_input.normalized_attention_input,
+            shell.plan.weights().blocks[2].attention.attention_norm_weight
+        ),
+        "Gemma2 shell third layer normalized attention input should not alias third attention norm weight"
+    );
+    expect_f32_matrix_close(
+        third_layer_normalized_attention_input,
+        expected_third_layer_normalized_attention_input,
+        1.0e-5F,
+        "Gemma2 shell third layer normalized attention input"
+    );
 }
 
 void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
@@ -3190,6 +3296,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 Metal runtime shell positions first layer attention when available",
         test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_available,
+    },
+    {
+        "Gemma2 Metal runtime shell skips third layer input without third layer when available",
+        test_gemma2_metal_runtime_shell_skips_third_layer_input_without_third_layer_when_available,
     },
     {
         "Gemma2 Metal runtime shell prepares first layer FFN output when available",
