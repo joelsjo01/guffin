@@ -1084,6 +1084,10 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         !shell.prefill_third_layer_input.has_value(),
         "Gemma2 shell one-layer fixture should not prepare a third-layer input"
     );
+    expect(
+        !shell.prefill_third_layer_attention_projection.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare a third-layer attention projection"
+    );
     expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
     expect(shell.prefill_input.hidden_states.backend() == BackendKind::metal, "Gemma2 shell input backend mismatch");
     expect(
@@ -1423,6 +1427,10 @@ void test_gemma2_metal_runtime_shell_skips_third_layer_input_without_third_layer
         !shell.prefill_third_layer_input.has_value(),
         "Gemma2 shell two-layer fixture should not prepare a third-layer input"
     );
+    expect(
+        !shell.prefill_third_layer_attention_projection.has_value(),
+        "Gemma2 shell two-layer fixture should not prepare a third-layer attention projection"
+    );
 }
 
 void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_when_available() {
@@ -1485,6 +1493,9 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     const auto second_query_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 8);
     const auto second_key_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 9);
     const auto second_value_weight = tensor_q6_k_gguf_weight_matrix(256, 256, 10);
+    const auto third_query_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 15);
+    const auto third_key_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 16);
+    const auto third_value_weight = tensor_q6_k_gguf_weight_matrix(256, 256, 17);
     const auto output_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 4);
     const auto second_output_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 11);
     std::vector<float> feed_forward_norm_values(256U, 1.0F);
@@ -1521,6 +1532,9 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_q.weight"), second_query_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_k.weight"), second_key_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_v.weight"), second_value_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(2, "attn_q.weight"), third_query_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(2, "attn_k.weight"), third_key_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(2, "attn_v.weight"), third_value_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_output.weight"), output_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_output.weight"), second_output_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_norm.weight"), feed_forward_norm);
@@ -1610,6 +1624,11 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         "Gemma2 shell should prepare a third-layer input when a third layer exists"
     );
     const auto& third_layer_input = *shell.prefill_third_layer_input;
+    expect(
+        shell.prefill_third_layer_attention_projection.has_value(),
+        "Gemma2 shell should prepare third-layer attention projections when a third layer exists"
+    );
+    const auto& third_layer_projection = *shell.prefill_third_layer_attention_projection;
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -1840,6 +1859,24 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         second_layer_feed_forward_residual_output,
         third_attention_norm,
         shell.plan.config().rms_norm_epsilon
+    );
+    const auto third_layer_query = copy_tensor_from_backend(third_layer_projection.query);
+    const auto expected_third_layer_query = matmul_f32_quantized_gguf_weight(
+        third_layer_normalized_attention_input,
+        third_query_weight,
+        BackendKind::cpu
+    );
+    const auto third_layer_key = copy_tensor_from_backend(third_layer_projection.key);
+    const auto expected_third_layer_key = matmul_f32_quantized_gguf_weight(
+        third_layer_normalized_attention_input,
+        third_key_weight,
+        BackendKind::cpu
+    );
+    const auto third_layer_value = copy_tensor_from_backend(third_layer_projection.value);
+    const auto expected_third_layer_value = matmul_f32_quantized_gguf_weight(
+        third_layer_normalized_attention_input,
+        third_value_weight,
+        BackendKind::cpu
     );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
@@ -3156,6 +3193,112 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         expected_third_layer_normalized_attention_input,
         1.0e-5F,
         "Gemma2 shell third layer normalized attention input"
+    );
+
+    expect(
+        third_layer_projection.layer_index == 2,
+        "Gemma2 shell third layer attention projection index mismatch"
+    );
+    expect(
+        third_layer_projection.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell third layer attention projection phase mismatch"
+    );
+    expect(
+        third_layer_projection.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell third layer attention projection scratch ownership mismatch"
+    );
+    expect(
+        third_layer_projection.query.backend() == BackendKind::metal,
+        "Gemma2 shell third layer query backend mismatch"
+    );
+    expect(
+        third_layer_projection.key.backend() == BackendKind::metal,
+        "Gemma2 shell third layer key backend mismatch"
+    );
+    expect(
+        third_layer_projection.value.backend() == BackendKind::metal,
+        "Gemma2 shell third layer value backend mismatch"
+    );
+    expect(
+        third_layer_projection.query.descriptor() == shell.prefill.scratch().query,
+        "Gemma2 shell third layer query scheduled descriptor mismatch"
+    );
+    expect(
+        third_layer_projection.key.descriptor() == shell.prefill.scratch().key,
+        "Gemma2 shell third layer key scheduled descriptor mismatch"
+    );
+    expect(
+        third_layer_projection.value.descriptor() == shell.prefill.scratch().value,
+        "Gemma2 shell third layer value scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(
+            third_layer_projection.query,
+            third_layer_input.normalized_attention_input
+        ),
+        "Gemma2 shell third layer query should not alias normalized layer input"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.key, third_layer_input.normalized_attention_input),
+        "Gemma2 shell third layer key should not alias normalized layer input"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.value, third_layer_input.normalized_attention_input),
+        "Gemma2 shell third layer value should not alias normalized layer input"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.query, second_layer_projection.query),
+        "Gemma2 shell third layer query should not alias second layer query"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.key, second_layer_projection.key),
+        "Gemma2 shell third layer key should not alias second layer key"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.value, second_layer_projection.value),
+        "Gemma2 shell third layer value should not alias second layer value"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.query, third_layer_projection.key),
+        "Gemma2 shell third layer query and key outputs should be distinct buffers"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.query, third_layer_projection.value),
+        "Gemma2 shell third layer query and value outputs should be distinct buffers"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.key, third_layer_projection.value),
+        "Gemma2 shell third layer key and value outputs should be distinct buffers"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.query, shell.plan.weights().blocks[2].attention.query_weight),
+        "Gemma2 shell third layer query output should not alias query weight"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.key, shell.plan.weights().blocks[2].attention.key_weight),
+        "Gemma2 shell third layer key output should not alias key weight"
+    );
+    expect(
+        !shares_backend_storage(third_layer_projection.value, shell.plan.weights().blocks[2].attention.value_weight),
+        "Gemma2 shell third layer value output should not alias value weight"
+    );
+    expect_f32_matrix_close(
+        third_layer_query,
+        expected_third_layer_query,
+        1.0e-2F,
+        "Gemma2 shell third layer query projection"
+    );
+    expect_f32_matrix_close(
+        third_layer_key,
+        expected_third_layer_key,
+        1.0e-2F,
+        "Gemma2 shell third layer key projection"
+    );
+    expect_f32_matrix_close(
+        third_layer_value,
+        expected_third_layer_value,
+        1.0e-2F,
+        "Gemma2 shell third layer value projection"
     );
 }
 

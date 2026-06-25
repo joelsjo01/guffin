@@ -5,8 +5,8 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma layer-2 attention projection setup primitive
-behind the Metal runtime shell.
+Add the first scheduled Gemma layer-2 attention position setup primitive behind
+the Metal runtime shell.
 
 ## Why
 
@@ -15,15 +15,16 @@ views, tokenize the prompt, upload the resident Metal model plan, build
 separate prefill/decode schedules, turn prompt token IDs into backend-resident
 hidden states with the Gemma embedding scale, run the full first scheduled
 layer through attention and FFN residual output, run layer-1 attention and FFN
-through its residual output, and hand that layer-1 FFN residual to block 2 by
-normalizing it with `blk.2.attn_norm.weight` into an explicit
-`prefill_third_layer_input`.
+through its residual output, hand that layer-1 FFN residual to block 2 by
+normalizing it with `blk.2.attn_norm.weight`, and project that layer-2
+normalized attention input through `blk.2.attn_q.weight`,
+`blk.2.attn_k.weight`, and `blk.2.attn_v.weight`.
 
-The next blocker is proving layer-2 Q/K/V projection setup without taking the
-rest of layer-2 attention at once: consume
-`prefill_third_layer_input->normalized_attention_input`, project it through
-`blk.2.attn_q.weight`, `blk.2.attn_k.weight`, and `blk.2.attn_v.weight`, and
-produce explicit resident or phase-local layer-2 Q/K/V outputs.
+The next blocker is proving layer-2 position/RoPE setup without taking the rest
+of layer-2 attention at once: consume
+`prefill_third_layer_attention_projection->query` and `key`, apply Gemma
+positions/RoPE, and produce explicit resident or phase-local layer-2 positioned
+Q/K outputs.
 
 ## Read
 
@@ -38,8 +39,8 @@ produce explicit resident or phase-local layer-2 Q/K/V outputs.
 
 - Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
   and `src/engine`
-- Tensor/Metal backend code only for narrow backend-buffer projection helpers
-  and tests if existing helpers are not enough
+- Tensor/Metal backend code only for narrow backend-buffer RoPE helpers and
+  tests if existing helpers are not enough
 - `tests/engine`
 - `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
@@ -51,10 +52,9 @@ produce explicit resident or phase-local layer-2 Q/K/V outputs.
 
 - Do not add full Gemma generation or a full Gemma layer chain.
 - Do not update KV cache.
-- Do not implement layer-2 RoPE, attention scores, probabilities, value
-  aggregation, output projection, residual work, FFN work, logits, or sampling
-  changes.
-- Do not run past layer-2 Q/K/V projection outputs.
+- Do not implement layer-2 attention scores, probabilities, value aggregation,
+  output projection, residual work, FFN work, logits, or sampling changes.
+- Do not run past layer-2 positioned Q/K outputs.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -77,7 +77,7 @@ produce explicit resident or phase-local layer-2 Q/K/V outputs.
 
 ## Stop When
 
-One small scheduled Gemma layer-2 attention projection primitive consumes the
-runtime shell's layer-2 normalized attention input and produces explicit
-resident or phase-local layer-2 Q/K/V projection outputs with deterministic
-tests, while full Gemma generation remains explicitly unsupported.
+One small scheduled Gemma layer-2 attention position primitive consumes the
+runtime shell's layer-2 Q/K projection outputs and produces explicit resident
+or phase-local layer-2 positioned Q/K outputs with deterministic tests, while
+full Gemma generation remains explicitly unsupported.
