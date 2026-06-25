@@ -5,8 +5,8 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma layer-1 FFN output setup primitive behind the
-Metal runtime shell.
+Add the first scheduled Gemma layer-2 handoff setup primitive behind the Metal
+runtime shell.
 
 ## Why
 
@@ -20,17 +20,18 @@ RoPE, scores, probabilities, value aggregation, output projection, and then
 apply `blk.1.post_attention_norm.weight` plus the layer-1 residual add. It now
 normalizes that layer-1 post-attention residual with `blk.1.ffn_norm.weight`
 and projects the normalized FFN input through `blk.1.ffn_gate.weight` and
-`blk.1.ffn_up.weight`.
+`blk.1.ffn_up.weight`, then applies Gemma's gated FFN activation, projects
+through `blk.1.ffn_down.weight`, applies `blk.1.post_ffw_norm.weight`, and adds
+the layer-1 post-attention residual.
 
-The next blocker is proving layer-1 FFN output setup without taking logits or
-the full layer loop at once: consume
-`prefill_second_layer_post_attention_residual->post_attention_residual` and
-`prefill_second_layer_feed_forward_gate_up`, apply Gemma's gated FFN activation,
-project through `blk.1.ffn_down.weight`, apply `blk.1.post_ffw_norm.weight`,
-add the layer-1 post-attention residual, and produce an explicit resident or
-phase-local layer-1 FFN residual. Keep this slice tiny and replaceable: enough
-to prove layer-1 FFN output setup, but not enough to run logits, sampling, KV
-cache updates, full layer chaining, or generation success.
+The next blocker is proving the layer-2 handoff without taking another
+attention block at once: consume
+`prefill_second_layer_feed_forward_output->feed_forward_residual`, normalize it
+with `blk.2.attn_norm.weight` when a third layer exists, and produce an
+explicit resident or phase-local layer-2 normalized attention input. Keep this
+slice tiny and replaceable: enough to prove the layer-2 handoff, but not enough
+to run layer-2 Q/K/V, attention, logits, sampling, KV cache updates, full layer
+chaining, or generation success.
 
 ## Read
 
@@ -58,9 +59,9 @@ cache updates, full layer chaining, or generation success.
 
 - Do not add full Gemma generation or a full Gemma layer chain.
 - Do not update KV cache.
-- Do not implement logits or sampling changes.
-- Do not run past layer-1 FFN residual output.
-- Do not add layer-2 handoff in this slice.
+- Do not implement layer-2 Q/K/V, RoPE, scores, probabilities, value
+  aggregation, output projection, FFN work, logits, or sampling changes.
+- Do not run past layer-2 normalized attention input.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -83,8 +84,7 @@ cache updates, full layer chaining, or generation success.
 
 ## Stop When
 
-One small scheduled Gemma layer-1 FFN output primitive consumes the runtime
-shell's layer-1 post-attention residual plus layer-1 FFN gate/up outputs and
-produces an explicit resident or phase-local layer-1 FFN residual with
-deterministic tests, while full Gemma generation remains explicitly
-unsupported.
+One small scheduled Gemma layer-2 handoff primitive consumes the runtime
+shell's layer-1 FFN residual and produces an explicit resident or phase-local
+layer-2 normalized attention input with deterministic tests, while full Gemma
+generation remains explicitly unsupported.
