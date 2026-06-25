@@ -1072,6 +1072,10 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         !shell.prefill_second_layer_post_attention_residual.has_value(),
         "Gemma2 shell one-layer fixture should not prepare second-layer post-attention residual"
     );
+    expect(
+        !shell.prefill_second_layer_feed_forward_gate_up.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare second-layer FFN gate/up"
+    );
     expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
     expect(shell.prefill_input.hidden_states.backend() == BackendKind::metal, "Gemma2 shell input backend mismatch");
     expect(
@@ -1447,6 +1451,12 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     feed_forward_norm_values[0] = 1.25F;
     feed_forward_norm_values[1] = 0.5F;
     const auto feed_forward_norm = tensor_f32_vector(std::span<const float>(feed_forward_norm_values));
+    std::vector<float> second_feed_forward_norm_values(256U, 1.0F);
+    second_feed_forward_norm_values[0] = 0.75F;
+    second_feed_forward_norm_values[1] = 1.5F;
+    const auto second_feed_forward_norm = tensor_f32_vector(
+        std::span<const float>(second_feed_forward_norm_values)
+    );
     std::vector<float> post_feed_forward_norm_values(256U, 1.0F);
     post_feed_forward_norm_values[0] = 0.5F;
     post_feed_forward_norm_values[1] = 1.5F;
@@ -1456,6 +1466,8 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     const auto feed_forward_gate_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 5);
     const auto feed_forward_up_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 6);
     const auto feed_forward_down_weight = tensor_q6_k_gguf_weight_matrix(256, 256, 7);
+    const auto second_feed_forward_gate_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 12);
+    const auto second_feed_forward_up_weight = tensor_q4_k_gguf_weight_matrix(256, 256, 13);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_q.weight"), query_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_k.weight"), key_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_v.weight"), value_weight);
@@ -1465,10 +1477,13 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "attn_output.weight"), output_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(1, "attn_output.weight"), second_output_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_norm.weight"), feed_forward_norm);
+    overwrite_payload_bytes(payload_store, block_tensor_name(1, "ffn_norm.weight"), second_feed_forward_norm);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "post_ffw_norm.weight"), post_feed_forward_norm);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_gate.weight"), feed_forward_gate_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_up.weight"), feed_forward_up_weight);
     overwrite_payload_bytes(payload_store, block_tensor_name(0, "ffn_down.weight"), feed_forward_down_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(1, "ffn_gate.weight"), second_feed_forward_gate_weight);
+    overwrite_payload_bytes(payload_store, block_tensor_name(1, "ffn_up.weight"), second_feed_forward_up_weight);
 
     auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
@@ -1527,6 +1542,11 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         "Gemma2 shell should prepare second-layer post-attention residual when a second layer exists"
     );
     const auto& second_layer_post_attention_residual = *shell.prefill_second_layer_post_attention_residual;
+    expect(
+        shell.prefill_second_layer_feed_forward_gate_up.has_value(),
+        "Gemma2 shell should prepare second-layer FFN gate/up when a second layer exists"
+    );
+    const auto& second_layer_feed_forward_gate_up = *shell.prefill_second_layer_feed_forward_gate_up;
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -1703,6 +1723,26 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
             second_post_attention_norm,
             shell.plan.config().rms_norm_epsilon
         )
+    );
+    const auto second_layer_normalized_feed_forward_input = copy_tensor_from_backend(
+        second_layer_feed_forward_gate_up.normalized_feed_forward_input
+    );
+    const auto expected_second_layer_normalized_feed_forward_input = rms_norm_f32(
+        second_layer_post_attention_residual_output,
+        second_feed_forward_norm,
+        shell.plan.config().rms_norm_epsilon
+    );
+    const auto second_layer_feed_forward_gate = copy_tensor_from_backend(second_layer_feed_forward_gate_up.gate);
+    const auto expected_second_layer_feed_forward_gate = matmul_f32_quantized_gguf_weight(
+        second_layer_normalized_feed_forward_input,
+        second_feed_forward_gate_weight,
+        BackendKind::cpu
+    );
+    const auto second_layer_feed_forward_up = copy_tensor_from_backend(second_layer_feed_forward_gate_up.up);
+    const auto expected_second_layer_feed_forward_up = matmul_f32_quantized_gguf_weight(
+        second_layer_normalized_feed_forward_input,
+        second_feed_forward_up_weight,
+        BackendKind::cpu
     );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
@@ -2701,6 +2741,131 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         expected_second_layer_post_attention_residual,
         1.0e-2F,
         "Gemma2 shell second layer post-attention residual"
+    );
+
+    expect(
+        second_layer_feed_forward_gate_up.layer_index == 1,
+        "Gemma2 shell second layer FFN gate/up index mismatch"
+    );
+    expect(
+        second_layer_feed_forward_gate_up.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell second layer FFN gate/up phase mismatch"
+    );
+    expect(
+        second_layer_feed_forward_gate_up.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell second layer FFN gate/up scratch ownership mismatch"
+    );
+    expect(
+        second_layer_feed_forward_gate_up.hidden_width == shell.plan.config().embedding_length,
+        "Gemma2 shell second layer FFN gate/up hidden width mismatch"
+    );
+    expect(
+        second_layer_feed_forward_gate_up.feed_forward_width == shell.plan.config().feed_forward_length,
+        "Gemma2 shell second layer FFN gate/up width mismatch"
+    );
+    expect(
+        second_layer_feed_forward_gate_up.normalized_feed_forward_input.backend() == BackendKind::metal,
+        "Gemma2 shell second layer normalized FFN input backend mismatch"
+    );
+    expect(
+        second_layer_feed_forward_gate_up.gate.backend() == BackendKind::metal,
+        "Gemma2 shell second layer FFN gate backend mismatch"
+    );
+    expect(
+        second_layer_feed_forward_gate_up.up.backend() == BackendKind::metal,
+        "Gemma2 shell second layer FFN up backend mismatch"
+    );
+    expect(
+        second_layer_feed_forward_gate_up.normalized_feed_forward_input.descriptor()
+            == shell.prefill.scratch().normalized_feed_forward_input,
+        "Gemma2 shell second layer normalized FFN input scheduled descriptor mismatch"
+    );
+    expect(
+        second_layer_feed_forward_gate_up.gate.descriptor() == shell.prefill.scratch().feed_forward_gate,
+        "Gemma2 shell second layer FFN gate scheduled descriptor mismatch"
+    );
+    expect(
+        second_layer_feed_forward_gate_up.up.descriptor() == shell.prefill.scratch().feed_forward_up,
+        "Gemma2 shell second layer FFN up scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_feed_forward_gate_up.normalized_feed_forward_input,
+            second_layer_post_attention_residual.post_attention_residual
+        ),
+        "Gemma2 shell second layer normalized FFN input should not alias post-attention residual"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_feed_forward_gate_up.normalized_feed_forward_input,
+            shell.plan.weights().blocks[1].feed_forward.feed_forward_norm_weight
+        ),
+        "Gemma2 shell second layer normalized FFN input should not alias FFN norm weight"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_feed_forward_gate_up.normalized_feed_forward_input,
+            feed_forward_gate_up.normalized_feed_forward_input
+        ),
+        "Gemma2 shell second layer normalized FFN input should not alias first layer normalized FFN input"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_feed_forward_gate_up.gate,
+            second_layer_feed_forward_gate_up.normalized_feed_forward_input
+        ),
+        "Gemma2 shell second layer FFN gate should not alias normalized FFN input"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_feed_forward_gate_up.up,
+            second_layer_feed_forward_gate_up.normalized_feed_forward_input
+        ),
+        "Gemma2 shell second layer FFN up should not alias normalized FFN input"
+    );
+    expect(
+        !shares_backend_storage(second_layer_feed_forward_gate_up.gate, second_layer_feed_forward_gate_up.up),
+        "Gemma2 shell second layer FFN gate and up outputs should be distinct buffers"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_feed_forward_gate_up.gate,
+            shell.plan.weights().blocks[1].feed_forward.gate_weight
+        ),
+        "Gemma2 shell second layer FFN gate output should not alias gate weight"
+    );
+    expect(
+        !shares_backend_storage(
+            second_layer_feed_forward_gate_up.up,
+            shell.plan.weights().blocks[1].feed_forward.up_weight
+        ),
+        "Gemma2 shell second layer FFN up output should not alias up weight"
+    );
+    expect(
+        !shares_backend_storage(second_layer_feed_forward_gate_up.gate, feed_forward_gate_up.gate),
+        "Gemma2 shell second layer FFN gate should not alias first layer gate"
+    );
+    expect(
+        !shares_backend_storage(second_layer_feed_forward_gate_up.up, feed_forward_gate_up.up),
+        "Gemma2 shell second layer FFN up should not alias first layer up"
+    );
+    expect_f32_matrix_close(
+        second_layer_normalized_feed_forward_input,
+        expected_second_layer_normalized_feed_forward_input,
+        1.0e-2F,
+        "Gemma2 shell second layer normalized FFN input"
+    );
+    expect_f32_matrix_close(
+        second_layer_feed_forward_gate,
+        expected_second_layer_feed_forward_gate,
+        1.0e-2F,
+        "Gemma2 shell second layer FFN gate"
+    );
+    expect_f32_matrix_close(
+        second_layer_feed_forward_up,
+        expected_second_layer_feed_forward_up,
+        1.0e-2F,
+        "Gemma2 shell second layer FFN up"
     );
 }
 

@@ -38,7 +38,8 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | First scheduled Gemma layer-1 attention value aggregation setup | Layer-1 softmax probabilities and V projection outputs produce an explicit attention value output, without output projection, logits, or generation success. |
 | Done | First scheduled Gemma layer-1 attention output projection setup | Layer-1 attention value output projects back to hidden width, without residual work, logits, or generation success. |
 | Done | First scheduled Gemma layer-1 post-attention residual setup | Layer-1 projected attention output applies Gemma post-attention norm and residual add, without FFN, logits, or generation success. |
-| Current | First scheduled Gemma layer-1 FFN gate/up setup | Layer-1 post-attention residual is normalized and projected into FFN gate/up buffers, without activation, down projection, logits, or generation success. |
+| Done | First scheduled Gemma layer-1 FFN gate/up setup | Layer-1 post-attention residual is normalized and projected into FFN gate/up buffers, without activation, down projection, logits, or generation success. |
+| Current | First scheduled Gemma layer-1 FFN output setup | Layer-1 FFN gate/up outputs apply Gemma activation, down projection, post-FFN norm, and residual add, without logits or generation success. |
 | Planned | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |
 
