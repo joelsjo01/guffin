@@ -161,6 +161,7 @@ struct Gemma2MetalGenerationRuntimeShell {
     std::optional<Gemma2MetalLayerHandoffActivations> prefill_third_layer_input;
     std::optional<Gemma2MetalAttentionProjectionActivations> prefill_third_layer_attention_projection;
     std::optional<Gemma2MetalAttentionPositionActivations> prefill_third_layer_attention_position;
+    std::optional<Gemma2MetalAttentionScoreActivations> prefill_third_layer_attention_scores;
 };
 
 [[nodiscard]] Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(

@@ -1092,6 +1092,10 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
         !shell.prefill_third_layer_attention_position.has_value(),
         "Gemma2 shell one-layer fixture should not prepare a third-layer attention position"
     );
+    expect(
+        !shell.prefill_third_layer_attention_scores.has_value(),
+        "Gemma2 shell one-layer fixture should not prepare third-layer attention scores"
+    );
     expect(shell.prefill_input.embedding_scale == 16.0F, "Gemma2 shell embedding scale mismatch");
     expect(shell.prefill_input.hidden_states.backend() == BackendKind::metal, "Gemma2 shell input backend mismatch");
     expect(
@@ -1439,6 +1443,10 @@ void test_gemma2_metal_runtime_shell_skips_third_layer_input_without_third_layer
         !shell.prefill_third_layer_attention_position.has_value(),
         "Gemma2 shell two-layer fixture should not prepare a third-layer attention position"
     );
+    expect(
+        !shell.prefill_third_layer_attention_scores.has_value(),
+        "Gemma2 shell two-layer fixture should not prepare third-layer attention scores"
+    );
 }
 
 void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_when_available() {
@@ -1642,6 +1650,11 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         "Gemma2 shell should prepare third-layer attention position when a third layer exists"
     );
     const auto& third_layer_position = *shell.prefill_third_layer_attention_position;
+    expect(
+        shell.prefill_third_layer_attention_scores.has_value(),
+        "Gemma2 shell should prepare third-layer attention scores when a third layer exists"
+    );
+    const auto& third_layer_scores = *shell.prefill_third_layer_attention_scores;
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -1908,6 +1921,18 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         shell.plan.config().attention_key_length,
         shell.plan.config().attention_key_length,
         10000.0F
+    );
+    const auto third_layer_score_output = copy_tensor_from_backend(third_layer_scores.scores);
+    const auto expected_third_layer_scores = causal_grouped_attention_scores_f32(
+        third_layer_positioned_query,
+        third_layer_positioned_key,
+        shell.prefill.cache_position(),
+        shell.plan.config().attention_head_count,
+        shell.plan.config().attention_head_count_kv,
+        shell.plan.config().attention_key_length,
+        shell.prefill.layers()[2].attention_token_count,
+        third_layer_scores.scale,
+        shell.plan.config().attention_logit_softcap
     );
 
     expect(scores.layer_index == 0, "Gemma2 shell first layer attention score index mismatch");
@@ -3417,6 +3442,85 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
         expected_third_layer_positioned_key,
         metal_layer1_rope_shell_tolerance,
         "Gemma2 shell third layer positioned key"
+    );
+
+    expect(
+        third_layer_scores.layer_index == 2,
+        "Gemma2 shell third layer attention score index mismatch"
+    );
+    expect(
+        third_layer_scores.phase == Gemma2MetalSchedulePhase::prefill,
+        "Gemma2 shell third layer attention score phase mismatch"
+    );
+    expect(
+        third_layer_scores.scratch_ownership == Gemma2MetalScratchOwnership::phase_local,
+        "Gemma2 shell third layer attention score scratch ownership mismatch"
+    );
+    expect(
+        third_layer_scores.query_position_start == shell.prefill.cache_position(),
+        "Gemma2 shell third layer attention score query position start mismatch"
+    );
+    expect(
+        third_layer_scores.attention_token_count == shell.prefill.layers()[2].attention_token_count,
+        "Gemma2 shell third layer attention score token count mismatch"
+    );
+    expect(
+        third_layer_scores.query_head_count == shell.plan.config().attention_head_count,
+        "Gemma2 shell third layer attention score query head count mismatch"
+    );
+    expect(
+        third_layer_scores.key_head_count == shell.plan.config().attention_head_count_kv,
+        "Gemma2 shell third layer attention score key head count mismatch"
+    );
+    expect(
+        third_layer_scores.key_length == shell.plan.config().attention_key_length,
+        "Gemma2 shell third layer attention score key length mismatch"
+    );
+    expect_close(
+        third_layer_scores.scale,
+        1.0F / 16.0F,
+        0.0F,
+        "Gemma2 shell third layer attention score scale mismatch"
+    );
+    expect_close(
+        third_layer_scores.logit_softcap,
+        shell.plan.config().attention_logit_softcap,
+        0.0F,
+        "Gemma2 shell third layer attention score softcap mismatch"
+    );
+    expect(
+        third_layer_scores.scores.backend() == BackendKind::metal,
+        "Gemma2 shell third layer attention score backend mismatch"
+    );
+    expect(
+        third_layer_scores.scores.descriptor() == shell.prefill.scratch().attention_scores,
+        "Gemma2 shell third layer attention score scheduled descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(third_layer_scores.scores, third_layer_position.query),
+        "Gemma2 shell third layer attention scores should not alias positioned query"
+    );
+    expect(
+        !shares_backend_storage(third_layer_scores.scores, third_layer_position.key),
+        "Gemma2 shell third layer attention scores should not alias positioned key"
+    );
+    expect(
+        !shares_backend_storage(third_layer_scores.scores, scores.scores),
+        "Gemma2 shell third layer attention scores should not alias first layer scores"
+    );
+    expect(
+        !shares_backend_storage(third_layer_scores.scores, second_layer_scores.scores),
+        "Gemma2 shell third layer attention scores should not alias second layer scores"
+    );
+    expect(
+        std::isinf(read_f32(expected_third_layer_scores, std::span<const std::uint64_t>(masked_score))),
+        "Gemma2 shell third layer attention score fixture should include causal mask"
+    );
+    expect_f32_rank3_close(
+        third_layer_score_output,
+        expected_third_layer_scores,
+        1.0e-3F,
+        "Gemma2 shell third layer attention scores"
     );
 }
 

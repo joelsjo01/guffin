@@ -628,6 +628,38 @@ void require_prefill_third_layer_attention_projection_matches_schedule(
     }
 }
 
+void require_prefill_third_layer_attention_position_matches_schedule(
+    const Gemma2MetalSchedule& prefill,
+    const Gemma2MetalAttentionPositionActivations& position
+) {
+    if (prefill.phase() != Gemma2MetalSchedulePhase::prefill) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 attention score primitive requires a prefill schedule");
+    }
+    if (position.phase != prefill.phase()) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 attention score input phase must match schedule");
+    }
+    if (position.scratch_ownership != prefill.scratch_ownership()) {
+        throw std::invalid_argument(
+            "Gemma2 Metal layer-2 attention score input scratch ownership must match schedule"
+        );
+    }
+    if (prefill.layers().size() < 3U) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 attention score primitive requires at least three layers");
+    }
+    if (position.layer_index != prefill.layers()[2].layer_index) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 attention score input layer must match schedule");
+    }
+    if (position.query.backend() != prefill.backend() || position.key.backend() != prefill.backend()) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 attention score inputs must use the schedule backend");
+    }
+    if (position.query.descriptor() != prefill.scratch().query) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 attention score query must match scheduled query shape");
+    }
+    if (position.key.descriptor() != prefill.scratch().key) {
+        throw std::invalid_argument("Gemma2 Metal layer-2 attention score key must match scheduled key shape");
+    }
+}
+
 void require_prefill_second_layer_attention_position_matches_schedule(
     const Gemma2MetalSchedule& prefill,
     const Gemma2MetalAttentionPositionActivations& position
@@ -1789,6 +1821,50 @@ create_gemma2_metal_prefill_third_layer_attention_position(
     };
 }
 
+[[nodiscard]] std::optional<Gemma2MetalAttentionScoreActivations>
+create_gemma2_metal_prefill_third_layer_attention_scores(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& prefill,
+    const std::optional<Gemma2MetalAttentionPositionActivations>& position
+) {
+    if (!position.has_value()) {
+        return std::nullopt;
+    }
+
+    require_prefill_third_layer_attention_position_matches_schedule(prefill, *position);
+    const auto& third_layer = prefill.layers()[2];
+    const auto key_length = plan.config().attention_key_length;
+    const auto scale = 1.0F / std::sqrt(static_cast<float>(key_length));
+    const auto attention_token_count = third_layer.attention_token_count;
+    auto scores = tensor::ops::causal_grouped_attention_scores_f32_to_backend(
+        position->query,
+        position->key,
+        prefill.cache_position(),
+        plan.config().attention_head_count,
+        plan.config().attention_head_count_kv,
+        key_length,
+        attention_token_count,
+        scale,
+        plan.config().attention_logit_softcap
+    );
+
+    require_attention_score_output_shape(scores, prefill.scratch().attention_scores);
+
+    return Gemma2MetalAttentionScoreActivations {
+        .layer_index = third_layer.layer_index,
+        .phase = prefill.phase(),
+        .scratch_ownership = prefill.scratch_ownership(),
+        .query_position_start = prefill.cache_position(),
+        .attention_token_count = attention_token_count,
+        .query_head_count = plan.config().attention_head_count,
+        .key_head_count = plan.config().attention_head_count_kv,
+        .key_length = key_length,
+        .scale = scale,
+        .logit_softcap = plan.config().attention_logit_softcap,
+        .scores = std::move(scores),
+    };
+}
+
 }  // namespace
 
 Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
@@ -1948,6 +2024,12 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
             prefill,
             prefill_third_layer_attention_projection
         );
+    auto prefill_third_layer_attention_scores =
+        create_gemma2_metal_prefill_third_layer_attention_scores(
+            plan,
+            prefill,
+            prefill_third_layer_attention_position
+        );
 
     return Gemma2MetalGenerationRuntimeShell {
         .plan = std::move(plan),
@@ -1992,6 +2074,8 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
             std::move(prefill_third_layer_attention_projection),
         .prefill_third_layer_attention_position =
             std::move(prefill_third_layer_attention_position),
+        .prefill_third_layer_attention_scores =
+            std::move(prefill_third_layer_attention_scores),
     };
 }
 
