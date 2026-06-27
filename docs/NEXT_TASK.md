@@ -5,27 +5,20 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma layer-2 FFN gate/up setup
-primitive behind the Metal runtime shell.
+Add the first reusable scheduled Gemma prefill block runner behind the Metal
+runtime shell.
 
 ## Why
 
 Gemma now reaches the real generate path far enough to load file-backed tensor
 views, tokenize the prompt, upload the resident Metal model plan, build
-separate prefill/decode schedules, run the full first scheduled layer through
-attention and FFN residual output, run layer-1 attention and FFN through its
-residual output, hand that residual to block 2, project layer-2 Q/K/V, apply
-Gemma positions/RoPE to layer-2 Q/K, produce layer-2 pre-softmax attention
-scores, turn those scores into layer-2 softmax probabilities, aggregate
-layer-2 attention values, and project the layer-2 attention output back to
-hidden width, then apply the layer-2 post-attention norm and residual add.
+separate prefill/decode schedules, run full scheduled blocks 0, 1, and 2
+through FFN residual output, and hand layer 2's residual to block 3 as a
+normalized attention input.
 
-The next blocker is proving the layer-2 FFN input and gate/up projections
-without taking FFN activation or down projection at once: consume
-`prefill_third_layer_post_attention_residual->post_attention_residual`, use
-`blk.2.ffn_norm.weight`, `blk.2.ffn_gate.weight`, and
-`blk.2.ffn_up.weight`, and produce explicit resident or phase-local layer-2
-normalized FFN input, gate, and up buffers.
+The next blocker is stopping bespoke layer-N shell expansion. Use the proven
+block pattern behind one reusable scheduled runner before expanding through the
+remaining Gemma layers.
 
 ## Read
 
@@ -40,8 +33,7 @@ normalized FFN input, gate, and up buffers.
 
 - Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
   and `src/engine`
-- Tensor/Metal backend code only for narrow backend-buffer projection helpers
-  and tests if existing helpers are not enough
+- Tensor/Metal backend code only if an existing primitive is not enough
 - `tests/engine`
 - `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
@@ -51,13 +43,10 @@ normalized FFN input, gate, and up buffers.
 
 ## Do Not
 
-- Do not add full Gemma generation or a full Gemma layer chain.
-- Do not update KV cache.
-- Do not implement layer-2 FFN activation, down projection, FFN residual,
-  logits, or sampling changes.
-- Do not run past layer-2 FFN gate/up outputs.
-- Do not add full 9B CPU execution, broad graph abstractions, or benchmark
-  work in this slice.
+- Do not add another bespoke layer-3 attention/FFN field chain.
+- Do not add logits, sampling, KV updates, decode looping, or generation
+  success.
+- Do not add a broad graph abstraction or generic model-family operator stack.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
 - Do not replace the resident plan with per-op host round trips.
 - Do not make `local-gguf-generate` claim Gemma success yet.
@@ -65,21 +54,21 @@ normalized FFN input, gate, and up buffers.
 
 ## Verify
 
-- Add deterministic tests for primitive shape/resource ownership and CPU/Metal
-  parity when a tensor primitive is introduced.
-- Keep unavailable-Metal behavior explicit if the primitive creates Metal
+- Add deterministic tests for the runner's shape/resource ownership.
+- Reuse CPU/Metal parity checks for the proven block operations.
+- Keep unavailable-Metal behavior explicit if the runner creates Metal
   resources directly.
 - Keep the real Gemma CLI failure as explicit unsupported Gemma execution until
   enough scheduled execution exists to return logits.
-- Run focused engine/tensor/CLI tests touched by the primitive.
+- Run focused engine/tensor/CLI tests touched by the runner.
 - Run local Gemma inspection/generation far enough to prove any remaining
   failure is still explicit unsupported Gemma execution.
 - Run `bash scripts/ci.sh` after implementation changes.
 
 ## Stop When
 
-One small scheduled Gemma layer-2 FFN gate/up primitive consumes the runtime
-shell's layer-2 post-attention residual and produces explicit resident or
-phase-local layer-2 normalized FFN input, gate, and up outputs with
-deterministic tests, while full Gemma generation remains explicitly
-unsupported.
+One reusable scheduled Gemma prefill block runner can consume a normalized
+layer input, run the proven attention/residual/FFN block pattern for a scheduled
+layer without adding a new bespoke layer-N shell chain, and produce an explicit
+FFN residual output with deterministic tests, while full Gemma generation
+remains explicitly unsupported.

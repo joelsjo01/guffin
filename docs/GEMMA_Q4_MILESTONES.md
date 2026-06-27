@@ -48,7 +48,10 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | First scheduled Gemma layer-2 attention value aggregation setup | Layer-2 softmax probabilities and V projection outputs produce an explicit attention value output, without output projection, logits, or generation success. |
 | Done | First scheduled Gemma layer-2 attention output projection setup | Layer-2 attention value output projects back to hidden width, without residual work, logits, or generation success. |
 | Done | First scheduled Gemma layer-2 post-attention residual setup | Layer-2 projected attention output applies Gemma post-attention norm and residual add, without FFN, logits, or generation success. |
-| Current | First scheduled Gemma layer-2 FFN gate/up setup | Layer-2 post-attention residual is normalized and projected into FFN gate/up buffers, without activation, down projection, logits, or generation success. |
+| Done | First scheduled Gemma layer-2 FFN gate/up setup | Layer-2 post-attention residual is normalized and projected into FFN gate/up buffers, without activation, down projection, logits, or generation success. |
+| Done | First scheduled Gemma layer-2 FFN output setup | Layer-2 FFN gate/up outputs apply Gemma activation, down projection, post-FFN norm, and residual add, without logits or generation success. |
+| Done | First scheduled Gemma layer-3 handoff setup | Layer-2 FFN residual becomes the next layer's normalized attention input, without running layer 3 attention, logits, or generation success. |
+| Current | Reusable scheduled Gemma layer runner | After layer-3 handoff, stop adding bespoke layer-N shell slices and run the proven block pattern through remaining layers from one scheduled runner. |
 | Planned | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |
 
