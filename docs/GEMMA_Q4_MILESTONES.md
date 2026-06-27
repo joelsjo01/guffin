@@ -44,7 +44,11 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | First scheduled Gemma layer-2 attention projection setup | Layer-2 normalized attention input produces explicit Q/K/V projection outputs, without position setup, attention scores, logits, or generation success. |
 | Done | First scheduled Gemma layer-2 attention position setup | Layer-2 Q/K projection outputs are prepared for Gemma positions/RoPE, without attention scores, logits, or generation success. |
 | Done | First scheduled Gemma layer-2 attention score setup | Layer-2 positioned Q/K outputs produce an explicit pre-softmax score workspace, without probabilities, value aggregation, logits, or generation success. |
-| Current | First scheduled Gemma layer-2 attention probability setup | Layer-2 score outputs produce explicit softmax probabilities, without value aggregation, output projection, logits, or generation success. |
+| Done | First scheduled Gemma layer-2 attention probability setup | Layer-2 score outputs produce explicit softmax probabilities, without value aggregation, output projection, logits, or generation success. |
+| Done | First scheduled Gemma layer-2 attention value aggregation setup | Layer-2 softmax probabilities and V projection outputs produce an explicit attention value output, without output projection, logits, or generation success. |
+| Done | First scheduled Gemma layer-2 attention output projection setup | Layer-2 attention value output projects back to hidden width, without residual work, logits, or generation success. |
+| Done | First scheduled Gemma layer-2 post-attention residual setup | Layer-2 projected attention output applies Gemma post-attention norm and residual add, without FFN, logits, or generation success. |
+| Current | First scheduled Gemma layer-2 FFN gate/up setup | Layer-2 post-attention residual is normalized and projected into FFN gate/up buffers, without activation, down projection, logits, or generation success. |
 | Planned | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |
 

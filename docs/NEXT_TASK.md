@@ -5,8 +5,8 @@ completed implementation slice.
 
 ## Objective
 
-Add the first scheduled Gemma layer-2 attention probability setup primitive
-behind the Metal runtime shell.
+Add the first scheduled Gemma layer-2 FFN gate/up setup
+primitive behind the Metal runtime shell.
 
 ## Why
 
@@ -15,14 +15,17 @@ views, tokenize the prompt, upload the resident Metal model plan, build
 separate prefill/decode schedules, run the full first scheduled layer through
 attention and FFN residual output, run layer-1 attention and FFN through its
 residual output, hand that residual to block 2, project layer-2 Q/K/V, apply
-Gemma positions/RoPE to layer-2 Q/K, and produce layer-2 pre-softmax attention
-scores.
+Gemma positions/RoPE to layer-2 Q/K, produce layer-2 pre-softmax attention
+scores, turn those scores into layer-2 softmax probabilities, aggregate
+layer-2 attention values, and project the layer-2 attention output back to
+hidden width, then apply the layer-2 post-attention norm and residual add.
 
-The next blocker is proving layer-2 softmax probabilities without taking the
-rest of layer-2 attention at once: consume
-`prefill_third_layer_attention_scores->scores`, apply the scheduled softmax
-primitive, and produce an explicit resident or phase-local layer-2 probability
-workspace.
+The next blocker is proving the layer-2 FFN input and gate/up projections
+without taking FFN activation or down projection at once: consume
+`prefill_third_layer_post_attention_residual->post_attention_residual`, use
+`blk.2.ffn_norm.weight`, `blk.2.ffn_gate.weight`, and
+`blk.2.ffn_up.weight`, and produce explicit resident or phase-local layer-2
+normalized FFN input, gate, and up buffers.
 
 ## Read
 
@@ -37,8 +40,8 @@ workspace.
 
 - Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
   and `src/engine`
-- Tensor/Metal backend code only for narrow backend-buffer softmax helpers and
-  tests if existing helpers are not enough
+- Tensor/Metal backend code only for narrow backend-buffer projection helpers
+  and tests if existing helpers are not enough
 - `tests/engine`
 - `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
@@ -50,9 +53,9 @@ workspace.
 
 - Do not add full Gemma generation or a full Gemma layer chain.
 - Do not update KV cache.
-- Do not implement layer-2 value aggregation, output projection, residual work,
-  FFN work, logits, or sampling changes.
-- Do not run past layer-2 attention probabilities.
+- Do not implement layer-2 FFN activation, down projection, FFN residual,
+  logits, or sampling changes.
+- Do not run past layer-2 FFN gate/up outputs.
 - Do not add full 9B CPU execution, broad graph abstractions, or benchmark
   work in this slice.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
@@ -75,7 +78,8 @@ workspace.
 
 ## Stop When
 
-One small scheduled Gemma layer-2 attention probability primitive consumes the
-runtime shell's layer-2 score output and produces an explicit resident or
-phase-local layer-2 softmax probability workspace with deterministic tests,
-while full Gemma generation remains explicitly unsupported.
+One small scheduled Gemma layer-2 FFN gate/up primitive consumes the runtime
+shell's layer-2 post-attention residual and produces explicit resident or
+phase-local layer-2 normalized FFN input, gate, and up outputs with
+deterministic tests, while full Gemma generation remains explicitly
+unsupported.
