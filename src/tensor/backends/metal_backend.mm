@@ -224,6 +224,11 @@ struct ElementwiseDimensions {
     uint elements;
 };
 
+struct SoftcapDimensions {
+    uint elements;
+    float softcap;
+};
+
 kernel void silu_multiply_f32_kernel(
     const device float* gate [[buffer(0)]],
     const device float* up [[buffer(1)]],
@@ -251,6 +256,19 @@ kernel void add_f32_kernel(
     }
 
     output[gid] = left[gid] + right[gid];
+}
+
+kernel void softcap_f32_kernel(
+    const device float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant SoftcapDimensions& dims [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= dims.elements) {
+        return;
+    }
+
+    output[gid] = tanh(input[gid] / dims.softcap) * dims.softcap;
 }
 
 kernel void noop_kernel(uint gid [[thread_position_in_grid]]) {

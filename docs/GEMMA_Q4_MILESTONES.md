@@ -51,7 +51,17 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | First scheduled Gemma layer-2 FFN gate/up setup | Layer-2 post-attention residual is normalized and projected into FFN gate/up buffers, without activation, down projection, logits, or generation success. |
 | Done | First scheduled Gemma layer-2 FFN output setup | Layer-2 FFN gate/up outputs apply Gemma activation, down projection, post-FFN norm, and residual add, without logits or generation success. |
 | Done | First scheduled Gemma layer-3 handoff setup | Layer-2 FFN residual becomes the next layer's normalized attention input, without running layer 3 attention, logits, or generation success. |
-| Current | Reusable scheduled Gemma layer runner | After layer-3 handoff, stop adding bespoke layer-N shell slices and run the proven block pattern through remaining layers from one scheduled runner. |
+| Done | Reusable scheduled Gemma layer runner | Layer-3 handoff feeds one reusable scheduled block runner that produces block 3's FFN residual without adding another layer-N shell field chain. |
+| Done | Reusable scheduled Gemma prefill loop | A reusable block output feeds the next scheduled layer input and runs another layer through the same runner without new layer-specific shell fields. |
+| Done | Remaining reusable scheduled Gemma prefill loop | A bounded loop runs block 3 onward through later scheduled prefill layers without adding layer-specific shell fields. |
+| Done | First Gemma prefill terminal normalization setup | The terminal scheduled FFN residual feeds Gemma output RMSNorm as an explicit pre-logits boundary without generation success. |
+| Done | First Gemma prefill logits projection setup | Final normalized prefill hidden states project through the output weight into explicit logits with final logit softcap, without sampling or generation success. |
+| Done | First Gemma prefill next-token selection setup | The final softcapped prefill logits row produces an explicit next-token selection boundary, without decode, KV updates, or generation success. |
+| Done | First Gemma prefill KV cache write setup | Scheduled prefill K/V outputs are written into the resident Gemma KV cache without decode looping or generation success. |
+| Done | First reusable Gemma decode block runner | A one-token decode block consumes resident KV, appends new K/V, and produces a scheduled FFN residual without a full decode loop. |
+| Done | Reusable scheduled Gemma decode loop | One loop runs the reusable decode block across scheduled decode layers and produces the terminal decode FFN residual without logits or generation success. |
+| Current | First Gemma decode logits projection | The terminal decode residual normalizes and projects to logits for one generated token without a generated-token loop. |
+| Planned | First Gemma generated-token loop | Prefill and one-token decode repeat through sampling and KV updates for requested new tokens while still failing explicit unsupported paths only when coverage is incomplete. |
 | Planned | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |
 

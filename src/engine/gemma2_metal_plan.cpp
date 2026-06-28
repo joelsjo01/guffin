@@ -393,6 +393,10 @@ const Gemma2MetalModelWeightBuffers& Gemma2MetalModelPlan::weights() const noexc
     return weights_;
 }
 
+std::vector<Gemma2MetalKVCacheLayer>& Gemma2MetalModelPlan::kv_cache() noexcept {
+    return kv_cache_;
+}
+
 const std::vector<Gemma2MetalKVCacheLayer>& Gemma2MetalModelPlan::kv_cache() const noexcept {
     return kv_cache_;
 }

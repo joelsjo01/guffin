@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 
 namespace local_gguf_engine::tensor::ops {
 
@@ -70,6 +71,23 @@ TensorStorage silu_f32(const TensorStorage& input) {
         const auto index_view = std::span<const std::uint64_t>(indices.data(), input.descriptor().shape.rank());
         const auto value = read_f32(input, index_view);
         write_f32(output, index_view, value / (1.0F + std::exp(-value)));
+    }
+
+    return output;
+}
+
+TensorStorage softcap_f32(const TensorStorage& input, float softcap) {
+    require_f32_operand(input);
+    if (!(softcap > 0.0F) || !std::isfinite(softcap)) {
+        throw std::invalid_argument("F32 softcap must be positive and finite");
+    }
+
+    auto output = TensorStorage::allocate(input.descriptor());
+    for (std::uint64_t linear_index = 0; linear_index < input.descriptor().element_count; ++linear_index) {
+        const auto indices = indices_from_linear_index(input.descriptor().shape, linear_index);
+        const auto index_view = std::span<const std::uint64_t>(indices.data(), input.descriptor().shape.rank());
+        const auto value = read_f32(input, index_view);
+        write_f32(output, index_view, std::tanh(value / softcap) * softcap);
     }
 
     return output;

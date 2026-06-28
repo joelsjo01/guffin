@@ -33,6 +33,7 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> matmul_add_pipeline = nil;
     id<MTLComputePipelineState> silu_multiply_pipeline = nil;
     id<MTLComputePipelineState> add_pipeline = nil;
+    id<MTLComputePipelineState> softcap_pipeline = nil;
     id<MTLComputePipelineState> noop_pipeline = nil;
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
     id<MTLComputePipelineState> rope_by_heads_pipeline = nil;

@@ -185,6 +185,25 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> softcap_function = [library newFunctionWithName:@"softcap_f32_kernel"];
+    if (softcap_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal softcap kernel function was not found"
+        );
+    }
+
+    NSError* softcap_pipeline_error = nil;
+    softcap_pipeline = [device newComputePipelineStateWithFunction:softcap_function
+                                                            error:&softcap_pipeline_error];
+    if (softcap_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal softcap pipeline creation failed: "
+                + ns_error_message(softcap_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> noop_function = [library newFunctionWithName:@"noop_kernel"];
     if (noop_function == nil) {
         throw metal_error(

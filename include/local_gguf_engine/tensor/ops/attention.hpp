@@ -75,6 +75,18 @@ struct F32RoPEMatrixColumnView {
     float logit_softcap
 );
 
+[[nodiscard]] BackendBuffer causal_grouped_attention_scores_f32_with_kv_cache_to_backend(
+    const BackendBuffer& query,
+    const BackendBuffer& cache_key,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t attention_token_count,
+    float scale,
+    float logit_softcap
+);
+
 [[nodiscard]] TensorStorage causal_grouped_attention_values_f32(
     const TensorStorage& probabilities,
     const TensorStorage& value,
@@ -93,6 +105,38 @@ struct F32RoPEMatrixColumnView {
     std::uint64_t kv_head_count,
     std::uint64_t value_length,
     std::uint64_t attention_token_count
+);
+
+[[nodiscard]] BackendBuffer causal_grouped_attention_values_f32_with_kv_cache_to_backend(
+    const BackendBuffer& probabilities,
+    const BackendBuffer& cache_value,
+    std::uint64_t query_position_start,
+    std::uint64_t head_count,
+    std::uint64_t kv_head_count,
+    std::uint64_t value_length,
+    std::uint64_t attention_token_count
+);
+
+void write_kv_cache_f32_to_backend(
+    const BackendBuffer& key,
+    const BackendBuffer& value,
+    BackendBuffer& cache_key,
+    BackendBuffer& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length
+);
+
+void write_prefill_kv_cache_f32_to_backend(
+    const BackendBuffer& key,
+    const BackendBuffer& value,
+    BackendBuffer& cache_key,
+    BackendBuffer& cache_value,
+    std::uint64_t cache_position,
+    std::uint64_t kv_head_count,
+    std::uint64_t key_length,
+    std::uint64_t value_length
 );
 
 [[nodiscard]] BackendBuffer llama_cached_attention_f32_to_backend(

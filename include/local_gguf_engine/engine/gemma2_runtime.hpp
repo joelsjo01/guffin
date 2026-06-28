@@ -129,6 +129,102 @@ struct Gemma2MetalLayerHandoffActivations {
     tensor::BackendBuffer normalized_attention_input;
 };
 
+struct Gemma2MetalPrefillBlockActivations {
+    std::uint32_t schedule_layer_offset = 0;
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::prefill;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::phase_local;
+    Gemma2MetalAttentionProjectionActivations attention_projection;
+    Gemma2MetalAttentionPositionActivations attention_position;
+    Gemma2MetalAttentionScoreActivations attention_scores;
+    Gemma2MetalAttentionProbabilityActivations attention_probabilities;
+    Gemma2MetalAttentionValueActivations attention_values;
+    Gemma2MetalAttentionOutputProjectionActivations attention_output_projection;
+    Gemma2MetalPostAttentionResidualActivations post_attention_residual;
+    Gemma2MetalFeedForwardGateUpActivations feed_forward_gate_up;
+    Gemma2MetalFeedForwardOutputActivations feed_forward_output;
+};
+
+struct Gemma2MetalDecodeKVCacheWriteActivations {
+    std::uint32_t schedule_layer_offset = 0;
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::decode;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::resident_decode;
+    std::uint32_t cache_position = 0;
+    std::uint32_t token_count = 0;
+    std::uint32_t total_kv_token_count = 0;
+    std::uint32_t key_head_count = 0;
+    std::uint32_t key_length = 0;
+    std::uint32_t value_head_count = 0;
+    std::uint32_t value_length = 0;
+    tensor::BackendBuffer key_cache;
+    tensor::BackendBuffer value_cache;
+};
+
+struct Gemma2MetalDecodeBlockActivations {
+    std::uint32_t schedule_layer_offset = 0;
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::decode;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::resident_decode;
+    Gemma2MetalAttentionProjectionActivations attention_projection;
+    Gemma2MetalAttentionPositionActivations attention_position;
+    Gemma2MetalDecodeKVCacheWriteActivations kv_cache_write;
+    Gemma2MetalAttentionScoreActivations attention_scores;
+    Gemma2MetalAttentionProbabilityActivations attention_probabilities;
+    Gemma2MetalAttentionValueActivations attention_values;
+    Gemma2MetalAttentionOutputProjectionActivations attention_output_projection;
+    Gemma2MetalPostAttentionResidualActivations post_attention_residual;
+    Gemma2MetalFeedForwardGateUpActivations feed_forward_gate_up;
+    Gemma2MetalFeedForwardOutputActivations feed_forward_output;
+};
+
+struct Gemma2MetalPrefillOutputNormActivations {
+    std::uint32_t schedule_layer_offset = 0;
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::prefill;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::phase_local;
+    std::uint32_t hidden_width = 0;
+    tensor::BackendBuffer normalized_hidden_states;
+};
+
+struct Gemma2MetalPrefillLogitsActivations {
+    std::uint32_t schedule_layer_offset = 0;
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::prefill;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::phase_local;
+    std::uint32_t hidden_width = 0;
+    std::uint32_t vocab_size = 0;
+    float final_logit_softcap = 0.0F;
+    tensor::BackendBuffer raw_logits;
+    tensor::BackendBuffer logits;
+};
+
+struct Gemma2MetalPrefillNextTokenSelection {
+    std::uint32_t schedule_layer_offset = 0;
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::prefill;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::phase_local;
+    std::uint32_t logits_row_index = 0;
+    std::uint32_t vocab_size = 0;
+    std::uint32_t token_id = 0;
+    float logit = 0.0F;
+};
+
+struct Gemma2MetalPrefillKVCacheWriteActivations {
+    std::uint32_t schedule_layer_offset = 0;
+    std::uint32_t layer_index = 0;
+    Gemma2MetalSchedulePhase phase = Gemma2MetalSchedulePhase::prefill;
+    Gemma2MetalScratchOwnership scratch_ownership = Gemma2MetalScratchOwnership::phase_local;
+    std::uint32_t cache_position = 0;
+    std::uint32_t token_count = 0;
+    std::uint32_t key_head_count = 0;
+    std::uint32_t key_length = 0;
+    std::uint32_t value_head_count = 0;
+    std::uint32_t value_length = 0;
+    tensor::BackendBuffer key_cache;
+    tensor::BackendBuffer value_cache;
+};
+
 struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalModelPlan plan;
     Gemma2MetalSchedule prefill;
@@ -173,7 +269,51 @@ struct Gemma2MetalGenerationRuntimeShell {
     std::optional<Gemma2MetalFeedForwardOutputActivations>
         prefill_third_layer_feed_forward_output;
     std::optional<Gemma2MetalLayerHandoffActivations> prefill_fourth_layer_input;
+    std::vector<Gemma2MetalLayerHandoffActivations> prefill_reusable_layer_inputs;
+    std::vector<Gemma2MetalPrefillBlockActivations> prefill_reusable_blocks;
+    std::vector<Gemma2MetalPrefillKVCacheWriteActivations> prefill_kv_cache_writes;
+    Gemma2MetalPrefillOutputNormActivations prefill_output_norm;
+    Gemma2MetalPrefillLogitsActivations prefill_logits;
+    Gemma2MetalPrefillNextTokenSelection prefill_next_token_selection;
+    Gemma2MetalInputActivations first_decode_input;
+    Gemma2MetalLayerInputActivations first_decode_first_layer_input;
+    Gemma2MetalDecodeBlockActivations first_decode_block;
+    std::vector<Gemma2MetalLayerHandoffActivations> first_decode_reusable_layer_inputs;
+    std::vector<Gemma2MetalDecodeBlockActivations> first_decode_reusable_blocks;
+    Gemma2MetalFeedForwardOutputActivations first_decode_terminal_feed_forward_output;
 };
+
+[[nodiscard]] std::optional<Gemma2MetalLayerHandoffActivations>
+create_gemma2_metal_scheduled_prefill_layer_input(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& prefill,
+    std::uint32_t schedule_layer_offset,
+    const Gemma2MetalFeedForwardOutputActivations& previous_feed_forward_output
+);
+
+[[nodiscard]] std::optional<Gemma2MetalLayerHandoffActivations>
+create_gemma2_metal_scheduled_decode_layer_input(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    std::uint32_t schedule_layer_offset,
+    const Gemma2MetalFeedForwardOutputActivations& previous_feed_forward_output
+);
+
+[[nodiscard]] Gemma2MetalPrefillBlockActivations run_gemma2_metal_scheduled_prefill_block(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& prefill,
+    std::uint32_t schedule_layer_offset,
+    const tensor::BackendBuffer& normalized_attention_input,
+    const tensor::BackendBuffer& residual_input
+);
+
+[[nodiscard]] Gemma2MetalDecodeBlockActivations run_gemma2_metal_scheduled_decode_block(
+    Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    std::uint32_t schedule_layer_offset,
+    const tensor::BackendBuffer& normalized_attention_input,
+    const tensor::BackendBuffer& residual_input
+);
 
 [[nodiscard]] Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
     const EngineModel& model,

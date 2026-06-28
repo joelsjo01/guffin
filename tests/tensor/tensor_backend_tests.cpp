@@ -56,8 +56,10 @@ using local_gguf_engine::tensor::ops::add_f32;
 using local_gguf_engine::tensor::ops::add_f32_to_backend;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32_to_backend;
+using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32_with_kv_cache_to_backend;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32_to_backend;
+using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32_with_kv_cache_to_backend;
 using local_gguf_engine::tensor::ops::embed_f16_gguf_weight_token_ids_to_backend;
 using local_gguf_engine::tensor::ops::gated_silu_projection_f32_f16_gguf_weight_to_backend;
 using local_gguf_engine::tensor::ops::llama_cached_attention_f32_to_backend;
@@ -74,8 +76,11 @@ using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
 using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start_to_backend;
 using local_gguf_engine::tensor::ops::silu_f32;
 using local_gguf_engine::tensor::ops::silu_multiply_f32_to_backend;
+using local_gguf_engine::tensor::ops::softcap_f32;
+using local_gguf_engine::tensor::ops::softcap_f32_to_backend;
 using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::softmax_f32_to_backend;
+using local_gguf_engine::tensor::ops::write_prefill_kv_cache_f32_to_backend;
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::expect_close;
 using local_gguf_engine::tests::tensor_f16_gguf_matrix;
@@ -787,6 +792,22 @@ void test_applies_softmax_to_cpu_backend_buffer() {
 
     expect(output_buffer.backend() == BackendKind::cpu, "CPU softmax backend mismatch");
     expect_f32_rank3_close(output, expected, 0.0F, "CPU backend-buffer softmax");
+}
+
+void test_applies_softcap_to_cpu_backend_buffer() {
+    const std::array<float, 6> input_values {
+        -6.0F, -1.0F, 0.0F,
+        0.5F, 2.0F, 6.0F,
+    };
+    const auto input = tensor_f32_matrix(2, 3, std::span<const float>(input_values));
+    const auto input_buffer = copy_tensor_to_backend(input, BackendKind::cpu);
+
+    const auto output_buffer = softcap_f32_to_backend(input_buffer, 2.0F);
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = softcap_f32(input, 2.0F);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU softcap backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer softcap");
 }
 
 void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers() {
@@ -1509,6 +1530,28 @@ void test_matches_softmax_to_metal_backend_buffer_when_available() {
     );
 }
 
+void test_matches_softcap_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 6> input_values {
+        -6.0F, -1.0F, 0.0F,
+        0.5F, 2.0F, 6.0F,
+    };
+    const auto input = tensor_f32_matrix(2, 3, std::span<const float>(input_values));
+    const auto cpu_output_buffer = softcap_f32_to_backend(copy_tensor_to_backend(input, BackendKind::cpu), 2.0F);
+    const auto metal_output_buffer = softcap_f32_to_backend(copy_tensor_to_backend(input, BackendKind::metal), 2.0F);
+
+    expect(metal_output_buffer.backend() == BackendKind::metal, "Metal softcap backend mismatch");
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_output_buffer),
+        copy_tensor_from_backend(cpu_output_buffer),
+        1.0e-6F,
+        "Metal backend-buffer softcap"
+    );
+}
+
 void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_metal_backend_buffers_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -1884,6 +1927,356 @@ void test_matches_llama_cached_attention_to_metal_backend_buffer_when_available(
     );
 }
 
+void test_writes_prefill_kv_cache_to_cpu_backend_buffer() {
+    const std::array<float, 8> key_values {
+        1.0F, 2.0F, 3.0F, 4.0F,
+        5.0F, 6.0F, 7.0F, 8.0F,
+    };
+    const std::array<float, 12> value_values {
+        -1.0F, -2.0F, -3.0F, -4.0F, -5.0F, -6.0F,
+        -7.0F, -8.0F, -9.0F, -10.0F, -11.0F, -12.0F,
+    };
+    const auto key = tensor_f32_matrix(2, 4, std::span<const float>(key_values));
+    const auto value = tensor_f32_matrix(2, 6, std::span<const float>(value_values));
+    const auto key_cache_descriptor = TensorDescriptor::from(Shape::from({5, 2, 2}), DType::f32);
+    const auto value_cache_descriptor = TensorDescriptor::from(Shape::from({5, 2, 3}), DType::f32);
+    auto key_cache_buffer = copy_tensor_to_backend(TensorStorage::allocate(key_cache_descriptor), BackendKind::cpu);
+    auto value_cache_buffer = copy_tensor_to_backend(
+        TensorStorage::allocate(value_cache_descriptor),
+        BackendKind::cpu
+    );
+
+    write_prefill_kv_cache_f32_to_backend(
+        copy_tensor_to_backend(key, BackendKind::cpu),
+        copy_tensor_to_backend(value, BackendKind::cpu),
+        key_cache_buffer,
+        value_cache_buffer,
+        1,
+        2,
+        2,
+        3
+    );
+
+    auto expected_key_cache = TensorStorage::allocate(key_cache_descriptor);
+    auto expected_value_cache = TensorStorage::allocate(value_cache_descriptor);
+    for (std::uint64_t row = 0; row < 2; ++row) {
+        for (std::uint64_t head = 0; head < 2; ++head) {
+            for (std::uint64_t column = 0; column < 2; ++column) {
+                const std::array<std::uint64_t, 2> source_index {row, head * 2 + column};
+                const std::array<std::uint64_t, 3> cache_index {row + 1, head, column};
+                write_f32(
+                    expected_key_cache,
+                    std::span<const std::uint64_t>(cache_index),
+                    read_f32(key, std::span<const std::uint64_t>(source_index))
+                );
+            }
+            for (std::uint64_t column = 0; column < 3; ++column) {
+                const std::array<std::uint64_t, 2> source_index {row, head * 3 + column};
+                const std::array<std::uint64_t, 3> cache_index {row + 1, head, column};
+                write_f32(
+                    expected_value_cache,
+                    std::span<const std::uint64_t>(cache_index),
+                    read_f32(value, std::span<const std::uint64_t>(source_index))
+                );
+            }
+        }
+    }
+
+    expect_f32_rank3_close(
+        copy_tensor_from_backend(key_cache_buffer),
+        expected_key_cache,
+        0.0F,
+        "CPU prefill KV key cache write"
+    );
+    expect_f32_rank3_close(
+        copy_tensor_from_backend(value_cache_buffer),
+        expected_value_cache,
+        0.0F,
+        "CPU prefill KV value cache write"
+    );
+}
+
+void test_matches_prefill_kv_cache_write_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 8> key_values {
+        0.25F, -0.5F, 1.25F, -1.5F,
+        2.25F, -2.5F, 3.25F, -3.5F,
+    };
+    const std::array<float, 12> value_values {
+        10.0F, 11.0F, 12.0F, 13.0F, 14.0F, 15.0F,
+        20.0F, 21.0F, 22.0F, 23.0F, 24.0F, 25.0F,
+    };
+    const auto key = tensor_f32_matrix(2, 4, std::span<const float>(key_values));
+    const auto value = tensor_f32_matrix(2, 6, std::span<const float>(value_values));
+    const auto key_cache_descriptor = TensorDescriptor::from(Shape::from({5, 2, 2}), DType::f32);
+    const auto value_cache_descriptor = TensorDescriptor::from(Shape::from({5, 2, 3}), DType::f32);
+    auto cpu_key_cache = copy_tensor_to_backend(TensorStorage::allocate(key_cache_descriptor), BackendKind::cpu);
+    auto cpu_value_cache = copy_tensor_to_backend(TensorStorage::allocate(value_cache_descriptor), BackendKind::cpu);
+    auto metal_key_cache = copy_tensor_to_backend(TensorStorage::allocate(key_cache_descriptor), BackendKind::metal);
+    auto metal_value_cache = copy_tensor_to_backend(
+        TensorStorage::allocate(value_cache_descriptor),
+        BackendKind::metal
+    );
+
+    write_prefill_kv_cache_f32_to_backend(
+        copy_tensor_to_backend(key, BackendKind::cpu),
+        copy_tensor_to_backend(value, BackendKind::cpu),
+        cpu_key_cache,
+        cpu_value_cache,
+        1,
+        2,
+        2,
+        3
+    );
+    write_prefill_kv_cache_f32_to_backend(
+        copy_tensor_to_backend(key, BackendKind::metal),
+        copy_tensor_to_backend(value, BackendKind::metal),
+        metal_key_cache,
+        metal_value_cache,
+        1,
+        2,
+        2,
+        3
+    );
+
+    expect_f32_rank3_close(
+        copy_tensor_from_backend(metal_key_cache),
+        copy_tensor_from_backend(cpu_key_cache),
+        0.0F,
+        "Metal prefill KV key cache write"
+    );
+    expect_f32_rank3_close(
+        copy_tensor_from_backend(metal_value_cache),
+        copy_tensor_from_backend(cpu_value_cache),
+        0.0F,
+        "Metal prefill KV value cache write"
+    );
+}
+
+void test_applies_causal_grouped_attention_to_cpu_backend_kv_cache_buffers() {
+    constexpr std::uint64_t cache_capacity = 5;
+    constexpr std::uint64_t head_count = 4;
+    constexpr std::uint64_t kv_head_count = 2;
+    constexpr std::uint64_t key_length = 2;
+    constexpr std::uint64_t value_length = 3;
+    constexpr std::uint64_t query_position_start = 3;
+    constexpr std::uint64_t attention_token_count = 3;
+    const std::array<float, head_count * key_length> query_values {
+        0.25F, -0.5F,
+        0.75F, 0.125F,
+        -0.25F, 0.5F,
+        0.375F, -0.125F,
+    };
+    const auto query = tensor_f32_matrix(1, head_count * key_length, std::span<const float>(query_values));
+    auto key_cache = TensorStorage::allocate(TensorDescriptor::from(
+        Shape::from({cache_capacity, kv_head_count, key_length}),
+        DType::f32
+    ));
+    auto value_cache = TensorStorage::allocate(TensorDescriptor::from(
+        Shape::from({cache_capacity, kv_head_count, value_length}),
+        DType::f32
+    ));
+    for (std::uint64_t row = 0; row < cache_capacity; ++row) {
+        for (std::uint64_t head = 0; head < kv_head_count; ++head) {
+            for (std::uint64_t column = 0; column < key_length; ++column) {
+                const std::array<std::uint64_t, 3> index {row, head, column};
+                write_f32(
+                    key_cache,
+                    std::span<const std::uint64_t>(index),
+                    0.1F * static_cast<float>(row + 1)
+                        + 0.05F * static_cast<float>(head)
+                        - 0.025F * static_cast<float>(column)
+                );
+            }
+            for (std::uint64_t column = 0; column < value_length; ++column) {
+                const std::array<std::uint64_t, 3> index {row, head, column};
+                write_f32(
+                    value_cache,
+                    std::span<const std::uint64_t>(index),
+                    -0.2F * static_cast<float>(row)
+                        + 0.125F * static_cast<float>(head + 1)
+                        + 0.0625F * static_cast<float>(column)
+                );
+            }
+        }
+    }
+
+    const auto flat_key = TensorStorage::from_bytes(
+        TensorDescriptor::from(Shape::from({cache_capacity, kv_head_count * key_length}), DType::f32),
+        key_cache.bytes()
+    );
+    const auto flat_value = TensorStorage::from_bytes(
+        TensorDescriptor::from(Shape::from({cache_capacity, kv_head_count * value_length}), DType::f32),
+        value_cache.bytes()
+    );
+    const auto scores_buffer = causal_grouped_attention_scores_f32_with_kv_cache_to_backend(
+        copy_tensor_to_backend(query, BackendKind::cpu),
+        copy_tensor_to_backend(key_cache, BackendKind::cpu),
+        query_position_start,
+        head_count,
+        kv_head_count,
+        key_length,
+        attention_token_count,
+        0.5F,
+        10.0F
+    );
+    const auto expected_scores = causal_grouped_attention_scores_f32(
+        query,
+        flat_key,
+        query_position_start,
+        head_count,
+        kv_head_count,
+        key_length,
+        attention_token_count,
+        0.5F,
+        10.0F
+    );
+    const auto probabilities_buffer = softmax_f32_to_backend(scores_buffer);
+    const auto values_buffer = causal_grouped_attention_values_f32_with_kv_cache_to_backend(
+        probabilities_buffer,
+        copy_tensor_to_backend(value_cache, BackendKind::cpu),
+        query_position_start,
+        head_count,
+        kv_head_count,
+        value_length,
+        attention_token_count
+    );
+    const auto expected_values = causal_grouped_attention_values_f32(
+        softmax_f32(expected_scores),
+        flat_value,
+        query_position_start,
+        head_count,
+        kv_head_count,
+        value_length,
+        attention_token_count
+    );
+
+    expect_f32_rank3_close(
+        copy_tensor_from_backend(scores_buffer),
+        expected_scores,
+        1.0e-6F,
+        "CPU grouped cache attention scores"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(values_buffer),
+        expected_values,
+        1.0e-6F,
+        "CPU grouped cache attention values"
+    );
+}
+
+void test_matches_causal_grouped_attention_kv_cache_to_metal_backend_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    constexpr std::uint64_t cache_capacity = 6;
+    constexpr std::uint64_t head_count = 4;
+    constexpr std::uint64_t kv_head_count = 2;
+    constexpr std::uint64_t key_length = 2;
+    constexpr std::uint64_t value_length = 3;
+    constexpr std::uint64_t query_position_start = 4;
+    constexpr std::uint64_t attention_token_count = 4;
+    const std::array<float, head_count * key_length> query_values {
+        0.5F, -0.25F,
+        0.125F, 0.75F,
+        -0.375F, 0.625F,
+        0.25F, -0.5F,
+    };
+    const auto query = tensor_f32_matrix(1, head_count * key_length, std::span<const float>(query_values));
+    auto key_cache = TensorStorage::allocate(TensorDescriptor::from(
+        Shape::from({cache_capacity, kv_head_count, key_length}),
+        DType::f32
+    ));
+    auto value_cache = TensorStorage::allocate(TensorDescriptor::from(
+        Shape::from({cache_capacity, kv_head_count, value_length}),
+        DType::f32
+    ));
+    for (std::uint64_t row = 0; row < cache_capacity; ++row) {
+        for (std::uint64_t head = 0; head < kv_head_count; ++head) {
+            for (std::uint64_t column = 0; column < key_length; ++column) {
+                const std::array<std::uint64_t, 3> index {row, head, column};
+                write_f32(
+                    key_cache,
+                    std::span<const std::uint64_t>(index),
+                    -0.075F * static_cast<float>(row)
+                        + 0.2F * static_cast<float>(head + 1)
+                        + 0.03125F * static_cast<float>(column)
+                );
+            }
+            for (std::uint64_t column = 0; column < value_length; ++column) {
+                const std::array<std::uint64_t, 3> index {row, head, column};
+                write_f32(
+                    value_cache,
+                    std::span<const std::uint64_t>(index),
+                    0.15F * static_cast<float>(row + 1)
+                        - 0.05F * static_cast<float>(head)
+                        + 0.025F * static_cast<float>(column)
+                );
+            }
+        }
+    }
+
+    const auto cpu_scores_buffer = causal_grouped_attention_scores_f32_with_kv_cache_to_backend(
+        copy_tensor_to_backend(query, BackendKind::cpu),
+        copy_tensor_to_backend(key_cache, BackendKind::cpu),
+        query_position_start,
+        head_count,
+        kv_head_count,
+        key_length,
+        attention_token_count,
+        0.5F,
+        10.0F
+    );
+    const auto metal_scores_buffer = causal_grouped_attention_scores_f32_with_kv_cache_to_backend(
+        copy_tensor_to_backend(query, BackendKind::metal),
+        copy_tensor_to_backend(key_cache, BackendKind::metal),
+        query_position_start,
+        head_count,
+        kv_head_count,
+        key_length,
+        attention_token_count,
+        0.5F,
+        10.0F
+    );
+    const auto cpu_probabilities_buffer = softmax_f32_to_backend(cpu_scores_buffer);
+    const auto metal_probabilities_buffer = softmax_f32_to_backend(metal_scores_buffer);
+    const auto cpu_values_buffer = causal_grouped_attention_values_f32_with_kv_cache_to_backend(
+        cpu_probabilities_buffer,
+        copy_tensor_to_backend(value_cache, BackendKind::cpu),
+        query_position_start,
+        head_count,
+        kv_head_count,
+        value_length,
+        attention_token_count
+    );
+    const auto metal_values_buffer = causal_grouped_attention_values_f32_with_kv_cache_to_backend(
+        metal_probabilities_buffer,
+        copy_tensor_to_backend(value_cache, BackendKind::metal),
+        query_position_start,
+        head_count,
+        kv_head_count,
+        value_length,
+        attention_token_count
+    );
+
+    expect_f32_rank3_close(
+        copy_tensor_from_backend(metal_scores_buffer),
+        copy_tensor_from_backend(cpu_scores_buffer),
+        1.0e-4F,
+        "Metal grouped cache attention scores"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_values_buffer),
+        copy_tensor_from_backend(cpu_values_buffer),
+        1.0e-4F,
+        "Metal grouped cache attention values"
+    );
+}
+
 void test_matches_llama_one_token_grouped_cached_attention_to_metal_backend_buffer_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -2206,6 +2599,7 @@ const TestCase tensor_backend_tests[] {
         test_applies_causal_grouped_attention_values_to_cpu_backend_buffers,
     },
     {"applies softmax to CPU backend buffer", test_applies_softmax_to_cpu_backend_buffer},
+    {"applies softcap to CPU backend buffer", test_applies_softcap_to_cpu_backend_buffer},
     {
         "multiplies backend F32 by three backend F16 GGUF weights to CPU backend buffers",
         test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers,
@@ -2282,6 +2676,10 @@ const TestCase tensor_backend_tests[] {
         test_matches_softmax_to_metal_backend_buffer_when_available,
     },
     {
+        "matches softcap to Metal backend buffer when available",
+        test_matches_softcap_to_metal_backend_buffer_when_available,
+    },
+    {
         "multiplies backend F32 by three backend F16 GGUF weights to Metal backend buffers when available",
         test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_metal_backend_buffers_when_available,
     },
@@ -2301,6 +2699,19 @@ const TestCase tensor_backend_tests[] {
     {
         "matches Llama cached attention to Metal backend buffer when available",
         test_matches_llama_cached_attention_to_metal_backend_buffer_when_available,
+    },
+    {"writes prefill KV cache to CPU backend buffer", test_writes_prefill_kv_cache_to_cpu_backend_buffer},
+    {
+        "matches prefill KV cache write to Metal backend buffer when available",
+        test_matches_prefill_kv_cache_write_to_metal_backend_buffer_when_available,
+    },
+    {
+        "applies causal grouped attention to CPU backend KV cache buffers",
+        test_applies_causal_grouped_attention_to_cpu_backend_kv_cache_buffers,
+    },
+    {
+        "matches causal grouped attention KV cache to Metal backend buffers when available",
+        test_matches_causal_grouped_attention_kv_cache_to_metal_backend_buffers_when_available,
     },
     {
         "matches one-token grouped Llama cached attention to Metal backend buffer when available",

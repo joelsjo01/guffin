@@ -232,6 +232,13 @@ BackendBuffer softmax_f32_with_cpu_buffer(const CpuBackendBufferStorage& input) 
     return copy_tensor_to_cpu_backend(ops::softmax_f32(input.storage()));
 }
 
+BackendBuffer softcap_f32_with_cpu_buffer(
+    const CpuBackendBufferStorage& input,
+    float softcap
+) {
+    return copy_tensor_to_cpu_backend(ops::softcap_f32(input.storage(), softcap));
+}
+
 TensorStorage matmul_f32_f16_gguf_weight(
     const TensorStorage& left,
     const TensorStorage& right

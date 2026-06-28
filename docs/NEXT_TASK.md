@@ -5,20 +5,35 @@ completed implementation slice.
 
 ## Objective
 
-Add the first reusable scheduled Gemma prefill block runner behind the Metal
-runtime shell.
+Implement the first Gemma decode logits projection boundary.
 
 ## Why
 
-Gemma now reaches the real generate path far enough to load file-backed tensor
-views, tokenize the prompt, upload the resident Metal model plan, build
-separate prefill/decode schedules, run full scheduled blocks 0, 1, and 2
-through FFN residual output, and hand layer 2's residual to block 3 as a
-normalized attention input.
+Gemma now reaches the real generate path far enough to run full scheduled
+prefill, write scheduled prefill K/V into the resident KV cache, select the
+next token from prefill logits, embed that selected token for decode, normalize
+the first decode layer input, and run one reusable scheduled decode loop across
+scheduled decode layers for that selected token.
 
-The next blocker is stopping bespoke layer-N shell expansion. Use the proven
-block pattern behind one reusable scheduled runner before expanding through the
-remaining Gemma layers.
+Latest reusable/runtime outputs:
+
+- `prefill_reusable_blocks`
+- `prefill_reusable_layer_inputs`
+- `prefill_kv_cache_writes`
+- `prefill_output_norm.normalized_hidden_states`
+- `prefill_logits.logits`
+- `prefill_next_token_selection.token_id`
+- `first_decode_input.hidden_states`
+- `first_decode_first_layer_input.normalized_attention_input`
+- `first_decode_block.kv_cache_write`
+- `first_decode_block.feed_forward_output.feed_forward_residual`
+- `first_decode_reusable_layer_inputs`
+- `first_decode_reusable_blocks`
+- `first_decode_terminal_feed_forward_output.feed_forward_residual`
+
+The next blocker is to normalize the terminal decode residual and project it
+through the output weight into explicit decode logits for that one selected
+token, without adding the generated-token loop yet.
 
 ## Read
 
@@ -31,10 +46,10 @@ remaining Gemma layers.
 
 ## Touch
 
-- Gemma engine/runtime planning code under `include/local_gguf_engine/engine`
-  and `src/engine`
-- Tensor/Metal backend code only if an existing primitive is not enough
+- Gemma runtime shell code under `include/local_gguf_engine/engine` and
+  `src/engine`
 - `tests/engine`
+- Tensor/Metal backend code only if existing primitives are not enough
 - `tests/tensor` only if adding or exposing a backend primitive
 - `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
   execution boundary changes
@@ -43,9 +58,10 @@ remaining Gemma layers.
 
 ## Do Not
 
-- Do not add another bespoke layer-3 attention/FFN field chain.
-- Do not add logits, sampling, KV updates, decode looping, or generation
-  success.
+- Do not add bespoke decode layer-N attention/FFN fields.
+- Do not fold prefill layers 0-2 into the reusable prefill runner yet.
+- Do not add a generated-token loop or generation success.
+- Do not change sampling behavior.
 - Do not add a broad graph abstraction or generic model-family operator stack.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
 - Do not replace the resident plan with per-op host round trips.
@@ -54,21 +70,21 @@ remaining Gemma layers.
 
 ## Verify
 
-- Add deterministic tests for the runner's shape/resource ownership.
-- Reuse CPU/Metal parity checks for the proven block operations.
-- Keep unavailable-Metal behavior explicit if the runner creates Metal
-  resources directly.
+- Add deterministic tests for decode output normalization, raw logits,
+  softcapped logits, shape/resource ownership, and terminal layer selection.
+- Reuse CPU/Metal parity checks for the decode output norm/logits projection
+  where possible.
+- Keep unavailable-Metal behavior explicit if new code creates Metal resources
+  directly.
 - Keep the real Gemma CLI failure as explicit unsupported Gemma execution until
-  enough scheduled execution exists to return logits.
-- Run focused engine/tensor/CLI tests touched by the runner.
+  the generation boundary is intentionally moved.
+- Run focused engine/tensor/CLI tests touched by the decode-logits boundary.
 - Run local Gemma inspection/generation far enough to prove any remaining
   failure is still explicit unsupported Gemma execution.
 - Run `bash scripts/ci.sh` after implementation changes.
 
 ## Stop When
 
-One reusable scheduled Gemma prefill block runner can consume a normalized
-layer input, run the proven attention/residual/FFN block pattern for a scheduled
-layer without adding a new bespoke layer-N shell chain, and produce an explicit
-FFN residual output with deterministic tests, while full Gemma generation
-remains explicitly unsupported.
+The terminal first-decode FFN residual feeds Gemma output RMSNorm and logits
+projection for one selected token, producing explicit raw and softcapped decode
+logits without a generated-token loop or generation success.

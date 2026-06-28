@@ -121,6 +121,7 @@ public:
     [[nodiscard]] runtime::BackendKind backend() const noexcept;
     [[nodiscard]] const Gemma2ModelConfig& config() const noexcept;
     [[nodiscard]] const Gemma2MetalModelWeightBuffers& weights() const noexcept;
+    [[nodiscard]] std::vector<Gemma2MetalKVCacheLayer>& kv_cache() noexcept;
     [[nodiscard]] const std::vector<Gemma2MetalKVCacheLayer>& kv_cache() const noexcept;
     [[nodiscard]] const Gemma2MetalDecodeScratch& decode_scratch() const noexcept;
     [[nodiscard]] const std::vector<Gemma2MetalLayerState>& layers() const noexcept;
