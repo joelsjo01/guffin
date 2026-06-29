@@ -60,8 +60,10 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | First Gemma prefill KV cache write setup | Scheduled prefill K/V outputs are written into the resident Gemma KV cache without decode looping or generation success. |
 | Done | First reusable Gemma decode block runner | A one-token decode block consumes resident KV, appends new K/V, and produces a scheduled FFN residual without a full decode loop. |
 | Done | Reusable scheduled Gemma decode loop | One loop runs the reusable decode block across scheduled decode layers and produces the terminal decode FFN residual without logits or generation success. |
-| Current | First Gemma decode logits projection | The terminal decode residual normalizes and projects to logits for one generated token without a generated-token loop. |
-| Planned | First Gemma generated-token loop | Prefill and one-token decode repeat through sampling and KV updates for requested new tokens while still failing explicit unsupported paths only when coverage is incomplete. |
+| Done | First Gemma decode logits projection | The terminal decode residual normalizes and projects to logits for one generated token without a generated-token loop. |
+| Done | First Gemma decode next-token selection | The first decode logits produce an explicit next-token selection boundary without a generated-token loop. |
+| Done | First Gemma generated-token loop | Prefill and one-token decode repeat through greedy argmax and resident KV updates for requested new tokens; real Gemma `--greedy` generation succeeds for the covered path. |
+| Current | Resident Gemma greedy selection | Prefill/decode logits select top-1 on Metal with only token/logit readback, preserving the generated-token loop and greedy-only CLI contract. |
 | Planned | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |
 

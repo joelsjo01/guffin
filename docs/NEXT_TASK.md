@@ -5,35 +5,36 @@ completed implementation slice.
 
 ## Objective
 
-Implement the first Gemma decode logits projection boundary.
+Move Gemma greedy next-token selection off full logits host readback.
 
 ## Why
 
-Gemma now reaches the real generate path far enough to run full scheduled
-prefill, write scheduled prefill K/V into the resident KV cache, select the
-next token from prefill logits, embed that selected token for decode, normalize
-the first decode layer input, and run one reusable scheduled decode loop across
-scheduled decode layers for that selected token.
+Gemma now reaches a bounded real greedy generation path. Full scheduled prefill
+runs, scheduled prefill K/V writes into the resident KV cache, the selected
+prefill token feeds repeated one-token decode steps, each decode appends
+resident K/V, and `local-gguf-generate ... --greedy` succeeds for the covered
+path.
 
 Latest reusable/runtime outputs:
 
 - `prefill_reusable_blocks`
 - `prefill_reusable_layer_inputs`
 - `prefill_kv_cache_writes`
-- `prefill_output_norm.normalized_hidden_states`
 - `prefill_logits.logits`
 - `prefill_next_token_selection.token_id`
-- `first_decode_input.hidden_states`
-- `first_decode_first_layer_input.normalized_attention_input`
-- `first_decode_block.kv_cache_write`
-- `first_decode_block.feed_forward_output.feed_forward_residual`
 - `first_decode_reusable_layer_inputs`
 - `first_decode_reusable_blocks`
 - `first_decode_terminal_feed_forward_output.feed_forward_residual`
+- `first_decode_output_norm.normalized_hidden_states`
+- `first_decode_logits.logits`
+- `first_decode_next_token_selection.token_id`
+- `generated_token_ids`
+- `decode_steps`
 
-The next blocker is to normalize the terminal decode residual and project it
-through the output weight into explicit decode logits for that one selected
-token, without adding the generated-token loop yet.
+The next performance blocker is that the current greedy selection boundary
+copies the full logits tensor back to host and runs CPU top-1. Replace that with
+a Gemma/Metal top-1 boundary that leaves logits resident and reads back only
+the selected token/logit.
 
 ## Read
 
@@ -48,43 +49,41 @@ token, without adding the generated-token loop yet.
 
 - Gemma runtime shell code under `include/local_gguf_engine/engine` and
   `src/engine`
+- Tensor/Metal top-1 selection code if a narrow op is needed
 - `tests/engine`
-- Tensor/Metal backend code only if existing primitives are not enough
-- `tests/tensor` only if adding or exposing a backend primitive
-- `tests/frontends/cli/generate_cli_tests.cpp` only if the unsupported Gemma
-  execution boundary changes
+- `tests/tensor` if adding a narrow top-1 op
 - `docs/GEMMA_Q4_MILESTONES.md`
 - `docs/NEXT_TASK.md`
 
 ## Do Not
 
-- Do not add bespoke decode layer-N attention/FFN fields.
+- Do not change the generated-token loop semantics.
 - Do not fold prefill layers 0-2 into the reusable prefill runner yet.
-- Do not add a generated-token loop or generation success.
-- Do not change sampling behavior.
-- Do not add a broad graph abstraction or generic model-family operator stack.
+- Do not add non-greedy sampling, temperature, top-k, top-p, repetition penalty,
+  or RNG support for Gemma yet.
+- Do not add broad graph abstractions or a generic model-family operator stack.
 - Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
 - Do not replace the resident plan with per-op host round trips.
-- Do not make `local-gguf-generate` claim Gemma success yet.
+- Do not reintroduce full-logits host readback for Gemma greedy selection.
+- Do not make unsupported Gemma sampling/debug paths claim success before
+  coverage is explicit.
 - Do not read benchmark artifacts.
 
 ## Verify
 
-- Add deterministic tests for decode output normalization, raw logits,
-  softcapped logits, shape/resource ownership, and terminal layer selection.
-- Reuse CPU/Metal parity checks for the decode output norm/logits projection
-  where possible.
+- Add deterministic CPU/reference parity tests for the Metal top-1 token/logit
+  result on prefill and decode logits.
+- Add shape/resource ownership tests proving selection consumes resident logits
+  and exposes only the small selected-token boundary.
 - Keep unavailable-Metal behavior explicit if new code creates Metal resources
   directly.
-- Keep the real Gemma CLI failure as explicit unsupported Gemma execution until
-  the generation boundary is intentionally moved.
-- Run focused engine/tensor/CLI tests touched by the decode-logits boundary.
-- Run local Gemma inspection/generation far enough to prove any remaining
-  failure is still explicit unsupported Gemma execution.
+- Run focused tensor/engine/CLI tests touched by the selection boundary.
+- Run release Gemma inspection.
+- Run release Gemma greedy generation smoke; it should remain successful.
 - Run `bash scripts/ci.sh` after implementation changes.
 
 ## Stop When
 
-The terminal first-decode FFN residual feeds Gemma output RMSNorm and logits
-projection for one selected token, producing explicit raw and softcapped decode
-logits without a generated-token loop or generation success.
+Gemma greedy selection no longer reads back full logits for top-1; the bounded
+generated-token loop and real `--greedy` generation still pass, while
+non-greedy Gemma sampling remains explicitly unsupported.

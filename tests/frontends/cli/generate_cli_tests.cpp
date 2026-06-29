@@ -110,6 +110,27 @@ int run_generate_for_path(
     return run_generate(4, argv, output, error);
 }
 
+int run_generate_for_path_with_greedy(
+    const std::filesystem::path& path,
+    std::string_view prompt,
+    std::string_view max_new_tokens,
+    std::ostringstream& output,
+    std::ostringstream& error
+) {
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const std::string prompt_string(prompt);
+    const std::string max_new_tokens_string(max_new_tokens);
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        prompt_string.c_str(),
+        max_new_tokens_string.c_str(),
+        "--greedy",
+    };
+    return run_generate(5, argv, output, error);
+}
+
 void append_u8(std::vector<std::uint8_t>& bytes, std::uint8_t value) {
     bytes.push_back(value);
 }
@@ -770,11 +791,7 @@ void test_generates_text_from_gguf_bytes_with_cpu_backend_option() {
     expect(text == "!", "generate text CPU backend option should preserve cached argmax output");
 }
 
-void test_rejects_generate_gemma2_runtime_not_implemented() {
-    if (!tensor_backend_is_available(BackendKind::metal)) {
-        return;
-    }
-
+void test_rejects_generate_gemma2_sampling_not_implemented() {
     const auto bytes = tiny_gemma2_generate_cli_gguf_bytes();
     const TempBinaryFile model("tiny-gemma2-generate", std::span<const std::uint8_t>(bytes));
     std::ostringstream output;
@@ -782,12 +799,29 @@ void test_rejects_generate_gemma2_runtime_not_implemented() {
 
     const auto exit_code = run_generate_for_path(model.path(), "Hello", "1", output, error);
 
-    expect(exit_code == EXIT_FAILURE, "generate Gemma2 unsupported runtime exit code mismatch");
-    expect(output.str().empty(), "generate Gemma2 unsupported runtime should not write stdout");
+    expect(exit_code == EXIT_FAILURE, "generate Gemma2 unsupported sampling exit code mismatch");
+    expect(output.str().empty(), "generate Gemma2 unsupported sampling should not write stdout");
     expect(
-        error.str().find("Gemma 2 generation runtime is not implemented yet") != std::string::npos,
-        "generate Gemma2 unsupported runtime error missing"
+        error.str().find("Gemma 2 generation currently supports greedy sampling only") != std::string::npos,
+        "generate Gemma2 unsupported sampling error missing"
     );
+}
+
+void test_runs_generate_gemma2_greedy_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = tiny_gemma2_generate_cli_gguf_bytes();
+    const TempBinaryFile model("tiny-gemma2-generate-greedy", std::span<const std::uint8_t>(bytes));
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_for_path_with_greedy(model.path(), "Hello", "1", output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "generate Gemma2 greedy exit code mismatch");
+    expect(output.str() == "\n", "generate Gemma2 greedy output mismatch");
+    expect(error.str().empty(), "generate Gemma2 greedy should not write stderr");
 }
 
 void test_reports_generate_gemma2_metal_runtime_shell_unavailable_when_missing() {
@@ -806,11 +840,12 @@ void test_reports_generate_gemma2_metal_runtime_shell_unavailable_when_missing()
         "1",
         "--backend",
         "metal",
+        "--greedy",
     };
     std::ostringstream output;
     std::ostringstream error;
 
-    const auto exit_code = run_generate(6, argv, output, error);
+    const auto exit_code = run_generate(7, argv, output, error);
 
     expect(exit_code == EXIT_FAILURE, "generate Gemma2 unavailable runtime shell exit code mismatch");
     expect(output.str().empty(), "generate Gemma2 unavailable runtime shell should not write stdout");
@@ -841,12 +876,12 @@ void test_rejects_generate_gemma2_after_decode_schedule_context_full_when_availa
     std::ostringstream output;
     std::ostringstream error;
 
-    const auto exit_code = run_generate_for_path(model.path(), "Hello", "1", output, error);
+    const auto exit_code = run_generate_for_path_with_greedy(model.path(), "Hello", "1", output, error);
 
     expect(exit_code == EXIT_FAILURE, "generate Gemma2 decode schedule context-full exit code mismatch");
     expect(output.str().empty(), "generate Gemma2 decode schedule context-full should not write stdout");
     expect(
-        error.str().find("Gemma2 Metal decode schedule cached token count must leave room for one token")
+        error.str().find("Gemma2 Metal generation token count exceeds context length")
             != std::string::npos,
         "generate Gemma2 decode schedule context-full error missing"
     );
@@ -1283,8 +1318,12 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     },
     {"runs generate success path", test_runs_generate_success_path},
     {
-        "rejects generate Gemma2 runtime not implemented",
-        test_rejects_generate_gemma2_runtime_not_implemented,
+        "rejects generate Gemma2 sampling not implemented",
+        test_rejects_generate_gemma2_sampling_not_implemented,
+    },
+    {
+        "runs generate Gemma2 greedy when available",
+        test_runs_generate_gemma2_greedy_when_available,
     },
     {
         "reports generate Gemma2 Metal runtime shell unavailable when missing",

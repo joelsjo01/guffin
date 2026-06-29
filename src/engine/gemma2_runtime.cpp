@@ -37,6 +37,31 @@ constexpr float gemma2_rope_frequency_base = 10000.0F;
     return static_cast<std::uint32_t>(prompt_token_ids.size());
 }
 
+void require_gemma2_metal_generation_inputs(
+    const Gemma2ModelConfig& config,
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens
+) {
+    if (max_new_tokens == 0U) {
+        throw std::invalid_argument("Gemma2 Metal generation max_new_tokens must be positive");
+    }
+    if (prompt_token_ids.empty()) {
+        throw std::invalid_argument("Gemma2 Metal generation prompt token ids must not be empty");
+    }
+    if (prompt_token_ids.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("Gemma2 Metal generation prompt token count exceeds uint32");
+    }
+    if (max_new_tokens > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("Gemma2 Metal generation max_new_tokens exceeds uint32");
+    }
+    if (prompt_token_ids.size() > std::numeric_limits<std::size_t>::max() - max_new_tokens) {
+        throw std::invalid_argument("Gemma2 Metal generation token count overflows");
+    }
+    if (prompt_token_ids.size() + max_new_tokens > static_cast<std::size_t>(config.context_length)) {
+        throw std::invalid_argument("Gemma2 Metal generation token count exceeds context length");
+    }
+}
+
 void require_prefill_hidden_states_match_schedule(
     const Gemma2MetalSchedule& prefill,
     const tensor::BackendBuffer& hidden_states
@@ -629,6 +654,17 @@ void require_prefill_output_norm_output_shape(
     }
 }
 
+void require_decode_output_norm_output_shape(
+    const tensor::BackendBuffer& output,
+    const tensor::TensorDescriptor& expected
+) {
+    if (output.descriptor() != expected) {
+        throw std::invalid_argument(
+            "Gemma2 Metal decode output norm must match scheduled normalized hidden shape"
+        );
+    }
+}
+
 void require_prefill_logits_output_shape(
     const tensor::BackendBuffer& output,
     const tensor::TensorDescriptor& expected,
@@ -637,6 +673,18 @@ void require_prefill_logits_output_shape(
     if (output.descriptor() != expected) {
         throw std::invalid_argument(
             std::string("Gemma2 Metal prefill logits ") + name + " must match scheduled logits shape"
+        );
+    }
+}
+
+void require_decode_logits_output_shape(
+    const tensor::BackendBuffer& output,
+    const tensor::TensorDescriptor& expected,
+    const char* name
+) {
+    if (output.descriptor() != expected) {
+        throw std::invalid_argument(
+            std::string("Gemma2 Metal decode logits ") + name + " must match scheduled logits shape"
         );
     }
 }
@@ -840,6 +888,47 @@ void require_prefill_terminal_feed_forward_output_matches_schedule(
     }
 }
 
+void require_decode_terminal_feed_forward_output_matches_schedule(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    const Gemma2MetalFeedForwardOutputActivations& feed_forward_output
+) {
+    if (decode.phase() != Gemma2MetalSchedulePhase::decode) {
+        throw std::invalid_argument("Gemma2 Metal decode output norm requires a decode schedule");
+    }
+    if (decode.scratch_ownership() != Gemma2MetalScratchOwnership::resident_decode) {
+        throw std::invalid_argument("Gemma2 Metal decode output norm requires resident decode scratch");
+    }
+    if (decode.token_count() != 1U) {
+        throw std::invalid_argument("Gemma2 Metal decode output norm requires one scheduled token");
+    }
+    if (plan.backend() != decode.backend()) {
+        throw std::invalid_argument("Gemma2 Metal decode output norm plan backend must match schedule");
+    }
+    if (decode.layers().empty()) {
+        throw std::invalid_argument("Gemma2 Metal decode output norm requires at least one layer");
+    }
+    if (feed_forward_output.phase != decode.phase()) {
+        throw std::invalid_argument("Gemma2 Metal decode output norm residual phase must match schedule");
+    }
+    if (feed_forward_output.scratch_ownership != decode.scratch_ownership()) {
+        throw std::invalid_argument(
+            "Gemma2 Metal decode output norm residual scratch ownership must match schedule"
+        );
+    }
+    if (feed_forward_output.layer_index != decode.layers().back().layer_index) {
+        throw std::invalid_argument("Gemma2 Metal decode output norm residual layer must be terminal");
+    }
+    if (feed_forward_output.feed_forward_residual.backend() != decode.backend()) {
+        throw std::invalid_argument("Gemma2 Metal decode output norm residual must use the schedule backend");
+    }
+    if (feed_forward_output.feed_forward_residual.descriptor() != decode.scratch().feed_forward_residual) {
+        throw std::invalid_argument(
+            "Gemma2 Metal decode output norm residual must match scheduled FFN residual shape"
+        );
+    }
+}
+
 void require_prefill_output_norm_matches_schedule(
     const Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& prefill,
@@ -877,6 +966,53 @@ void require_prefill_output_norm_matches_schedule(
     if (output_norm.normalized_hidden_states.descriptor() != prefill.scratch().normalized_hidden) {
         throw std::invalid_argument(
             "Gemma2 Metal prefill logits projection input must match scheduled normalized hidden shape"
+        );
+    }
+}
+
+void require_decode_output_norm_matches_schedule(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    const Gemma2MetalDecodeOutputNormActivations& output_norm
+) {
+    if (decode.phase() != Gemma2MetalSchedulePhase::decode) {
+        throw std::invalid_argument("Gemma2 Metal decode logits projection requires a decode schedule");
+    }
+    if (decode.scratch_ownership() != Gemma2MetalScratchOwnership::resident_decode) {
+        throw std::invalid_argument("Gemma2 Metal decode logits projection requires resident decode scratch");
+    }
+    if (decode.token_count() != 1U) {
+        throw std::invalid_argument("Gemma2 Metal decode logits projection requires one scheduled token");
+    }
+    if (plan.backend() != decode.backend()) {
+        throw std::invalid_argument("Gemma2 Metal decode logits projection plan backend must match schedule");
+    }
+    if (decode.layers().empty()) {
+        throw std::invalid_argument("Gemma2 Metal decode logits projection requires at least one layer");
+    }
+    if (output_norm.phase != decode.phase()) {
+        throw std::invalid_argument("Gemma2 Metal decode logits projection input phase must match schedule");
+    }
+    if (output_norm.scratch_ownership != decode.scratch_ownership()) {
+        throw std::invalid_argument(
+            "Gemma2 Metal decode logits projection input scratch ownership must match schedule"
+        );
+    }
+    if (output_norm.schedule_layer_offset != decode.layers().size() - 1U) {
+        throw std::invalid_argument("Gemma2 Metal decode logits projection input layer offset must be terminal");
+    }
+    if (output_norm.layer_index != decode.layers().back().layer_index) {
+        throw std::invalid_argument("Gemma2 Metal decode logits projection input layer must be terminal");
+    }
+    if (output_norm.hidden_width != plan.config().embedding_length) {
+        throw std::invalid_argument("Gemma2 Metal decode logits projection input hidden width must match config");
+    }
+    if (output_norm.normalized_hidden_states.backend() != decode.backend()) {
+        throw std::invalid_argument("Gemma2 Metal decode logits projection input must use the schedule backend");
+    }
+    if (output_norm.normalized_hidden_states.descriptor() != decode.scratch().normalized_hidden) {
+        throw std::invalid_argument(
+            "Gemma2 Metal decode logits projection input must match scheduled normalized hidden shape"
         );
     }
 }
@@ -920,6 +1056,51 @@ void require_prefill_logits_match_schedule(
     }
     if (logits.logits.descriptor() != prefill.scratch().logits) {
         throw std::invalid_argument("Gemma2 Metal prefill next-token selection logits must match scheduled shape");
+    }
+}
+
+void require_decode_logits_match_schedule(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    const Gemma2MetalDecodeLogitsActivations& logits
+) {
+    if (decode.phase() != Gemma2MetalSchedulePhase::decode) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection requires a decode schedule");
+    }
+    if (decode.scratch_ownership() != Gemma2MetalScratchOwnership::resident_decode) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection requires resident decode scratch");
+    }
+    if (decode.token_count() != 1U) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection requires one scheduled token");
+    }
+    if (plan.backend() != decode.backend()) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection plan backend must match schedule");
+    }
+    if (decode.layers().empty()) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection requires at least one layer");
+    }
+    if (logits.phase != decode.phase()) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection input phase must match schedule");
+    }
+    if (logits.scratch_ownership != decode.scratch_ownership()) {
+        throw std::invalid_argument(
+            "Gemma2 Metal decode next-token selection input scratch ownership must match schedule"
+        );
+    }
+    if (logits.schedule_layer_offset != decode.layers().size() - 1U) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection input layer offset must be terminal");
+    }
+    if (logits.layer_index != decode.layers().back().layer_index) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection input layer must be terminal");
+    }
+    if (logits.hidden_width != plan.config().embedding_length || logits.vocab_size != plan.config().vocab_size) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection input dimensions must match config");
+    }
+    if (logits.logits.backend() != decode.backend()) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection logits must use the schedule backend");
+    }
+    if (logits.logits.descriptor() != decode.scratch().logits) {
+        throw std::invalid_argument("Gemma2 Metal decode next-token selection logits must match scheduled shape");
     }
 }
 
@@ -2923,7 +3104,7 @@ create_gemma2_metal_prefill_fourth_layer_input(
     };
 }
 
-[[nodiscard]] tensor::BackendBuffer project_prefill_logits_to_backend(
+[[nodiscard]] tensor::BackendBuffer project_gemma2_logits_to_backend(
     const tensor::BackendBuffer& normalized_hidden_states,
     const tensor::BackendBuffer& output_weight
 ) {
@@ -2944,7 +3125,71 @@ create_gemma2_metal_prefill_fourth_layer_input(
             break;
     }
 
-    throw std::invalid_argument("Gemma2 Metal prefill logits output weight dtype is not supported");
+    throw std::invalid_argument("Gemma2 Metal logits output weight dtype is not supported");
+}
+
+[[nodiscard]] Gemma2MetalDecodeOutputNormActivations create_gemma2_metal_decode_output_norm(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    const Gemma2MetalFeedForwardOutputActivations& terminal_feed_forward_output
+) {
+    require_decode_terminal_feed_forward_output_matches_schedule(
+        plan,
+        decode,
+        terminal_feed_forward_output
+    );
+
+    auto normalized_hidden_states = tensor::ops::rms_norm_f32_to_backend(
+        terminal_feed_forward_output.feed_forward_residual,
+        plan.weights().output_norm_weight,
+        plan.config().rms_norm_epsilon
+    );
+
+    require_decode_output_norm_output_shape(
+        normalized_hidden_states,
+        decode.scratch().normalized_hidden
+    );
+
+    return Gemma2MetalDecodeOutputNormActivations {
+        .schedule_layer_offset = static_cast<std::uint32_t>(decode.layers().size() - 1U),
+        .layer_index = terminal_feed_forward_output.layer_index,
+        .phase = decode.phase(),
+        .scratch_ownership = decode.scratch_ownership(),
+        .hidden_width = plan.config().embedding_length,
+        .normalized_hidden_states = std::move(normalized_hidden_states),
+    };
+}
+
+[[nodiscard]] Gemma2MetalDecodeLogitsActivations create_gemma2_metal_decode_logits(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    const Gemma2MetalDecodeOutputNormActivations& output_norm
+) {
+    require_decode_output_norm_matches_schedule(plan, decode, output_norm);
+
+    auto raw_logits = project_gemma2_logits_to_backend(
+        output_norm.normalized_hidden_states,
+        plan.weights().output_weight
+    );
+    require_decode_logits_output_shape(raw_logits, decode.scratch().logits, "raw output");
+
+    auto logits = tensor::ops::softcap_f32_to_backend(
+        raw_logits,
+        plan.config().final_logit_softcap
+    );
+    require_decode_logits_output_shape(logits, decode.scratch().logits, "softcapped output");
+
+    return Gemma2MetalDecodeLogitsActivations {
+        .schedule_layer_offset = output_norm.schedule_layer_offset,
+        .layer_index = output_norm.layer_index,
+        .phase = decode.phase(),
+        .scratch_ownership = decode.scratch_ownership(),
+        .hidden_width = plan.config().embedding_length,
+        .vocab_size = plan.config().vocab_size,
+        .final_logit_softcap = plan.config().final_logit_softcap,
+        .raw_logits = std::move(raw_logits),
+        .logits = std::move(logits),
+    };
 }
 
 [[nodiscard]] Gemma2MetalPrefillLogitsActivations create_gemma2_metal_prefill_logits(
@@ -2954,7 +3199,7 @@ create_gemma2_metal_prefill_fourth_layer_input(
 ) {
     require_prefill_output_norm_matches_schedule(plan, prefill, output_norm);
 
-    auto raw_logits = project_prefill_logits_to_backend(
+    auto raw_logits = project_gemma2_logits_to_backend(
         output_norm.normalized_hidden_states,
         plan.weights().output_weight
     );
@@ -3005,6 +3250,32 @@ create_gemma2_metal_prefill_fourth_layer_input(
     };
 }
 
+[[nodiscard]] Gemma2MetalDecodeNextTokenSelection create_gemma2_metal_decode_next_token_selection(
+    const Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    const Gemma2MetalDecodeLogitsActivations& logits
+) {
+    require_decode_logits_match_schedule(plan, decode, logits);
+
+    const auto logits_storage = tensor::copy_tensor_from_backend(logits.logits);
+    const auto token_id = sample_argmax_token_f32(logits_storage);
+    const std::array<std::uint64_t, 2> selected_index {
+        0U,
+        static_cast<std::uint64_t>(token_id),
+    };
+
+    return Gemma2MetalDecodeNextTokenSelection {
+        .schedule_layer_offset = logits.schedule_layer_offset,
+        .layer_index = logits.layer_index,
+        .phase = decode.phase(),
+        .scratch_ownership = decode.scratch_ownership(),
+        .logits_row_index = 0U,
+        .vocab_size = plan.config().vocab_size,
+        .token_id = token_id,
+        .logit = tensor::read_f32(logits_storage, std::span<const std::uint64_t>(selected_index)),
+    };
+}
+
 [[nodiscard]] Gemma2MetalPrefillKVCacheWriteActivations write_gemma2_metal_prefill_kv_cache(
     Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& prefill,
@@ -3049,23 +3320,23 @@ create_gemma2_metal_prefill_fourth_layer_input(
     };
 }
 
-[[nodiscard]] Gemma2MetalInputActivations create_gemma2_metal_first_decode_input(
+[[nodiscard]] Gemma2MetalInputActivations create_gemma2_metal_decode_input(
     const Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& decode,
-    const Gemma2MetalPrefillNextTokenSelection& selection,
+    std::uint32_t token_id,
     float embedding_scale
 ) {
     if (decode.phase() != Gemma2MetalSchedulePhase::decode) {
-        throw std::invalid_argument("Gemma2 Metal first decode input requires a decode schedule");
+        throw std::invalid_argument("Gemma2 Metal decode input requires a decode schedule");
     }
     if (decode.token_count() != 1U) {
-        throw std::invalid_argument("Gemma2 Metal first decode input requires one scheduled token");
+        throw std::invalid_argument("Gemma2 Metal decode input requires one scheduled token");
     }
-    if (selection.token_id >= plan.config().vocab_size || selection.vocab_size != plan.config().vocab_size) {
-        throw std::invalid_argument("Gemma2 Metal first decode input token must be within vocab");
+    if (token_id >= plan.config().vocab_size) {
+        throw std::invalid_argument("Gemma2 Metal decode input token must be within vocab");
     }
 
-    std::vector<std::uint32_t> token_ids {selection.token_id};
+    std::vector<std::uint32_t> token_ids {token_id};
     auto hidden_states = tensor::ops::embed_f16_gguf_weight_token_ids_to_backend(
         std::span<const std::uint32_t>(token_ids),
         plan.weights().token_embedding_weight,
@@ -3817,6 +4088,98 @@ Gemma2MetalDecodeBlockActivations run_gemma2_metal_scheduled_decode_block(
     };
 }
 
+Gemma2MetalDecodeStepActivations run_gemma2_metal_decode_step(
+    Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    std::uint32_t token_id,
+    float embedding_scale
+) {
+    auto input = create_gemma2_metal_decode_input(
+        plan,
+        decode,
+        token_id,
+        embedding_scale
+    );
+    auto first_layer_input = create_gemma2_metal_first_decode_layer_input(
+        plan,
+        decode,
+        input
+    );
+    auto first_block = run_gemma2_metal_scheduled_decode_block(
+        plan,
+        decode,
+        0,
+        first_layer_input.normalized_attention_input,
+        input.hidden_states
+    );
+
+    std::vector<Gemma2MetalLayerHandoffActivations> reusable_layer_inputs;
+    std::vector<Gemma2MetalDecodeBlockActivations> reusable_blocks;
+    const auto scheduled_decode_layer_count = decode.layers().size();
+    if (scheduled_decode_layer_count > 1U) {
+        reusable_layer_inputs.reserve(scheduled_decode_layer_count - 1U);
+        reusable_blocks.reserve(scheduled_decode_layer_count - 1U);
+    }
+
+    const Gemma2MetalFeedForwardOutputActivations* terminal_feed_forward_output =
+        &first_block.feed_forward_output;
+    for (
+        std::uint32_t schedule_layer_offset = 1U;
+        static_cast<std::size_t>(schedule_layer_offset) < scheduled_decode_layer_count;
+        ++schedule_layer_offset
+    ) {
+        auto next_layer_input = create_gemma2_metal_scheduled_decode_layer_input(
+            plan,
+            decode,
+            schedule_layer_offset,
+            *terminal_feed_forward_output
+        );
+        if (!next_layer_input.has_value()) {
+            break;
+        }
+
+        reusable_layer_inputs.push_back(std::move(*next_layer_input));
+        reusable_blocks.push_back(run_gemma2_metal_scheduled_decode_block(
+            plan,
+            decode,
+            schedule_layer_offset,
+            reusable_layer_inputs.back().normalized_attention_input,
+            terminal_feed_forward_output->feed_forward_residual
+        ));
+        terminal_feed_forward_output = &reusable_blocks.back().feed_forward_output;
+    }
+
+    auto terminal_output = *terminal_feed_forward_output;
+    auto output_norm = create_gemma2_metal_decode_output_norm(
+        plan,
+        decode,
+        terminal_output
+    );
+    auto logits = create_gemma2_metal_decode_logits(
+        plan,
+        decode,
+        output_norm
+    );
+    auto next_token_selection = create_gemma2_metal_decode_next_token_selection(
+        plan,
+        decode,
+        logits
+    );
+
+    return Gemma2MetalDecodeStepActivations {
+        .decode = decode,
+        .input = std::move(input),
+        .first_layer_input = std::move(first_layer_input),
+        .first_block = std::move(first_block),
+        .reusable_layer_inputs = std::move(reusable_layer_inputs),
+        .reusable_blocks = std::move(reusable_blocks),
+        .terminal_feed_forward_output = std::move(terminal_output),
+        .output_norm = std::move(output_norm),
+        .logits = std::move(logits),
+        .next_token_selection = next_token_selection,
+    };
+}
+
 Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
     const EngineModel& model,
     std::span<const std::uint32_t> prompt_token_ids
@@ -4143,61 +4506,12 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
         prefill,
         prefill_logits
     );
-    auto first_decode_input = create_gemma2_metal_first_decode_input(
+    auto first_decode_step = run_gemma2_metal_decode_step(
         plan,
         first_decode,
-        prefill_next_token_selection,
+        prefill_next_token_selection.token_id,
         embedding_scale
     );
-    auto first_decode_first_layer_input = create_gemma2_metal_first_decode_layer_input(
-        plan,
-        first_decode,
-        first_decode_input
-    );
-    auto first_decode_block = run_gemma2_metal_scheduled_decode_block(
-        plan,
-        first_decode,
-        0,
-        first_decode_first_layer_input.normalized_attention_input,
-        first_decode_input.hidden_states
-    );
-    std::vector<Gemma2MetalLayerHandoffActivations> first_decode_reusable_layer_inputs;
-    std::vector<Gemma2MetalDecodeBlockActivations> first_decode_reusable_blocks;
-    const auto scheduled_decode_layer_count = first_decode.layers().size();
-    if (scheduled_decode_layer_count > 1U) {
-        first_decode_reusable_layer_inputs.reserve(scheduled_decode_layer_count - 1U);
-        first_decode_reusable_blocks.reserve(scheduled_decode_layer_count - 1U);
-    }
-
-    const Gemma2MetalFeedForwardOutputActivations* terminal_decode_feed_forward_output =
-        &first_decode_block.feed_forward_output;
-    for (
-        std::uint32_t schedule_layer_offset = 1U;
-        static_cast<std::size_t>(schedule_layer_offset) < scheduled_decode_layer_count;
-        ++schedule_layer_offset
-    ) {
-        auto next_decode_layer_input = create_gemma2_metal_scheduled_decode_layer_input(
-            plan,
-            first_decode,
-            schedule_layer_offset,
-            *terminal_decode_feed_forward_output
-        );
-        if (!next_decode_layer_input.has_value()) {
-            break;
-        }
-
-        first_decode_reusable_layer_inputs.push_back(std::move(*next_decode_layer_input));
-        first_decode_reusable_blocks.push_back(run_gemma2_metal_scheduled_decode_block(
-            plan,
-            first_decode,
-            schedule_layer_offset,
-            first_decode_reusable_layer_inputs.back().normalized_attention_input,
-            terminal_decode_feed_forward_output->feed_forward_residual
-        ));
-        terminal_decode_feed_forward_output =
-            &first_decode_reusable_blocks.back().feed_forward_output;
-    }
-    auto first_decode_terminal_feed_forward_output = *terminal_decode_feed_forward_output;
 
     return Gemma2MetalGenerationRuntimeShell {
         .plan = std::move(plan),
@@ -4263,14 +4577,120 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
         .prefill_output_norm = std::move(prefill_output_norm),
         .prefill_logits = std::move(prefill_logits),
         .prefill_next_token_selection = prefill_next_token_selection,
-        .first_decode_input = std::move(first_decode_input),
-        .first_decode_first_layer_input = std::move(first_decode_first_layer_input),
-        .first_decode_block = std::move(first_decode_block),
-        .first_decode_reusable_layer_inputs = std::move(first_decode_reusable_layer_inputs),
-        .first_decode_reusable_blocks = std::move(first_decode_reusable_blocks),
+        .first_decode_input = std::move(first_decode_step.input),
+        .first_decode_first_layer_input = std::move(first_decode_step.first_layer_input),
+        .first_decode_block = std::move(first_decode_step.first_block),
+        .first_decode_reusable_layer_inputs = std::move(first_decode_step.reusable_layer_inputs),
+        .first_decode_reusable_blocks = std::move(first_decode_step.reusable_blocks),
         .first_decode_terminal_feed_forward_output =
-            std::move(first_decode_terminal_feed_forward_output),
+            std::move(first_decode_step.terminal_feed_forward_output),
+        .first_decode_output_norm = std::move(first_decode_step.output_norm),
+        .first_decode_logits = std::move(first_decode_step.logits),
+        .first_decode_next_token_selection = first_decode_step.next_token_selection,
     };
+}
+
+Gemma2MetalGeneratedTokenLoopActivations create_gemma2_metal_generated_token_loop(
+    const EngineModel& model,
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    std::optional<std::uint32_t> stop_token_id
+) {
+    require_gemma2_metal_generation_inputs(
+        model.gemma2_config(),
+        prompt_token_ids,
+        max_new_tokens
+    );
+
+    auto runtime_shell = create_gemma2_metal_generation_runtime_shell(model, prompt_token_ids);
+    const auto embedding_scale = gemma2_input_embedding_scale(
+        runtime_shell.plan.config().embedding_length
+    );
+
+    std::vector<std::uint32_t> generated_token_ids;
+    generated_token_ids.reserve(max_new_tokens);
+    std::vector<Gemma2MetalDecodeStepActivations> decode_steps;
+    decode_steps.reserve(max_new_tokens);
+
+    generated_token_ids.push_back(runtime_shell.prefill_next_token_selection.token_id);
+    decode_steps.push_back(Gemma2MetalDecodeStepActivations {
+        .decode = runtime_shell.first_decode,
+        .input = runtime_shell.first_decode_input,
+        .first_layer_input = runtime_shell.first_decode_first_layer_input,
+        .first_block = runtime_shell.first_decode_block,
+        .reusable_layer_inputs = runtime_shell.first_decode_reusable_layer_inputs,
+        .reusable_blocks = runtime_shell.first_decode_reusable_blocks,
+        .terminal_feed_forward_output = runtime_shell.first_decode_terminal_feed_forward_output,
+        .output_norm = runtime_shell.first_decode_output_norm,
+        .logits = runtime_shell.first_decode_logits,
+        .next_token_selection = runtime_shell.first_decode_next_token_selection,
+    });
+    if (stop_token_id == generated_token_ids.back() || generated_token_ids.size() == max_new_tokens) {
+        return Gemma2MetalGeneratedTokenLoopActivations {
+            .runtime_shell = std::move(runtime_shell),
+            .generated_token_ids = std::move(generated_token_ids),
+            .decode_steps = std::move(decode_steps),
+        };
+    }
+
+    generated_token_ids.push_back(runtime_shell.first_decode_next_token_selection.token_id);
+    if (stop_token_id == generated_token_ids.back() || generated_token_ids.size() == max_new_tokens) {
+        return Gemma2MetalGeneratedTokenLoopActivations {
+            .runtime_shell = std::move(runtime_shell),
+            .generated_token_ids = std::move(generated_token_ids),
+            .decode_steps = std::move(decode_steps),
+        };
+    }
+
+    const auto prompt_token_count = checked_prompt_token_count(prompt_token_ids);
+    while (generated_token_ids.size() < max_new_tokens) {
+        const auto cached_token_count = static_cast<std::uint32_t>(
+            prompt_token_count + generated_token_ids.size() - 1U
+        );
+        auto decode = create_gemma2_metal_decode_schedule(
+            runtime_shell.plan,
+            cached_token_count
+        );
+        decode_steps.push_back(run_gemma2_metal_decode_step(
+            runtime_shell.plan,
+            decode,
+            generated_token_ids.back(),
+            embedding_scale
+        ));
+        generated_token_ids.push_back(decode_steps.back().next_token_selection.token_id);
+        if (stop_token_id == generated_token_ids.back()) {
+            break;
+        }
+    }
+
+    return Gemma2MetalGeneratedTokenLoopActivations {
+        .runtime_shell = std::move(runtime_shell),
+        .generated_token_ids = std::move(generated_token_ids),
+        .decode_steps = std::move(decode_steps),
+    };
+}
+
+std::vector<std::uint32_t> generate_gemma2_metal_argmax_tokens(
+    const EngineModel& model,
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    std::optional<std::uint32_t> stop_token_id
+) {
+    auto loop = create_gemma2_metal_generated_token_loop(
+        model,
+        prompt_token_ids,
+        max_new_tokens,
+        stop_token_id
+    );
+
+    std::vector<std::uint32_t> token_ids(prompt_token_ids.begin(), prompt_token_ids.end());
+    token_ids.reserve(prompt_token_ids.size() + loop.generated_token_ids.size());
+    token_ids.insert(
+        token_ids.end(),
+        loop.generated_token_ids.begin(),
+        loop.generated_token_ids.end()
+    );
+    return token_ids;
 }
 
 }  // namespace local_gguf_engine::engine

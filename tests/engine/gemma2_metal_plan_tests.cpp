@@ -47,11 +47,13 @@ using local_gguf_engine::engine::Gemma2ModelConfig;
 using local_gguf_engine::engine::LlamaModelConfig;
 using local_gguf_engine::engine::ModelArchitecture;
 using local_gguf_engine::engine::create_gemma2_metal_decode_schedule;
+using local_gguf_engine::engine::create_gemma2_metal_generated_token_loop;
 using local_gguf_engine::engine::create_gemma2_metal_generation_runtime_shell;
 using local_gguf_engine::engine::create_gemma2_metal_model_plan;
 using local_gguf_engine::engine::create_gemma2_metal_prefill_schedule;
 using local_gguf_engine::engine::create_gemma2_metal_scheduled_decode_layer_input;
 using local_gguf_engine::engine::create_gemma2_metal_scheduled_prefill_layer_input;
+using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::run_gemma2_metal_scheduled_decode_block;
 using local_gguf_engine::engine::run_gemma2_metal_scheduled_prefill_block;
@@ -2768,11 +2770,8 @@ void test_gemma2_metal_runtime_shell_writes_prefill_kv_cache_when_available() {
         embedding_values[3U * 256U + column] = 0.25F * static_cast<float>(column + 1U);
         embedding_values[1U * 256U + column] = -0.125F * static_cast<float>(column + 1U);
     }
-    overwrite_payload_bytes(
-        payload_store,
-        "token_embd.weight",
-        tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values))
-    );
+    const auto embedding = tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values));
+    overwrite_payload_bytes(payload_store, "token_embd.weight", embedding);
 
     std::vector<float> first_attention_norm_values(256U, 1.0F);
     first_attention_norm_values[0] = 1.25F;
@@ -2925,11 +2924,8 @@ void test_gemma2_metal_runtime_shell_runs_first_decode_block_when_available() {
         embedding_values[3U * 256U + column] = 0.25F * static_cast<float>(column + 1U);
         embedding_values[1U * 256U + column] = -0.125F * static_cast<float>(column + 1U);
     }
-    overwrite_payload_bytes(
-        payload_store,
-        "token_embd.weight",
-        tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values))
-    );
+    const auto embedding = tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values));
+    overwrite_payload_bytes(payload_store, "token_embd.weight", embedding);
 
     std::vector<float> attention_norm_values(256U, 1.0F);
     overwrite_payload_bytes(
@@ -3114,11 +3110,13 @@ void test_gemma2_metal_runtime_shell_loops_over_reusable_decode_blocks_when_avai
                 0.03125F * static_cast<float>((token + 1U) * (column + 1U));
         }
     }
-    overwrite_payload_bytes(
-        payload_store,
-        "token_embd.weight",
-        tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values))
-    );
+    const auto embedding = tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values));
+    overwrite_payload_bytes(payload_store, "token_embd.weight", embedding);
+    std::vector<float> output_norm_values(256U, 1.0F);
+    output_norm_values[0] = 0.625F;
+    output_norm_values[1] = 1.375F;
+    const auto output_norm = tensor_f32_vector(std::span<const float>(output_norm_values));
+    overwrite_payload_bytes(payload_store, "output_norm.weight", output_norm);
 
     auto attention_norm_for_block = [](float first, float second) {
         std::vector<float> values(256U, 1.0F);
@@ -3175,26 +3173,9 @@ void test_gemma2_metal_runtime_shell_loops_over_reusable_decode_blocks_when_avai
             block_tensor_name(block_index, "attn_v.weight"),
             tensor_q6_k_gguf_weight_matrix(256, 256, seed + 2U)
         );
-        overwrite_payload_bytes(
-            payload_store,
-            block_tensor_name(block_index, "attn_output.weight"),
-            tensor_q4_k_gguf_weight_matrix(256, 256, seed + 3U)
-        );
-        overwrite_payload_bytes(
-            payload_store,
-            block_tensor_name(block_index, "ffn_gate.weight"),
-            tensor_q4_k_gguf_weight_matrix(256, 256, seed + 4U)
-        );
-        overwrite_payload_bytes(
-            payload_store,
-            block_tensor_name(block_index, "ffn_up.weight"),
-            tensor_q4_k_gguf_weight_matrix(256, 256, seed + 5U)
-        );
-        overwrite_payload_bytes(
-            payload_store,
-            block_tensor_name(block_index, "ffn_down.weight"),
-            tensor_q6_k_gguf_weight_matrix(256, 256, seed + 6U)
-        );
+        // This fixture targets decode-loop handoff, resident K/V attention, and token selection.
+        // Leaving output/FFN projections at their zero fixture values prevents random
+        // quantized FFN chains from overflowing before the argmax boundary.
     };
     for (std::uint32_t block_index = 0; block_index < 4U; ++block_index) {
         overwrite_block_weights(block_index, 31U + static_cast<std::uint64_t>(block_index) * 9U);
@@ -3389,6 +3370,395 @@ void test_gemma2_metal_runtime_shell_loops_over_reusable_decode_blocks_when_avai
         ),
         "Gemma2 decode loop terminal FFN residual should select final reusable block"
     );
+
+    const auto terminal_decode_residual = copy_tensor_from_backend(
+        shell.first_decode_terminal_feed_forward_output.feed_forward_residual
+    );
+    const auto expected_decode_output_norm = rms_norm_f32(
+        terminal_decode_residual,
+        output_norm,
+        shell.plan.config().rms_norm_epsilon
+    );
+    const auto expected_decode_raw_logits = matmul_f32_f16_gguf_weight(
+        expected_decode_output_norm,
+        embedding,
+        BackendKind::cpu
+    );
+    const auto expected_decode_logits = softcap_f32(
+        expected_decode_raw_logits,
+        shell.plan.config().final_logit_softcap
+    );
+
+    expect(
+        shell.first_decode_output_norm.schedule_layer_offset == shell.first_decode.layers().size() - 1U,
+        "Gemma2 decode output norm terminal schedule offset mismatch"
+    );
+    expect(shell.first_decode_output_norm.layer_index == terminal_block.layer_index, "Gemma2 decode output norm layer mismatch");
+    expect(
+        shell.first_decode_output_norm.phase == Gemma2MetalSchedulePhase::decode,
+        "Gemma2 decode output norm phase mismatch"
+    );
+    expect(
+        shell.first_decode_output_norm.scratch_ownership == Gemma2MetalScratchOwnership::resident_decode,
+        "Gemma2 decode output norm scratch ownership mismatch"
+    );
+    expect(
+        shell.first_decode_output_norm.hidden_width == shell.plan.config().embedding_length,
+        "Gemma2 decode output norm hidden width mismatch"
+    );
+    expect(
+        shell.first_decode_output_norm.normalized_hidden_states.backend() == BackendKind::metal,
+        "Gemma2 decode output norm backend mismatch"
+    );
+    expect(
+        shell.first_decode_output_norm.normalized_hidden_states.descriptor()
+            == shell.first_decode.scratch().normalized_hidden,
+        "Gemma2 decode output norm descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(
+            shell.first_decode_output_norm.normalized_hidden_states,
+            shell.first_decode_terminal_feed_forward_output.feed_forward_residual
+        ),
+        "Gemma2 decode output norm should not alias terminal residual"
+    );
+    expect(
+        !shares_backend_storage(
+            shell.first_decode_output_norm.normalized_hidden_states,
+            shell.plan.weights().output_norm_weight
+        ),
+        "Gemma2 decode output norm should not alias output norm weight"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(shell.first_decode_output_norm.normalized_hidden_states),
+        expected_decode_output_norm,
+        1.0e-5F,
+        "Gemma2 decode output norm normalized hidden states"
+    );
+
+    expect(
+        shell.first_decode_logits.schedule_layer_offset == shell.first_decode.layers().size() - 1U,
+        "Gemma2 decode logits terminal schedule offset mismatch"
+    );
+    expect(shell.first_decode_logits.layer_index == terminal_block.layer_index, "Gemma2 decode logits layer mismatch");
+    expect(shell.first_decode_logits.phase == Gemma2MetalSchedulePhase::decode, "Gemma2 decode logits phase mismatch");
+    expect(
+        shell.first_decode_logits.scratch_ownership == Gemma2MetalScratchOwnership::resident_decode,
+        "Gemma2 decode logits scratch ownership mismatch"
+    );
+    expect(
+        shell.first_decode_logits.hidden_width == shell.plan.config().embedding_length,
+        "Gemma2 decode logits hidden width mismatch"
+    );
+    expect(
+        shell.first_decode_logits.vocab_size == shell.plan.config().vocab_size,
+        "Gemma2 decode logits vocab size mismatch"
+    );
+    expect(
+        shell.first_decode_logits.final_logit_softcap == shell.plan.config().final_logit_softcap,
+        "Gemma2 decode logits final softcap mismatch"
+    );
+    expect(shell.first_decode_logits.raw_logits.backend() == BackendKind::metal, "Gemma2 decode raw logits backend mismatch");
+    expect(shell.first_decode_logits.logits.backend() == BackendKind::metal, "Gemma2 decode logits backend mismatch");
+    expect(
+        shell.first_decode_logits.raw_logits.descriptor() == shell.first_decode.scratch().logits,
+        "Gemma2 decode raw logits descriptor mismatch"
+    );
+    expect(
+        shell.first_decode_logits.logits.descriptor() == shell.first_decode.scratch().logits,
+        "Gemma2 decode logits descriptor mismatch"
+    );
+    expect(
+        !shares_backend_storage(
+            shell.first_decode_logits.raw_logits,
+            shell.first_decode_output_norm.normalized_hidden_states
+        ),
+        "Gemma2 decode raw logits should not alias output norm"
+    );
+    expect(
+        !shares_backend_storage(shell.first_decode_logits.raw_logits, shell.plan.weights().output_weight),
+        "Gemma2 decode raw logits should not alias output weight"
+    );
+    expect(
+        !shares_backend_storage(shell.first_decode_logits.logits, shell.first_decode_logits.raw_logits),
+        "Gemma2 decode softcapped logits should not alias raw logits"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(shell.first_decode_logits.raw_logits),
+        expected_decode_raw_logits,
+        1.0e-2F,
+        "Gemma2 decode raw logits"
+    );
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(shell.first_decode_logits.logits),
+        expected_decode_logits,
+        1.0e-2F,
+        "Gemma2 decode softcapped logits"
+    );
+}
+
+void test_gemma2_metal_runtime_shell_selects_first_decode_next_token_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store(true, 1);
+    std::vector<float> embedding_values(256U * 4U, 0.0F);
+    for (std::size_t token = 0; token < 4U; ++token) {
+        for (std::size_t column = 0; column < 6U; ++column) {
+            embedding_values[token * 256U + column] =
+                0.0625F * static_cast<float>((token + 1U) * (column + 2U));
+        }
+    }
+    const auto embedding = tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values));
+    overwrite_payload_bytes(payload_store, "token_embd.weight", embedding);
+
+    std::vector<float> output_norm_values(256U, 1.0F);
+    output_norm_values[0] = 1.25F;
+    output_norm_values[1] = 0.75F;
+    const auto output_norm = tensor_f32_vector(std::span<const float>(output_norm_values));
+    overwrite_payload_bytes(payload_store, "output_norm.weight", output_norm);
+
+    auto view = tiny_model_view(tiny_gemma2_metadata(1), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const std::array<std::uint32_t, 2> prompt_token_ids {1, 2};
+    const auto shell = create_gemma2_metal_generation_runtime_shell(
+        model,
+        std::span<const std::uint32_t>(prompt_token_ids)
+    );
+    expect(shell.first_decode.layers().size() == 1U, "Gemma2 decode selection fixture layer count mismatch");
+
+    const auto terminal_decode_residual = copy_tensor_from_backend(
+        shell.first_decode_terminal_feed_forward_output.feed_forward_residual
+    );
+    const auto expected_decode_output_norm = rms_norm_f32(
+        terminal_decode_residual,
+        output_norm,
+        shell.plan.config().rms_norm_epsilon
+    );
+    const auto expected_decode_raw_logits = matmul_f32_f16_gguf_weight(
+        expected_decode_output_norm,
+        embedding,
+        BackendKind::cpu
+    );
+    const auto expected_decode_logits = softcap_f32(
+        expected_decode_raw_logits,
+        shell.plan.config().final_logit_softcap
+    );
+    const auto expected_decode_next_token = top_logit_tokens_f32(expected_decode_logits, 1).front();
+
+    expect(
+        shell.first_decode_next_token_selection.schedule_layer_offset == shell.first_decode.layers().size() - 1U,
+        "Gemma2 decode next-token selection terminal schedule offset mismatch"
+    );
+    expect(
+        shell.first_decode_next_token_selection.layer_index == shell.first_decode.layers().back().layer_index,
+        "Gemma2 decode next-token selection terminal layer mismatch"
+    );
+    expect(
+        shell.first_decode_next_token_selection.phase == Gemma2MetalSchedulePhase::decode,
+        "Gemma2 decode next-token selection phase mismatch"
+    );
+    expect(
+        shell.first_decode_next_token_selection.scratch_ownership == Gemma2MetalScratchOwnership::resident_decode,
+        "Gemma2 decode next-token selection scratch ownership mismatch"
+    );
+    expect(
+        shell.first_decode_next_token_selection.logits_row_index == 0U,
+        "Gemma2 decode next-token selection logits row mismatch"
+    );
+    expect(
+        shell.first_decode_next_token_selection.vocab_size == shell.plan.config().vocab_size,
+        "Gemma2 decode next-token selection vocab size mismatch"
+    );
+    expect(
+        shell.first_decode_next_token_selection.token_id < shell.plan.config().vocab_size,
+        "Gemma2 decode next-token selection token should be within vocab"
+    );
+    expect(
+        shell.first_decode_next_token_selection.token_id == expected_decode_next_token.token,
+        "Gemma2 decode next-token selection token mismatch"
+    );
+    expect_close(
+        shell.first_decode_next_token_selection.logit,
+        expected_decode_next_token.logit,
+        1.0e-2F,
+        "Gemma2 decode next-token selection logit mismatch"
+    );
+}
+
+void test_gemma2_metal_generated_token_loop_repeats_decode_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store(true, 1);
+    auto view = tiny_model_view(tiny_gemma2_metadata(1), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const std::array<std::uint32_t, 2> prompt_token_ids {1, 2};
+
+    const auto loop = create_gemma2_metal_generated_token_loop(
+        model,
+        std::span<const std::uint32_t>(prompt_token_ids),
+        3
+    );
+
+    expect(loop.generated_token_ids.size() == 3U, "Gemma2 generated loop token count mismatch");
+    expect(loop.decode_steps.size() == 2U, "Gemma2 generated loop decode step count mismatch");
+    expect(
+        loop.generated_token_ids[0] == loop.runtime_shell.prefill_next_token_selection.token_id,
+        "Gemma2 generated loop first token should come from prefill selection"
+    );
+    expect(
+        loop.generated_token_ids[1] == loop.runtime_shell.first_decode_next_token_selection.token_id,
+        "Gemma2 generated loop second token should come from first decode selection"
+    );
+
+    const auto& first_step = loop.decode_steps[0];
+    expect(first_step.decode.cache_position() == prompt_token_ids.size(), "Gemma2 generated loop first decode position mismatch");
+    expect(first_step.input.token_ids.size() == 1U, "Gemma2 generated loop first decode token count mismatch");
+    expect(
+        first_step.input.token_ids.front() == loop.generated_token_ids[0],
+        "Gemma2 generated loop first decode input token mismatch"
+    );
+    expect(
+        first_step.next_token_selection.token_id == loop.generated_token_ids[1],
+        "Gemma2 generated loop first decode selected token mismatch"
+    );
+    expect(
+        shares_backend_storage(
+            first_step.first_block.kv_cache_write.key_cache,
+            loop.runtime_shell.plan.kv_cache()[0].key
+        ),
+        "Gemma2 generated loop first decode key write should share resident cache"
+    );
+    expect(
+        shares_backend_storage(
+            first_step.first_block.kv_cache_write.value_cache,
+            loop.runtime_shell.plan.kv_cache()[0].value
+        ),
+        "Gemma2 generated loop first decode value write should share resident cache"
+    );
+
+    const auto& second_step = loop.decode_steps[1];
+    expect(
+        second_step.decode.cache_position() == prompt_token_ids.size() + 1U,
+        "Gemma2 generated loop second decode position mismatch"
+    );
+    expect(second_step.decode.token_count() == 1U, "Gemma2 generated loop second decode token count mismatch");
+    expect(
+        second_step.decode.total_kv_token_count() == prompt_token_ids.size() + 2U,
+        "Gemma2 generated loop second decode total KV count mismatch"
+    );
+    expect(second_step.input.token_ids.size() == 1U, "Gemma2 generated loop second decode input size mismatch");
+    expect(
+        second_step.input.token_ids.front() == loop.generated_token_ids[1],
+        "Gemma2 generated loop second decode input token mismatch"
+    );
+    expect(
+        second_step.first_layer_input.phase == Gemma2MetalSchedulePhase::decode,
+        "Gemma2 generated loop second decode layer input phase mismatch"
+    );
+    expect(
+        second_step.first_layer_input.scratch_ownership == Gemma2MetalScratchOwnership::resident_decode,
+        "Gemma2 generated loop second decode layer input scratch ownership mismatch"
+    );
+    expect(
+        second_step.first_layer_input.normalized_attention_input.descriptor()
+            == second_step.decode.scratch().normalized_hidden,
+        "Gemma2 generated loop second decode layer input descriptor mismatch"
+    );
+    expect(second_step.first_block.layer_index == 0U, "Gemma2 generated loop second decode block layer mismatch");
+    expect(
+        second_step.first_block.kv_cache_write.cache_position == second_step.decode.cache_position(),
+        "Gemma2 generated loop second decode KV write position mismatch"
+    );
+    expect(
+        second_step.first_block.kv_cache_write.total_kv_token_count == second_step.decode.total_kv_token_count(),
+        "Gemma2 generated loop second decode KV write total count mismatch"
+    );
+    expect(
+        shares_backend_storage(
+            second_step.first_block.kv_cache_write.key_cache,
+            loop.runtime_shell.plan.kv_cache()[0].key
+        ),
+        "Gemma2 generated loop second decode key write should share resident cache"
+    );
+    expect(
+        shares_backend_storage(
+            second_step.first_block.kv_cache_write.value_cache,
+            loop.runtime_shell.plan.kv_cache()[0].value
+        ),
+        "Gemma2 generated loop second decode value write should share resident cache"
+    );
+    expect(
+        shares_backend_storage(
+            second_step.terminal_feed_forward_output.feed_forward_residual,
+            second_step.first_block.feed_forward_output.feed_forward_residual
+        ),
+        "Gemma2 generated loop single-layer terminal residual should use first block"
+    );
+
+    const auto key_cache = copy_tensor_from_backend(loop.runtime_shell.plan.kv_cache()[0].key);
+    const auto value_cache = copy_tensor_from_backend(loop.runtime_shell.plan.kv_cache()[0].value);
+    expect_cache_window_matches_flat_rows(
+        key_cache,
+        copy_tensor_from_backend(second_step.first_block.attention_position.key),
+        second_step.decode.cache_position(),
+        loop.runtime_shell.plan.config().attention_head_count_kv,
+        loop.runtime_shell.plan.config().attention_key_length,
+        "Gemma2 generated loop second decode key cache append"
+    );
+    expect_cache_window_matches_flat_rows(
+        value_cache,
+        copy_tensor_from_backend(second_step.first_block.attention_projection.value),
+        second_step.decode.cache_position(),
+        loop.runtime_shell.plan.config().attention_head_count_kv,
+        loop.runtime_shell.plan.config().attention_value_length,
+        "Gemma2 generated loop second decode value cache append"
+    );
+    expect_cache_row_zero(
+        key_cache,
+        second_step.decode.cache_position() + 1U,
+        "Gemma2 generated loop next key cache row should remain unwritten"
+    );
+
+    const auto expected_next_token = top_logit_tokens_f32(
+        copy_tensor_from_backend(second_step.logits.logits),
+        1
+    ).front();
+    expect(
+        second_step.next_token_selection.token_id == expected_next_token.token,
+        "Gemma2 generated loop second decode next token mismatch"
+    );
+    expect(
+        second_step.next_token_selection.token_id == loop.generated_token_ids[2],
+        "Gemma2 generated loop third token should come from second decode selection"
+    );
+    expect_close(
+        second_step.next_token_selection.logit,
+        expected_next_token.logit,
+        1.0e-6F,
+        "Gemma2 generated loop second decode selected logit mismatch"
+    );
+
+    const auto output_token_ids = generate_gemma2_metal_argmax_tokens(
+        model,
+        std::span<const std::uint32_t>(prompt_token_ids),
+        3
+    );
+    expect(
+        output_token_ids.size() == prompt_token_ids.size() + loop.generated_token_ids.size(),
+        "Gemma2 generated loop output token count mismatch"
+    );
+    expect(output_token_ids[0] == prompt_token_ids[0], "Gemma2 generated loop output prompt token 0 mismatch");
+    expect(output_token_ids[1] == prompt_token_ids[1], "Gemma2 generated loop output prompt token 1 mismatch");
+    for (std::size_t index = 0; index < loop.generated_token_ids.size(); ++index) {
+        expect(
+            output_token_ids[prompt_token_ids.size() + index] == loop.generated_token_ids[index],
+            "Gemma2 generated loop output generated token mismatch"
+        );
+    }
 }
 
 void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_when_available() {
@@ -6469,6 +6839,14 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 Metal runtime shell loops over reusable decode blocks when available",
         test_gemma2_metal_runtime_shell_loops_over_reusable_decode_blocks_when_available,
+    },
+    {
+        "Gemma2 Metal runtime shell selects first decode next token when available",
+        test_gemma2_metal_runtime_shell_selects_first_decode_next_token_when_available,
+    },
+    {
+        "Gemma2 Metal generated-token loop repeats decode when available",
+        test_gemma2_metal_generated_token_loop_repeats_decode_when_available,
     },
     {
         "Gemma2 Metal runtime shell prepares first layer FFN output when available",

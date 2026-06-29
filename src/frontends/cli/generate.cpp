@@ -35,6 +35,7 @@ using engine::create_gemma2_metal_generation_runtime_shell;
 using engine::create_llama_backend_kv_cache;
 using engine::create_llama_kv_cache;
 using engine::EngineModelError;
+using engine::generate_gemma2_metal_argmax_tokens;
 using engine::generate_llama_sampled_tokens_with_kv_cache_f32;
 using engine::LlamaModelInferenceConfig;
 using engine::load_engine_model_from_gguf;
@@ -397,6 +398,14 @@ void write_token_id_list(std::ostream& output, std::span<const std::uint32_t> to
     output << ']';
 }
 
+[[nodiscard]] bool is_greedy_sampling(const engine::SamplingConfig& sampling) noexcept {
+    return sampling.temperature == 0.0F
+        && sampling.top_k == 0U
+        && sampling.top_p == 1.0F
+        && sampling.repetition_penalty == 1.0F
+        && sampling.seed == 0U;
+}
+
 void reject_unsupported_gemma2_generation_runtime(
     const engine::EngineModel& model,
     std::span<const std::uint32_t> prompt_token_ids,
@@ -415,6 +424,30 @@ void reject_unsupported_gemma2_generation_runtime(
     throw std::runtime_error("Gemma 2 generation runtime is not implemented yet");
 }
 
+[[nodiscard]] std::string generate_gemma2_greedy_text(
+    const engine::EngineModel& model,
+    const tokenizer::Tokenizer& tokenizer,
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::size_t max_new_tokens,
+    const GenerateOptions& options
+) {
+    if (!is_greedy_sampling(options.sampling)) {
+        throw std::runtime_error("Gemma 2 generation currently supports greedy sampling only");
+    }
+
+    const auto output_token_ids = generate_gemma2_metal_argmax_tokens(
+        model,
+        prompt_token_ids,
+        max_new_tokens,
+        tokenizer.special_tokens().eos_token_id
+    );
+
+    return tokenizer.decode(
+        std::span<const std::uint32_t>(output_token_ids).subspan(prompt_token_ids.size()),
+        TokenizerDecodeOptions {.skip_special_tokens = true}
+    );
+}
+
 [[nodiscard]] std::string generate_text_from_gguf_model_view(
     const model_format::GGUFModelView& model_view,
     std::string_view prompt,
@@ -424,11 +457,16 @@ void reject_unsupported_gemma2_generation_runtime(
     const auto model = load_engine_model_from_gguf(model_view);
     const auto tokenizer = load_tokenizer_from_gguf_metadata(model_view.directory.metadata);
     const auto encoded_prompt = encode_generate_prompt(model_view.directory.metadata, tokenizer, prompt);
-    reject_unsupported_gemma2_generation_runtime(
-        model,
-        std::span<const std::uint32_t>(encoded_prompt.token_ids),
-        options.backend
-    );
+    if (model.architecture() == ModelArchitecture::gemma2) {
+        return generate_gemma2_greedy_text(
+            model,
+            tokenizer,
+            std::span<const std::uint32_t>(encoded_prompt.token_ids),
+            max_new_tokens,
+            options
+        );
+    }
+
     const auto weights = bind_llama_model_weights(model);
     std::vector<std::uint32_t> output_token_ids;
     if (options.backend == BackendKind::cpu) {
