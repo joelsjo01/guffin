@@ -11,6 +11,7 @@
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
+#include "local_gguf_engine/tensor/ops/reduction.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
@@ -80,6 +81,8 @@ using local_gguf_engine::tensor::ops::softcap_f32;
 using local_gguf_engine::tensor::ops::softcap_f32_to_backend;
 using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::softmax_f32_to_backend;
+using local_gguf_engine::tensor::ops::top_logit_f32;
+using local_gguf_engine::tensor::ops::top_logit_f32_from_backend;
 using local_gguf_engine::tensor::ops::write_prefill_kv_cache_f32_to_backend;
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::expect_close;
@@ -808,6 +811,35 @@ void test_applies_softcap_to_cpu_backend_buffer() {
 
     expect(output_buffer.backend() == BackendKind::cpu, "CPU softcap backend mismatch");
     expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer softcap");
+}
+
+void test_selects_top_logit_from_last_row() {
+    const std::array<float, 12> input_values {
+        0.5F, 99.0F, 1.0F, 2.0F,
+        -1.0F, 0.25F, 3.0F, 2.5F,
+        -2.0F, 7.0F, 7.0F, 1.0F,
+    };
+    const auto input = tensor_f32_matrix(3, 4, std::span<const float>(input_values));
+
+    const auto selected = top_logit_f32(input);
+
+    expect(selected.token == 1U, "F32 top-logit should select first max token from final row");
+    expect_close(selected.logit, 7.0F, 0.0F, "F32 top-logit selected logit mismatch");
+}
+
+void test_selects_top_logit_from_cpu_backend_buffer() {
+    const std::array<float, 12> input_values {
+        0.5F, 99.0F, 1.0F, 2.0F,
+        -1.0F, 0.25F, 3.0F, 2.5F,
+        -2.0F, 7.0F, 7.0F, 1.0F,
+    };
+    const auto input = tensor_f32_matrix(3, 4, std::span<const float>(input_values));
+    const auto input_buffer = copy_tensor_to_backend(input, BackendKind::cpu);
+
+    const auto selected = top_logit_f32_from_backend(input_buffer);
+
+    expect(selected.token == 1U, "CPU backend top-logit token mismatch");
+    expect_close(selected.logit, 7.0F, 0.0F, "CPU backend top-logit logit mismatch");
 }
 
 void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers() {
@@ -1550,6 +1582,31 @@ void test_matches_softcap_to_metal_backend_buffer_when_available() {
         1.0e-6F,
         "Metal backend-buffer softcap"
     );
+}
+
+void test_matches_top_logit_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    constexpr std::uint64_t rows = 2;
+    constexpr std::uint64_t columns = 300;
+    std::vector<float> values(static_cast<std::size_t>(rows * columns), -10.0F);
+    values[17] = 500.0F;
+    for (std::uint64_t token = 0; token < columns; ++token) {
+        values[static_cast<std::size_t>(columns + token)] =
+            -2.0F + 0.001F * static_cast<float>(token % 29U);
+    }
+    values[static_cast<std::size_t>(columns + 257U)] = 9.0F;
+    values[static_cast<std::size_t>(columns + 299U)] = 9.0F;
+    const auto input = tensor_f32_matrix(rows, columns, std::span<const float>(values));
+    const auto expected = top_logit_f32(input);
+
+    const auto selected = top_logit_f32_from_backend(copy_tensor_to_backend(input, BackendKind::metal));
+
+    expect(expected.token == 257U, "Metal top-logit fixture expected token mismatch");
+    expect(selected.token == expected.token, "Metal top-logit token mismatch");
+    expect_close(selected.logit, expected.logit, 0.0F, "Metal top-logit logit mismatch");
 }
 
 void test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_metal_backend_buffers_when_available() {
@@ -2600,6 +2657,8 @@ const TestCase tensor_backend_tests[] {
     },
     {"applies softmax to CPU backend buffer", test_applies_softmax_to_cpu_backend_buffer},
     {"applies softcap to CPU backend buffer", test_applies_softcap_to_cpu_backend_buffer},
+    {"selects top logit from last row", test_selects_top_logit_from_last_row},
+    {"selects top logit from CPU backend buffer", test_selects_top_logit_from_cpu_backend_buffer},
     {
         "multiplies backend F32 by three backend F16 GGUF weights to CPU backend buffers",
         test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers,
@@ -2678,6 +2737,10 @@ const TestCase tensor_backend_tests[] {
     {
         "matches softcap to Metal backend buffer when available",
         test_matches_softcap_to_metal_backend_buffer_when_available,
+    },
+    {
+        "matches top logit to Metal backend buffer when available",
+        test_matches_top_logit_to_metal_backend_buffer_when_available,
     },
     {
         "multiplies backend F32 by three backend F16 GGUF weights to Metal backend buffers when available",

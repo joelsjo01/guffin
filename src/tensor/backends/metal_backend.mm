@@ -18,6 +18,7 @@ using namespace metal;
 constant uint llama_cached_decode_attention_thread_count = 256;
 constant uint llama_cached_decode_block_tail_thread_count = 256;
 constant uint llama_cached_decode_qkv_projection_thread_count = 256;
+constant uint top_logit_thread_count = 256;
 
 struct MatmulDimensions {
     uint rows;
@@ -317,6 +318,16 @@ struct SoftmaxDimensions {
     uint columns;
 };
 
+struct TopLogitDimensions {
+    uint row_offset;
+    uint columns;
+};
+
+struct TopLogitResult {
+    uint token;
+    float logit;
+};
+
 kernel void rms_norm_f32_kernel(
     const device float* input [[buffer(0)]],
     const device float* weight [[buffer(1)]],
@@ -499,6 +510,53 @@ kernel void softmax_f32_kernel(
 
     for (uint column = 0; column < dims.columns; ++column) {
         output[row_offset + column] = output[row_offset + column] / exp_sum;
+    }
+}
+
+kernel void top_logit_f32_kernel(
+    const device float* input [[buffer(0)]],
+    device TopLogitResult* result [[buffer(1)]],
+    constant TopLogitDimensions& dims [[buffer(2)]],
+    uint thread_index [[thread_index_in_threadgroup]]
+) {
+    threadgroup float best_values[top_logit_thread_count];
+    threadgroup uint best_tokens[top_logit_thread_count];
+
+    uint best_token = uint(-1);
+    float best_value = 0.0f;
+    for (uint token = thread_index; token < dims.columns; token += top_logit_thread_count) {
+        const float value = input[dims.row_offset + token];
+        if (best_token == uint(-1) || value > best_value) {
+            best_token = token;
+            best_value = value;
+        }
+    }
+
+    best_values[thread_index] = best_value;
+    best_tokens[thread_index] = best_token;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = top_logit_thread_count / 2; stride > 0; stride /= 2) {
+        if (thread_index < stride) {
+            const uint other_token = best_tokens[thread_index + stride];
+            if (other_token != uint(-1)) {
+                const float other_value = best_values[thread_index + stride];
+                const bool replace =
+                    best_tokens[thread_index] == uint(-1)
+                    || other_value > best_values[thread_index]
+                    || (other_value == best_values[thread_index] && other_token < best_tokens[thread_index]);
+                if (replace) {
+                    best_values[thread_index] = other_value;
+                    best_tokens[thread_index] = other_token;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (thread_index == 0) {
+        result[0].token = best_tokens[0];
+        result[0].logit = best_values[0];
     }
 }
 

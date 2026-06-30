@@ -5,15 +5,15 @@ completed implementation slice.
 
 ## Objective
 
-Move Gemma greedy next-token selection off full logits host readback.
+Add end-to-end Gemma generation benchmark metrics.
 
 ## Why
 
-Gemma now reaches a bounded real greedy generation path. Full scheduled prefill
-runs, scheduled prefill K/V writes into the resident KV cache, the selected
-prefill token feeds repeated one-token decode steps, each decode appends
-resident K/V, and `local-gguf-generate ... --greedy` succeeds for the covered
-path.
+Gemma now reaches a bounded real greedy generation path with resident top-1
+selection. Full scheduled prefill runs, scheduled prefill K/V writes into the
+resident KV cache, selected tokens feed repeated one-token decode steps, each
+decode appends resident K/V, logits stay on Metal for greedy selection, and
+only the selected token/logit is read back.
 
 Latest reusable/runtime outputs:
 
@@ -30,11 +30,12 @@ Latest reusable/runtime outputs:
 - `first_decode_next_token_selection.token_id`
 - `generated_token_ids`
 - `decode_steps`
+- `tensor::ops::top_logit_f32_from_backend`
 
-The next performance blocker is that the current greedy selection boundary
-copies the full logits tensor back to host and runs CPU top-1. Replace that with
-a Gemma/Metal top-1 boundary that leaves logits resident and reads back only
-the selected token/logit.
+The next blocker is evidence. The real Gemma path is still slow, but the major
+GPU-residency boundary is now clean enough to measure. Add compact end-to-end
+metrics to the same `local-gguf-generate` command path so the next optimization
+slice is chosen from data rather than guesses.
 
 ## Read
 
@@ -47,43 +48,41 @@ the selected token/logit.
 
 ## Touch
 
-- Gemma runtime shell code under `include/local_gguf_engine/engine` and
-  `src/engine`
-- Tensor/Metal top-1 selection code if a narrow op is needed
-- `tests/engine`
-- `tests/tensor` if adding a narrow top-1 op
+- `include/local_gguf_engine/frontends/cli/generate.hpp`
+- `src/frontends/cli/generate.cpp`
+- `benchmarks/frontends/cli` or benchmark report plumbing only if needed for
+  shared formatting
+- `tests/frontends/cli/generate_cli_tests.cpp`
+- `tests/benchmarks` only if shared benchmark formatting changes
 - `docs/GEMMA_Q4_MILESTONES.md`
 - `docs/NEXT_TASK.md`
 
 ## Do Not
 
-- Do not change the generated-token loop semantics.
-- Do not fold prefill layers 0-2 into the reusable prefill runner yet.
-- Do not add non-greedy sampling, temperature, top-k, top-p, repetition penalty,
-  or RNG support for Gemma yet.
+- Do not change Gemma generation semantics or token output.
+- Do not add non-greedy Gemma sampling, temperature, top-k, top-p, repetition
+  penalty, or RNG support.
 - Do not add broad graph abstractions or a generic model-family operator stack.
-- Do not dequantize whole Gemma weight tensors into persistent F16/F32 buffers.
-- Do not replace the resident plan with per-op host round trips.
-- Do not reintroduce full-logits host readback for Gemma greedy selection.
-- Do not make unsupported Gemma sampling/debug paths claim success before
-  coverage is explicit.
-- Do not read benchmark artifacts.
+- Do not refactor large Gemma runtime files in this slice.
+- Do not dequantize whole Gemma weight tensors.
+- Do not read benchmark result artifacts from prior runs; produce fresh metrics
+  if benchmarking is run.
+- Do not make unsupported Gemma sampling/debug paths claim success.
 
 ## Verify
 
-- Add deterministic CPU/reference parity tests for the Metal top-1 token/logit
-  result on prefill and decode logits.
-- Add shape/resource ownership tests proving selection consumes resident logits
-  and exposes only the small selected-token boundary.
-- Keep unavailable-Metal behavior explicit if new code creates Metal resources
-  directly.
-- Run focused tensor/engine/CLI tests touched by the selection boundary.
+- Add CLI tests for benchmark flag parsing/report shape and failure paths.
+- Keep normal generation stdout stable when benchmarking is not requested.
+- Report at least TTFT, prompt eval tokens/s, decode tokens/s, total tokens/s,
+  prompt token count, generated token count, and total elapsed time.
+- Run focused CLI/benchmark tests touched by metrics.
 - Run release Gemma inspection.
 - Run release Gemma greedy generation smoke; it should remain successful.
+- Run a fresh release Gemma benchmark smoke if the command path is added.
 - Run `bash scripts/ci.sh` after implementation changes.
 
 ## Stop When
 
-Gemma greedy selection no longer reads back full logits for top-1; the bounded
-generated-token loop and real `--greedy` generation still pass, while
-non-greedy Gemma sampling remains explicitly unsupported.
+The real Gemma `--greedy` command can emit compact end-to-end performance
+metrics for the same generation path, without changing generated text or
+unsupported sampling behavior.

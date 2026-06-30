@@ -9,6 +9,7 @@
 #include "local_gguf_engine/tensor/ops/embedding.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
+#include "local_gguf_engine/tensor/ops/reduction.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/tensor_error.hpp"
@@ -89,6 +90,16 @@ struct GroupedAttentionValueDimensions {
 struct SoftmaxDimensions {
     std::uint32_t rows = 0;
     std::uint32_t columns = 0;
+};
+
+struct TopLogitDimensions {
+    std::uint32_t row_offset = 0;
+    std::uint32_t columns = 0;
+};
+
+struct TopLogitMetalResult {
+    std::uint32_t token = 0;
+    float logit = 0.0F;
 };
 
 void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float value) {
@@ -623,6 +634,21 @@ void require_softcap_f32_operand(const TensorDescriptor& input, float softcap) {
     ops::require_f32_descriptor(input);
     if (!(softcap > 0.0F) || !std::isfinite(softcap)) {
         throw std::invalid_argument("F32 softcap must be positive and finite");
+    }
+}
+
+void require_top_logit_f32_operand(const TensorDescriptor& input) {
+    ops::require_f32_descriptor(input);
+    const auto rank = input.shape.rank();
+    if (rank < 1 || rank > 3) {
+        throw TensorError(
+            TensorErrorCode::invalid_shape_rank,
+            3,
+            static_cast<std::uint64_t>(rank)
+        );
+    }
+    if (input.shape.dimension(rank - 1U) > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("F32 top-logit vocabulary is too large for uint32 token ids");
     }
 }
 
@@ -1404,6 +1430,76 @@ BackendBuffer softcap_f32_with_metal_buffer(
     }
 
     return make_metal_backend_buffer(input_descriptor, output_buffer);
+}
+
+ops::TopLogit top_logit_f32_with_metal_buffer(
+    const MetalBackendBufferStorage& input
+) {
+    static_assert(sizeof(TopLogitMetalResult) == 8);
+
+    auto& state = shared_matmul_pipeline_state();
+    const auto& input_descriptor = input.descriptor();
+    const auto rank = input_descriptor.shape.rank();
+    const auto columns = input_descriptor.shape.dimension(rank - 1U);
+    const auto rows = input_descriptor.element_count / columns;
+    const TopLogitDimensions dims {
+        .row_offset = require_u32_dimension((rows - 1U) * columns, "top-logit row offset"),
+        .columns = require_u32_dimension(columns, "top-logit columns"),
+    };
+
+    id<MTLBuffer> result_buffer = [state.device newBufferWithLength:sizeof(TopLogitMetalResult)
+                                                            options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(TopLogitDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (result_buffer == nil || dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal top-logit buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    if (command_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal top-logit command buffer creation failed"
+        );
+    }
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal top-logit command encoding failed"
+        );
+    }
+
+    [encoder setComputePipelineState:state.top_logit_pipeline];
+    [encoder setBuffer:input.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:result_buffer offset:0 atIndex:1];
+    [encoder setBuffer:dims_buffer offset:0 atIndex:2];
+
+    const MTLSize threads_per_threadgroup = MTLSizeMake(256, 1, 1);
+    const MTLSize threadgroups = MTLSizeMake(1, 1, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal top-logit command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    TopLogitMetalResult result {};
+    std::memcpy(&result, [result_buffer contents], sizeof(TopLogitMetalResult));
+    return ops::TopLogit {
+        .token = result.token,
+        .logit = result.logit,
+    };
 }
 
 BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
@@ -2476,6 +2572,29 @@ BackendBuffer softcap_f32_to_backend(const BackendBuffer& input, float softcap) 
         runtime::BackendErrorCode::unsupported_backend,
         input.backend(),
         "unsupported backend buffer for softcap"
+    );
+}
+
+TopLogit top_logit_f32_from_backend(const BackendBuffer& logits) {
+    backends::metal::require_top_logit_f32_operand(logits.descriptor());
+
+    switch (logits.backend()) {
+        case runtime::BackendKind::cpu:
+            return top_logit_f32(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(logits)).storage()
+            );
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::top_logit_f32_with_metal_buffer(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(logits))
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        logits.backend(),
+        "unsupported backend buffer for top-logit"
     );
 }
 

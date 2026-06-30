@@ -319,6 +319,25 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> top_logit_function = [library newFunctionWithName:@"top_logit_f32_kernel"];
+    if (top_logit_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal top-logit kernel function was not found"
+        );
+    }
+
+    NSError* top_logit_pipeline_error = nil;
+    top_logit_pipeline = [device newComputePipelineStateWithFunction:top_logit_function
+                                                               error:&top_logit_pipeline_error];
+    if (top_logit_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal top-logit pipeline creation failed: "
+                + ns_error_message(top_logit_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> llama_cached_decode_qkv_projection_function =
         [library newFunctionWithName:@"llama_cached_decode_qkv_projection_f32_f16_kernel"];
     if (llama_cached_decode_qkv_projection_function == nil) {

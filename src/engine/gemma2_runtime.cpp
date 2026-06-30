@@ -1,7 +1,6 @@
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
-#include "local_gguf_engine/engine/sampling.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/dtype.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
@@ -9,11 +8,11 @@
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
+#include "local_gguf_engine/tensor/ops/reduction.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
-#include <array>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -3231,12 +3230,7 @@ create_gemma2_metal_prefill_fourth_layer_input(
 ) {
     require_prefill_logits_match_schedule(plan, prefill, logits);
 
-    const auto logits_storage = tensor::copy_tensor_from_backend(logits.logits);
-    const auto token_id = sample_argmax_token_f32(logits_storage);
-    const std::array<std::uint64_t, 2> selected_index {
-        static_cast<std::uint64_t>(prefill.token_count() - 1U),
-        static_cast<std::uint64_t>(token_id),
-    };
+    const auto selected = tensor::ops::top_logit_f32_from_backend(logits.logits);
 
     return Gemma2MetalPrefillNextTokenSelection {
         .schedule_layer_offset = logits.schedule_layer_offset,
@@ -3245,8 +3239,8 @@ create_gemma2_metal_prefill_fourth_layer_input(
         .scratch_ownership = prefill.scratch_ownership(),
         .logits_row_index = prefill.token_count() - 1U,
         .vocab_size = plan.config().vocab_size,
-        .token_id = token_id,
-        .logit = tensor::read_f32(logits_storage, std::span<const std::uint64_t>(selected_index)),
+        .token_id = selected.token,
+        .logit = selected.logit,
     };
 }
 
@@ -3257,12 +3251,7 @@ create_gemma2_metal_prefill_fourth_layer_input(
 ) {
     require_decode_logits_match_schedule(plan, decode, logits);
 
-    const auto logits_storage = tensor::copy_tensor_from_backend(logits.logits);
-    const auto token_id = sample_argmax_token_f32(logits_storage);
-    const std::array<std::uint64_t, 2> selected_index {
-        0U,
-        static_cast<std::uint64_t>(token_id),
-    };
+    const auto selected = tensor::ops::top_logit_f32_from_backend(logits.logits);
 
     return Gemma2MetalDecodeNextTokenSelection {
         .schedule_layer_offset = logits.schedule_layer_offset,
@@ -3271,8 +3260,8 @@ create_gemma2_metal_prefill_fourth_layer_input(
         .scratch_ownership = decode.scratch_ownership(),
         .logits_row_index = 0U,
         .vocab_size = plan.config().vocab_size,
-        .token_id = token_id,
-        .logit = tensor::read_f32(logits_storage, std::span<const std::uint64_t>(selected_index)),
+        .token_id = selected.token,
+        .logit = selected.logit,
     };
 }
 
