@@ -164,6 +164,8 @@ std::vector<std::string> tiny_gemma2_token_texts() {
     tokens[9] = "user\n";
     tokens[10] = "model\n";
     tokens[11] = "\n";
+    tokens[12] = "\xE2\x96\x81seems";
+    tokens[13] = "\xE2\x96\x81question";
     tokens[106] = "<start_of_turn>";
     tokens[107] = "<end_of_turn>";
     return tokens;
@@ -501,6 +503,20 @@ void test_decodes_gpt2_byte_level_markers() {
     expect(skipped == expected_skipped, "GPT-2 byte-level skip-special decoded text mismatch");
 }
 
+void test_decodes_gemma2_sentencepiece_space_markers() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_gemma2_tokenizer_metadata()));
+    const std::array<std::uint32_t, 5> ids {2, 5, 12, 13, 1};
+
+    const auto decoded = tokenizer.decode(std::span<const std::uint32_t>(ids));
+    const auto skipped = tokenizer.decode(
+        std::span<const std::uint32_t>(ids),
+        TokenizerDecodeOptions {.skip_special_tokens = true}
+    );
+
+    expect(decoded == "<bos>Hello seems question<eos>", "Gemma2 decoded space-marker text mismatch");
+    expect(skipped == "Hello seems question", "Gemma2 skip-special space-marker text mismatch");
+}
+
 void test_rejects_tokenizer_decode_id_out_of_range() {
     const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_llama_tokenizer_metadata()));
     const std::array<std::uint32_t, 1> ids {7};
@@ -597,6 +613,10 @@ std::span<const TestCase> tokenizer_test_cases() {
             test_decodes_llama_tokenizer_known_ids_and_skips_special_tokens,
         },
         {"decodes GPT-2 byte-level markers", test_decodes_gpt2_byte_level_markers},
+        {
+            "decodes Gemma2 SentencePiece space markers",
+            test_decodes_gemma2_sentencepiece_space_markers,
+        },
         {"rejects tokenizer decode ID out of range", test_rejects_tokenizer_decode_id_out_of_range},
         {
             "rejects tokenizer malformed token metadata",

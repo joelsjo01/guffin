@@ -835,6 +835,22 @@ void append_gpt2_decoded_text(std::string& output, std::string_view token_text) 
     }
 }
 
+void append_sentencepiece_decoded_text(std::string& output, std::string_view token_text) {
+    constexpr std::string_view space_marker = "\xE2\x96\x81";
+    std::size_t offset = 0;
+    while (offset < token_text.size()) {
+        const auto marker_offset = token_text.find(space_marker, offset);
+        if (marker_offset == std::string_view::npos) {
+            output += token_text.substr(offset);
+            return;
+        }
+
+        output += token_text.substr(offset, marker_offset - offset);
+        output.push_back(' ');
+        offset = marker_offset + space_marker.size();
+    }
+}
+
 void append_decoded_token_text(
     std::string& output,
     TokenizerModel model,
@@ -845,7 +861,7 @@ void append_decoded_token_text(
             append_gpt2_decoded_text(output, token_text);
             return;
         case TokenizerModel::llama:
-            output += token_text;
+            append_sentencepiece_decoded_text(output, token_text);
             return;
     }
 }
