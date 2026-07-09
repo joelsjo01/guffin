@@ -7,7 +7,6 @@
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
-#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <span>
@@ -40,7 +39,6 @@ using local_gguf_engine::tests::metadata_f32;
 using local_gguf_engine::tests::metadata_string;
 using local_gguf_engine::tests::metadata_u32;
 using local_gguf_engine::tests::TestFailure;
-using local_gguf_engine::tests::tiny_llama_metadata;
 
 GGUFModelView tiny_model_view(
     std::vector<GGUFMetadataEntry> metadata_entries,
@@ -68,23 +66,6 @@ GGUFModelView tiny_model_view(
             .encoded_byte_count = 0,
         },
         .tensor_payloads = std::move(payloads),
-    };
-}
-
-GGUFTensorPayloadView tensor_payload_view(
-    std::string name,
-    std::span<const std::uint8_t> bytes,
-    std::uint32_t type_id = 0
-) {
-    return GGUFTensorPayloadView {
-        .tensor = GGUFTensorInfo {
-            .name = std::move(name),
-            .dimensions = {2},
-            .type_id = type_id,
-            .offset = 0,
-            .file_offset = 0,
-        },
-        .bytes = bytes,
     };
 }
 
@@ -200,45 +181,6 @@ TinyGemma2PayloadStore tiny_gemma2_payload_store(bool include_post_ffw_norm = tr
     return store;
 }
 
-void test_loads_engine_model_from_llama_gguf_view() {
-    const std::array<std::uint8_t, 8> tensor_bytes {
-        0x00, 0x00, 0x80, 0x3F,
-        0x00, 0x00, 0x00, 0x40,
-    };
-    auto view = tiny_model_view(
-        tiny_llama_metadata(),
-        {tensor_payload_view("token_embd.weight", std::span<const std::uint8_t>(tensor_bytes))}
-    );
-
-    const auto model = load_engine_model_from_gguf(view);
-
-    expect(model.architecture() == ModelArchitecture::llama, "engine model architecture mismatch");
-    expect(model_architecture_name(model.architecture()) == "llama", "engine model architecture name mismatch");
-    expect(model.name().has_value(), "engine model name should be present");
-    expect(*model.name() == "Tiny Llama Fixture", "engine model name mismatch");
-    expect(model.llama_config().context_length == 16, "engine model context length mismatch");
-    expect(model.llama_config().embedding_length == 8, "engine model embedding length mismatch");
-    expect(model.llama_config().block_count == 2, "engine model block count mismatch");
-    expect(model.llama_config().feed_forward_length == 32, "engine model feed-forward length mismatch");
-    expect(model.llama_config().attention_head_count == 4, "engine model head count mismatch");
-    expect(model.llama_config().attention_head_count_kv == 2, "engine model KV head count mismatch");
-    expect(model.llama_config().attention_key_length == 2, "engine model key length mismatch");
-    expect(model.llama_config().attention_value_length == 2, "engine model value length mismatch");
-    expect(model.llama_config().rope_dimension_count == 2, "engine model rope dimension mismatch");
-    expect(model.llama_config().vocab_size == 64, "engine model vocab size mismatch");
-    expect(model.llama_config().rope_freq_base == 10000.0F, "engine model rope base mismatch");
-    expect(model.llama_config().rms_norm_epsilon == 0.00001F, "engine model RMS epsilon mismatch");
-    expect(model.tensors().size() == 1, "engine model tensor count mismatch");
-
-    const auto* tensor = model.find_tensor("token_embd.weight");
-    expect(tensor != nullptr, "engine model tensor lookup failed");
-    expect(tensor->storage.descriptor().dtype == DType::f32, "engine model tensor dtype mismatch");
-    expect(tensor->storage.bytes().size() == tensor_bytes.size(), "engine model tensor byte count mismatch");
-    expect(tensor->storage.bytes().data() != tensor_bytes.data(), "engine model tensor storage should own bytes");
-    expect(tensor->storage.bytes()[3] == 0x3F, "engine model tensor copied byte mismatch");
-    expect(model.find_tensor("missing.weight") == nullptr, "engine model missing tensor lookup should return null");
-}
-
 void test_loads_engine_model_from_gemma2_gguf_view() {
     auto payload_store = tiny_gemma2_payload_store();
     const auto* token_embedding_bytes = payload_store.payloads[0].bytes.data();
@@ -268,7 +210,6 @@ void test_loads_engine_model_from_gemma2_gguf_view() {
         .uses_tied_output_weight = true,
     };
     expect(model.gemma2_config() == expected_config, "Gemma2 config mismatch");
-    expect(model.tensors().empty(), "Gemma2 engine model should not eagerly own tensor storage");
     expect(model.tensor_views().size() == 13, "Gemma2 tensor view count mismatch");
 
     const auto* token_embedding = model.find_tensor_view("token_embd.weight");
@@ -277,7 +218,6 @@ void test_loads_engine_model_from_gemma2_gguf_view() {
         token_embedding->view.bytes().data() == token_embedding_bytes,
         "Gemma2 token embedding view should point at GGUF payload bytes"
     );
-    expect(model.find_tensor("token_embd.weight") == nullptr, "Gemma2 tensor lookup should not find owned storage");
 }
 
 void test_binds_gemma2_model_weights_with_mixed_k_quant_tensors() {
@@ -317,12 +257,12 @@ void test_binds_gemma2_model_weights_with_mixed_k_quant_tensors() {
 }
 
 void test_rejects_engine_model_without_architecture_metadata() {
-    std::array<std::uint8_t, 8> tensor_bytes {};
-    auto metadata = tiny_llama_metadata();
+    auto metadata = tiny_gemma2_metadata();
     metadata.erase(metadata.begin());
+    auto payload_store = tiny_gemma2_payload_store();
     auto view = tiny_model_view(
         std::move(metadata),
-        {tensor_payload_view("token_embd.weight", std::span<const std::uint8_t>(tensor_bytes))}
+        std::move(payload_store.payloads)
     );
 
     try {
@@ -335,7 +275,7 @@ void test_rejects_engine_model_without_architecture_metadata() {
 }
 
 void test_rejects_engine_model_unsupported_architecture() {
-    auto metadata = tiny_llama_metadata();
+    auto metadata = tiny_gemma2_metadata();
     metadata[0] = metadata_string("general.architecture", "gptneox");
     auto view = tiny_model_view(std::move(metadata), {});
 
@@ -351,20 +291,6 @@ void test_rejects_engine_model_unsupported_architecture() {
     }
 }
 
-void test_rejects_engine_model_missing_llama_metadata() {
-    auto metadata = tiny_llama_metadata();
-    metadata.erase(metadata.begin() + 2);
-    auto view = tiny_model_view(std::move(metadata), {});
-
-    try {
-        (void)load_engine_model_from_gguf(view);
-        throw TestFailure("engine model should reject missing Llama metadata");
-    } catch (const EngineModelError& error) {
-        expect(error.code() == EngineModelErrorCode::missing_metadata, "engine model missing Llama metadata mismatch");
-        expect(error.detail() == "llama.context_length", "engine model missing Llama metadata detail mismatch");
-    }
-}
-
 void test_rejects_engine_model_missing_gemma2_metadata() {
     auto metadata = tiny_gemma2_metadata();
     metadata.erase(metadata.begin() + 2);
@@ -377,23 +303,6 @@ void test_rejects_engine_model_missing_gemma2_metadata() {
     } catch (const EngineModelError& error) {
         expect(error.code() == EngineModelErrorCode::missing_metadata, "engine model missing Gemma2 metadata mismatch");
         expect(error.detail() == "gemma2.context_length", "engine model missing Gemma2 metadata detail mismatch");
-    }
-}
-
-void test_rejects_engine_model_invalid_metadata_type() {
-    auto metadata = tiny_llama_metadata();
-    metadata[4] = metadata_string("llama.block_count", "two");
-    auto view = tiny_model_view(std::move(metadata), {});
-
-    try {
-        (void)load_engine_model_from_gguf(view);
-        throw TestFailure("engine model should reject invalid metadata type");
-    } catch (const EngineModelError& error) {
-        expect(
-            error.code() == EngineModelErrorCode::invalid_metadata_type,
-            "engine model invalid metadata type mismatch"
-        );
-        expect(error.detail() == "llama.block_count", "engine model invalid metadata detail mismatch");
     }
 }
 
@@ -436,19 +345,23 @@ void test_rejects_engine_model_invalid_gemma2_token_embedding_shape() {
 }
 
 void test_rejects_engine_model_duplicate_tensor_names() {
-    const std::array<std::uint8_t, 8> first_tensor_bytes {
-        0x00, 0x00, 0x80, 0x3F,
-        0x00, 0x00, 0x00, 0x40,
-    };
-    const std::array<std::uint8_t, 8> second_tensor_bytes {
-        0x00, 0x00, 0x40, 0x40,
-        0x00, 0x00, 0x80, 0x40,
-    };
+    auto first_tensor_bytes = zero_tensor_bytes({256, 4}, DType::f16);
+    auto second_tensor_bytes = zero_tensor_bytes({256, 4}, DType::f16);
     auto view = tiny_model_view(
-        tiny_llama_metadata(),
+        tiny_gemma2_metadata(),
         {
-            tensor_payload_view("token_embd.weight", std::span<const std::uint8_t>(first_tensor_bytes)),
-            tensor_payload_view("token_embd.weight", std::span<const std::uint8_t>(second_tensor_bytes)),
+            tensor_payload_view(
+                "token_embd.weight",
+                {256, 4},
+                gguf_type_id_for_dtype(DType::f16),
+                std::span<const std::uint8_t>(first_tensor_bytes)
+            ),
+            tensor_payload_view(
+                "token_embd.weight",
+                {256, 4},
+                gguf_type_id_for_dtype(DType::f16),
+                std::span<const std::uint8_t>(second_tensor_bytes)
+            ),
         }
     );
 
@@ -482,7 +395,6 @@ void test_rejects_gemma2_weight_binding_missing_tensor() {
 }
 
 const local_gguf_engine::tests::TestCase kEngineModelTests[] = {
-    {"loads engine model from Llama GGUF view", test_loads_engine_model_from_llama_gguf_view},
     {
         "loads engine model from Gemma2 GGUF view without eager owned tensor copies",
         test_loads_engine_model_from_gemma2_gguf_view,
@@ -496,9 +408,7 @@ const local_gguf_engine::tests::TestCase kEngineModelTests[] = {
         test_rejects_engine_model_without_architecture_metadata,
     },
     {"rejects engine model unsupported architecture", test_rejects_engine_model_unsupported_architecture},
-    {"rejects engine model missing Llama metadata", test_rejects_engine_model_missing_llama_metadata},
     {"rejects engine model missing Gemma2 metadata", test_rejects_engine_model_missing_gemma2_metadata},
-    {"rejects engine model invalid metadata type", test_rejects_engine_model_invalid_metadata_type},
     {
         "rejects engine model invalid Gemma2 metadata type",
         test_rejects_engine_model_invalid_gemma2_metadata_type,

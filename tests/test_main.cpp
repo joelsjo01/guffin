@@ -1,4 +1,3 @@
-#include "benchmark_tests.hpp"
 #include "engine_model_tests.hpp"
 #include "gemma2_metal_plan_tests.hpp"
 #include "generate_cli_tests.hpp"
@@ -6,13 +5,6 @@
 #include "gguf_inspect_tests.hpp"
 #include "gguf_reader_tests.hpp"
 #include "gguf_tensor_bridge_tests.hpp"
-#include "llama_attention_layer_tests.hpp"
-#include "llama_backend_tests.hpp"
-#include "llama_block_tests.hpp"
-#include "llama_feed_forward_layer_tests.hpp"
-#include "llama_generation_tests.hpp"
-#include "llama_kv_cache_tests.hpp"
-#include "llama_model_tests.hpp"
 #include "sampling_tests.hpp"
 #include "tensor_backend_tests.hpp"
 #include "tensor_tests.hpp"
@@ -47,49 +39,7 @@ int main() {
     for (const auto& test : local_gguf_engine::tests::tensor_post_backend_test_cases()) {
         run_test(test);
     }
-    for (const auto& test : local_gguf_engine::tests::llama_kv_cache_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_attention_layer_primary_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_backend_attention_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_attention_layer_validation_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_feed_forward_layer_primary_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_backend_feed_forward_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_feed_forward_layer_validation_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_block_primary_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_backend_block_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_block_validation_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_model_block_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_backend_model_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_model_logits_test_cases()) {
-        run_test(test);
-    }
     for (const auto& test : local_gguf_engine::tests::sampling_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::llama_generation_test_cases()) {
         run_test(test);
     }
     for (const auto& test : local_gguf_engine::tests::generate_cli_test_cases()) {
@@ -116,10 +66,6 @@ int main() {
     for (const auto& test : local_gguf_engine::tests::tokenizer_test_cases()) {
         run_test(test);
     }
-    for (const auto& test : local_gguf_engine::tests::benchmark_test_cases()) {
-        run_test(test);
-    }
-
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
         return EXIT_FAILURE;

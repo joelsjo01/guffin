@@ -37,15 +37,12 @@
 
 namespace {
 
-using local_gguf_engine::engine::EngineModel;
 using local_gguf_engine::engine::EngineModelError;
 using local_gguf_engine::engine::EngineModelErrorCode;
 using local_gguf_engine::engine::Gemma2MetalSchedulePhase;
 using local_gguf_engine::engine::Gemma2MetalScratchOwnership;
 using local_gguf_engine::engine::Gemma2MetalModelPlan;
 using local_gguf_engine::engine::Gemma2ModelConfig;
-using local_gguf_engine::engine::LlamaModelConfig;
-using local_gguf_engine::engine::ModelArchitecture;
 using local_gguf_engine::engine::create_gemma2_metal_decode_schedule;
 using local_gguf_engine::engine::create_gemma2_metal_generated_token_loop;
 using local_gguf_engine::engine::create_gemma2_metal_generation_runtime_shell;
@@ -619,15 +616,6 @@ bool shares_backend_storage(
     return &backend_buffer_storage(left) == &backend_buffer_storage(right);
 }
 
-EngineModel tiny_llama_model() {
-    return EngineModel(
-        ModelArchitecture::llama,
-        {},
-        LlamaModelConfig {},
-        {}
-    );
-}
-
 void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -641,7 +629,6 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
     const auto plan = create_gemma2_metal_model_plan(model);
 
     expect(plan.backend() == BackendKind::metal, "Gemma2 Metal plan backend mismatch");
-    expect(model.tensors().empty(), "Gemma2 Metal plan should not require owned host tensors");
     expect(plan.config() == model.gemma2_config(), "Gemma2 Metal plan config mismatch");
     expect(plan.uploaded_weight_byte_count() == expected_weight_bytes, "Gemma2 Metal uploaded byte count mismatch");
     expect(plan.kv_cache_byte_count() == expected_kv_cache_byte_count(plan.config()), "Gemma2 Metal KV byte count mismatch");
@@ -6721,18 +6708,6 @@ void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
     }
 }
 
-void test_rejects_gemma2_metal_plan_for_non_gemma_model() {
-    try {
-        (void)create_gemma2_metal_model_plan(tiny_llama_model());
-        throw TestFailure("Gemma2 Metal plan should reject non-Gemma model");
-    } catch (const EngineModelError& error) {
-        expect(
-            error.code() == EngineModelErrorCode::unsupported_architecture,
-            "Gemma2 Metal plan unsupported architecture error mismatch"
-        );
-    }
-}
-
 void test_rejects_gemma2_metal_plan_missing_required_weight_before_upload() {
     auto payload_store = tiny_gemma2_payload_store(false);
     auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
@@ -6856,7 +6831,6 @@ const TestCase kGemma2MetalPlanTests[] = {
         "rejects invalid Gemma2 Metal schedule shapes when available",
         test_rejects_invalid_gemma2_metal_schedule_shapes_when_available,
     },
-    {"rejects Gemma2 Metal plan for non-Gemma model", test_rejects_gemma2_metal_plan_for_non_gemma_model},
     {
         "rejects Gemma2 Metal plan missing required weight before upload",
         test_rejects_gemma2_metal_plan_missing_required_weight_before_upload,

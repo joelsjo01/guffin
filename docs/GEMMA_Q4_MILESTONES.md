@@ -11,7 +11,7 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Status | Milestone | Exit Proof |
 | --- | --- | --- |
 | Done | Q4_K/Q6_K layout support | Gemma GGUF tensor directory gets past type `12`/`14` validation with deterministic layout tests. |
-| Done | Gemma 2 config and weight binding | `gemma2` metadata and required tensor names bind beside Llama, with unsupported execution errors where runtime work is unfinished. |
+| Done | Gemma 2 config and weight binding | `gemma2` metadata and required tensor names bind without depending on old Llama execution code. |
 | Done | Gemma tokenizer and chat template | Local Gemma IT prompt formatting, role validation, BOS/EOS behavior, and generation prompt suffix have tests. |
 | Done | Tiny reference correctness fixtures | Small Q4_K/Q6_K and Gemma semantic fixtures exist for parity, without becoming a full 9B CPU runtime. |
 | Done | File-backed loading | Large tensor payloads can flow from validated file-backed views to backend upload without eager duplicate host copies. |
@@ -64,13 +64,13 @@ Status legend: `Done`, `Current`, `Next`, `Planned`, `Blocked`.
 | Done | First Gemma decode next-token selection | The first decode logits produce an explicit next-token selection boundary without a generated-token loop. |
 | Done | First Gemma generated-token loop | Prefill and one-token decode repeat through greedy argmax and resident KV updates for requested new tokens; real Gemma `--greedy` generation succeeds for the covered path. |
 | Done | Resident Gemma greedy selection | Prefill/decode logits select top-1 on Metal with only token/logit readback, preserving the generated-token loop and greedy-only CLI contract. |
+| Done | Retire old benchmark/Llama execution scaffolding | Standalone `local-gguf-bench`, Llama generation/runtime files, old Llama cached Metal ops, Llama model metadata, GPT-2/BPE tokenization, SmolLM2 templates, and sampled generate CLI options are removed while Gemma tokenizer support and CPU correctness scaffolding stay. |
 | Current | End-to-end Gemma benchmark metrics | `local-gguf-generate --bench` reports TTFT, prompt eval tokens/s, decode tokens/s, and total tokens/s on the real Gemma path. |
 | Planned | llama.cpp comparison loop | Same model, prompt, context, sampling mode, and hardware settings are compared against a current llama.cpp Metal baseline. |
 
 Update rule: change milestone status only when a verified slice lands. Keep
 implementation details in `docs/NEXT_TASK.md` or the diagnosis doc, not here.
 
-Cleanup rule: isolate or remove old Llama/CPU-first paths only when a Gemma
-replacement or correctness fixture makes them unnecessary. Do not turn cleanup
-into a broad refactor, but do not let obsolete paths shape the Gemma Metal-first
-architecture.
+Cleanup rule: keep removing obsolete CPU/Llama-first paths when Gemma coverage
+or generic correctness fixtures make them unnecessary. Do not let obsolete
+paths shape the Gemma Metal-first architecture.

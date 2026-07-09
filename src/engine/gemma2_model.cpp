@@ -18,11 +18,6 @@ namespace {
         return tensor_view->view;
     }
 
-    const auto* tensor = model.find_tensor(name);
-    if (tensor != nullptr) {
-        return tensor->storage.view();
-    }
-
     throw EngineModelError(EngineModelErrorCode::missing_tensor, std::move(name));
 }
 
@@ -33,11 +28,6 @@ namespace {
     const auto* output_weight_view = model.find_tensor_view("output.weight");
     if (output_weight_view != nullptr) {
         return output_weight_view->view;
-    }
-
-    const auto* output_weight = model.find_tensor("output.weight");
-    if (output_weight != nullptr) {
-        return output_weight->storage.view();
     }
 
     return token_embedding_weight;

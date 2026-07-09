@@ -1,5 +1,12 @@
 # Gemma Q4 Performance Diagnosis
 
+Historical note: this diagnosis predates the bold cleanup that removed
+standalone `local-gguf-bench`, Llama generation/runtime files, and old Llama
+cached Metal ops. A follow-up sweep also removed Llama model metadata loading,
+SmolLM2/GPT-2 tokenizer paths, sampled generate CLI options, and stochastic CPU
+sampling helpers. Treat references to those files and paths as historical
+evidence unless a current code search confirms they still exist.
+
 ## Scope And Current Goal
 
 This document diagnoses what must change for this repo to become a fast,
@@ -16,12 +23,11 @@ This is not a proposal to wrap `llama.cpp`, Ollama, MLX, PyTorch, Core ML, or
 another production inference runtime. Those projects are useful references and
 benchmark baselines only.
 
-The fastest maintainable path is to add focused Gemma 2 and Q4/K support beside
-the current Llama/SmolLM2 path, use small CPU/reference fixtures to prove
-behavior, and move the hot Gemma Q4 execution path into model-resident Metal
-kernels. A large generic architecture should wait until the common pieces have
-been proven by at least two real model families and multiple quantization
-formats.
+The current maintainable path is focused Gemma 2 Q4 support, small
+CPU/reference fixtures for proof, and a hot Gemma execution path in
+model-resident Metal kernels. A large generic architecture should wait until
+the common pieces have been proven by at least two real model families and
+multiple quantization formats.
 
 ## Current Repo Architecture
 

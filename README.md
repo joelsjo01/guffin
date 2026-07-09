@@ -35,86 +35,49 @@ Build the GGUF inspection CLI with:
 
 ```bash
 make gguf-inspect
-./build/debug/gguf-inspect models/SmolLM2-135M-Instruct-F16.gguf
+./build/debug/gguf-inspect models/gemma-2-9b-Q4.gguf
 ```
 
 Build the generate CLI with:
 
 ```bash
 make generate
-./build/debug/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "Hello" 8
+./build/debug/local-gguf-generate models/gemma-2-9b-Q4.gguf "Hello" 8 --greedy
 ```
 
 ## Run A Model
 
 Put local GGUF files under `models/`. Model files are ignored by Git.
 
-For the current SmolLM2 F16 target, build the release generator:
+For the current Gemma 2 Q4 target, build the release generator:
 
 ```bash
 make MODE=release generate
 ```
 
-Run with the CLI's default sampled settings:
+Run deterministic greedy/argmax generation on the Metal path:
 
 ```bash
-./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "What is the capital of France?" 64
+./build/release/local-gguf-generate models/gemma-2-9b-Q4.gguf "What is the capital of France?" 32 --greedy
 ```
 
-Run deterministic greedy/argmax generation:
+Gemma generation is greedy by default, Metal-only, and accepts `--greedy` as an
+explicit no-op. The old Llama/SmolLM2 generation path, sampled CLI options, and
+`--debug-first-token` inspection path have been removed. Non-Gemma models may
+still be inspected with `gguf-inspect`, but `local-gguf-generate` now rejects
+them instead of routing through deleted CPU/Llama runtime code.
 
-```bash
-./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "What is the capital of France?" 32 --greedy
-```
-
-Or use zero temperature for the same argmax path:
-
-```bash
-./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "What is the capital of France?" 32 --temperature 0
-```
-
-CPU is the default generation backend. To try the explicit Metal/GPU path on
-Apple Silicon, pass `--backend metal`:
-
-```bash
-./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "What is the capital of France?" 32 --backend metal --greedy
-```
-
-Metal generation is currently an opt-in inspection path, not a speed guarantee.
-Use `--backend cpu` to request the default CPU path explicitly.
-
-Sampling controls are engine-owned and deterministic when `--seed` is set:
-
-```bash
-./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "Write a haiku about rain." 64 --temperature 0.7 --top-k 40 --top-p 0.9 --repeat-penalty 1.1 --seed 1
-```
-
-To inspect prompt formatting, token IDs, and first-token logits:
-
-```bash
-./build/release/local-gguf-generate models/SmolLM2-135M-Instruct-F16.gguf "Hello" 1 --debug-first-token
-```
-
-Build the benchmark scaffold with:
-
-```bash
-make MODE=release benchmark
-./build/release/local-gguf-bench --iterations 1 --output benchmarks/results/smoke.txt
-```
-
-Benchmark reports are written under `benchmarks/results`, which is ignored by
-Git.
+The standalone `local-gguf-bench` scaffold has been retired. Rebuild benchmark
+metrics on the real `local-gguf-generate` command path.
 
 ## Status
 
-This project is in the early implementation stage. The GGUF reader and initial
-Tensor Core are in place for F32, F16, and Q8_0 payloads. The engine can now
-load a narrow Llama-family GGUF model structure, tokenize prompts from GGUF
-metadata, bind F16 model weights, and run cached CPU generation for the first
-SmolLM2 inference path, with opt-in Metal generation routing available through
-`--backend metal`, including seeded sampling controls, a greedy/argmax mode,
-tokenizer-EOS stopping, and narrow SmolLM2 chat-template prompt formatting.
-The current runnable surfaces are
-`gguf-inspect` for concise local GGUF summaries, `local-gguf-generate` for
-minimal text generation, and `local-gguf-bench` for engine-native
-tensor/load microbenchmarks.
+This project is in the early implementation stage. The GGUF reader, tokenizer,
+Tensor Core, CPU reference primitives, and Metal backend primitives are in
+place for the current Gemma 2 Q4 direction. The generator now exposes the
+Gemma 2 greedy Metal path only; CPU/Llama generation, sampled CLI generation,
+and the old standalone benchmark runner have been removed to keep the
+architecture pointed at the model-resident Metal runtime.
+
+The current runnable surfaces are `gguf-inspect` for concise local GGUF
+summaries and `local-gguf-generate` for narrow Gemma 2 generation.

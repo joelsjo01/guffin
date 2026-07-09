@@ -105,25 +105,6 @@ GGUFMetadataEntry metadata_i32_array(std::string key, std::vector<std::int32_t> 
     };
 }
 
-std::vector<GGUFMetadataEntry> tiny_llama_metadata() {
-    return {
-        metadata_string("general.architecture", "llama"),
-        metadata_string("general.name", "Tiny Llama Fixture"),
-        metadata_u32("llama.context_length", 16),
-        metadata_u32("llama.embedding_length", 8),
-        metadata_u32("llama.block_count", 2),
-        metadata_u32("llama.feed_forward_length", 32),
-        metadata_u32("llama.attention.head_count", 4),
-        metadata_u32("llama.attention.head_count_kv", 2),
-        metadata_u32("llama.attention.key_length", 2),
-        metadata_u32("llama.attention.value_length", 2),
-        metadata_u32("llama.rope.dimension_count", 2),
-        metadata_u32("llama.vocab_size", 64),
-        metadata_f32("llama.rope.freq_base", 10000.0F),
-        metadata_f32("llama.attention.layer_norm_rms_epsilon", 0.00001F),
-    };
-}
-
 GGUFMetadataSection metadata_section(std::vector<GGUFMetadataEntry> entries) {
     const auto metadata_count = static_cast<std::uint64_t>(entries.size());
     return GGUFMetadataSection {
@@ -135,15 +116,6 @@ GGUFMetadataSection metadata_section(std::vector<GGUFMetadataEntry> entries) {
         .entries = std::move(entries),
         .encoded_byte_count = 0,
     };
-}
-
-std::string smollm2_chat_template_fixture() {
-    return "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\n"
-        "You are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n"
-        "' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n"
-        "' + message['content'] + '<|im_end|>' + '\n"
-        "'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n"
-        "' }}{% endif %}";
 }
 
 std::string gemma2_chat_template_fixture() {

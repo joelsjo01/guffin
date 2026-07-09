@@ -30,7 +30,7 @@ Gemma 2 9B Q4 CPU runtime as the main track.
 
 ## Architecture Bias
 
-- Prefer focused Gemma 2 support beside the current Llama path.
+- Prefer focused Gemma 2 support over preserving old Llama execution paths.
 - Make reusable blocks at ownership boundaries: GGUF metadata, tokenizer,
   tensor layout, weight binding, execution planning, backend buffers, Metal
   kernels, KV cache, sampling, and benchmarks.
@@ -74,6 +74,8 @@ Generation performance must be measured on the real generation path.
 - `--bench` should produce detailed metrics for the same command path.
 - Report prompt eval tokens/s, decode tokens/s, total tokens/s, and TTFT.
 - Keep benchmark reports under ignored `benchmarks/results`.
+- Do not resurrect the deleted standalone `local-gguf-bench` scaffold unless a
+  specific kernel question cannot be answered on the real generate path.
 
 ## Implementation Loop
 

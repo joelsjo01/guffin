@@ -41,7 +41,6 @@ private:
 
 enum class TokenizerModel {
     llama,
-    gpt2,
 };
 
 struct TokenizerToken {
@@ -108,13 +107,10 @@ private:
     Tokenizer(
         TokenizerModel model,
         std::vector<TokenizerToken> vocabulary,
-        TokenizerSpecialTokens special_tokens,
-        std::vector<std::string> bpe_merges,
-        bool add_space_prefix
+        TokenizerSpecialTokens special_tokens
     );
 
     void append_exact_token_ids(std::vector<std::uint32_t>& token_ids, std::string_view text) const;
-    void append_gpt2_bpe_token_ids(std::vector<std::uint32_t>& token_ids, std::string_view text) const;
     void append_piece_token_ids(
         std::vector<std::uint32_t>& token_ids,
         std::string_view text,
@@ -137,8 +133,6 @@ private:
     std::vector<std::uint32_t> encode_candidate_token_ids_;
     std::vector<std::uint32_t> special_encode_candidate_token_ids_;
     std::unordered_map<std::string, std::uint32_t> token_text_to_id_;
-    std::unordered_map<std::string, std::uint32_t> bpe_merge_ranks_;
-    bool add_space_prefix_;
 };
 
 [[nodiscard]] std::string_view tokenizer_model_name(TokenizerModel model) noexcept;

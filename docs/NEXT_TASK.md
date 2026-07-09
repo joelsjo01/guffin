@@ -50,10 +50,7 @@ slice is chosen from data rather than guesses.
 
 - `include/local_gguf_engine/frontends/cli/generate.hpp`
 - `src/frontends/cli/generate.cpp`
-- `benchmarks/frontends/cli` or benchmark report plumbing only if needed for
-  shared formatting
 - `tests/frontends/cli/generate_cli_tests.cpp`
-- `tests/benchmarks` only if shared benchmark formatting changes
 - `docs/GEMMA_Q4_MILESTONES.md`
 - `docs/NEXT_TASK.md`
 
@@ -67,7 +64,9 @@ slice is chosen from data rather than guesses.
 - Do not dequantize whole Gemma weight tensors.
 - Do not read benchmark result artifacts from prior runs; produce fresh metrics
   if benchmarking is run.
-- Do not make unsupported Gemma sampling/debug paths claim success.
+- Do not reintroduce sampled generation or debug-first-token paths.
+- Do not bring back the deleted `local-gguf-bench` scaffold for this work;
+  benchmark reporting should live on the real generate command path.
 
 ## Verify
 
@@ -85,4 +84,4 @@ slice is chosen from data rather than guesses.
 
 The real Gemma `--greedy` command can emit compact end-to-end performance
 metrics for the same generation path, without changing generated text or
-unsupported sampling behavior.
+backend rejection behavior.

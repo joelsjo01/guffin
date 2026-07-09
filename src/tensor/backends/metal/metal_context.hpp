@@ -5,24 +5,9 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-#include <cstdint>
-#include <mutex>
 #include <string>
 
 namespace local_gguf_engine::tensor::backends::metal {
-
-struct LlamaCachedBlockScratchBuffers {
-    id<MTLBuffer> attention_normalized = nil;
-    id<MTLBuffer> query = nil;
-    id<MTLBuffer> key = nil;
-    id<MTLBuffer> value = nil;
-    id<MTLBuffer> attention_output = nil;
-    id<MTLBuffer> attention_residual = nil;
-    id<MTLBuffer> feed_forward_normalized = nil;
-    id<MTLBuffer> gate = nil;
-    id<MTLBuffer> up = nil;
-    id<MTLBuffer> gated = nil;
-};
 
 struct MatmulPipelineState {
     id<MTLDevice> device = nil;
@@ -41,15 +26,7 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> causal_grouped_attention_values_pipeline = nil;
     id<MTLComputePipelineState> softmax_pipeline = nil;
     id<MTLComputePipelineState> top_logit_pipeline = nil;
-    id<MTLComputePipelineState> llama_cached_decode_qkv_projection_pipeline = nil;
-    id<MTLComputePipelineState> llama_cached_kv_append_pipeline = nil;
-    id<MTLComputePipelineState> llama_cached_attention_output_pipeline = nil;
-    id<MTLComputePipelineState> llama_cached_decode_attention_output_pipeline = nil;
-    id<MTLComputePipelineState> llama_cached_decode_attention_residual_norm_pipeline = nil;
-    id<MTLComputePipelineState> llama_cached_decode_ffn_gate_up_silu_pipeline = nil;
     id<MTLCommandQueue> queue = nil;
-    std::mutex llama_cached_block_scratch_mutex;
-    LlamaCachedBlockScratchBuffers llama_cached_block_scratch;
 
     MatmulPipelineState();
 };

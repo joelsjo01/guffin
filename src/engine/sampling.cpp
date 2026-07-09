@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
-#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -21,10 +20,6 @@ using tensor::TensorStorage;
 
 constexpr std::size_t vector_rank = 1;
 constexpr std::size_t matrix_rank = 2;
-constexpr std::uint64_t splitmix64_increment = 0x9E3779B97F4A7C15ULL;
-constexpr std::uint64_t splitmix64_multiplier_0 = 0xBF58476D1CE4E5B9ULL;
-constexpr std::uint64_t splitmix64_multiplier_1 = 0x94D049BB133111EBULL;
-constexpr double unit_float_scale = 1.0 / 9007199254740992.0;
 
 [[nodiscard]] std::uint64_t dtype_value(DType dtype) noexcept {
     return static_cast<std::uint64_t>(static_cast<std::uint8_t>(dtype));
@@ -76,24 +71,6 @@ void require_f32_logits(const TensorDescriptor& descriptor) {
     return left.token < right.token;
 }
 
-void require_sampling_config(const SamplingConfig& config) {
-    if (config.temperature < 0.0F || !std::isfinite(config.temperature)) {
-        throw std::invalid_argument("sampling temperature must be zero or a positive finite value");
-    }
-
-    if (config.top_p <= 0.0F || config.top_p > 1.0F || !std::isfinite(config.top_p)) {
-        throw std::invalid_argument("sampling top-p must be in (0, 1]");
-    }
-
-    if (config.repetition_penalty < 1.0F || !std::isfinite(config.repetition_penalty)) {
-        throw std::invalid_argument("sampling repetition penalty must be at least 1");
-    }
-}
-
-[[nodiscard]] double next_unit_float(SamplingState& state) noexcept {
-    return static_cast<double>(state.next_u64() >> 11U) * unit_float_scale;
-}
-
 [[nodiscard]] std::vector<TokenLogit> collect_last_row_logits(const TensorStorage& logits) {
     require_f32_logits(logits.descriptor());
     const auto rank = require_supported_logits_rank(logits.descriptor());
@@ -120,60 +97,7 @@ void require_sampling_config(const SamplingConfig& config) {
     return candidates;
 }
 
-void apply_repetition_penalty(
-    std::vector<TokenLogit>& candidates,
-    float repetition_penalty,
-    std::span<const std::uint32_t> repetition_token_ids
-) {
-    if (repetition_penalty == 1.0F) {
-        return;
-    }
-
-    for (const auto token_id : repetition_token_ids) {
-        const auto index = static_cast<std::size_t>(token_id);
-        if (index >= candidates.size()) {
-            continue;
-        }
-
-        auto& logit = candidates[index].logit;
-        logit = logit < 0.0F ? logit * repetition_penalty : logit / repetition_penalty;
-    }
-}
-
 }  // namespace
-
-SamplingState::SamplingState(std::uint64_t seed) noexcept : state_(seed) {}
-
-std::uint64_t SamplingState::next_u64() noexcept {
-    state_ += splitmix64_increment;
-    auto value = state_;
-    value = (value ^ (value >> 30U)) * splitmix64_multiplier_0;
-    value = (value ^ (value >> 27U)) * splitmix64_multiplier_1;
-    return value ^ (value >> 31U);
-}
-
-std::uint32_t sample_argmax_token_f32(const TensorStorage& logits) {
-    require_f32_logits(logits.descriptor());
-    const auto rank = require_supported_logits_rank(logits.descriptor());
-    const auto vocab = logits_vocab_size(logits, rank);
-
-    if (vocab > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::invalid_argument("logit vocabulary is too large for uint32 token ids");
-    }
-
-    const auto row_offset = logits_last_row_offset(logits, rank, vocab);
-    std::uint32_t best_token = 0;
-    auto best_value = read_f32_linear(logits, row_offset);
-    for (std::uint64_t token = 1; token < vocab; ++token) {
-        const auto value = read_f32_linear(logits, row_offset + token);
-        if (value > best_value) {
-            best_value = value;
-            best_token = static_cast<std::uint32_t>(token);
-        }
-    }
-
-    return best_token;
-}
 
 std::vector<TokenLogit> top_logit_tokens_f32(const TensorStorage& logits, std::size_t max_tokens) {
     auto candidates = collect_last_row_logits(logits);
@@ -186,82 +110,6 @@ std::vector<TokenLogit> top_logit_tokens_f32(const TensorStorage& logits, std::s
     std::partial_sort(candidates.begin(), selected_end, candidates.end(), better_logit_candidate);
     candidates.resize(max_tokens);
     return candidates;
-}
-
-std::uint32_t sample_token_f32(
-    const TensorStorage& logits,
-    const SamplingConfig& config,
-    SamplingState& state,
-    std::span<const std::uint32_t> repetition_token_ids
-) {
-    require_sampling_config(config);
-    if (config.temperature == 0.0F) {
-        return sample_argmax_token_f32(logits);
-    }
-
-    auto candidates = collect_last_row_logits(logits);
-    apply_repetition_penalty(candidates, config.repetition_penalty, repetition_token_ids);
-
-    bool candidates_sorted_by_logit = false;
-    if (config.top_k > 0 && config.top_k < candidates.size()) {
-        const auto selected_begin = candidates.begin();
-        const auto selected_end = candidates.begin() + static_cast<std::ptrdiff_t>(config.top_k);
-        std::partial_sort(selected_begin, selected_end, candidates.end(), better_logit_candidate);
-        candidates.resize(static_cast<std::size_t>(config.top_k));
-        candidates_sorted_by_logit = true;
-    }
-
-    if (config.top_p < 1.0F && !candidates_sorted_by_logit) {
-        std::sort(candidates.begin(), candidates.end(), better_logit_candidate);
-        candidates_sorted_by_logit = true;
-    }
-
-    auto max_logit = candidates.front().logit;
-    for (const auto& candidate : candidates) {
-        max_logit = std::max(max_logit, candidate.logit);
-    }
-
-    std::vector<double> weights;
-    weights.reserve(candidates.size());
-    double total_weight = 0.0;
-    // Subtracting max_logit keeps temperature softmax finite even for large raw logits.
-    for (const auto& candidate : candidates) {
-        const auto weight = std::exp(static_cast<double>(candidate.logit - max_logit) / config.temperature);
-        weights.push_back(weight);
-        total_weight += weight;
-    }
-
-    if (config.top_p < 1.0F) {
-        const auto threshold = static_cast<double>(config.top_p) * total_weight;
-        double kept_weight = 0.0;
-        std::size_t kept_count = 0;
-        for (; kept_count < weights.size(); ++kept_count) {
-            kept_weight += weights[kept_count];
-            if (kept_weight >= threshold) {
-                ++kept_count;
-                break;
-            }
-        }
-
-        if (kept_count == 0) {
-            kept_count = 1;
-            kept_weight = weights.front();
-        }
-        candidates.resize(kept_count);
-        weights.resize(kept_count);
-        total_weight = kept_weight;
-    }
-
-    const auto draw = next_unit_float(state) * total_weight;
-    double cumulative_weight = 0.0;
-    for (std::size_t index = 0; index < candidates.size(); ++index) {
-        cumulative_weight += weights[index];
-        if (draw < cumulative_weight) {
-            return candidates[index].token;
-        }
-    }
-
-    return candidates.back().token;
 }
 
 }  // namespace local_gguf_engine::engine

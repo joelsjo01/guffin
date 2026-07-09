@@ -92,7 +92,6 @@ Packed quantized Metal matmul:
 - `src/tensor/backends/metal/metal_buffer.*`
 - `src/tensor/backends/metal/metal_tensor_ops.*`
 - `tests/tensor/tensor_backend_tests.cpp`
-- `benchmarks/tensor`
 
 Model-resident Gemma execution:
 
@@ -110,17 +109,7 @@ Generation CLI and benchmark metrics:
 - `src/frontends/cli/generate.cpp`
 - `src/frontends/cli/generate_main.cpp`
 - `tests/frontends/cli/generate_cli_tests.cpp`
-- `benchmarks/frontends/cli`
-- `benchmarks/benchmark_harness.cpp` only if sharing benchmark report plumbing
-
-Benchmark harness:
-
-- `include/local_gguf_engine/benchmarks/benchmark_harness.hpp`
-- `benchmarks/benchmark_harness.cpp`
-- `benchmarks/frontends/cli`
-- `benchmarks/support`
-- the hot surface being measured
-- `tests/benchmarks/benchmark_tests.cpp`
+- future `--bench` report code should stay on the generate command path
 
 CLI inspection:
 
@@ -138,5 +127,4 @@ CLI inspection:
 | Tokenizer/chat template | `tests/tokenizer`, plus CLI tests when prompt rendering changes |
 | Engine/model binding/generation | `tests/engine` |
 | CLI behavior | `tests/frontends/cli` |
-| Benchmark parsing/report shape | `tests/benchmarks` |
 | Shared fixtures | `tests/support` |
