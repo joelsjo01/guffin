@@ -285,35 +285,6 @@ struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalPostAttentionResidualActivations prefill_first_layer_post_attention_residual;
     Gemma2MetalFeedForwardGateUpActivations prefill_first_layer_feed_forward_gate_up;
     Gemma2MetalFeedForwardOutputActivations prefill_first_layer_feed_forward_output;
-    std::optional<Gemma2MetalLayerHandoffActivations> prefill_second_layer_input;
-    std::optional<Gemma2MetalAttentionProjectionActivations> prefill_second_layer_attention_projection;
-    std::optional<Gemma2MetalAttentionPositionActivations> prefill_second_layer_attention_position;
-    std::optional<Gemma2MetalAttentionScoreActivations> prefill_second_layer_attention_scores;
-    std::optional<Gemma2MetalAttentionProbabilityActivations> prefill_second_layer_attention_probabilities;
-    std::optional<Gemma2MetalAttentionValueActivations> prefill_second_layer_attention_values;
-    std::optional<Gemma2MetalAttentionOutputProjectionActivations>
-        prefill_second_layer_attention_output_projection;
-    std::optional<Gemma2MetalPostAttentionResidualActivations>
-        prefill_second_layer_post_attention_residual;
-    std::optional<Gemma2MetalFeedForwardGateUpActivations>
-        prefill_second_layer_feed_forward_gate_up;
-    std::optional<Gemma2MetalFeedForwardOutputActivations>
-        prefill_second_layer_feed_forward_output;
-    std::optional<Gemma2MetalLayerHandoffActivations> prefill_third_layer_input;
-    std::optional<Gemma2MetalAttentionProjectionActivations> prefill_third_layer_attention_projection;
-    std::optional<Gemma2MetalAttentionPositionActivations> prefill_third_layer_attention_position;
-    std::optional<Gemma2MetalAttentionScoreActivations> prefill_third_layer_attention_scores;
-    std::optional<Gemma2MetalAttentionProbabilityActivations> prefill_third_layer_attention_probabilities;
-    std::optional<Gemma2MetalAttentionValueActivations> prefill_third_layer_attention_values;
-    std::optional<Gemma2MetalAttentionOutputProjectionActivations>
-        prefill_third_layer_attention_output_projection;
-    std::optional<Gemma2MetalPostAttentionResidualActivations>
-        prefill_third_layer_post_attention_residual;
-    std::optional<Gemma2MetalFeedForwardGateUpActivations>
-        prefill_third_layer_feed_forward_gate_up;
-    std::optional<Gemma2MetalFeedForwardOutputActivations>
-        prefill_third_layer_feed_forward_output;
-    std::optional<Gemma2MetalLayerHandoffActivations> prefill_fourth_layer_input;
     std::vector<Gemma2MetalLayerHandoffActivations> prefill_reusable_layer_inputs;
     std::vector<Gemma2MetalPrefillBlockActivations> prefill_reusable_blocks;
     std::vector<Gemma2MetalPrefillKVCacheWriteActivations> prefill_kv_cache_writes;

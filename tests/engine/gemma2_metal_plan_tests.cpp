@@ -1107,96 +1107,12 @@ void test_gemma2_metal_runtime_shell_embeds_prefill_prompt_when_available() {
 
     expect(shell.prefill_input.token_ids == std::vector<std::uint32_t>({3, 1}), "Gemma2 shell token ids mismatch");
     expect(
-        !shell.prefill_second_layer_input.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare a second-layer input"
-    );
-    expect(
-        !shell.prefill_second_layer_attention_projection.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare a second-layer attention projection"
-    );
-    expect(
-        !shell.prefill_second_layer_attention_position.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare a second-layer attention position"
-    );
-    expect(
-        !shell.prefill_second_layer_attention_scores.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare second-layer attention scores"
-    );
-    expect(
-        !shell.prefill_second_layer_attention_probabilities.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare second-layer attention probabilities"
-    );
-    expect(
-        !shell.prefill_second_layer_attention_values.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare second-layer attention values"
-    );
-    expect(
-        !shell.prefill_second_layer_attention_output_projection.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare second-layer attention output projection"
-    );
-    expect(
-        !shell.prefill_second_layer_post_attention_residual.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare second-layer post-attention residual"
-    );
-    expect(
-        !shell.prefill_second_layer_feed_forward_gate_up.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare second-layer FFN gate/up"
-    );
-    expect(
-        !shell.prefill_second_layer_feed_forward_output.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare second-layer FFN output"
-    );
-    expect(
-        !shell.prefill_third_layer_input.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare a third-layer input"
-    );
-    expect(
-        !shell.prefill_third_layer_attention_projection.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare a third-layer attention projection"
-    );
-    expect(
-        !shell.prefill_third_layer_attention_position.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare a third-layer attention position"
-    );
-    expect(
-        !shell.prefill_third_layer_attention_scores.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare third-layer attention scores"
-    );
-    expect(
-        !shell.prefill_third_layer_attention_probabilities.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare third-layer attention probabilities"
-    );
-    expect(
-        !shell.prefill_third_layer_attention_values.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare third-layer attention values"
-    );
-    expect(
-        !shell.prefill_third_layer_attention_output_projection.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare third-layer attention output projection"
-    );
-    expect(
-        !shell.prefill_third_layer_post_attention_residual.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare third-layer post-attention residual"
-    );
-    expect(
-        !shell.prefill_third_layer_feed_forward_gate_up.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare third-layer FFN gate/up"
-    );
-    expect(
-        !shell.prefill_third_layer_feed_forward_output.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare third-layer FFN output"
-    );
-    expect(
-        !shell.prefill_fourth_layer_input.has_value(),
-        "Gemma2 shell one-layer fixture should not prepare a fourth-layer input"
-    );
-    expect(
         shell.prefill_reusable_layer_inputs.empty(),
-        "Gemma2 shell one-layer fixture should not prepare reusable layer inputs"
+        "Gemma2 shell one-layer fixture should not prepare later prefill layer inputs"
     );
     expect(
         shell.prefill_reusable_blocks.empty(),
-        "Gemma2 shell one-layer fixture should not run reusable prefill blocks"
+        "Gemma2 shell one-layer fixture should not run later prefill blocks"
     );
     expect(
         shell.prefill_output_norm.schedule_layer_offset == 0U,
@@ -1526,7 +1442,7 @@ void test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_availa
     expect_f32_matrix_close(positioned_key, expected_key, metal_rope_shell_tolerance, "Gemma2 shell positioned key");
 }
 
-void test_gemma2_metal_runtime_shell_skips_third_layer_input_without_third_layer_when_available() {
+void test_gemma2_metal_runtime_shell_loops_single_later_prefill_layer_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
@@ -1542,60 +1458,24 @@ void test_gemma2_metal_runtime_shell_skips_third_layer_input_without_third_layer
     );
 
     expect(
-        shell.prefill_second_layer_feed_forward_output.has_value(),
-        "Gemma2 shell two-layer fixture should prepare second-layer FFN output"
+        shell.prefill_reusable_layer_inputs.size() == 1U,
+        "Gemma2 shell two-layer fixture should prepare one later prefill layer input"
     );
     expect(
-        !shell.prefill_third_layer_input.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare a third-layer input"
+        shell.prefill_reusable_blocks.size() == 1U,
+        "Gemma2 shell two-layer fixture should run one later prefill block"
     );
     expect(
-        !shell.prefill_third_layer_attention_projection.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare a third-layer attention projection"
+        shell.prefill_reusable_layer_inputs.front().layer_index == 1U,
+        "Gemma2 shell two-layer input layer mismatch"
     );
     expect(
-        !shell.prefill_third_layer_attention_position.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare a third-layer attention position"
+        shell.prefill_reusable_blocks.front().schedule_layer_offset == 1U,
+        "Gemma2 shell two-layer block offset mismatch"
     );
     expect(
-        !shell.prefill_third_layer_attention_scores.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare third-layer attention scores"
-    );
-    expect(
-        !shell.prefill_third_layer_attention_probabilities.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare third-layer attention probabilities"
-    );
-    expect(
-        !shell.prefill_third_layer_attention_values.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare third-layer attention values"
-    );
-    expect(
-        !shell.prefill_third_layer_attention_output_projection.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare third-layer attention output projection"
-    );
-    expect(
-        !shell.prefill_third_layer_post_attention_residual.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare third-layer post-attention residual"
-    );
-    expect(
-        !shell.prefill_third_layer_feed_forward_gate_up.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare third-layer FFN gate/up"
-    );
-    expect(
-        !shell.prefill_third_layer_feed_forward_output.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare third-layer FFN output"
-    );
-    expect(
-        !shell.prefill_fourth_layer_input.has_value(),
-        "Gemma2 shell two-layer fixture should not prepare a fourth-layer input"
-    );
-    expect(
-        shell.prefill_reusable_layer_inputs.empty(),
-        "Gemma2 shell two-layer fixture should not prepare reusable layer inputs"
-    );
-    expect(
-        shell.prefill_reusable_blocks.empty(),
-        "Gemma2 shell two-layer fixture should not run reusable prefill blocks"
+        shell.prefill_reusable_blocks.front().layer_index == 1U,
+        "Gemma2 shell two-layer block layer mismatch"
     );
     expect(
         shell.prefill_output_norm.schedule_layer_offset == 1U,
@@ -1608,13 +1488,13 @@ void test_gemma2_metal_runtime_shell_skips_third_layer_input_without_third_layer
     expect(
         !shares_backend_storage(
             shell.prefill_output_norm.normalized_hidden_states,
-            shell.prefill_second_layer_feed_forward_output->feed_forward_residual
+            shell.prefill_reusable_blocks.back().feed_forward_output.feed_forward_residual
         ),
         "Gemma2 shell two-layer output norm should not alias terminal residual"
     );
 }
 
-void test_gemma2_metal_runtime_shell_skips_fourth_layer_input_without_fourth_layer_when_available() {
+void test_gemma2_metal_runtime_shell_loops_two_later_prefill_layers_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
@@ -1630,20 +1510,28 @@ void test_gemma2_metal_runtime_shell_skips_fourth_layer_input_without_fourth_lay
     );
 
     expect(
-        shell.prefill_third_layer_feed_forward_output.has_value(),
-        "Gemma2 shell three-layer fixture should prepare third-layer FFN output"
+        shell.prefill_reusable_layer_inputs.size() == 2U,
+        "Gemma2 shell three-layer fixture should prepare two later prefill layer inputs"
     );
     expect(
-        !shell.prefill_fourth_layer_input.has_value(),
-        "Gemma2 shell three-layer fixture should not prepare a fourth-layer input"
+        shell.prefill_reusable_blocks.size() == 2U,
+        "Gemma2 shell three-layer fixture should run two later prefill blocks"
     );
     expect(
-        shell.prefill_reusable_layer_inputs.empty(),
-        "Gemma2 shell three-layer fixture should not prepare reusable layer inputs"
+        shell.prefill_reusable_layer_inputs[0].layer_index == 1U,
+        "Gemma2 shell three-layer first later input layer mismatch"
     );
     expect(
-        shell.prefill_reusable_blocks.empty(),
-        "Gemma2 shell three-layer fixture should not run reusable prefill blocks"
+        shell.prefill_reusable_layer_inputs[1].layer_index == 2U,
+        "Gemma2 shell three-layer second later input layer mismatch"
+    );
+    expect(
+        shell.prefill_reusable_blocks[0].schedule_layer_offset == 1U,
+        "Gemma2 shell three-layer first later block offset mismatch"
+    );
+    expect(
+        shell.prefill_reusable_blocks[1].schedule_layer_offset == 2U,
+        "Gemma2 shell three-layer second later block offset mismatch"
     );
     expect(
         shell.prefill_output_norm.schedule_layer_offset == 2U,
@@ -1656,7 +1544,7 @@ void test_gemma2_metal_runtime_shell_skips_fourth_layer_input_without_fourth_lay
     expect(
         !shares_backend_storage(
             shell.prefill_output_norm.normalized_hidden_states,
-            shell.prefill_third_layer_feed_forward_output->feed_forward_residual
+            shell.prefill_reusable_blocks.back().feed_forward_output.feed_forward_residual
         ),
         "Gemma2 shell three-layer output norm should not alias terminal residual"
     );
@@ -2376,87 +2264,85 @@ void test_gemma2_metal_runtime_shell_loops_over_later_reusable_blocks_when_avail
     );
 
     expect(
-        shell.prefill_reusable_layer_inputs.size() == 2U,
-        "Gemma2 shell six-layer fixture should prepare two reusable layer inputs"
+        shell.prefill_reusable_layer_inputs.size() == 5U,
+        "Gemma2 shell six-layer fixture should prepare five later prefill layer inputs"
     );
     expect(
-        shell.prefill_reusable_blocks.size() == 3U,
-        "Gemma2 shell six-layer fixture should run three reusable blocks"
+        shell.prefill_reusable_blocks.size() == 5U,
+        "Gemma2 shell six-layer fixture should run five later prefill blocks"
     );
-    const auto& first_reusable_layer_input = shell.prefill_reusable_layer_inputs[0];
-    const auto& second_reusable_layer_input = shell.prefill_reusable_layer_inputs[1];
-    const auto& first_reusable_block = shell.prefill_reusable_blocks[0];
-    const auto& second_reusable_block = shell.prefill_reusable_blocks[1];
-    const auto& third_reusable_block = shell.prefill_reusable_blocks[2];
+    const auto& fourth_reusable_layer_input = shell.prefill_reusable_layer_inputs[3];
+    const auto& fifth_reusable_layer_input = shell.prefill_reusable_layer_inputs[4];
+    const auto& fourth_reusable_block = shell.prefill_reusable_blocks[3];
+    const auto& fifth_reusable_block = shell.prefill_reusable_blocks[4];
 
-    expect(first_reusable_layer_input.layer_index == 4U, "Gemma2 shell first reusable layer input index mismatch");
-    expect(second_reusable_layer_input.layer_index == 5U, "Gemma2 shell second reusable layer input index mismatch");
+    expect(fourth_reusable_layer_input.layer_index == 4U, "Gemma2 shell fifth layer input index mismatch");
+    expect(fifth_reusable_layer_input.layer_index == 5U, "Gemma2 shell sixth layer input index mismatch");
     expect(
-        first_reusable_layer_input.normalized_attention_input.descriptor()
+        fourth_reusable_layer_input.normalized_attention_input.descriptor()
             == shell.prefill.scratch().layer_handoff_normalized_attention_input,
-        "Gemma2 shell first reusable layer input descriptor mismatch"
+        "Gemma2 shell fifth layer input descriptor mismatch"
     );
     expect(
-        second_reusable_layer_input.normalized_attention_input.descriptor()
+        fifth_reusable_layer_input.normalized_attention_input.descriptor()
             == shell.prefill.scratch().layer_handoff_normalized_attention_input,
-        "Gemma2 shell second reusable layer input descriptor mismatch"
+        "Gemma2 shell sixth layer input descriptor mismatch"
     );
     expect(
         !shares_backend_storage(
-            first_reusable_layer_input.normalized_attention_input,
-            first_reusable_block.feed_forward_output.feed_forward_residual
+            fourth_reusable_layer_input.normalized_attention_input,
+            fourth_reusable_block.feed_forward_output.feed_forward_residual
         ),
-        "Gemma2 shell first reusable layer input should not alias first reusable residual"
+        "Gemma2 shell fifth layer input should not alias fifth layer residual"
     );
     expect(
         !shares_backend_storage(
-            second_reusable_layer_input.normalized_attention_input,
-            second_reusable_block.feed_forward_output.feed_forward_residual
+            fifth_reusable_layer_input.normalized_attention_input,
+            fifth_reusable_block.feed_forward_output.feed_forward_residual
         ),
-        "Gemma2 shell second reusable layer input should not alias second reusable residual"
+        "Gemma2 shell sixth layer input should not alias sixth layer residual"
     );
     expect(
         !shares_backend_storage(
-            second_reusable_layer_input.normalized_attention_input,
-            first_reusable_layer_input.normalized_attention_input
+            fifth_reusable_layer_input.normalized_attention_input,
+            fourth_reusable_layer_input.normalized_attention_input
         ),
         "Gemma2 shell reusable layer inputs should not alias each other"
     );
-    expect(first_reusable_block.schedule_layer_offset == 3U, "Gemma2 shell first reusable block offset mismatch");
-    expect(second_reusable_block.schedule_layer_offset == 4U, "Gemma2 shell second reusable block offset mismatch");
-    expect(third_reusable_block.schedule_layer_offset == 5U, "Gemma2 shell third reusable block offset mismatch");
-    expect(second_reusable_block.layer_index == 4U, "Gemma2 shell second reusable block layer mismatch");
-    expect(third_reusable_block.layer_index == 5U, "Gemma2 shell third reusable block layer mismatch");
+    expect(fourth_reusable_block.schedule_layer_offset == 4U, "Gemma2 shell fifth layer block offset mismatch");
+    expect(fifth_reusable_block.schedule_layer_offset == 5U, "Gemma2 shell sixth layer block offset mismatch");
+    expect(fourth_reusable_block.layer_index == 4U, "Gemma2 shell fifth layer block layer mismatch");
+    expect(fifth_reusable_block.layer_index == 5U, "Gemma2 shell sixth layer block layer mismatch");
     expect(
-        second_reusable_block.feed_forward_output.feed_forward_residual.descriptor()
+        fourth_reusable_block.feed_forward_output.feed_forward_residual.descriptor()
             == shell.prefill.scratch().feed_forward_residual,
-        "Gemma2 shell second reusable block FFN residual descriptor mismatch"
+        "Gemma2 shell fifth layer block FFN residual descriptor mismatch"
     );
     expect(
-        third_reusable_block.feed_forward_output.feed_forward_residual.descriptor()
+        fifth_reusable_block.feed_forward_output.feed_forward_residual.descriptor()
             == shell.prefill.scratch().feed_forward_residual,
-        "Gemma2 shell third reusable block FFN residual descriptor mismatch"
+        "Gemma2 shell sixth layer block FFN residual descriptor mismatch"
     );
     expect(
         !shares_backend_storage(
-            second_reusable_block.feed_forward_output.feed_forward_residual,
-            first_reusable_block.feed_forward_output.feed_forward_residual
+            fourth_reusable_block.feed_forward_output.feed_forward_residual,
+            shell.prefill_reusable_blocks[2].feed_forward_output.feed_forward_residual
         ),
-        "Gemma2 shell second reusable block FFN residual should not alias first reusable block"
+        "Gemma2 shell fifth layer block FFN residual should not alias previous block"
     );
     expect(
         !shares_backend_storage(
-            third_reusable_block.feed_forward_output.feed_forward_residual,
-            second_reusable_block.feed_forward_output.feed_forward_residual
+            fifth_reusable_block.feed_forward_output.feed_forward_residual,
+            fourth_reusable_block.feed_forward_output.feed_forward_residual
         ),
-        "Gemma2 shell third reusable block FFN residual should not alias second reusable block"
+        "Gemma2 shell sixth layer block FFN residual should not alias previous block"
     );
 
     const auto previous_reusable_residual = copy_tensor_from_backend(
-        second_reusable_block.feed_forward_output.feed_forward_residual
+        fourth_reusable_block.feed_forward_output.feed_forward_residual
     );
     const auto actual_sixth_layer_input = copy_tensor_from_backend(
-        second_reusable_layer_input.normalized_attention_input
+        fifth_reusable_layer_input.normalized_attention_input
     );
     const auto expected_sixth_layer_input = rms_norm_f32(
         previous_reusable_residual,
@@ -2502,7 +2388,7 @@ void test_gemma2_metal_runtime_shell_loops_over_later_reusable_blocks_when_avail
         shell.plan.config().attention_head_count_kv,
         shell.plan.config().attention_key_length,
         shell.prefill.layers()[5].attention_token_count,
-        third_reusable_block.attention_scores.scale,
+        fifth_reusable_block.attention_scores.scale,
         shell.plan.config().attention_logit_softcap
     );
     const auto sixth_probabilities = softmax_f32(sixth_scores);
@@ -2573,10 +2459,10 @@ void test_gemma2_metal_runtime_shell_loops_over_later_reusable_blocks_when_avail
     );
     const auto expected_next_token = top_logit_tokens_f32(expected_prefill_logits, 1).front();
     const auto actual_sixth_positioned_query = copy_tensor_from_backend(
-        third_reusable_block.attention_position.query
+        fifth_reusable_block.attention_position.query
     );
     const auto actual_sixth_feed_forward_residual = copy_tensor_from_backend(
-        third_reusable_block.feed_forward_output.feed_forward_residual
+        fifth_reusable_block.feed_forward_output.feed_forward_residual
     );
     const auto actual_prefill_output_norm = copy_tensor_from_backend(
         shell.prefill_output_norm.normalized_hidden_states
@@ -2631,7 +2517,7 @@ void test_gemma2_metal_runtime_shell_loops_over_later_reusable_blocks_when_avail
     expect(
         !shares_backend_storage(
             shell.prefill_output_norm.normalized_hidden_states,
-            third_reusable_block.feed_forward_output.feed_forward_residual
+            fifth_reusable_block.feed_forward_output.feed_forward_residual
         ),
         "Gemma2 shell output norm should not alias terminal residual"
     );
@@ -2790,7 +2676,7 @@ void test_gemma2_metal_runtime_shell_writes_prefill_kv_cache_when_available() {
         std::span<const std::uint32_t>(prompt_token_ids)
     );
 
-    expect(shell.prefill_reusable_blocks.size() == 1U, "Gemma2 KV write fixture should run one reusable block");
+    expect(shell.prefill_reusable_blocks.size() == 3U, "Gemma2 KV write fixture should run three later blocks");
     expect(
         shell.prefill_kv_cache_writes.size() == shell.prefill.layers().size(),
         "Gemma2 shell should record one prefill KV write per scheduled layer"
@@ -2848,9 +2734,9 @@ void test_gemma2_metal_runtime_shell_writes_prefill_kv_cache_when_available() {
     const auto first_layer_key_cache = copy_tensor_from_backend(shell.plan.kv_cache()[0].key);
     const auto first_layer_value_cache = copy_tensor_from_backend(shell.plan.kv_cache()[0].value);
     const auto reusable_positioned_key =
-        copy_tensor_from_backend(shell.prefill_reusable_blocks.front().attention_position.key);
+        copy_tensor_from_backend(shell.prefill_reusable_blocks.back().attention_position.key);
     const auto reusable_value =
-        copy_tensor_from_backend(shell.prefill_reusable_blocks.front().attention_projection.value);
+        copy_tensor_from_backend(shell.prefill_reusable_blocks.back().attention_projection.value);
     const auto reusable_key_cache = copy_tensor_from_backend(shell.first_decode.kv_cache()[3].key);
     const auto reusable_value_cache = copy_tensor_from_backend(shell.first_decode.kv_cache()[3].value);
     const std::array<std::uint64_t, 2> first_cell {0, 0};
@@ -3929,119 +3815,37 @@ void test_gemma2_metal_runtime_shell_prepares_first_layer_feed_forward_output_wh
     const auto& feed_forward_gate_up = shell.prefill_first_layer_feed_forward_gate_up;
     const auto& feed_forward_output = shell.prefill_first_layer_feed_forward_output;
     expect(
-        shell.prefill_second_layer_input.has_value(),
-        "Gemma2 shell should prepare a second-layer input when a second layer exists"
-    );
-    const auto& second_layer_input = *shell.prefill_second_layer_input;
-    expect(
-        shell.prefill_second_layer_attention_projection.has_value(),
-        "Gemma2 shell should prepare a second-layer attention projection when a second layer exists"
-    );
-    const auto& second_layer_projection = *shell.prefill_second_layer_attention_projection;
-    expect(
-        shell.prefill_second_layer_attention_position.has_value(),
-        "Gemma2 shell should prepare a second-layer attention position when a second layer exists"
-    );
-    const auto& second_layer_position = *shell.prefill_second_layer_attention_position;
-    expect(
-        shell.prefill_second_layer_attention_scores.has_value(),
-        "Gemma2 shell should prepare second-layer attention scores when a second layer exists"
-    );
-    const auto& second_layer_scores = *shell.prefill_second_layer_attention_scores;
-    expect(
-        shell.prefill_second_layer_attention_probabilities.has_value(),
-        "Gemma2 shell should prepare second-layer attention probabilities when a second layer exists"
-    );
-    const auto& second_layer_probabilities = *shell.prefill_second_layer_attention_probabilities;
-    expect(
-        shell.prefill_second_layer_attention_values.has_value(),
-        "Gemma2 shell should prepare second-layer attention values when a second layer exists"
-    );
-    const auto& second_layer_values = *shell.prefill_second_layer_attention_values;
-    expect(
-        shell.prefill_second_layer_attention_output_projection.has_value(),
-        "Gemma2 shell should prepare second-layer attention output projection when a second layer exists"
-    );
-    const auto& second_layer_output_projection = *shell.prefill_second_layer_attention_output_projection;
-    expect(
-        shell.prefill_second_layer_post_attention_residual.has_value(),
-        "Gemma2 shell should prepare second-layer post-attention residual when a second layer exists"
-    );
-    const auto& second_layer_post_attention_residual = *shell.prefill_second_layer_post_attention_residual;
-    expect(
-        shell.prefill_second_layer_feed_forward_gate_up.has_value(),
-        "Gemma2 shell should prepare second-layer FFN gate/up when a second layer exists"
-    );
-    const auto& second_layer_feed_forward_gate_up = *shell.prefill_second_layer_feed_forward_gate_up;
-    expect(
-        shell.prefill_second_layer_feed_forward_output.has_value(),
-        "Gemma2 shell should prepare second-layer FFN output when a second layer exists"
-    );
-    const auto& second_layer_feed_forward_output = *shell.prefill_second_layer_feed_forward_output;
-    expect(
-        shell.prefill_third_layer_input.has_value(),
-        "Gemma2 shell should prepare a third-layer input when a third layer exists"
-    );
-    const auto& third_layer_input = *shell.prefill_third_layer_input;
-    expect(
-        shell.prefill_third_layer_attention_projection.has_value(),
-        "Gemma2 shell should prepare third-layer attention projections when a third layer exists"
-    );
-    const auto& third_layer_projection = *shell.prefill_third_layer_attention_projection;
-    expect(
-        shell.prefill_third_layer_attention_position.has_value(),
-        "Gemma2 shell should prepare third-layer attention position when a third layer exists"
-    );
-    const auto& third_layer_position = *shell.prefill_third_layer_attention_position;
-    expect(
-        shell.prefill_third_layer_attention_scores.has_value(),
-        "Gemma2 shell should prepare third-layer attention scores when a third layer exists"
-    );
-    const auto& third_layer_scores = *shell.prefill_third_layer_attention_scores;
-    expect(
-        shell.prefill_third_layer_attention_probabilities.has_value(),
-        "Gemma2 shell should prepare third-layer attention probabilities when a third layer exists"
-    );
-    const auto& third_layer_probabilities = *shell.prefill_third_layer_attention_probabilities;
-    expect(
-        shell.prefill_third_layer_attention_values.has_value(),
-        "Gemma2 shell should prepare third-layer attention values when a third layer exists"
-    );
-    const auto& third_layer_values = *shell.prefill_third_layer_attention_values;
-    expect(
-        shell.prefill_third_layer_attention_output_projection.has_value(),
-        "Gemma2 shell should prepare third-layer attention output projection when a third layer exists"
-    );
-    const auto& third_layer_output_projection = *shell.prefill_third_layer_attention_output_projection;
-    expect(
-        shell.prefill_third_layer_post_attention_residual.has_value(),
-        "Gemma2 shell should prepare third-layer post-attention residual when a third layer exists"
-    );
-    const auto& third_layer_post_attention_residual = *shell.prefill_third_layer_post_attention_residual;
-    expect(
-        shell.prefill_third_layer_feed_forward_gate_up.has_value(),
-        "Gemma2 shell should prepare third-layer FFN gate/up when a third layer exists"
-    );
-    const auto& third_layer_feed_forward_gate_up = *shell.prefill_third_layer_feed_forward_gate_up;
-    expect(
-        shell.prefill_third_layer_feed_forward_output.has_value(),
-        "Gemma2 shell should prepare third-layer FFN output when a third layer exists"
-    );
-    const auto& third_layer_feed_forward_output = *shell.prefill_third_layer_feed_forward_output;
-    expect(
-        shell.prefill_fourth_layer_input.has_value(),
-        "Gemma2 shell should prepare a fourth-layer input when a fourth layer exists"
-    );
-    const auto& fourth_layer_input = *shell.prefill_fourth_layer_input;
-    expect(
-        shell.prefill_reusable_blocks.size() == 1U,
-        "Gemma2 shell should run one reusable prefill block after the fourth-layer input"
+        shell.prefill_reusable_layer_inputs.size() == 3U,
+        "Gemma2 shell should prepare three later prefill layer inputs"
     );
     expect(
-        shell.prefill_reusable_layer_inputs.empty(),
-        "Gemma2 shell four-layer fixture should not prepare a second reusable layer input"
+        shell.prefill_reusable_blocks.size() == 3U,
+        "Gemma2 shell should run three later prefill blocks"
     );
-    const auto& reusable_block = shell.prefill_reusable_blocks.front();
+    const auto& second_layer_input = shell.prefill_reusable_layer_inputs[0];
+    const auto& second_layer_block = shell.prefill_reusable_blocks[0];
+    const auto& second_layer_projection = second_layer_block.attention_projection;
+    const auto& second_layer_position = second_layer_block.attention_position;
+    const auto& second_layer_scores = second_layer_block.attention_scores;
+    const auto& second_layer_probabilities = second_layer_block.attention_probabilities;
+    const auto& second_layer_values = second_layer_block.attention_values;
+    const auto& second_layer_output_projection = second_layer_block.attention_output_projection;
+    const auto& second_layer_post_attention_residual = second_layer_block.post_attention_residual;
+    const auto& second_layer_feed_forward_gate_up = second_layer_block.feed_forward_gate_up;
+    const auto& second_layer_feed_forward_output = second_layer_block.feed_forward_output;
+    const auto& third_layer_input = shell.prefill_reusable_layer_inputs[1];
+    const auto& third_layer_block = shell.prefill_reusable_blocks[1];
+    const auto& third_layer_projection = third_layer_block.attention_projection;
+    const auto& third_layer_position = third_layer_block.attention_position;
+    const auto& third_layer_scores = third_layer_block.attention_scores;
+    const auto& third_layer_probabilities = third_layer_block.attention_probabilities;
+    const auto& third_layer_values = third_layer_block.attention_values;
+    const auto& third_layer_output_projection = third_layer_block.attention_output_projection;
+    const auto& third_layer_post_attention_residual = third_layer_block.post_attention_residual;
+    const auto& third_layer_feed_forward_gate_up = third_layer_block.feed_forward_gate_up;
+    const auto& third_layer_feed_forward_output = third_layer_block.feed_forward_output;
+    const auto& fourth_layer_input = shell.prefill_reusable_layer_inputs[2];
+    const auto& reusable_block = shell.prefill_reusable_blocks[2];
     const auto residual_hidden_states = copy_tensor_from_backend(shell.prefill_input.hidden_states);
     const auto projected_value = copy_tensor_from_backend(projection.value);
     const auto positioned_query = copy_tensor_from_backend(position.query);
@@ -6784,12 +6588,12 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_gemma2_metal_runtime_shell_positions_first_layer_attention_when_available,
     },
     {
-        "Gemma2 Metal runtime shell skips third layer input without third layer when available",
-        test_gemma2_metal_runtime_shell_skips_third_layer_input_without_third_layer_when_available,
+        "Gemma2 Metal runtime shell loops one later prefill layer when available",
+        test_gemma2_metal_runtime_shell_loops_single_later_prefill_layer_when_available,
     },
     {
-        "Gemma2 Metal runtime shell skips fourth layer input without fourth layer when available",
-        test_gemma2_metal_runtime_shell_skips_fourth_layer_input_without_fourth_layer_when_available,
+        "Gemma2 Metal runtime shell loops two later prefill layers when available",
+        test_gemma2_metal_runtime_shell_loops_two_later_prefill_layers_when_available,
     },
     {
         "Gemma2 Metal prefill block runner executes scheduled layer when available",

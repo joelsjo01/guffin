@@ -77,6 +77,20 @@ Metal-first runtime. Keep this file compact.
   - `sample_token_f32`
   - top-k, top-p, repetition penalty, and RNG sampling tests
 
+## Removed In Prefill Loop Consolidation
+
+- Gemma prefill milestone scaffolding:
+  - named layer-2, layer-3, and layer-4 prefill activation fields on
+    `Gemma2MetalGenerationRuntimeShell`
+  - old optional second/third/fourth prefill helper functions
+  - old terminal prefill selector that special-cased second and third layers
+- Prefill now keeps the first layer explicit and runs later scheduled layers
+  through the reusable block loop, matching the decode-side shape. The first
+  layer stays separate because it starts from prompt embeddings instead of a
+  previous block residual.
+- `src/engine/gemma2_runtime.cpp` dropped from roughly 4.7k lines to roughly
+  2.8k lines in this pass.
+
 ## Kept Intentionally
 
 - `TokenizerModel::llama`, because Gemma GGUF tokenizer metadata uses the GGML
@@ -110,9 +124,9 @@ Metal-first runtime. Keep this file compact.
   This is not runtime Llama support, but the fixtures can be renamed or rebuilt
   around neutral/Gemma metadata to reduce misleading context.
 - `src` has less obvious dead legacy left. `gemma2_runtime.cpp` is live but
-  likely carries incremental milestone structure; prefer consolidation after
-  benchmark evidence, not deletion. `metal_tensor_ops.mm` is also live backend
-  code and is a later split-by-op-family candidate.
+  should now be treated as a live reusable prefill/decode runner, not
+  layer-by-layer milestone scaffolding. `metal_tensor_ops.mm` is also live
+  backend code and is a later split-by-op-family candidate.
 - Small low-value cleanup remains in unreachable non-Gemma defensive checks now
   that the model boundary is Gemma-only.
 
