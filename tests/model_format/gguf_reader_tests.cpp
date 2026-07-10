@@ -160,7 +160,7 @@ void test_reads_scalar_metadata_entries() {
             section.entries[0].value,
             GGUFMetadataValueType::string,
             "general.architecture should be a string"
-        ) == "llama",
+        ) == "dummy",
         "general.architecture value mismatch"
     );
 
@@ -174,24 +174,24 @@ void test_reads_scalar_metadata_entries() {
         "general.alignment value mismatch"
     );
 
-    expect(section.entries[2].key == "llama.context_length", "metadata key 2 mismatch");
+    expect(section.entries[2].key == "model.context_length", "metadata key 2 mismatch");
     expect(
         metadata_data<std::uint64_t>(
             section.entries[2].value,
             GGUFMetadataValueType::uint64,
-            "llama.context_length should be a uint64"
+            "model.context_length should be a uint64"
         ) == 4096,
-        "llama.context_length value mismatch"
+        "model.context_length value mismatch"
     );
 
-    expect(section.entries[3].key == "llama.use_parallel_residual", "metadata key 3 mismatch");
+    expect(section.entries[3].key == "model.use_parallel_residual", "metadata key 3 mismatch");
     expect(
         metadata_data<bool>(
             section.entries[3].value,
             GGUFMetadataValueType::boolean,
-            "llama.use_parallel_residual should be a bool"
+            "model.use_parallel_residual should be a bool"
         ),
-        "llama.use_parallel_residual value mismatch"
+        "model.use_parallel_residual value mismatch"
     );
 }
 

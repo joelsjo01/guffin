@@ -108,6 +108,52 @@ Metal-first runtime. Keep this file compact.
   loop/output-token path, prefill KV writes, decode loop, generated-token loop,
   and invalid/unavailable Metal boundaries.
 
+## Removed In Tensor Test Guard Consolidation
+
+- `tests/tensor/tensor_tests.cpp` and
+  `tests/tensor/tensor_backend_tests.cpp` dropped from 5,406 lines to 5,328
+  lines.
+- Merged milestone-style negative-path tests that repeated the same guard
+  shape:
+  - F32 add and multiply dtype/shape rejection tests now run through one
+    elementwise invalid-input test.
+  - F32 matmul dtype/rank/inner-dimension rejection tests now run through one
+    matmul invalid-input test.
+  - Metal-unavailable probes for GGUF matmul, K-quant matmul, backend copy,
+    view copy, and allocation now run through one unavailable-backend test.
+- Kept live tensor coverage for Q4_K/Q6_K layout, decode, dequant, row
+  validation, F16/F32 accessors, CPU backend reference behavior, Metal parity,
+  backend residency/copy, top-logit selection, prefill KV writes, and KV-cache
+  attention.
+
+## Removed In Shared Tensor Fixture Consolidation
+
+- Moved duplicated packed Q4_K/Q6_K test fixture construction into
+  `tests/support/tensor_test_support.*`.
+- Removed local copies of the same K-quant byte-packing helpers from:
+  - `tests/tensor/tensor_tests.cpp`
+  - `tests/tensor/tensor_backend_tests.cpp`
+  - `tests/engine/gemma2_metal_plan_tests.cpp`
+- The tensor test files dropped from 5,328 lines to 5,014 lines, and
+  `tests/engine/gemma2_metal_plan_tests.cpp` dropped from 3,474 lines to
+  3,322 lines.
+- Shared support now owns seeded Q4_K/Q6_K GGUF weight matrices, Q4_K/Q6_K
+  reference tensors, projection-value fixtures, and the quantized reference
+  matmul used by backend parity tests.
+- Kept all packed-layout assertions, CPU/reference K-quant matmul checks,
+  Metal Q4_K/Q6_K parity checks, and Gemma Metal plan/runtime coverage.
+
+## Removed In GGUF Parser Fixture Cleanup
+
+- Replaced generic parser-fixture Llama metadata with neutral model metadata:
+  - `general.architecture = dummy`
+  - `model.context_length`
+  - `model.use_parallel_residual`
+- Removed the remaining `llama.*` metadata from `tests/model_format` and
+  `tests/fixtures`.
+- Kept real `tokenizer.ggml.model = llama` metadata in tokenizer and CLI
+  tests, because Gemma GGUF files require that GGML tokenizer label.
+
 ## Kept Intentionally
 
 - `TokenizerModel::llama`, because Gemma GGUF tokenizer metadata uses the GGML
@@ -132,12 +178,10 @@ Metal-first runtime. Keep this file compact.
 - `tests/engine/gemma2_metal_plan_tests.cpp` has had the main milestone-era
   bulk removed. Future trims should be opportunistic and keep the current
   high-signal boundaries intact.
-- Tensor tests are large but mostly useful correctness scaffolding. Trim only
-  obvious duplicates; keep Q4_K/Q6_K, backend residency, Metal parity,
-  top-logit, and KV/cache coverage.
-- GGUF parser fixtures still use some `llama.*` metadata as generic test data.
-  This is not runtime Llama support, but the fixtures can be renamed or rebuilt
-  around neutral/Gemma metadata to reduce misleading context.
+- Tensor tests are still large but mostly useful correctness scaffolding. After
+  guard and fixture consolidation, further trims should focus on repeated
+  parity/invalid-input boilerplate and avoid weakening Q4_K/Q6_K, backend
+  residency, Metal parity, top-logit, and KV/cache coverage.
 - `src` has less obvious dead legacy left. `gemma2_runtime.cpp` is live but
   should now be treated as a live reusable prefill/decode runner, not
   layer-by-layer milestone scaffolding. `metal_tensor_ops.mm` is also live
@@ -154,3 +198,15 @@ Metal-first runtime. Keep this file compact.
   `281 test(s) passed`.
 - `bash scripts/ci.sh` passed after Gemma plan test consolidation with
   `281 test(s) passed`.
+- `make test MODE=debug` passed after tensor test guard consolidation with
+  `272 test(s) passed`.
+- `bash scripts/ci.sh` passed after tensor test guard consolidation with
+  `272 test(s) passed`.
+- `make test MODE=debug` passed after shared tensor fixture consolidation with
+  `272 test(s) passed`.
+- `bash scripts/ci.sh` passed after shared tensor fixture consolidation with
+  `272 test(s) passed`.
+- `make test MODE=debug` passed after GGUF parser fixture cleanup with
+  `272 test(s) passed`.
+- `bash scripts/ci.sh` passed after GGUF parser fixture cleanup with
+  `272 test(s) passed`.

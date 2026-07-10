@@ -23,7 +23,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -33,7 +32,6 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 namespace {
 
@@ -101,6 +99,8 @@ using local_gguf_engine::tests::TestFailure;
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::expect_close;
 using local_gguf_engine::tests::fixture;
+using local_gguf_engine::tests::q4_k_reference_tensor;
+using local_gguf_engine::tests::q6_k_reference_tensor;
 using local_gguf_engine::tests::tensor_f16_gguf_matrix;
 using local_gguf_engine::tests::tensor_f16_matrix;
 using local_gguf_engine::tests::tensor_f32_matrix;
@@ -294,123 +294,6 @@ void test_rejects_tensor_descriptor_with_invalid_shape_dtype_combination() {
         expect(error.expected_value() == 32, "expected Q8_0 descriptor block size mismatch");
         expect(error.actual_value() == 15, "actual Q8_0 descriptor row element count mismatch");
     }
-}
-
-void write_little_endian_u16(std::span<std::uint8_t> bytes, std::size_t offset, std::uint16_t value) {
-    bytes[offset] = static_cast<std::uint8_t>(value & 0xFFU);
-    bytes[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
-}
-
-void set_q4_k_scale_min(
-    std::span<std::uint8_t> block_bytes,
-    std::size_t group_index,
-    std::uint8_t scale,
-    std::uint8_t min
-) {
-    auto scale_min = block_bytes.subspan(4, Q4_KBlockView::scale_min_byte_count);
-    scale = static_cast<std::uint8_t>(scale & 0x3FU);
-    min = static_cast<std::uint8_t>(min & 0x3FU);
-
-    if (group_index < 4U) {
-        scale_min[group_index] = static_cast<std::uint8_t>((scale_min[group_index] & 0xC0U) | scale);
-        scale_min[group_index + 4U] = static_cast<std::uint8_t>((scale_min[group_index + 4U] & 0xC0U) | min);
-        return;
-    }
-
-    const auto scale_high_bits = static_cast<std::uint8_t>((scale & 0x30U) << 2U);
-    const auto min_high_bits = static_cast<std::uint8_t>((min & 0x30U) << 2U);
-    scale_min[group_index - 4U] =
-        static_cast<std::uint8_t>((scale_min[group_index - 4U] & 0x3FU) | scale_high_bits);
-    scale_min[group_index] = static_cast<std::uint8_t>((scale_min[group_index] & 0x3FU) | min_high_bits);
-    scale_min[group_index + 4U] = static_cast<std::uint8_t>((scale & 0x0FU) | ((min & 0x0FU) << 4U));
-}
-
-void set_q4_k_quantized_nibble(
-    std::span<std::uint8_t> block_bytes,
-    std::size_t element_index,
-    std::uint8_t value
-) {
-    auto quantized = block_bytes.subspan(16, Q4_KBlockView::quantized_byte_count);
-    const auto super_group_base = (element_index / 64U) * 32U;
-    const auto index_in_super_group = element_index % 64U;
-    const auto byte_index = super_group_base + (index_in_super_group % 32U);
-    const auto shift = index_in_super_group < 32U ? 0U : 4U;
-    const auto mask = static_cast<std::uint8_t>(0x0FU << shift);
-    quantized[byte_index] = static_cast<std::uint8_t>(
-        (quantized[byte_index] & ~mask) | ((value & 0x0FU) << shift)
-    );
-}
-
-TensorStorage q4_k_reference_tensor() {
-    std::array<std::uint8_t, Q4_KBlockView::byte_count> bytes {};
-    write_little_endian_u16(std::span<std::uint8_t>(bytes), 0, 0x3C00U);
-    write_little_endian_u16(std::span<std::uint8_t>(bytes), 2, 0x3800U);
-
-    set_q4_k_scale_min(std::span<std::uint8_t>(bytes), 0, 2, 1);
-    set_q4_k_scale_min(std::span<std::uint8_t>(bytes), 1, 3, 2);
-    set_q4_k_scale_min(std::span<std::uint8_t>(bytes), 4, 6, 5);
-    set_q4_k_quantized_nibble(std::span<std::uint8_t>(bytes), 0, 4);
-    set_q4_k_quantized_nibble(std::span<std::uint8_t>(bytes), 31, 15);
-    set_q4_k_quantized_nibble(std::span<std::uint8_t>(bytes), 32, 5);
-    set_q4_k_quantized_nibble(std::span<std::uint8_t>(bytes), 63, 6);
-    set_q4_k_quantized_nibble(std::span<std::uint8_t>(bytes), 128, 7);
-
-    return TensorStorage::from_bytes(
-        TensorDescriptor::from(Shape::from({1, 256}), DType::q4_k),
-        std::span<const std::uint8_t>(bytes)
-    );
-}
-
-void set_q6_k_scale(std::span<std::uint8_t> block_bytes, std::size_t group_index, std::int8_t value) {
-    block_bytes[Q6_KBlockView::low_bit_byte_count + Q6_KBlockView::high_bit_byte_count + group_index] =
-        std::bit_cast<std::uint8_t>(value);
-}
-
-void set_q6_k_quantized_value(
-    std::span<std::uint8_t> block_bytes,
-    std::size_t element_index,
-    std::int8_t value
-) {
-    const auto encoded = static_cast<std::uint8_t>(static_cast<std::int16_t>(value) + 32);
-    const auto low = static_cast<std::uint8_t>(encoded & 0x0FU);
-    const auto high = static_cast<std::uint8_t>((encoded >> 4U) & 0x03U);
-    const auto half_block_index = element_index / 128U;
-    const auto index_in_half_block = element_index % 128U;
-    const auto lane_index = index_in_half_block % 32U;
-
-    const auto low_base = half_block_index * 64U;
-    const auto low_plane_offset = ((index_in_half_block / 32U) % 2U) * 32U;
-    const auto low_shift = index_in_half_block < 64U ? 0U : 4U;
-    const auto low_mask = static_cast<std::uint8_t>(0x0FU << low_shift);
-    auto& low_byte = block_bytes[low_base + low_plane_offset + lane_index];
-    low_byte = static_cast<std::uint8_t>((low_byte & ~low_mask) | (low << low_shift));
-
-    const auto high_base = Q6_KBlockView::low_bit_byte_count + half_block_index * 32U;
-    const auto high_shift = (index_in_half_block / 32U) * 2U;
-    const auto high_mask = static_cast<std::uint8_t>(0x03U << high_shift);
-    auto& high_byte = block_bytes[high_base + lane_index];
-    high_byte = static_cast<std::uint8_t>((high_byte & ~high_mask) | (high << high_shift));
-}
-
-TensorStorage q6_k_reference_tensor() {
-    std::array<std::uint8_t, Q6_KBlockView::byte_count> bytes {};
-    write_little_endian_u16(std::span<std::uint8_t>(bytes), Q6_KBlockView::byte_count - 2U, 0x3800U);
-
-    set_q6_k_scale(std::span<std::uint8_t>(bytes), 0, 2);
-    set_q6_k_scale(std::span<std::uint8_t>(bytes), 1, 3);
-    set_q6_k_scale(std::span<std::uint8_t>(bytes), 2, -3);
-    set_q6_k_scale(std::span<std::uint8_t>(bytes), 4, 4);
-    set_q6_k_scale(std::span<std::uint8_t>(bytes), 8, -2);
-    set_q6_k_quantized_value(std::span<std::uint8_t>(bytes), 0, -32);
-    set_q6_k_quantized_value(std::span<std::uint8_t>(bytes), 31, 31);
-    set_q6_k_quantized_value(std::span<std::uint8_t>(bytes), 32, -1);
-    set_q6_k_quantized_value(std::span<std::uint8_t>(bytes), 64, 5);
-    set_q6_k_quantized_value(std::span<std::uint8_t>(bytes), 128, 7);
-
-    return TensorStorage::from_bytes(
-        TensorDescriptor::from(Shape::from({1, 256}), DType::q6_k),
-        std::span<const std::uint8_t>(bytes)
-    );
 }
 
 void test_decodes_q8_0_block_values() {
@@ -996,37 +879,6 @@ void test_adds_f32_tensors_elementwise() {
     expect(read_f32(right, std::span<const std::uint64_t>(index_11)) == 8.0F, "F32 add should not mutate right input");
 }
 
-void test_rejects_f32_add_dtype_mismatch() {
-    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
-    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f16));
-
-    try {
-        (void)add_f32(left, right);
-        throw TestFailure("F32 add should reject F16 operand");
-    } catch (const TensorError& error) {
-        expect(
-            error.code() == TensorErrorCode::unsupported_operator_dtype,
-            "error code should be unsupported_operator_dtype"
-        );
-        expect(error.expected_value() == 0, "expected F32 operator dtype id mismatch");
-        expect(error.actual_value() == 1, "actual F16 operator dtype id mismatch");
-    }
-}
-
-void test_rejects_f32_add_shape_mismatch() {
-    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 3}), DType::f32));
-    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
-
-    try {
-        (void)add_f32(left, right);
-        throw TestFailure("F32 add should reject mismatched shapes");
-    } catch (const TensorError& error) {
-        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "error code should be tensor_shape_mismatch");
-        expect(error.expected_value() == 3, "expected shape dimension mismatch");
-        expect(error.actual_value() == 2, "actual shape dimension mismatch");
-    }
-}
-
 void test_multiplies_f32_tensors_elementwise() {
     const auto descriptor = TensorDescriptor::from(Shape::from({2, 2}), DType::f32);
     auto left = TensorStorage::allocate(descriptor);
@@ -1056,12 +908,35 @@ void test_multiplies_f32_tensors_elementwise() {
     expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 32.0F, "F32 multiply value 3 mismatch");
 }
 
-void test_rejects_f32_multiply_dtype_mismatch() {
-    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
-    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f16));
+void test_rejects_invalid_f32_elementwise_inputs() {
+    const auto f32_vector = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+    const auto f16_vector = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f16));
+    const auto f32_matrix_2x3 = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 3}), DType::f32));
+    const auto f32_matrix_2x2 = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
 
     try {
-        (void)multiply_f32(left, right);
+        (void)add_f32(f32_vector, f16_vector);
+        throw TestFailure("F32 add should reject F16 operand");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::unsupported_operator_dtype,
+            "F32 add dtype error code mismatch"
+        );
+        expect(error.expected_value() == 0, "F32 add expected dtype mismatch");
+        expect(error.actual_value() == 1, "F32 add actual dtype mismatch");
+    }
+
+    try {
+        (void)add_f32(f32_matrix_2x3, f32_matrix_2x2);
+        throw TestFailure("F32 add should reject mismatched shapes");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 add shape error code mismatch");
+        expect(error.expected_value() == 3, "F32 add expected shape dimension mismatch");
+        expect(error.actual_value() == 2, "F32 add actual shape dimension mismatch");
+    }
+
+    try {
+        (void)multiply_f32(f32_vector, f16_vector);
         throw TestFailure("F32 multiply should reject F16 operand");
     } catch (const TensorError& error) {
         expect(
@@ -1071,14 +946,9 @@ void test_rejects_f32_multiply_dtype_mismatch() {
         expect(error.expected_value() == 0, "F32 multiply expected dtype mismatch");
         expect(error.actual_value() == 1, "F32 multiply actual dtype mismatch");
     }
-}
-
-void test_rejects_f32_multiply_shape_mismatch() {
-    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 3}), DType::f32));
-    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
 
     try {
-        (void)multiply_f32(left, right);
+        (void)multiply_f32(f32_matrix_2x3, f32_matrix_2x2);
         throw TestFailure("F32 multiply should reject mismatched shapes");
     } catch (const TensorError& error) {
         expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 multiply shape error code mismatch");
@@ -2591,12 +2461,14 @@ void test_multiplies_f32_matrices() {
     expect(read_f32(output, std::span<const std::uint64_t>(index_11)) == 154.0F, "F32 matmul value 1,1 mismatch");
 }
 
-void test_rejects_f32_matmul_dtype_mismatch() {
-    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
-    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f16));
+void test_rejects_invalid_f32_matmul_inputs() {
+    const auto f32_matrix_2x2 = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
+    const auto f16_matrix_2x2 = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f16));
+    const auto f32_vector = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
+    const auto f32_matrix_2x3 = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 3}), DType::f32));
 
     try {
-        (void)matmul_f32(left, right);
+        (void)matmul_f32(f32_matrix_2x2, f16_matrix_2x2);
         throw TestFailure("F32 matmul should reject F16 right operand");
     } catch (const TensorError& error) {
         expect(
@@ -2606,28 +2478,18 @@ void test_rejects_f32_matmul_dtype_mismatch() {
         expect(error.expected_value() == 0, "F32 matmul expected dtype mismatch");
         expect(error.actual_value() == 1, "F32 matmul actual dtype mismatch");
     }
-}
-
-void test_rejects_f32_matmul_non_matrix_rank() {
-    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2}), DType::f32));
-    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
 
     try {
-        (void)matmul_f32(left, right);
+        (void)matmul_f32(f32_vector, f32_matrix_2x2);
         throw TestFailure("F32 matmul should reject rank-one operands");
     } catch (const TensorError& error) {
         expect(error.code() == TensorErrorCode::invalid_shape_rank, "F32 matmul rank error code mismatch");
         expect(error.expected_value() == 2, "F32 matmul expected rank mismatch");
         expect(error.actual_value() == 1, "F32 matmul actual rank mismatch");
     }
-}
-
-void test_rejects_f32_matmul_inner_dimension_mismatch() {
-    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 3}), DType::f32));
-    const auto right = TensorStorage::allocate(TensorDescriptor::from(Shape::from({2, 2}), DType::f32));
 
     try {
-        (void)matmul_f32(left, right);
+        (void)matmul_f32(f32_matrix_2x3, f32_matrix_2x2);
         throw TestFailure("F32 matmul should reject mismatched inner dimensions");
     } catch (const TensorError& error) {
         expect(error.code() == TensorErrorCode::tensor_shape_mismatch, "F32 matmul shape error code mismatch");
@@ -2781,11 +2643,8 @@ const TestCase tensor_core_tests[] = {
     {"rejects F16 accessor dtype mismatch", test_rejects_f16_accessor_dtype_mismatch},
     {"rejects F16 accessor invalid index", test_rejects_f16_accessor_invalid_index},
     {"adds F32 tensors elementwise", test_adds_f32_tensors_elementwise},
-    {"rejects F32 add dtype mismatch", test_rejects_f32_add_dtype_mismatch},
-    {"rejects F32 add shape mismatch", test_rejects_f32_add_shape_mismatch},
     {"multiplies F32 tensors elementwise", test_multiplies_f32_tensors_elementwise},
-    {"rejects F32 multiply dtype mismatch", test_rejects_f32_multiply_dtype_mismatch},
-    {"rejects F32 multiply shape mismatch", test_rejects_f32_multiply_shape_mismatch},
+    {"rejects invalid F32 elementwise inputs", test_rejects_invalid_f32_elementwise_inputs},
     {"applies F32 SiLU", test_applies_f32_silu},
     {"rejects F32 SiLU dtype mismatch", test_rejects_f32_silu_dtype_mismatch},
     {"fills F32 tensor with scalar", test_fills_f32_tensor_with_scalar},
@@ -2883,9 +2742,7 @@ const TestCase tensor_core_tests[] = {
     },
     {"rejects F32 attention nonpositive scale", test_rejects_f32_attention_nonpositive_scale},
     {"multiplies F32 matrices", test_multiplies_f32_matrices},
-    {"rejects F32 matmul dtype mismatch", test_rejects_f32_matmul_dtype_mismatch},
-    {"rejects F32 matmul non-matrix rank", test_rejects_f32_matmul_non_matrix_rank},
-    {"rejects F32 matmul inner dimension mismatch", test_rejects_f32_matmul_inner_dimension_mismatch},
+    {"rejects invalid F32 matmul inputs", test_rejects_invalid_f32_matmul_inputs},
     {"multiplies F32 by F16 matrices into F32", test_multiplies_f32_by_f16_matrices_into_f32},
     {"multiplies F32 by F16 GGUF weight matrix", test_multiplies_f32_by_f16_gguf_weight_matrix},
 };

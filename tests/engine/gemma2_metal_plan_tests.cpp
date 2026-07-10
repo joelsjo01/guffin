@@ -15,7 +15,6 @@
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/ops/softmax.hpp"
-#include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
@@ -24,7 +23,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -79,8 +77,6 @@ using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
 using local_gguf_engine::tensor::ops::silu_f32;
 using local_gguf_engine::tensor::ops::softcap_f32;
 using local_gguf_engine::tensor::ops::softmax_f32;
-using local_gguf_engine::tensor::Q4_KBlockView;
-using local_gguf_engine::tensor::Q6_KBlockView;
 using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tests::TestCase;
@@ -93,6 +89,8 @@ using local_gguf_engine::tests::metadata_u32;
 using local_gguf_engine::tests::tensor_f32_matrix;
 using local_gguf_engine::tests::tensor_f16_gguf_matrix;
 using local_gguf_engine::tests::tensor_f32_vector;
+using local_gguf_engine::tests::tensor_q4_k_gguf_weight_matrix;
+using local_gguf_engine::tests::tensor_q6_k_gguf_weight_matrix;
 
 GGUFModelView tiny_model_view(
     std::vector<GGUFMetadataEntry> metadata_entries,
@@ -400,156 +398,6 @@ local_gguf_engine::tensor::TensorStorage flatten_f32_cache_rows(
         ),
         cache.bytes()
     );
-}
-
-void write_little_endian_u16(std::span<std::uint8_t> bytes, std::size_t offset, std::uint16_t value) {
-    bytes[offset] = static_cast<std::uint8_t>(value & 0xFFU);
-    bytes[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
-}
-
-void set_q4_k_scale_min(
-    std::span<std::uint8_t> block_bytes,
-    std::size_t group_index,
-    std::uint8_t scale,
-    std::uint8_t min
-) {
-    auto scale_min = block_bytes.subspan(4, Q4_KBlockView::scale_min_byte_count);
-    scale = static_cast<std::uint8_t>(scale & 0x3FU);
-    min = static_cast<std::uint8_t>(min & 0x3FU);
-
-    if (group_index < 4U) {
-        scale_min[group_index] = static_cast<std::uint8_t>((scale_min[group_index] & 0xC0U) | scale);
-        scale_min[group_index + 4U] = static_cast<std::uint8_t>((scale_min[group_index + 4U] & 0xC0U) | min);
-        return;
-    }
-
-    const auto scale_high_bits = static_cast<std::uint8_t>((scale & 0x30U) << 2U);
-    const auto min_high_bits = static_cast<std::uint8_t>((min & 0x30U) << 2U);
-    scale_min[group_index - 4U] =
-        static_cast<std::uint8_t>((scale_min[group_index - 4U] & 0x3FU) | scale_high_bits);
-    scale_min[group_index] = static_cast<std::uint8_t>((scale_min[group_index] & 0x3FU) | min_high_bits);
-    scale_min[group_index + 4U] = static_cast<std::uint8_t>((scale & 0x0FU) | ((min & 0x0FU) << 4U));
-}
-
-void set_q4_k_quantized_nibble(
-    std::span<std::uint8_t> block_bytes,
-    std::size_t element_index,
-    std::uint8_t value
-) {
-    auto quantized = block_bytes.subspan(16, Q4_KBlockView::quantized_byte_count);
-    const auto super_group_base = (element_index / 64U) * 32U;
-    const auto index_in_super_group = element_index % 64U;
-    const auto byte_index = super_group_base + (index_in_super_group % 32U);
-    const auto shift = index_in_super_group < 32U ? 0U : 4U;
-    const auto mask = static_cast<std::uint8_t>(0x0FU << shift);
-    quantized[byte_index] = static_cast<std::uint8_t>(
-        (quantized[byte_index] & ~mask) | ((value & 0x0FU) << shift)
-    );
-}
-
-void set_q6_k_scale(std::span<std::uint8_t> block_bytes, std::size_t group_index, std::int8_t value) {
-    block_bytes[Q6_KBlockView::low_bit_byte_count + Q6_KBlockView::high_bit_byte_count + group_index] =
-        std::bit_cast<std::uint8_t>(value);
-}
-
-void set_q6_k_quantized_value(
-    std::span<std::uint8_t> block_bytes,
-    std::size_t element_index,
-    std::int8_t value
-) {
-    const auto encoded = static_cast<std::uint8_t>(static_cast<std::int16_t>(value) + 32);
-    const auto low = static_cast<std::uint8_t>(encoded & 0x0FU);
-    const auto high = static_cast<std::uint8_t>((encoded >> 4U) & 0x03U);
-    const auto half_block_index = element_index / 128U;
-    const auto index_in_half_block = element_index % 128U;
-    const auto lane_index = index_in_half_block % 32U;
-
-    const auto low_base = half_block_index * 64U;
-    const auto low_plane_offset = ((index_in_half_block / 32U) % 2U) * 32U;
-    const auto low_shift = index_in_half_block < 64U ? 0U : 4U;
-    const auto low_mask = static_cast<std::uint8_t>(0x0FU << low_shift);
-    auto& low_byte = block_bytes[low_base + low_plane_offset + lane_index];
-    low_byte = static_cast<std::uint8_t>((low_byte & ~low_mask) | (low << low_shift));
-
-    const auto high_base = Q6_KBlockView::low_bit_byte_count + half_block_index * 32U;
-    const auto high_shift = (index_in_half_block / 32U) * 2U;
-    const auto high_mask = static_cast<std::uint8_t>(0x03U << high_shift);
-    auto& high_byte = block_bytes[high_base + lane_index];
-    high_byte = static_cast<std::uint8_t>((high_byte & ~high_mask) | (high << high_shift));
-}
-
-local_gguf_engine::tensor::TensorStorage tensor_q4_k_gguf_weight_matrix(
-    std::uint64_t shared,
-    std::uint64_t columns,
-    std::uint64_t seed
-) {
-    auto storage = local_gguf_engine::tensor::TensorStorage::allocate(
-        TensorDescriptor::from(Shape::from({shared, columns}), DType::q4_k)
-    );
-    auto bytes = storage.mutable_bytes();
-    const auto blocks_per_column = shared / Q4_KBlockView::element_count;
-
-    for (std::uint64_t column = 0; column < columns; ++column) {
-        for (std::uint64_t column_block = 0; column_block < blocks_per_column; ++column_block) {
-            const auto block_index = column * blocks_per_column + column_block;
-            auto block = bytes.subspan(
-                static_cast<std::size_t>(block_index * Q4_KBlockView::byte_count),
-                Q4_KBlockView::byte_count
-            );
-            write_little_endian_u16(block, 0, 0x3C00U);
-            write_little_endian_u16(block, 2, 0x0000U);
-
-            for (std::size_t group = 0; group < 8U; ++group) {
-                const auto scale = static_cast<std::uint8_t>(1U + ((seed + column + column_block + group) % 5U));
-                set_q4_k_scale_min(block, group, scale, 0);
-            }
-            for (std::size_t element = 0; element < Q4_KBlockView::element_count; ++element) {
-                const auto nibble = static_cast<std::uint8_t>(
-                    (seed + column + (3U * column_block) + (5U * element)) % 16U
-                );
-                set_q4_k_quantized_nibble(block, element, nibble);
-            }
-        }
-    }
-
-    return storage;
-}
-
-local_gguf_engine::tensor::TensorStorage tensor_q6_k_gguf_weight_matrix(
-    std::uint64_t shared,
-    std::uint64_t columns,
-    std::uint64_t seed
-) {
-    auto storage = local_gguf_engine::tensor::TensorStorage::allocate(
-        TensorDescriptor::from(Shape::from({shared, columns}), DType::q6_k)
-    );
-    auto bytes = storage.mutable_bytes();
-    const auto blocks_per_column = shared / Q6_KBlockView::element_count;
-
-    for (std::uint64_t column = 0; column < columns; ++column) {
-        for (std::uint64_t column_block = 0; column_block < blocks_per_column; ++column_block) {
-            const auto block_index = column * blocks_per_column + column_block;
-            auto block = bytes.subspan(
-                static_cast<std::size_t>(block_index * Q6_KBlockView::byte_count),
-                Q6_KBlockView::byte_count
-            );
-            write_little_endian_u16(block, Q6_KBlockView::byte_count - 2U, 0x3800U);
-
-            for (std::size_t group = 0; group < Q6_KBlockView::scale_byte_count; ++group) {
-                const auto raw = static_cast<int>((seed + column + column_block + group) % 7U) - 3;
-                const auto scale = static_cast<std::int8_t>(raw == 0 ? 2 : raw);
-                set_q6_k_scale(block, group, scale);
-            }
-            for (std::size_t element = 0; element < Q6_KBlockView::element_count; ++element) {
-                const auto quantized = static_cast<std::int8_t>(
-                    static_cast<int>((seed + column + (5U * column_block) + (7U * element)) % 31U) - 15
-                );
-                set_q6_k_quantized_value(block, element, quantized);
-            }
-        }
-    }
-
-    return storage;
 }
 
 std::size_t expected_kv_cache_byte_count(const Gemma2ModelConfig& config) {
