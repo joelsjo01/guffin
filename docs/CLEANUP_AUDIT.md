@@ -91,6 +91,23 @@ Metal-first runtime. Keep this file compact.
 - `src/engine/gemma2_runtime.cpp` dropped from roughly 4.7k lines to roughly
   2.8k lines in this pass.
 
+## Removed In Gemma Plan Test Consolidation
+
+- `tests/engine/gemma2_metal_plan_tests.cpp` dropped from 6,656 lines to 3,474
+  lines.
+- Removed milestone-era staged tests that preserved old construction history:
+  - first-layer projection-only and RoPE-only runtime shell tests
+  - one-later-layer and two-later-layer prefill loop count tests
+  - standalone reusable prefill "feed next scheduled layer" test
+  - the very large first-layer feed-forward/output walkthrough
+- Replaced the first-layer walkthrough with one compact boundary/parity test
+  that proves the first prefill block starts from prompt embeddings, produces
+  the first residual, and feeds the reusable later-layer input.
+- Kept high-signal Gemma Metal coverage for plan shape, resident buffers,
+  first prefill boundary, reusable prefill block runner parity, later prefill
+  loop/output-token path, prefill KV writes, decode loop, generated-token loop,
+  and invalid/unavailable Metal boundaries.
+
 ## Kept Intentionally
 
 - `TokenizerModel::llama`, because Gemma GGUF tokenizer metadata uses the GGML
@@ -112,11 +129,9 @@ Metal-first runtime. Keep this file compact.
 
 ## Next Cleanup Candidates
 
-- Tests have more removable bulk than `src`. The clearest target is
-  `tests/engine/gemma2_metal_plan_tests.cpp`: it is large, milestone-era, and
-  over-asserts many staged Gemma runtime handoffs. Keep the high-signal coverage
-  for plan shape, prefill, decode, generated-token loops, residency, and error
-  boundaries; consolidate repeated layer-by-layer assertions.
+- `tests/engine/gemma2_metal_plan_tests.cpp` has had the main milestone-era
+  bulk removed. Future trims should be opportunistic and keep the current
+  high-signal boundaries intact.
 - Tensor tests are large but mostly useful correctness scaffolding. Trim only
   obvious duplicates; keep Q4_K/Q6_K, backend residency, Metal parity,
   top-logit, and KV/cache coverage.
@@ -135,3 +150,7 @@ Metal-first runtime. Keep this file compact.
 - `bash scripts/ci.sh` passed after the bold deletion pass.
 - `bash scripts/ci.sh` passed after the follow-up sweep with `286 test(s)
   passed`.
+- `make test MODE=debug` passed after Gemma plan test consolidation with
+  `281 test(s) passed`.
+- `bash scripts/ci.sh` passed after Gemma plan test consolidation with
+  `281 test(s) passed`.
