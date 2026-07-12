@@ -81,5 +81,5 @@ Do not have comments that merely restate the code.
 - Engine principles: `docs/ENGINE_PRINCIPLES.md`
 - Current implementation baton: `docs/NEXT_TASK.md`
 - Where to look: `docs/GRAPH.md`
-- CLI milestone map: `docs/CLI_MILESTONES.md`
+- Benchmark milestone map: `docs/BENCH_MILESTONES.md`
 - Gemma planning and findings: `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md`

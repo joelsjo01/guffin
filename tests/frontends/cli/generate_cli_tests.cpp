@@ -1,6 +1,7 @@
 #include "generate_cli_tests.hpp"
 
 #include "local_gguf_engine/engine/gemma2_chat_session.hpp"
+#include "local_gguf_engine/benchmarks/generation_benchmark.hpp"
 #include "local_gguf_engine/frontends/cli/generate.hpp"
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
@@ -30,10 +31,16 @@
 namespace {
 
 using local_gguf_engine::frontends::cli::run_generate;
+using local_gguf_engine::frontends::cli::format_chat_timing_line;
+using local_gguf_engine::benchmarks::GenerationBenchmarkCase;
+using local_gguf_engine::benchmarks::GenerationBenchmarkRunnerOptions;
+using local_gguf_engine::benchmarks::run_generation_benchmark;
 using local_gguf_engine::engine::Gemma2ChatSession;
 using local_gguf_engine::engine::Gemma2ChatContextError;
 using local_gguf_engine::engine::Gemma2ChatSessionOptions;
 using local_gguf_engine::engine::Gemma2ChatTurnOptions;
+using local_gguf_engine::engine::Gemma2GenerationStopReason;
+using local_gguf_engine::engine::Gemma2TokenSelectionMode;
 using local_gguf_engine::engine::TokenSamplerOptions;
 using local_gguf_engine::model_format::read_file_backed_gguf_model;
 using local_gguf_engine::model_format::GGUFMetadataArray;
@@ -84,6 +91,60 @@ public:
 private:
     std::filesystem::path path_;
 };
+
+[[nodiscard]] std::size_t chat_timing_line_count(std::string_view text) {
+    std::size_t count = 0;
+    for (std::size_t position = 0; (position = text.find("[ Prompt: ", position)) != std::string_view::npos;) {
+        ++count;
+        position += 10U;
+    }
+    return count;
+}
+
+[[nodiscard]] std::string without_chat_timing_lines(std::string_view text) {
+    std::string filtered;
+    std::size_t line_start = 0;
+    while (line_start < text.size()) {
+        const auto newline = text.find('\n', line_start);
+        const auto line_end = newline == std::string_view::npos ? text.size() : newline + 1U;
+        const auto line = text.substr(line_start, line_end - line_start);
+        if (!line.starts_with("[ Prompt: ")) {
+            filtered.append(line);
+        }
+        line_start = line_end;
+    }
+    return filtered;
+}
+
+void test_formats_chat_timing_line_from_runtime_metrics() {
+    local_gguf_engine::engine::Gemma2ChatTurnMetrics metrics;
+    metrics.generation.newly_evaluated_prompt_token_count = 19U;
+    metrics.generation.prefill_duration_ns = 1'000'000'000U;
+    metrics.generation.decode_token_count = 78U;
+    metrics.generation.decode_duration_ns = 5'000'000'000U;
+    expect(
+        format_chat_timing_line(metrics) == "[ Prompt: 19.0 t/s | Generation: 15.6 t/s ]",
+        "chat timing normal formatting mismatch"
+    );
+
+    metrics.generation.newly_evaluated_prompt_token_count = 2U;
+    metrics.generation.prefill_duration_ns = 3'000'000'000U;
+    metrics.generation.decode_token_count = 0U;
+    metrics.generation.decode_duration_ns = 0U;
+    expect(
+        format_chat_timing_line(metrics) == "[ Prompt: 0.7 t/s | Generation: n/a ]",
+        "chat timing rounding/unavailable formatting mismatch"
+    );
+
+    metrics.generation.newly_evaluated_prompt_token_count = 0U;
+    metrics.generation.prefill_duration_ns = 1U;
+    metrics.generation.decode_token_count = 1U;
+    metrics.generation.decode_duration_ns = 0U;
+    expect(
+        format_chat_timing_line(metrics) == "[ Prompt: n/a | Generation: n/a ]",
+        "chat timing zero input formatting mismatch"
+    );
+}
 
 int run_generate_for_path(
     const std::filesystem::path& path,
@@ -203,6 +264,39 @@ int run_generate_chat_with_extra_arguments(
     }
     std::istringstream input("/exit\n");
     return run_generate(static_cast<int>(argv.size()), argv.data(), input, output, error);
+}
+
+int run_generate_with_extra_arguments(
+    const std::filesystem::path& path,
+    const std::vector<std::string>& extra_arguments,
+    std::ostringstream& output,
+    std::ostringstream& error
+) {
+    std::vector<std::string> arguments {"local-gguf-generate", path.string(), "Hello", "1"};
+    arguments.insert(arguments.end(), extra_arguments.begin(), extra_arguments.end());
+    std::vector<const char*> argv;
+    for (const auto& argument : arguments) argv.push_back(argument.c_str());
+    return run_generate(static_cast<int>(argv.size()), argv.data(), output, error);
+}
+
+[[nodiscard]] bool looks_like_strict_json_object(std::string_view line) {
+    if (line.size() < 2U || line.front() != '{' || line.back() != '}') return false;
+    bool in_string = false;
+    bool escaped = false;
+    int depth = 0;
+    for (const auto character : line) {
+        if (escaped) { escaped = false; continue; }
+        if (in_string && character == '\\') { escaped = true; continue; }
+        if (character == '"') { in_string = !in_string; continue; }
+        if (in_string) {
+            if (static_cast<unsigned char>(character) < 0x20U) return false;
+            continue;
+        }
+        if (character == '{' || character == '[') ++depth;
+        if (character == '}' || character == ']') --depth;
+        if (depth < 0) return false;
+    }
+    return !in_string && !escaped && depth == 0;
 }
 
 void append_u8(std::vector<std::uint8_t>& bytes, std::uint8_t value) {
@@ -418,6 +512,7 @@ std::vector<std::string> tiny_gemma2_generate_cli_token_texts() {
     tokens[3] = "<unk>";
     tokens[4] = "<mask>";
     tokens[5] = "Hello";
+    tokens[6] = "▁Hello";
     tokens[9] = "user\n";
     tokens[10] = "model\n";
     tokens[11] = "\n";
@@ -628,6 +723,93 @@ void test_gemma2_chat_session_appends_second_turn_at_nonzero_cache_when_availabl
     expect(session.message_count() == 4, "Gemma2 chat session message count mismatch after two turns");
 }
 
+void test_gemma2_chat_session_appends_after_truncated_output_retokenizes_differently_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(64),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(6)
+    );
+    const TempBinaryFile model("tiny-gemma2-truncated-retokenize", std::span<const std::uint8_t>(bytes));
+    auto session = Gemma2ChatSession(
+        read_file_backed_gguf_model(model.path()),
+        Gemma2ChatSessionOptions {.max_new_tokens = 1U}
+    );
+    const auto first = session.generate_user_turn("Hello");
+    const auto second = session.generate_user_turn("Hello");
+    expect(first.text == "Hello", "truncated retokenization fixture text mismatch");
+    expect(first.generated_token_ids == std::vector<std::uint32_t> {6U},
+        "truncated retokenization should retain exact generated ID");
+    expect(second.cache_position > first.cache_position,
+        "truncated retokenization second turn should reuse resident KV");
+    expect(second.metrics.reused_cached_token_count == second.cache_position,
+        "truncated retokenization cache metric mismatch");
+}
+
+void test_gemma2_chat_session_records_deterministic_turn_metrics_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(64),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-metrics", std::span<const std::uint8_t>(bytes));
+    std::uint64_t now_ns = 100U;
+    auto session = Gemma2ChatSession(
+        read_file_backed_gguf_model(model.path()),
+        Gemma2ChatSessionOptions {
+            .max_new_tokens = 1,
+            .clock = [&now_ns]() {
+                const auto current = now_ns;
+                now_ns += 10U;
+                return current;
+            },
+        }
+    );
+
+    std::string streamed;
+    const auto first = session.generate_user_turn("Hello", [&](std::string_view delta) {
+        streamed += delta;
+    });
+    const auto second = session.generate_user_turn("Hello");
+
+    expect(streamed == "Hello", "Gemma2 measured turn stream mismatch");
+    expect(first.metrics.turn_accepted_ns == 100U, "Gemma2 measured turn accepted boundary mismatch");
+    expect(first.metrics.generation.prefill_started_ns == 110U, "Gemma2 measured prefill start mismatch");
+    expect(first.metrics.generation.prefill_completed_ns == 120U, "Gemma2 measured prefill completion mismatch");
+    expect(first.metrics.generation.first_token_selected_ns == 140U, "Gemma2 measured selection boundary mismatch");
+    expect(first.metrics.generation.decode_started_ns == 150U, "Gemma2 measured decode start mismatch");
+    expect(first.metrics.generation.decode_completed_ns == 160U, "Gemma2 measured decode completion mismatch");
+    expect(first.metrics.generation.generation_completed_ns == 170U, "Gemma2 measured runtime completion mismatch");
+    expect(first.metrics.first_visible_output_ns == 180U, "Gemma2 measured visible-output boundary mismatch");
+    expect(first.metrics.turn_completed_ns == 190U, "Gemma2 measured turn completion mismatch");
+    expect(first.metrics.generation.prefill_duration_ns == 30U, "Gemma2 measured prefill duration mismatch");
+    expect(first.metrics.generation.runtime_ttft_ns == 30U, "Gemma2 measured runtime TTFT mismatch");
+    expect(first.metrics.generation.decode_duration_ns == 10U, "Gemma2 measured decode duration mismatch");
+    expect(first.metrics.end_to_end_ttft_ns == 80U, "Gemma2 measured end-to-end TTFT mismatch");
+    expect(first.metrics.total_turn_duration_ns == 90U, "Gemma2 measured total turn duration mismatch");
+    expect(first.metrics.generation.newly_evaluated_prompt_token_count == first.appended_token_count,
+        "Gemma2 measured prompt token count mismatch");
+    expect(first.metrics.generation.generated_token_count == 1U, "Gemma2 measured generated count mismatch");
+    expect(first.metrics.generation.decode_token_count == 1U, "Gemma2 measured decode count mismatch");
+    expect(first.metrics.generation.stop_reason == Gemma2GenerationStopReason::token_limit,
+        "Gemma2 measured token-limit reason mismatch");
+    expect(first.metrics.selection_mode == Gemma2TokenSelectionMode::greedy,
+        "Gemma2 measured greedy mode mismatch");
+    expect(first.metrics.initial_cache_position == 0U && first.metrics.reused_cached_token_count == 0U,
+        "Gemma2 measured first-turn cache facts mismatch");
+    expect(first.metrics.resident_weight_byte_count > 0U, "Gemma2 measured resident weight bytes missing");
+    expect(first.metrics.resident_kv_cache_byte_count > 0U, "Gemma2 measured resident KV bytes missing");
+    expect(first.metrics.resident_scratch_byte_count > 0U, "Gemma2 measured resident scratch bytes missing");
+    expect(second.metrics.initial_cache_position == first.cached_token_count,
+        "Gemma2 measured cached-turn initial position mismatch");
+    expect(second.metrics.reused_cached_token_count == second.cache_position,
+        "Gemma2 measured reused cache count mismatch");
+    expect(second.metrics.generation.newly_evaluated_prompt_token_count == second.appended_token_count,
+        "Gemma2 measured cached turn should count only appended prompt tokens");
+}
+
 void test_gemma2_chat_session_streams_visible_text_before_return_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -694,6 +876,8 @@ void test_gemma2_chat_session_can_cancel_generation_when_available() {
     expect(streamed == "Hello", "Gemma2 chat cancelled turn stream mismatch");
     expect(turn.text == streamed, "Gemma2 chat cancelled turn final text mismatch");
     expect(turn.generated_token_ids.size() == 1, "Gemma2 chat cancelled turn token count mismatch");
+    expect(turn.metrics.generation.stop_reason == Gemma2GenerationStopReason::interrupted,
+        "Gemma2 chat cancelled turn measurement reason mismatch");
 }
 
 void test_gemma2_chat_session_stops_on_eos_when_available() {
@@ -721,6 +905,10 @@ void test_gemma2_chat_session_stops_on_eos_when_available() {
     expect(turn.text.empty(), "Gemma2 chat EOS stop text should be empty");
     expect(turn.stop_token_id.has_value() && *turn.stop_token_id == 1U, "Gemma2 chat EOS stop token mismatch");
     expect(turn.generated_token_ids.empty(), "Gemma2 chat EOS stop should not store visible tokens");
+    expect(turn.metrics.generation.stop_reason == Gemma2GenerationStopReason::stop_token,
+        "Gemma2 chat EOS measurement reason mismatch");
+    expect(!turn.metrics.end_to_end_ttft_ns.has_value(),
+        "Gemma2 chat invisible EOS should not invent end-to-end TTFT");
 }
 
 void test_gemma2_chat_session_stops_on_end_of_turn_when_available() {
@@ -782,6 +970,10 @@ void test_gemma2_chat_session_applies_reverse_stop_and_cleans_history_when_avail
         "Gemma2 chat reverse stop marker mismatch"
     );
     expect(first_turn.generated_token_ids.empty(), "Gemma2 chat reverse stop should not store stop token ids");
+    expect(first_turn.metrics.generation.stop_reason == Gemma2GenerationStopReason::reverse_stop,
+        "Gemma2 chat reverse-stop measurement reason mismatch");
+    expect(!first_turn.metrics.end_to_end_ttft_ns.has_value(),
+        "Gemma2 chat fully trimmed reverse stop should not invent end-to-end TTFT");
     expect(second_turn.cache_position > first_turn.cache_position, "Gemma2 chat reverse stop history should continue");
     expect(session.message_count() == 4, "Gemma2 chat reverse stop message count mismatch");
 }
@@ -895,6 +1087,11 @@ void test_gemma2_chat_session_trims_oldest_turns_and_rebuilds_retained_context_w
         expect(turn.cache_position == 0U, "Gemma2 chat rebuilt context should prefill from cache zero");
         expect(turn.generated_token_ids == std::vector<std::uint32_t> {5U}, "Gemma2 chat rebuilt output mismatch");
         expect(turn.cached_token_count <= session.context_length(), "Gemma2 chat rebuilt cache exceeds context");
+        expect(turn.metrics.rebuilt_context, "Gemma2 chat measured rebuild flag mismatch");
+        expect(turn.metrics.trimmed_turn_count == turn.trimmed_turn_count,
+            "Gemma2 chat measured trimmed-turn count mismatch");
+        expect(turn.metrics.initial_cache_position == 0U && turn.metrics.reused_cached_token_count == 0U,
+            "Gemma2 rebuilt measurement should not report reused stale KV");
         break;
     }
 
@@ -943,6 +1140,7 @@ void test_gemma2_chat_session_seeded_sampling_and_regen_are_reproducible_when_av
     );
     const TempBinaryFile first_model("tiny-gemma2-chat-sampled-a", std::span<const std::uint8_t>(bytes));
     const TempBinaryFile second_model("tiny-gemma2-chat-sampled-b", std::span<const std::uint8_t>(bytes));
+    std::uint64_t now_ns = 1000U;
     const auto options = Gemma2ChatSessionOptions {
         .max_new_tokens = 3,
         .sampler = TokenSamplerOptions {
@@ -951,6 +1149,11 @@ void test_gemma2_chat_session_seeded_sampling_and_regen_are_reproducible_when_av
             .top_p = 1.0F,
             .repetition_penalty = 1.1F,
             .seed = 42,
+        },
+        .clock = [&now_ns]() {
+            const auto current = now_ns;
+            now_ns += 10U;
+            return current;
         },
     };
     auto first_session = Gemma2ChatSession(read_file_backed_gguf_model(first_model.path()), options);
@@ -962,7 +1165,177 @@ void test_gemma2_chat_session_seeded_sampling_and_regen_are_reproducible_when_av
 
     expect(first.generated_token_ids == same_seed.generated_token_ids, "seeded sampled sessions mismatch");
     expect(first.generated_token_ids == regenerated.generated_token_ids, "sampled /regen should replay sampler state");
+    expect(first.metrics.selection_mode == Gemma2TokenSelectionMode::sampled,
+        "sampled turn measurement mode mismatch");
+    expect(first.metrics.generation.prefill_duration_ns == 30U,
+        "sampled turn deterministic prefill timing mismatch");
+    expect(first.metrics.generation.runtime_ttft_ns == 30U,
+        "sampled turn deterministic runtime TTFT mismatch");
+    expect(first.metrics.generation.decode_duration_ns == 50U,
+        "sampled turn deterministic selection/decode timing mismatch");
+    expect(first.metrics.generation.decode_token_count == 3U,
+        "sampled turn decode count mismatch");
     expect(first_session.message_count() == 2U, "sampled /regen should replace the previous response");
+}
+
+void test_generation_benchmark_runner_reuses_one_plan_and_records_all_cases_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(128),
+        tiny_gemma2_generate_cli_tensors_for_sampled_tokens()
+    );
+    const TempBinaryFile model("tiny-gemma2-benchmark-runner", std::span<const std::uint8_t>(bytes));
+    std::uint64_t now_ns = 100U;
+    const auto result = run_generation_benchmark(GenerationBenchmarkRunnerOptions {
+        .model_path = model.path().string(),
+        .prompt = "Hello",
+        .cached_second_prompt = "Hello",
+        .max_new_tokens = 1U,
+        .warmup_count = 1U,
+        .repetition_count = 2U,
+        .sampled_sampler = TokenSamplerOptions {
+            .temperature = 1.0F,
+            .top_k = 2U,
+            .top_p = 1.0F,
+            .repetition_penalty = 1.0F,
+            .seed = 42U,
+        },
+        .clock = [&now_ns]() {
+            const auto current = now_ns;
+            now_ns += 10U;
+            return current;
+        },
+    });
+
+    expect(result.setup.model_load_duration_ns == 10U, "benchmark runner load timing mismatch");
+    expect(result.setup.plan_creation_duration_ns == 10U, "benchmark runner plan timing mismatch");
+    expect(result.setup.resident_weight_byte_count > 0U, "benchmark runner resident weights missing");
+    expect(result.setup.resident_kv_cache_byte_count > 0U, "benchmark runner resident KV missing");
+    expect(result.setup.resident_scratch_byte_count > 0U, "benchmark runner resident scratch missing");
+    expect(result.repetitions.size() == 10U, "benchmark runner repetition record count mismatch");
+    expect(result.summaries.size() == 4U, "benchmark runner summary count mismatch");
+
+    std::size_t cold_count = 0;
+    std::size_t warmup_count = 0;
+    std::vector<const local_gguf_engine::benchmarks::GenerationBenchmarkRepetitionRecord*> sampled_measured;
+    for (const auto& record : result.repetitions) {
+        expect(record.setup.model_label == model.path().string(), "benchmark runner model label mismatch");
+        expect(record.setup.resident_weight_byte_count == result.setup.resident_weight_byte_count,
+            "benchmark runner should share one resident setup record");
+        if (record.benchmark_case == GenerationBenchmarkCase::cold_first_turn) {
+            ++cold_count;
+        }
+        if (record.warmup) {
+            ++warmup_count;
+        }
+        if (record.benchmark_case == GenerationBenchmarkCase::warm_first_turn) {
+            expect(record.turn.initial_cache_position == 0U,
+                "benchmark warm-first record should start at cache zero");
+        }
+        if (record.benchmark_case == GenerationBenchmarkCase::cached_second_turn) {
+            expect(record.turn.initial_cache_position > 0U && record.turn.reused_cached_token_count > 0U,
+                "benchmark cached-second record should reuse resident KV");
+            expect(record.turn.generation.newly_evaluated_prompt_token_count > 0U,
+                "benchmark cached-second record should evaluate an appended suffix");
+        }
+        if (record.benchmark_case == GenerationBenchmarkCase::seeded_sampled_turn) {
+            expect(record.turn.selection_mode == Gemma2TokenSelectionMode::sampled,
+                "benchmark sampled case mode mismatch");
+            expect(record.sampler.seed == 42U, "benchmark sampled case seed mismatch");
+            if (!record.warmup) {
+                sampled_measured.push_back(&record);
+            }
+        }
+    }
+    expect(cold_count == 1U, "benchmark runner should record one true cold first turn");
+    expect(warmup_count == 3U, "benchmark runner warmup count mismatch");
+    expect(sampled_measured.size() == 2U, "benchmark sampled measured count mismatch");
+    expect(sampled_measured[0]->generated_token_ids == sampled_measured[1]->generated_token_ids,
+        "benchmark seeded sampled repetitions should reproduce token ids");
+    expect(result.summaries[0].measured_repetitions.size() == 1U,
+        "benchmark cold summary count mismatch");
+    for (std::size_t index = 1U; index < result.summaries.size(); ++index) {
+        expect(result.summaries[index].measured_repetitions.size() == 2U,
+            "benchmark repeatable case summary should exclude warmup");
+    }
+}
+
+void test_runs_generation_benchmark_human_and_jsonl_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(128),
+        tiny_gemma2_generate_cli_tensors_for_sampled_tokens()
+    );
+    const TempBinaryFile model("tiny-gemma2-benchmark-cli", std::span<const std::uint8_t>(bytes));
+
+    std::ostringstream human;
+    std::ostringstream human_error;
+    const auto human_exit = run_generate_with_extra_arguments(
+        model.path(), {"--bench", "--warmup", "0", "--repetitions", "1", "--output", "human"},
+        human, human_error
+    );
+    expect(human_exit == EXIT_SUCCESS && human_error.str().empty(), "human benchmark CLI failed");
+    const auto human_text = human.str();
+    expect(human_text.starts_with("benchmark schema=1"), "human benchmark setup missing");
+    for (const auto case_name : {"cold_first_turn", "warm_first_turn", "cached_second_turn", "seeded_sampled_turn"}) {
+        expect(human_text.find(case_name) != std::string::npos, "human benchmark case missing");
+    }
+    expect(human_text.find("mean=") != std::string::npos
+        && human_text.find("median=") != std::string::npos
+        && human_text.find("stddev=") != std::string::npos,
+        "human benchmark statistics missing");
+
+    std::ostringstream jsonl;
+    std::ostringstream jsonl_error;
+    const auto jsonl_exit = run_generate_with_extra_arguments(
+        model.path(), {"--bench", "--warmup", "0", "--repetitions", "1", "--output", "jsonl"},
+        jsonl, jsonl_error
+    );
+    expect(jsonl_exit == EXIT_SUCCESS && jsonl_error.str().empty(), "JSONL benchmark CLI failed");
+    std::istringstream lines(jsonl.str());
+    std::string line;
+    std::size_t line_count = 0;
+    while (std::getline(lines, line)) {
+        ++line_count;
+        expect(looks_like_strict_json_object(line), "benchmark JSONL line is not a strict object");
+        expect(line.find("\"schema_version\":1") != std::string::npos, "benchmark JSONL schema missing");
+        expect(line.find("\"units\":") != std::string::npos, "benchmark JSONL units missing");
+    }
+    expect(line_count == 9U, "benchmark JSONL setup/repetition/summary line count mismatch");
+    expect(jsonl.str().find("benchmark schema=") == std::string::npos, "JSONL stdout contains human banner");
+    expect(jsonl.str().find("\"record_kind\":\"setup\"") != std::string::npos, "JSONL setup missing");
+    expect(jsonl.str().find("\"record_kind\":\"repetition\"") != std::string::npos, "JSONL repetition missing");
+    expect(jsonl.str().find("\"record_kind\":\"summary\"") != std::string::npos, "JSONL summary missing");
+}
+
+void test_rejects_invalid_generation_benchmark_cli_options_before_loading() {
+    const auto missing = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-benchmark.gguf";
+    const std::vector<std::pair<std::vector<std::string>, std::string_view>> cases {
+        {{"--warmup", "1"}, "benchmark options require --bench"},
+        {{"--bench", "--warmup", "-1"}, "--warmup requires a nonnegative integer"},
+        {{"--bench", "--repetitions", "0"}, "--repetitions requires a positive integer"},
+        {{"--bench", "--output", "csv"}, "--output must be human or jsonl"},
+        {{"--bench", "--backend", "cpu"}, "requires Metal backend"},
+        {{"--bench", "--temperature", "0"}, "requires positive temperature"},
+    };
+    for (const auto& [arguments, expected] : cases) {
+        std::ostringstream output;
+        std::ostringstream error;
+        const auto exit_code = run_generate_with_extra_arguments(missing, arguments, output, error);
+        expect(exit_code == EXIT_FAILURE, "invalid benchmark CLI options should fail");
+        expect(output.str().empty(), "invalid benchmark CLI options should not write stdout");
+        expect(error.str().find(expected) != std::string::npos, "invalid benchmark CLI error mismatch");
+    }
+
+    std::ostringstream output;
+    std::ostringstream error;
+    const auto mixed_exit = run_generate_chat_with_extra_arguments(missing, {"--bench"}, output, error);
+    expect(mixed_exit == EXIT_FAILURE && output.str().empty(), "benchmark/chat mixing should fail");
+    expect(error.str().find("--bench cannot be combined with --chat") != std::string::npos,
+        "benchmark/chat mixing error mismatch");
 }
 
 void test_runs_generate_gemma2_chat_loop_until_exit_when_available() {
@@ -983,9 +1356,10 @@ void test_runs_generate_gemma2_chat_loop_until_exit_when_available() {
 
     expect(exit_code == EXIT_SUCCESS, "generate Gemma2 chat CLI exit code mismatch");
     expect(
-        output.str() == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> \n> \n> ",
+        without_chat_timing_lines(output.str()) == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> \n> \n> ",
         "generate Gemma2 chat CLI output mismatch"
     );
+    expect(chat_timing_line_count(output.str()) == 2U, "generate Gemma2 chat timing line count mismatch");
     expect(error.str().empty(), "generate Gemma2 chat CLI should not write stderr");
 }
 
@@ -1007,9 +1381,10 @@ void test_runs_generate_gemma2_chat_streams_visible_tokens_when_available() {
 
     expect(exit_code == EXIT_SUCCESS, "generate Gemma2 chat stream CLI exit code mismatch");
     expect(
-        output.str() == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> HelloHello\n> ",
+        without_chat_timing_lines(output.str()) == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> HelloHello\n> ",
         "generate Gemma2 chat stream CLI output mismatch"
     );
+    expect(chat_timing_line_count(output.str()) == 1U, "streamed chat timing line count mismatch");
     expect(error.str().empty(), "generate Gemma2 chat stream CLI should not write stderr");
 }
 
@@ -1038,9 +1413,10 @@ void test_runs_generate_gemma2_chat_reverse_stop_when_available() {
 
     expect(exit_code == EXIT_SUCCESS, "generate Gemma2 chat reverse-stop CLI exit code mismatch");
     expect(
-        output.str() == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> \n> ",
+        without_chat_timing_lines(output.str()) == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> \n> ",
         "generate Gemma2 chat reverse-stop CLI output mismatch"
     );
+    expect(chat_timing_line_count(output.str()) == 1U, "reverse-stop chat timing line count mismatch");
     expect(error.str().empty(), "generate Gemma2 chat reverse-stop CLI should not write stderr");
 }
 
@@ -1080,6 +1456,7 @@ void test_runs_generate_gemma2_chat_gate3_commands_and_input_when_available() {
         ++generated_hello_count;
     }
     expect(generated_hello_count == 4U, "Gate 3 multiline, /read, and /regen generation count mismatch");
+    expect(chat_timing_line_count(text) == 4U, "Gate 3 successful turns should each print one timing line");
     expect(error.str().empty(), "generate Gemma2 Gate 3 CLI should not write stderr");
 }
 
@@ -1109,6 +1486,9 @@ void test_runs_generate_gemma2_chat_context_trim_and_recovers_from_impossible_tu
     expect(text.find("error: context: turn requires ") != std::string::npos, "context rejection prefix missing");
     expect(text.find("use a shorter prompt or lower --max-new-tokens") != std::string::npos, "context recovery guidance missing");
     expect(text.find("tokens: cached=") != std::string::npos, "REPL should continue after context rejection");
+    expect(chat_timing_line_count(text) == 4U, "context rejection should not print an extra timing line");
+    const auto timing_before_context = text.rfind("[ Prompt: ", text.find("context: dropped "));
+    expect(timing_before_context != std::string::npos, "context rebuild timing should precede rebuild notice");
     expect(error.str().empty(), "generate Gemma2 context CLI should not write stderr");
 }
 
@@ -1137,7 +1517,11 @@ void test_runs_generate_gemma2_chat_seeded_sampling_flags_when_available() {
     );
 
     expect(first_exit == EXIT_SUCCESS && second_exit == EXIT_SUCCESS, "sampled chat CLI exit mismatch");
-    expect(first_output.str() == second_output.str(), "seeded sampled CLI transcript mismatch");
+    expect(
+        without_chat_timing_lines(first_output.str()) == without_chat_timing_lines(second_output.str()),
+        "seeded sampled CLI transcript mismatch"
+    );
+    expect(chat_timing_line_count(first_output.str()) == 2U, "sampled turn and /regen timing line count mismatch");
     expect(first_error.str().empty() && second_error.str().empty(), "sampled chat CLI should not write stderr");
 }
 
@@ -1325,6 +1709,10 @@ void test_rejects_generate_invalid_backend_option() {
 
 const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     {
+        "formats chat timing line from runtime metrics",
+        test_formats_chat_timing_line_from_runtime_metrics,
+    },
+    {
         "runs generate Gemma2 default greedy when available",
         test_runs_generate_gemma2_default_greedy_when_available,
     },
@@ -1335,6 +1723,14 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     {
         "Gemma2 chat session appends second turn at nonzero cache when available",
         test_gemma2_chat_session_appends_second_turn_at_nonzero_cache_when_available,
+    },
+    {
+        "Gemma2 chat session appends after truncated output retokenizes differently when available",
+        test_gemma2_chat_session_appends_after_truncated_output_retokenizes_differently_when_available,
+    },
+    {
+        "Gemma2 chat session records deterministic turn metrics when available",
+        test_gemma2_chat_session_records_deterministic_turn_metrics_when_available,
     },
     {
         "Gemma2 chat session streams visible text before return when available",
@@ -1379,6 +1775,18 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     {
         "Gemma2 chat session seeded sampling and regen are reproducible when available",
         test_gemma2_chat_session_seeded_sampling_and_regen_are_reproducible_when_available,
+    },
+    {
+        "generation benchmark runner reuses one plan and records all cases when available",
+        test_generation_benchmark_runner_reuses_one_plan_and_records_all_cases_when_available,
+    },
+    {
+        "runs generation benchmark human and JSONL when available",
+        test_runs_generation_benchmark_human_and_jsonl_when_available,
+    },
+    {
+        "rejects invalid generation benchmark CLI options before loading",
+        test_rejects_invalid_generation_benchmark_cli_options_before_loading,
     },
     {
         "runs generate Gemma2 chat loop until exit when available",

@@ -10,11 +10,19 @@
 #include <string_view>
 #include <vector>
 
+namespace local_gguf_engine::engine {
+struct Gemma2ChatTurnMetrics;
+}
+
 namespace local_gguf_engine::frontends::cli {
 
 struct GenerateOptions {
     runtime::BackendKind backend = runtime::BackendKind::metal;
 };
+
+[[nodiscard]] std::string format_chat_timing_line(
+    const engine::Gemma2ChatTurnMetrics& metrics
+);
 
 [[nodiscard]] std::string generate_text_from_gguf_bytes(
     std::span<const std::uint8_t> bytes,

@@ -14,6 +14,7 @@
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -28,6 +29,22 @@ namespace local_gguf_engine::engine {
 namespace {
 
 constexpr float gemma2_rope_frequency_base = 10000.0F;
+
+[[nodiscard]] std::uint64_t monotonic_now_ns(const Gemma2MonotonicClock& clock) {
+    if (clock) {
+        return clock();
+    }
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+    ).count());
+}
+
+[[nodiscard]] std::uint64_t elapsed_ns(std::uint64_t start, std::uint64_t end) {
+    if (end < start) {
+        throw std::runtime_error("Gemma2 measurement clock moved backwards");
+    }
+    return end - start;
+}
 
 [[nodiscard]] std::uint32_t checked_prompt_token_count(std::span<const std::uint32_t> prompt_token_ids) {
     if (prompt_token_ids.size() > std::numeric_limits<std::uint32_t>::max()) {
@@ -2980,7 +2997,8 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_argmax_tokens_with_plan(
     std::uint32_t cache_position,
     std::size_t max_new_tokens,
     std::span<const std::uint32_t> stop_token_ids,
-    const Gemma2MetalGeneratedTokenCallback& on_token
+    const Gemma2MetalGeneratedTokenCallback& on_token,
+    const Gemma2MonotonicClock& clock
 ) {
     const auto select_token = [](const tensor::BackendBuffer& logits) {
         return tensor::ops::top_logit_f32_from_backend(logits).token;
@@ -2992,7 +3010,8 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_argmax_tokens_with_plan(
         max_new_tokens,
         stop_token_ids,
         select_token,
-        on_token
+        on_token,
+        clock
     );
 }
 
@@ -3003,7 +3022,8 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
     std::size_t max_new_tokens,
     std::span<const std::uint32_t> stop_token_ids,
     const Gemma2MetalTokenSelector& select_token,
-    const Gemma2MetalGeneratedTokenCallback& on_token
+    const Gemma2MetalGeneratedTokenCallback& on_token,
+    const Gemma2MonotonicClock& clock
 ) {
     if (!select_token) {
         throw std::invalid_argument("Gemma2 Metal sampled generation requires a token selector");
@@ -3016,6 +3036,10 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
     );
 
     const auto prompt_token_count = checked_prompt_token_count(prompt_token_ids);
+    Gemma2GenerationMetrics metrics {
+        .prefill_started_ns = monotonic_now_ns(clock),
+        .newly_evaluated_prompt_token_count = prompt_token_count,
+    };
     auto prefill = create_gemma2_metal_prefill_schedule(
         plan,
         prompt_token_count,
@@ -3028,29 +3052,50 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
         prompt_token_ids,
         embedding_scale
     );
+    metrics.prefill_completed_ns = monotonic_now_ns(clock);
     auto next_logits = std::move(prefill_logits.logits);
 
     std::vector<std::uint32_t> generated_token_ids;
     generated_token_ids.reserve(max_new_tokens);
     auto cached_token_count = prefill.total_kv_token_count();
     std::optional<std::uint32_t> stop_token_id;
+    bool selected_first_token = false;
 
     for (std::size_t sampled_count = 0; sampled_count < max_new_tokens; ++sampled_count) {
+        const auto selection_started_ns = monotonic_now_ns(clock);
         const auto selected_token_id = select_token(next_logits);
+        const auto selection_completed_ns = monotonic_now_ns(clock);
         if (selected_token_id >= plan.config().vocab_size) {
             throw std::invalid_argument("Gemma2 Metal token selector returned token outside vocabulary");
         }
+        if (!selected_first_token) {
+            selected_first_token = true;
+            metrics.first_token_selected_ns = selection_completed_ns;
+            metrics.prefill_duration_ns = elapsed_ns(metrics.prefill_started_ns, selection_completed_ns);
+            metrics.runtime_ttft_ns = metrics.prefill_duration_ns;
+        } else {
+            metrics.decode_duration_ns += elapsed_ns(selection_started_ns, selection_completed_ns);
+        }
         const auto decode = create_gemma2_metal_decode_schedule(plan, cached_token_count);
+        const auto decode_started_ns = monotonic_now_ns(clock);
+        if (metrics.decode_token_count == 0U) {
+            metrics.decode_started_ns = decode_started_ns;
+        }
         auto decode_step = run_gemma2_metal_decode_step(
             plan,
             decode,
             selected_token_id,
             embedding_scale
         );
+        const auto decode_completed_ns = monotonic_now_ns(clock);
+        metrics.decode_completed_ns = decode_completed_ns;
+        metrics.decode_duration_ns += elapsed_ns(decode_started_ns, decode_completed_ns);
+        ++metrics.decode_token_count;
         cached_token_count = decode.total_kv_token_count();
 
         if (token_is_stop(selected_token_id, stop_token_ids)) {
             stop_token_id = selected_token_id;
+            metrics.stop_reason = Gemma2GenerationStopReason::stop_token;
             break;
         }
 
@@ -3062,6 +3107,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
                 .cached_token_count = cached_token_count,
             });
             if (decision == Gemma2MetalTokenStreamDecision::stop_generation) {
+                metrics.stop_reason = Gemma2GenerationStopReason::callback_stop;
                 break;
             }
         }
@@ -3072,12 +3118,18 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
         next_logits = std::move(decode_step.logits.logits);
     }
 
+    metrics.generation_completed_ns = monotonic_now_ns(clock);
+    metrics.generated_token_count = checked_prompt_token_count(
+        std::span<const std::uint32_t>(generated_token_ids)
+    );
+
     return Gemma2MetalPlanGeneratedTokens {
         .generated_token_ids = std::move(generated_token_ids),
         .stop_token_id = stop_token_id,
         .prefill_cache_position = cache_position,
         .prefill_token_count = prompt_token_count,
         .cached_token_count = cached_token_count,
+        .metrics = metrics,
     };
 }
 

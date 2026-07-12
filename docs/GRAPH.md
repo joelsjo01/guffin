@@ -9,7 +9,7 @@ Do not read as history.
 2. Read `docs/ENGINE_PRINCIPLES.md`.
 3. Read `docs/NEXT_TASK.md`.
 4. Read this file only when choosing files to inspect or edit.
-5. Read `docs/CLI_MILESTONES.md` only for CLI roadmap/status updates.
+5. Read `docs/BENCH_MILESTONES.md` only for benchmark roadmap/status updates.
 6. Read `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` only for Gemma planning,
    architecture, performance, or upstream-comparison work.
 7. Then read only the relevant code/tests below.
@@ -18,6 +18,7 @@ Do not read as history.
 
 ```text
 src/frontends/cli
+  -> src/benchmarks
   -> src/engine
       -> src/model_format
       -> src/tokenizer
@@ -55,6 +56,7 @@ benchmark harness is not a live source route.
 | `src/model_format` | GGUF headers, metadata, tensor directories, payload views, payload-size validation | tokenizer logic, inference |
 | `src/tokenizer` | tokenizer metadata, encode/decode, Gemma prompt/chat formatting | model execution |
 | `src/runtime` | backend enum/error types shared across runtime layers | backend execution |
+| `src/benchmarks` | generation benchmark records, derived metrics, and statistics | inference execution, CLI formatting |
 | `src/engine/model.cpp` | engine model loading from GGUF model views, architecture boundary | raw GGUF parsing internals |
 | `src/engine/gemma2_model.*` | Gemma 2 config parsing and weight binding | backend upload/execution |
 | `src/engine/gemma2_metal_plan.*` | Metal resident weight upload, KV cache buffers, prefill/decode schedules | tokenization, CLI formatting |
@@ -186,7 +188,13 @@ Generation CLI, interactive CLI, and benchmark metrics:
 - `tests/frontends/cli/generate_cli_tests.cpp`
 - `docs/INTERACTIVE_CLI_RESEARCH.md` for interactive/conversation CLI planning
 - `docs/NEXT_TASK.md`
-- `docs/CLI_MILESTONES.md`
+- `docs/BENCH_MILESTONES.md`
+
+Generation benchmark records and statistics:
+
+- `include/local_gguf_engine/benchmarks/generation_benchmark.hpp`
+- `src/benchmarks/generation_benchmark.cpp`
+- `tests/benchmarks/generation_benchmark_tests.cpp`
 
 GGUF inspection CLI:
 
@@ -205,7 +213,7 @@ Project docs:
 
 - `docs/ENGINE_PRINCIPLES.md` for current project direction
 - `docs/NEXT_TASK.md` for the active baton
-- `docs/CLI_MILESTONES.md` for the CLI application roadmap
+- `docs/BENCH_MILESTONES.md` for the generation benchmark roadmap
 - `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` for historical/performance research
 - `docs/INTERACTIVE_CLI_RESEARCH.md` for interactive/conversation CLI planning
 - `docs/GRAPH.md` for this locator

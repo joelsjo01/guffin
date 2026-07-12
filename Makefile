@@ -7,6 +7,7 @@ GGUF_INSPECT_BINARY := $(BUILD_DIR)/gguf-inspect
 GENERATE_BINARY := $(BUILD_DIR)/local-gguf-generate
 
 ENGINE_SOURCES := \
+	src/benchmarks/generation_benchmark.cpp \
 	src/engine/gemma2_chat_session.cpp \
 	src/engine/gemma2_model.cpp \
 	src/engine/gemma2_metal_plan.cpp \
@@ -52,6 +53,7 @@ GENERATE_SOURCES := \
 	src/frontends/cli/generate_main.cpp
 
 TEST_INCLUDE_FLAGS := \
+	-Itests/benchmarks \
 	-Itests/engine \
 	-Itests/frontends/cli \
 	-Itests/model_format \
@@ -60,6 +62,7 @@ TEST_INCLUDE_FLAGS := \
 	-Itests/tokenizer
 
 TEST_SOURCES := \
+	tests/benchmarks/generation_benchmark_tests.cpp \
 	tests/engine/gemma2_metal_plan_tests.cpp \
 	tests/engine/engine_model_tests.cpp \
 	tests/engine/gemma2_reference_tests.cpp \

@@ -12,6 +12,32 @@
 
 namespace local_gguf_engine::engine {
 
+using Gemma2MonotonicClock = std::function<std::uint64_t()>;
+
+enum class Gemma2GenerationStopReason {
+    token_limit,
+    stop_token,
+    callback_stop,
+    reverse_stop,
+    interrupted,
+};
+
+struct Gemma2GenerationMetrics {
+    std::uint64_t prefill_started_ns = 0;
+    std::uint64_t prefill_completed_ns = 0;
+    std::uint64_t first_token_selected_ns = 0;
+    std::uint64_t decode_started_ns = 0;
+    std::uint64_t decode_completed_ns = 0;
+    std::uint64_t generation_completed_ns = 0;
+    std::uint64_t prefill_duration_ns = 0;
+    std::uint64_t decode_duration_ns = 0;
+    std::uint64_t runtime_ttft_ns = 0;
+    std::uint32_t newly_evaluated_prompt_token_count = 0;
+    std::uint32_t generated_token_count = 0;
+    std::uint32_t decode_token_count = 0;
+    Gemma2GenerationStopReason stop_reason = Gemma2GenerationStopReason::token_limit;
+};
+
 struct Gemma2MetalInputActivations {
     std::vector<std::uint32_t> token_ids;
     tensor::BackendBuffer hidden_states;
@@ -317,6 +343,7 @@ struct Gemma2MetalPlanGeneratedTokens {
     std::uint32_t prefill_cache_position = 0;
     std::uint32_t prefill_token_count = 0;
     std::uint32_t cached_token_count = 0;
+    Gemma2GenerationMetrics metrics;
 };
 
 enum class Gemma2MetalTokenStreamDecision {
@@ -399,7 +426,8 @@ create_gemma2_metal_scheduled_decode_layer_input(
     std::uint32_t cache_position,
     std::size_t max_new_tokens,
     std::span<const std::uint32_t> stop_token_ids,
-    const Gemma2MetalGeneratedTokenCallback& on_token = {}
+    const Gemma2MetalGeneratedTokenCallback& on_token = {},
+    const Gemma2MonotonicClock& clock = {}
 );
 
 [[nodiscard]] Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
@@ -409,7 +437,8 @@ create_gemma2_metal_scheduled_decode_layer_input(
     std::size_t max_new_tokens,
     std::span<const std::uint32_t> stop_token_ids,
     const Gemma2MetalTokenSelector& select_token,
-    const Gemma2MetalGeneratedTokenCallback& on_token = {}
+    const Gemma2MetalGeneratedTokenCallback& on_token = {},
+    const Gemma2MonotonicClock& clock = {}
 );
 
 }  // namespace local_gguf_engine::engine

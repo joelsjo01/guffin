@@ -1,5 +1,6 @@
 #include "local_gguf_engine/frontends/cli/generate.hpp"
 
+#include "local_gguf_engine/benchmarks/generation_benchmark.hpp"
 #include "local_gguf_engine/engine/gemma2_chat_session.hpp"
 #include "local_gguf_engine/engine/gemma2_model.hpp"
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
@@ -16,11 +17,13 @@
 #include <csignal>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <istream>
 #include <limits>
 #include <optional>
 #include <ostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -41,6 +44,13 @@ using engine::generate_gemma2_metal_argmax_tokens;
 using engine::load_engine_model_from_gguf;
 using engine::ModelArchitecture;
 using engine::model_architecture_name;
+using benchmarks::GenerationBenchmarkRunResult;
+using benchmarks::GenerationBenchmarkRunnerOptions;
+using benchmarks::GenerationBenchmarkStatistics;
+using benchmarks::generation_benchmark_case_name;
+using benchmarks::generation_benchmark_generation_tokens_per_second;
+using benchmarks::generation_benchmark_prompt_tokens_per_second;
+using benchmarks::run_generation_benchmark;
 using model_format::GGUFReadError;
 using model_format::read_file_backed_gguf_model;
 using model_format::read_gguf_model_view;
@@ -58,6 +68,25 @@ struct EncodedGeneratePrompt {
     PromptFormatResult formatted_prompt;
     std::vector<std::uint32_t> token_ids;
 };
+
+[[nodiscard]] std::string format_tokens_per_second(
+    std::uint32_t token_count,
+    std::uint64_t duration_ns
+) {
+    if (token_count == 0U || duration_ns == 0U) {
+        return "n/a";
+    }
+
+    const auto rate = static_cast<double>(token_count) * 1.0e9
+        / static_cast<double>(duration_ns);
+    if (!std::isfinite(rate)) {
+        return "n/a";
+    }
+
+    std::ostringstream formatted;
+    formatted << std::fixed << std::setprecision(1) << rate << " t/s";
+    return formatted.str();
+}
 
 volatile std::sig_atomic_t g_chat_interrupt_count = 0;
 
@@ -92,6 +121,7 @@ private:
 void write_generate_usage(std::ostream& error) {
     error << "usage: local-gguf-generate <model.gguf> <prompt> <max-new-tokens>"
           << " [--greedy] [--backend cpu|metal]"
+          << " [--bench --warmup N --repetitions N --output human|jsonl]"
           << '\n'
           << "       local-gguf-generate <model.gguf> --chat --max-new-tokens <N>"
           << " [--greedy | --temperature T [--top-k K] [--top-p P]"
@@ -167,6 +197,25 @@ void write_generate_usage(std::ostream& error) {
     return true;
 }
 
+[[nodiscard]] bool parse_nonnegative_size(std::string_view text, std::size_t& value) noexcept {
+    if (text.empty()) {
+        return false;
+    }
+    std::size_t parsed = 0;
+    for (const auto character : text) {
+        if (character < '0' || character > '9') {
+            return false;
+        }
+        const auto digit = static_cast<std::size_t>(character - '0');
+        if (parsed > (std::numeric_limits<std::size_t>::max() - digit) / 10U) {
+            return false;
+        }
+        parsed = parsed * 10U + digit;
+    }
+    value = parsed;
+    return true;
+}
+
 [[nodiscard]] bool parse_u64(std::string_view text, std::uint64_t& value) noexcept {
     if (text.empty()) {
         return false;
@@ -198,17 +247,68 @@ void write_generate_usage(std::ostream& error) {
     return false;
 }
 
+enum class BenchmarkOutputFormat { human, jsonl };
+
+struct ParsedGenerateCommand {
+    GenerateOptions options;
+    bool benchmark = false;
+    bool benchmark_option_seen = false;
+    std::size_t warmup_count = 1U;
+    std::size_t repetition_count = 5U;
+    BenchmarkOutputFormat output_format = BenchmarkOutputFormat::human;
+    TokenSamplerOptions sampled_sampler {
+        .temperature = 0.8F,
+        .top_k = 40U,
+        .top_p = 0.95F,
+        .repetition_penalty = 1.0F,
+        .seed = 42U,
+    };
+};
+
 [[nodiscard]] bool parse_generate_options(
     int argc,
     const char* const* argv,
     int start_index,
-    GenerateOptions& options,
+    ParsedGenerateCommand& command,
     std::ostream& error
 ) {
     for (int index = start_index; index < argc; ++index) {
         const std::string_view option(argv[index]);
         if (option == "--greedy") {
             continue;
+        } else if (option == "--bench") {
+            command.benchmark = true;
+        } else if (option == "--warmup" || option == "--repetitions") {
+            command.benchmark_option_seen = true;
+            if (index + 1 >= argc) {
+                error << "error: " << option << " requires a value\n";
+                return false;
+            }
+            std::size_t value = 0;
+            const auto valid = option == "--warmup"
+                ? parse_nonnegative_size(argv[index + 1], value)
+                : parse_positive_size(argv[index + 1], value);
+            if (!valid) {
+                error << "error: " << option << " requires "
+                      << (option == "--warmup" ? "a nonnegative" : "a positive") << " integer\n";
+                return false;
+            }
+            if (option == "--warmup") command.warmup_count = value;
+            else command.repetition_count = value;
+            ++index;
+        } else if (option == "--output") {
+            command.benchmark_option_seen = true;
+            if (index + 1 >= argc) {
+                error << "error: --output requires a value\n";
+                return false;
+            }
+            const std::string_view value(argv[++index]);
+            if (value == "human") command.output_format = BenchmarkOutputFormat::human;
+            else if (value == "jsonl") command.output_format = BenchmarkOutputFormat::jsonl;
+            else {
+                error << "error: --output must be human or jsonl\n";
+                return false;
+            }
         } else if (option == "--backend") {
             if (index + 1 >= argc) {
                 write_generate_usage(error);
@@ -223,7 +323,35 @@ void write_generate_usage(std::ostream& error) {
                 return false;
             }
 
-            options.backend = backend;
+            command.options.backend = backend;
+            ++index;
+        } else if (option == "--temperature" || option == "--top-p" || option == "--repeat-penalty") {
+            command.benchmark_option_seen = true;
+            if (index + 1 >= argc) {
+                error << "error: " << option << " requires a value\n";
+                return false;
+            }
+            float value = 0.0F;
+            if (!parse_float(argv[++index], value)) {
+                error << "error: " << option << " requires a finite number\n";
+                return false;
+            }
+            if (option == "--temperature") command.sampled_sampler.temperature = value;
+            else if (option == "--top-p") command.sampled_sampler.top_p = value;
+            else command.sampled_sampler.repetition_penalty = value;
+        } else if (option == "--top-k") {
+            command.benchmark_option_seen = true;
+            if (index + 1 >= argc || !parse_positive_size(argv[index + 1], command.sampled_sampler.top_k)) {
+                error << "error: --top-k requires a positive integer\n";
+                return false;
+            }
+            ++index;
+        } else if (option == "--seed") {
+            command.benchmark_option_seen = true;
+            if (index + 1 >= argc || !parse_u64(argv[index + 1], command.sampled_sampler.seed)) {
+                error << "error: --seed requires an unsigned integer\n";
+                return false;
+            }
             ++index;
         } else {
             write_generate_usage(error);
@@ -231,7 +359,10 @@ void write_generate_usage(std::ostream& error) {
             return false;
         }
     }
-
+    if (!command.benchmark && command.benchmark_option_seen) {
+        error << "error: benchmark options require --bench\n";
+        return false;
+    }
     return true;
 }
 
@@ -246,6 +377,13 @@ void write_generate_usage(std::ostream& error) {
         }
     }
 
+    return false;
+}
+
+[[nodiscard]] bool argv_has_option(int argc, const char* const* argv, std::string_view wanted) noexcept {
+    for (int index = 2; index < argc; ++index) {
+        if (std::string_view(argv[index]) == wanted) return true;
+    }
     return false;
 }
 
@@ -584,6 +722,7 @@ int run_generate_chat(
             continue;
         }
         output << '\n';
+        output << format_chat_timing_line(turn->metrics) << '\n';
         if (turn->rebuilt_context) {
             output << "context: dropped " << turn->trimmed_turn_count
                    << " oldest turn(s) and rebuilt retained KV\n";
@@ -594,7 +733,198 @@ int run_generate_chat(
     }
 }
 
+[[nodiscard]] std::string_view backend_name(BackendKind backend) noexcept {
+    return backend == BackendKind::metal ? "metal" : "cpu";
+}
+
+[[nodiscard]] std::string_view selection_mode_name(engine::Gemma2TokenSelectionMode mode) noexcept {
+    return mode == engine::Gemma2TokenSelectionMode::greedy ? "greedy" : "sampled";
+}
+
+[[nodiscard]] std::string_view stop_reason_name(engine::Gemma2GenerationStopReason reason) noexcept {
+    switch (reason) {
+        case engine::Gemma2GenerationStopReason::token_limit: return "token_limit";
+        case engine::Gemma2GenerationStopReason::stop_token: return "stop_token";
+        case engine::Gemma2GenerationStopReason::callback_stop: return "callback_stop";
+        case engine::Gemma2GenerationStopReason::reverse_stop: return "reverse_stop";
+        case engine::Gemma2GenerationStopReason::interrupted: return "interrupted";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] std::string json_string(std::string_view value) {
+    std::ostringstream out;
+    out << '"';
+    for (const auto character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        switch (character) {
+            case '"': out << "\\\""; break;
+            case '\\': out << "\\\\"; break;
+            case '\b': out << "\\b"; break;
+            case '\f': out << "\\f"; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (byte < 0x20U) {
+                    out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                        << static_cast<unsigned int>(byte) << std::dec << std::setfill(' ');
+                } else {
+                    out << character;
+                }
+        }
+    }
+    out << '"';
+    return out.str();
+}
+
+[[nodiscard]] std::string json_optional_u64(std::optional<std::uint64_t> value) {
+    return value.has_value() ? std::to_string(*value) : "null";
+}
+
+[[nodiscard]] std::string json_optional_double(std::optional<double> value) {
+    if (!value.has_value() || !std::isfinite(*value)) return "null";
+    std::ostringstream out;
+    out << std::setprecision(17) << *value;
+    return out.str();
+}
+
+void write_json_statistics(std::ostream& output, const GenerationBenchmarkStatistics& stats) {
+    output << "{\"count\":" << stats.sample_count
+           << ",\"mean\":" << json_optional_double(stats.mean)
+           << ",\"median\":" << json_optional_double(stats.median)
+           << ",\"min\":" << json_optional_double(stats.minimum)
+           << ",\"max\":" << json_optional_double(stats.maximum)
+           << ",\"stddev\":" << json_optional_double(stats.sample_standard_deviation) << '}';
+}
+
+void write_benchmark_human(std::ostream& output, const GenerationBenchmarkRunResult& result) {
+    output << "benchmark schema=" << result.setup.schema_version
+           << " model=" << result.setup.model_label << " backend=" << backend_name(result.setup.backend) << '\n';
+    output << "setup load_ns=" << json_optional_u64(result.setup.model_load_duration_ns)
+           << " plan_ns=" << json_optional_u64(result.setup.plan_creation_duration_ns)
+           << " weights_bytes=" << result.setup.resident_weight_byte_count
+           << " kv_bytes=" << result.setup.resident_kv_cache_byte_count
+           << " scratch_bytes=" << result.setup.resident_scratch_byte_count << '\n';
+    for (const auto& record : result.repetitions) {
+        output << (record.warmup ? "warmup" : "repetition")
+               << " case=" << generation_benchmark_case_name(record.benchmark_case)
+               << " index=" << record.repetition_index
+               << " mode=" << selection_mode_name(record.turn.selection_mode)
+               << " seed=" << record.sampler.seed
+               << " prompt_tokens=" << record.turn.generation.newly_evaluated_prompt_token_count
+               << " prompt_tps=" << json_optional_double(generation_benchmark_prompt_tokens_per_second(record))
+               << " generated_tokens=" << record.turn.generation.generated_token_count
+               << " generation_tps=" << json_optional_double(generation_benchmark_generation_tokens_per_second(record))
+               << " runtime_ttft_ns=" << record.turn.generation.runtime_ttft_ns
+               << " e2e_ttft_ns=" << json_optional_u64(record.turn.end_to_end_ttft_ns)
+               << " total_ns=" << record.turn.total_turn_duration_ns
+               << " stop=" << stop_reason_name(record.turn.generation.stop_reason)
+               << " cache=" << record.turn.initial_cache_position
+               << " reused=" << record.turn.reused_cached_token_count
+               << " rebuilt=" << (record.turn.rebuilt_context ? "true" : "false") << '\n';
+    }
+    const auto write_stat = [&](std::string_view case_name, std::string_view metric, const auto& stats) {
+        output << "summary case=" << case_name << " metric=" << metric
+               << " count=" << stats.sample_count
+               << " mean=" << json_optional_double(stats.mean)
+               << " median=" << json_optional_double(stats.median)
+               << " min=" << json_optional_double(stats.minimum)
+               << " max=" << json_optional_double(stats.maximum)
+               << " stddev=" << json_optional_double(stats.sample_standard_deviation) << '\n';
+    };
+    for (const auto& summary : result.summaries) {
+        const auto name = generation_benchmark_case_name(summary.benchmark_case);
+        write_stat(name, "prefill_ns", summary.prefill_duration_ns);
+        write_stat(name, "prompt_tps", summary.prompt_tokens_per_second);
+        write_stat(name, "decode_ns", summary.decode_duration_ns);
+        write_stat(name, "generation_tps", summary.generation_tokens_per_second);
+        write_stat(name, "runtime_ttft_ns", summary.runtime_ttft_ns);
+        write_stat(name, "e2e_ttft_ns", summary.end_to_end_ttft_ns);
+        write_stat(name, "total_ns", summary.total_turn_duration_ns);
+    }
+}
+
+void write_benchmark_jsonl(std::ostream& output, const GenerationBenchmarkRunResult& result) {
+    const auto units = "\"units\":{\"duration\":\"ns\",\"throughput\":\"tokens_per_second\",\"memory\":\"bytes\"}";
+    output << "{\"schema_version\":" << result.setup.schema_version
+           << ",\"record_kind\":\"setup\",\"model\":" << json_string(result.setup.model_label)
+           << ",\"backend\":" << json_string(backend_name(result.setup.backend))
+           << ",\"model_load_ns\":" << json_optional_u64(result.setup.model_load_duration_ns)
+           << ",\"plan_creation_ns\":" << json_optional_u64(result.setup.plan_creation_duration_ns)
+           << ",\"resident_weight_bytes\":" << result.setup.resident_weight_byte_count
+           << ",\"resident_kv_bytes\":" << result.setup.resident_kv_cache_byte_count
+           << ",\"resident_scratch_bytes\":" << result.setup.resident_scratch_byte_count
+           << ',' << units << "}\n";
+    for (const auto& record : result.repetitions) {
+        output << "{\"schema_version\":" << record.schema_version
+               << ",\"record_kind\":\"repetition\",\"case\":" << json_string(generation_benchmark_case_name(record.benchmark_case))
+               << ",\"warmup\":" << (record.warmup ? "true" : "false")
+               << ",\"index\":" << record.repetition_index
+               << ",\"model\":" << json_string(record.setup.model_label)
+               << ",\"backend\":" << json_string(backend_name(record.setup.backend))
+               << ",\"mode\":" << json_string(selection_mode_name(record.turn.selection_mode))
+               << ",\"seed\":" << record.sampler.seed << ",\"temperature\":" << record.sampler.temperature
+               << ",\"top_k\":" << record.sampler.top_k << ",\"top_p\":" << record.sampler.top_p
+               << ",\"repeat_penalty\":" << record.sampler.repetition_penalty
+               << ",\"prompt_tokens\":" << record.turn.generation.newly_evaluated_prompt_token_count
+               << ",\"reused_tokens\":" << record.turn.reused_cached_token_count
+               << ",\"prefill_ns\":" << record.turn.generation.prefill_duration_ns
+               << ",\"prompt_tps\":" << json_optional_double(generation_benchmark_prompt_tokens_per_second(record))
+               << ",\"generated_tokens\":" << record.turn.generation.generated_token_count
+               << ",\"decode_tokens\":" << record.turn.generation.decode_token_count
+               << ",\"decode_ns\":" << record.turn.generation.decode_duration_ns
+               << ",\"generation_tps\":" << json_optional_double(generation_benchmark_generation_tokens_per_second(record))
+               << ",\"runtime_ttft_ns\":" << record.turn.generation.runtime_ttft_ns
+               << ",\"e2e_ttft_ns\":" << json_optional_u64(record.turn.end_to_end_ttft_ns)
+               << ",\"total_ns\":" << record.turn.total_turn_duration_ns
+               << ",\"stop_reason\":" << json_string(stop_reason_name(record.turn.generation.stop_reason))
+               << ",\"initial_cache_position\":" << record.turn.initial_cache_position
+               << ",\"trimmed_turns\":" << record.turn.trimmed_turn_count
+               << ",\"rebuilt_context\":" << (record.turn.rebuilt_context ? "true" : "false")
+               << ",\"resident_weight_bytes\":" << record.turn.resident_weight_byte_count
+               << ",\"resident_kv_bytes\":" << record.turn.resident_kv_cache_byte_count
+               << ",\"resident_scratch_bytes\":" << record.turn.resident_scratch_byte_count
+               << ",\"stop_token_id\":" << json_optional_u64(record.stop_token_id)
+               << ",\"generated_token_ids\":[";
+        for (std::size_t index = 0; index < record.generated_token_ids.size(); ++index) {
+            if (index != 0U) output << ',';
+            output << record.generated_token_ids[index];
+        }
+        output << ']'
+               << ',' << units << "}\n";
+    }
+    for (const auto& summary : result.summaries) {
+        output << "{\"schema_version\":" << summary.schema_version
+               << ",\"record_kind\":\"summary\",\"case\":" << json_string(generation_benchmark_case_name(summary.benchmark_case))
+               << ",\"model\":" << json_string(result.setup.model_label)
+               << ",\"backend\":" << json_string(backend_name(result.setup.backend))
+               << ",\"prefill_ns\":"; write_json_statistics(output, summary.prefill_duration_ns);
+        output << ",\"prompt_tps\":"; write_json_statistics(output, summary.prompt_tokens_per_second);
+        output << ",\"decode_ns\":"; write_json_statistics(output, summary.decode_duration_ns);
+        output << ",\"generation_tps\":"; write_json_statistics(output, summary.generation_tokens_per_second);
+        output << ",\"runtime_ttft_ns\":"; write_json_statistics(output, summary.runtime_ttft_ns);
+        output << ",\"e2e_ttft_ns\":"; write_json_statistics(output, summary.end_to_end_ttft_ns);
+        output << ",\"total_ns\":"; write_json_statistics(output, summary.total_turn_duration_ns);
+        output << ',' << units << "}\n";
+    }
+}
+
 }  // namespace
+
+std::string format_chat_timing_line(const engine::Gemma2ChatTurnMetrics& metrics) {
+    return "[ Prompt: "
+        + format_tokens_per_second(
+            metrics.generation.newly_evaluated_prompt_token_count,
+            metrics.generation.prefill_duration_ns
+        )
+        + " | Generation: "
+        + format_tokens_per_second(
+            metrics.generation.decode_token_count,
+            metrics.generation.decode_duration_ns
+        )
+        + " ]";
+}
 
 std::string generate_text_from_gguf_bytes(
     std::span<const std::uint8_t> bytes,
@@ -632,6 +962,10 @@ int run_generate(
     }
 
     if (argv_requests_chat(argc, argv)) {
+        if (argv_has_option(argc, argv, "--bench")) {
+            error << "error: --bench cannot be combined with --chat\n";
+            return 1;
+        }
         ParsedChatCommand command;
         if (!parse_chat_command(argc, argv, command, error)) {
             return 1;
@@ -669,14 +1003,28 @@ int run_generate(
         return 1;
     }
 
-    GenerateOptions options {};
-    if (!parse_generate_options(argc, argv, 4, options, error)) {
+    ParsedGenerateCommand command;
+    if (!parse_generate_options(argc, argv, 4, command, error)) {
         return 1;
     }
 
     try {
+        if (command.benchmark) {
+            const auto result = run_generation_benchmark(GenerationBenchmarkRunnerOptions {
+                .model_path = argv[1],
+                .prompt = argv[2],
+                .max_new_tokens = max_new_tokens,
+                .warmup_count = command.warmup_count,
+                .repetition_count = command.repetition_count,
+                .backend = command.options.backend,
+                .sampled_sampler = command.sampled_sampler,
+            });
+            if (command.output_format == BenchmarkOutputFormat::human) write_benchmark_human(output, result);
+            else write_benchmark_jsonl(output, result);
+            return 0;
+        }
         const auto file_model = read_file_backed_gguf_model(argv[1]);
-        output << generate_text_from_gguf_model_view(file_model.view(), argv[2], max_new_tokens, options)
+        output << generate_text_from_gguf_model_view(file_model.view(), argv[2], max_new_tokens, command.options)
                << '\n';
         return 0;
     } catch (const GGUFReadError& read_error) {

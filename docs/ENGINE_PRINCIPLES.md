@@ -62,25 +62,26 @@ short comment before a tricky block over many line-by-line comments.
 
 ## Current Gemma State
 
-See `docs/CLI_MILESTONES.md` for the CLI application route map and status. The
-core Metal path is no longer a checklist of missing pieces; it is a working
-greedy path that now needs a persistent llama.cpp-style chat application on top
-of the engine-owned session/runtime state.
+See `docs/BENCH_MILESTONES.md` for the current benchmark roadmap. The core
+Metal path and persistent chat frontend are working; the next focus is a
+measurement foundation on the real engine-owned session/runtime path.
 
 - Gemma 2 metadata, tokenizer/chat template, Q4_K/Q6_K layout, and weight
   binding are in place.
 - Packed quantized weights, KV cache, scratch, prefill/decode schedules, logits,
   and greedy token selection are on the Metal path.
-- The active application blocker is Gate 1 from `docs/CLI_MILESTONES.md`: add
-  `local-gguf-generate --chat` with a persistent Gemma session and nonzero
-  cache-position append.
+- Persistent chat, streaming, commands, context management, greedy generation,
+  and seeded sampled generation are complete.
+- The six-gate benchmark foundation and real release Metal baseline are
+  complete. The active task is the first measured optimization: reduce shared
+  Metal decode synchronization/command-submission overhead.
 
 ## Benchmark Rule
 
 Generation performance must be measured on the real generation path.
 
-- Normal `local-gguf-generate` output should stay stable unless the CLI contract
-  intentionally changes.
+- Normal chat will permanently print compact prompt and generation throughput
+  after Gate 2 of the benchmark roadmap.
 - `--bench` should report metrics for the same command path.
 - Report prompt eval tokens/s, decode tokens/s, total tokens/s, and TTFT.
 - Keep benchmark reports under ignored `benchmarks/results`.

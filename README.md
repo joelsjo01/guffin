@@ -61,14 +61,20 @@ Run deterministic greedy/argmax generation on the Metal path:
 ./build/release/local-gguf-generate models/gemma-2-9b-Q4.gguf "What is the capital of France?" 32 --greedy
 ```
 
-Gemma generation is greedy by default, Metal-only, and accepts `--greedy` as an
-explicit no-op. The old Llama/SmolLM2 generation path, sampled CLI options, and
-`--debug-first-token` inspection path have been removed. Non-Gemma models may
-still be inspected with `gguf-inspect`, but `local-gguf-generate` now rejects
-them instead of routing through deleted CPU/Llama runtime code.
+Gemma generation is greedy by default and Metal-only. Persistent `--chat`
+supports seeded sampling controls and prints prompt/generation throughput after
+every successful response.
 
-The standalone `local-gguf-bench` scaffold has been retired. Rebuild benchmark
-metrics on the real `local-gguf-generate` command path.
+Benchmark the real generation path:
+
+```bash
+./build/release/local-gguf-generate models/gemma-2-9b-Q4.gguf \
+  "Explain why the sky is blue." 128 --backend metal --greedy \
+  --bench --warmup 1 --repetitions 5 --output human
+```
+
+Use `--output jsonl` and shell redirection for machine-readable results. The
+standalone `local-gguf-bench` scaffold remains retired.
 
 ## Status
 
@@ -79,5 +85,6 @@ Gemma 2 greedy Metal path only; CPU/Llama generation, sampled CLI generation,
 and the old standalone benchmark runner have been removed to keep the
 architecture pointed at the model-resident Metal runtime.
 
-The current runnable surfaces are `gguf-inspect` for concise local GGUF
-summaries and `local-gguf-generate` for narrow Gemma 2 generation.
+The current runnable surfaces are `gguf-inspect` for concise GGUF summaries and
+`local-gguf-generate` for Gemma 2 generation, persistent chat, and real-path
+benchmarking.
