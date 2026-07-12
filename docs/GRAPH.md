@@ -1,6 +1,6 @@
 # Project Graph
 
-Read when: locating code, tests, or benchmark surfaces for a task.
+Read when: locating code, tests, fixtures, or command surfaces for a task.
 Do not read as history.
 
 ## Read Rule
@@ -9,10 +9,9 @@ Do not read as history.
 2. Read `docs/ENGINE_PRINCIPLES.md`.
 3. Read `docs/NEXT_TASK.md`.
 4. Read this file only when choosing files to inspect or edit.
-5. Read `docs/GEMMA_Q4_MILESTONES.md` only when choosing or updating Gemma
-   roadmap status.
+5. Read `docs/CLI_MILESTONES.md` only for CLI roadmap/status updates.
 6. Read `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` only for Gemma planning,
-   architecture, or implementation work.
+   architecture, performance, or upstream-comparison work.
 7. Then read only the relevant code/tests below.
 
 ## Dependency Flow
@@ -22,46 +21,83 @@ src/frontends/cli
   -> src/engine
       -> src/model_format
       -> src/tokenizer
+      -> src/runtime
       -> src/tensor
+          -> src/tensor/ops
           -> src/tensor/backends/cpu_backend.*
-          -> src/tensor/backends/metal*
-
-benchmarks
-  -> src/engine / src/tensor / src/model_format
+          -> src/tensor/backends/metal_backend.*
+          -> src/tensor/backends/metal/*
 
 tests
   -> module under test
-  -> tests/support when shared fixtures are needed
+  -> tests/support
+  -> tests/fixtures
 ```
+
+Benchmark output lives under ignored `benchmarks/results`. The old standalone
+benchmark harness is not a live source route.
+
+## Build Entrypoints
+
+| Path | Use |
+| --- | --- |
+| `Makefile` | build graph for engine sources, CLIs, and tests |
+| `scripts/ci.sh` | repository check wrapper |
+| `src/frontends/cli/generate_main.cpp` | `local-gguf-generate` binary entry |
+| `src/frontends/cli/gguf_inspect_main.cpp` | `gguf-inspect` binary entry |
+| `tests/test_main.cpp` | single test binary registry |
 
 ## Module Ownership
 
 | Path | Owns | Does not own |
 | --- | --- | --- |
-| `src/model_format` | GGUF headers, metadata, tensor directories, payload views, payload-size validation | inference, tokenizer logic |
-| `src/tokenizer` | tokenizer metadata, encode/decode, prompt/chat formatting | model execution |
-| `src/engine` | model binding, model configs, generation orchestration, KV cache, sampling | CLI parsing, raw GGUF parsing internals, backend device setup |
-| `src/tensor` | tensor descriptors/storage, dtype/layout, typed access, quantization views, numerical ops | model-family policy |
-| `src/tensor/backends/cpu_backend.*` | CPU backend buffers and CPU backend fallback helpers | product-speed Gemma runtime |
-| `src/tensor/backends/metal*` | Metal availability, buffers, persistent context, kernels, backend execution helpers | CLI behavior, benchmark reporting |
+| `include/local_gguf_engine` | public API declarations matching source modules | implementation |
+| `src/model_format` | GGUF headers, metadata, tensor directories, payload views, payload-size validation | tokenizer logic, inference |
+| `src/tokenizer` | tokenizer metadata, encode/decode, Gemma prompt/chat formatting | model execution |
+| `src/runtime` | backend enum/error types shared across runtime layers | backend execution |
+| `src/engine/model.cpp` | engine model loading from GGUF model views, architecture boundary | raw GGUF parsing internals |
+| `src/engine/gemma2_model.*` | Gemma 2 config parsing and weight binding | backend upload/execution |
+| `src/engine/gemma2_metal_plan.*` | Metal resident weight upload, KV cache buffers, prefill/decode schedules | tokenization, CLI formatting |
+| `src/engine/gemma2_runtime.*` | Gemma Metal generation runtime shell, scheduled prefill/decode execution, greedy token loop | CLI parsing, raw GGUF parsing |
+| `src/engine/gemma2_reference.*` | tiny CPU/reference Gemma numerics for parity tests | product CPU runtime |
+| `src/engine/sampling.*` | top-logit helpers used by greedy/reference checks | stochastic sampling surface |
+| `src/tensor` | tensor descriptors/storage, dtype/layout, F16, quantization views, typed access, backend buffer wrapper | model-family policy |
+| `src/tensor/ops` | CPU/reference tensor ops and backend-dispatched op front doors | device setup |
+| `src/tensor/backends/cpu_backend.*` | CPU backend buffers and CPU backend execution helpers | product-speed Gemma path |
+| `src/tensor/backends/metal_backend.*` | public Metal backend bridge, availability, buffer copy/allocation | CLI behavior |
+| `src/tensor/backends/metal/*` | Metal context, buffers, kernels, Metal op implementations | benchmark reporting |
 | `src/frontends/cli` | command arguments, file IO, stdout/stderr formatting, error reporting | inference math |
-| `benchmarks` | local measurement harnesses and benchmark report formatting | production routing |
-| `tests` | deterministic coverage and fixtures | real model weights, benchmark artifacts |
+| `tests` | deterministic coverage and fixtures | real model weights, generated benchmark artifacts |
 
 ## Task Routes
 
-Gemma 2 architecture/model binding:
+Gemma 2 model binding:
 
 - `include/local_gguf_engine/engine/model.hpp`
+- `include/local_gguf_engine/engine/gemma2_model.hpp`
 - `src/engine/model.cpp`
+- `src/engine/gemma2_model.cpp`
 - `tests/engine/engine_model_tests.cpp`
-- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md`
 
-Gemma Q4 roadmap/status:
+Gemma Metal plan and resident schedules:
 
-- `docs/GEMMA_Q4_MILESTONES.md`
-- `docs/NEXT_TASK.md`
-- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md`
+- `include/local_gguf_engine/engine/gemma2_metal_plan.hpp`
+- `src/engine/gemma2_metal_plan.cpp`
+- `tests/engine/gemma2_metal_plan_tests.cpp`
+- `tests/support/tensor_test_support.*`
+
+Gemma Metal runtime and greedy generation loop:
+
+- `include/local_gguf_engine/engine/gemma2_runtime.hpp`
+- `src/engine/gemma2_runtime.cpp`
+- `tests/engine/gemma2_metal_plan_tests.cpp`
+- `tests/frontends/cli/generate_cli_tests.cpp`
+
+Gemma reference numerics:
+
+- `include/local_gguf_engine/engine/gemma2_reference.hpp`
+- `src/engine/gemma2_reference.cpp`
+- `tests/engine/gemma2_reference_tests.cpp`
 
 Gemma tokenizer/chat template:
 
@@ -70,61 +106,123 @@ Gemma tokenizer/chat template:
 - `tests/tokenizer/tokenizer_tests.cpp`
 - `tests/frontends/cli/generate_cli_tests.cpp`
 
-Q4_K/Q6_K GGUF and tensor layout:
+GGUF parser and payload views:
+
+- `include/local_gguf_engine/model_format/gguf_header.hpp`
+- `include/local_gguf_engine/model_format/gguf_metadata.hpp`
+- `include/local_gguf_engine/model_format/gguf_reader.hpp`
+- `include/local_gguf_engine/model_format/gguf_tensor.hpp`
+- `src/model_format/gguf_reader.cpp`
+- `tests/model_format/gguf_reader_tests.cpp`
+- `tests/fixtures/*.hex`
+
+GGUF tensor bridge and Q4_K/Q6_K layout:
 
 - `include/local_gguf_engine/model_format/gguf_tensor_bridge.hpp`
-- `src/model_format/gguf_reader.cpp`
 - `src/model_format/gguf_tensor_bridge.cpp`
 - `include/local_gguf_engine/tensor/dtype.hpp`
+- `include/local_gguf_engine/tensor/layout.hpp`
+- `include/local_gguf_engine/tensor/quantization.hpp`
 - `src/tensor/dtype.cpp`
 - `src/tensor/layout.cpp`
 - `src/tensor/quantization.cpp`
-- `tests/model_format/gguf_reader_tests.cpp`
 - `tests/model_format/gguf_tensor_bridge_tests.cpp`
 - `tests/tensor/tensor_tests.cpp`
 
-Packed quantized Metal matmul:
+Tensor descriptors, storage, and typed access:
 
-- `include/local_gguf_engine/tensor/ops/matmul.hpp`
-- `src/tensor/ops/matmul.cpp`
-- `src/tensor/backends/metal_backend.*`
-- `src/tensor/backends/metal/metal_context.*`
-- `src/tensor/backends/metal/metal_buffer.*`
-- `src/tensor/backends/metal/metal_tensor_ops.*`
+- `include/local_gguf_engine/tensor/tensor.hpp`
+- `include/local_gguf_engine/tensor/shape.hpp`
+- `include/local_gguf_engine/tensor/f16.hpp`
+- `include/local_gguf_engine/tensor/typed_access.hpp`
+- `include/local_gguf_engine/tensor/tensor_error.hpp`
+- `src/tensor/tensor.cpp`
+- `src/tensor/shape.cpp`
+- `src/tensor/f16.cpp`
+- `src/tensor/typed_access.cpp`
+- `src/tensor/tensor_error.cpp`
+- `tests/tensor/tensor_tests.cpp`
+
+Tensor ops and CPU/reference behavior:
+
+- `include/local_gguf_engine/tensor/ops/*.hpp`
+- `src/tensor/ops/*.cpp`
+- `src/tensor/ops/validation.hpp`
+- `tests/tensor/tensor_tests.cpp`
 - `tests/tensor/tensor_backend_tests.cpp`
 
-Model-resident Gemma execution:
+Backend buffers and residency:
 
-- `src/engine`
+- `include/local_gguf_engine/tensor/backend.hpp`
+- `include/local_gguf_engine/tensor/backend_buffer.hpp`
+- `src/tensor/backend.cpp`
 - `src/tensor/backend_buffer.mm`
+- `src/tensor/backends/cpu_backend.*`
+- `src/tensor/backends/metal_backend.*`
 - `src/tensor/backends/metal/metal_buffer.*`
-- `src/tensor/backends/metal/metal_tensor_ops.*`
-- future Gemma-specific engine/backend files if added
-- `tests/engine`
-- `tests/tensor`
+- `tests/tensor/tensor_backend_tests.cpp`
 
-Generation CLI and benchmark metrics:
+Metal kernels and backend-dispatched Metal ops:
+
+- `src/tensor/backends/metal/metal_context.*`
+- `src/tensor/backends/metal/metal_tensor_ops.*`
+- `src/tensor/backends/metal_backend.*`
+- `tests/tensor/tensor_backend_tests.cpp`
+- `tests/engine/gemma2_metal_plan_tests.cpp`
+
+Top-logit greedy selection:
+
+- `include/local_gguf_engine/engine/sampling.hpp`
+- `src/engine/sampling.cpp`
+- `src/tensor/backends/metal/metal_tensor_ops.*`
+- `tests/engine/sampling_tests.cpp`
+- `tests/tensor/tensor_backend_tests.cpp`
+
+Generation CLI, interactive CLI, and benchmark metrics:
 
 - `include/local_gguf_engine/frontends/cli/generate.hpp`
 - `src/frontends/cli/generate.cpp`
 - `src/frontends/cli/generate_main.cpp`
 - `tests/frontends/cli/generate_cli_tests.cpp`
-- future `--bench` report code should stay on the generate command path
+- `docs/INTERACTIVE_CLI_RESEARCH.md` for interactive/conversation CLI planning
+- `docs/NEXT_TASK.md`
+- `docs/CLI_MILESTONES.md`
 
-CLI inspection:
+GGUF inspection CLI:
 
 - `include/local_gguf_engine/frontends/cli/gguf_inspect.hpp`
 - `src/frontends/cli/gguf_inspect.cpp`
 - `src/frontends/cli/gguf_inspect_main.cpp`
 - `tests/frontends/cli/gguf_inspect_tests.cpp`
 
+Shared test fixtures:
+
+- `tests/support/test_support.*`
+- `tests/support/tensor_test_support.*`
+- `tests/fixtures/*.hex`
+
+Project docs:
+
+- `docs/ENGINE_PRINCIPLES.md` for current project direction
+- `docs/NEXT_TASK.md` for the active baton
+- `docs/CLI_MILESTONES.md` for the CLI application roadmap
+- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` for historical/performance research
+- `docs/INTERACTIVE_CLI_RESEARCH.md` for interactive/conversation CLI planning
+- `docs/GRAPH.md` for this locator
+
 ## Test Map
 
 | Change area | Tests |
 | --- | --- |
-| GGUF parser/layout | `tests/model_format` |
-| Tensor ops/dtypes/backends | `tests/tensor` |
-| Tokenizer/chat template | `tests/tokenizer`, plus CLI tests when prompt rendering changes |
-| Engine/model binding/generation | `tests/engine` |
-| CLI behavior | `tests/frontends/cli` |
-| Shared fixtures | `tests/support` |
+| GGUF parser/payload views | `tests/model_format/gguf_reader_tests.cpp` |
+| GGUF tensor bridge | `tests/model_format/gguf_tensor_bridge_tests.cpp` |
+| Tensor layout/dtypes/quantization/accessors | `tests/tensor/tensor_tests.cpp` |
+| Tensor ops/backends/Metal parity | `tests/tensor/tensor_backend_tests.cpp` |
+| Engine model binding | `tests/engine/engine_model_tests.cpp` |
+| Gemma Metal plan/runtime | `tests/engine/gemma2_metal_plan_tests.cpp` |
+| Gemma reference numerics | `tests/engine/gemma2_reference_tests.cpp` |
+| Greedy top-logit helpers | `tests/engine/sampling_tests.cpp`, `tests/tensor/tensor_backend_tests.cpp` |
+| Tokenizer/chat template | `tests/tokenizer/tokenizer_tests.cpp`, plus CLI tests when prompt rendering changes |
+| Generate CLI | `tests/frontends/cli/generate_cli_tests.cpp` |
+| Inspect CLI | `tests/frontends/cli/gguf_inspect_tests.cpp` |
+| Shared fixtures | `tests/support`, `tests/fixtures` |

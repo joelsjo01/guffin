@@ -5,6 +5,9 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <numeric>
+#include <random>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -98,6 +101,97 @@ void require_f32_logits(const TensorDescriptor& descriptor) {
 }
 
 }  // namespace
+
+TokenSampler::TokenSampler(TokenSamplerOptions options)
+    : options_(options), rng_(options.seed) {
+    if (!std::isfinite(options_.temperature) || options_.temperature < 0.0F) {
+        throw std::invalid_argument("sampling temperature must be finite and nonnegative");
+    }
+    if (!std::isfinite(options_.top_p) || options_.top_p <= 0.0F || options_.top_p > 1.0F) {
+        throw std::invalid_argument("sampling top_p must be in (0, 1]");
+    }
+    if (
+        !std::isfinite(options_.repetition_penalty)
+        || options_.repetition_penalty <= 0.0F
+    ) {
+        throw std::invalid_argument("sampling repetition_penalty must be finite and positive");
+    }
+}
+
+bool TokenSampler::is_greedy() const noexcept {
+    return options_.temperature == 0.0F;
+}
+
+std::uint32_t TokenSampler::sample(const TensorStorage& logits) {
+    auto candidates = collect_last_row_logits(logits);
+    if (candidates.empty()) {
+        throw std::invalid_argument("sampling logits vocabulary must not be empty");
+    }
+
+    for (auto& candidate : candidates) {
+        if (
+            options_.repetition_penalty != 1.0F
+            && std::find(token_history_.begin(), token_history_.end(), candidate.token)
+                != token_history_.end()
+        ) {
+            candidate.logit = candidate.logit < 0.0F
+                ? candidate.logit * options_.repetition_penalty
+                : candidate.logit / options_.repetition_penalty;
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), better_logit_candidate);
+    if (is_greedy()) {
+        return candidates.front().token;
+    }
+
+    if (options_.top_k > 0U && candidates.size() > options_.top_k) {
+        candidates.resize(options_.top_k);
+    }
+
+    const auto max_logit = candidates.front().logit;
+    std::vector<double> weights;
+    weights.reserve(candidates.size());
+    double total_weight = 0.0;
+    for (const auto& candidate : candidates) {
+        const auto weight = std::exp(
+            static_cast<double>(candidate.logit - max_logit)
+                / static_cast<double>(options_.temperature)
+        );
+        weights.push_back(weight);
+        total_weight += weight;
+    }
+
+    double retained_weight = 0.0;
+    std::size_t retained_count = 0;
+    do {
+        retained_weight += weights[retained_count];
+        ++retained_count;
+    } while (
+        retained_count < weights.size()
+        && retained_weight / total_weight < static_cast<double>(options_.top_p)
+    );
+    candidates.resize(retained_count);
+    weights.resize(retained_count);
+
+    std::uniform_real_distribution<double> distribution(0.0, retained_weight);
+    const auto draw = distribution(rng_);
+    double cumulative = 0.0;
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        cumulative += weights[index];
+        if (draw < cumulative) {
+            return candidates[index].token;
+        }
+    }
+    return candidates.back().token;
+}
+
+void TokenSampler::observe_tokens(std::span<const std::uint32_t> token_ids) {
+    token_history_.insert(token_history_.end(), token_ids.begin(), token_ids.end());
+}
+
+void TokenSampler::reset_history(std::span<const std::uint32_t> token_ids) {
+    token_history_.assign(token_ids.begin(), token_ids.end());
+}
 
 std::vector<TokenLogit> top_logit_tokens_f32(const TensorStorage& logits, std::size_t max_tokens) {
     auto candidates = collect_last_row_logits(logits);

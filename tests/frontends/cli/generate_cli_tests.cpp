@@ -1,12 +1,17 @@
 #include "generate_cli_tests.hpp"
 
+#include "local_gguf_engine/engine/gemma2_chat_session.hpp"
 #include "local_gguf_engine/frontends/cli/generate.hpp"
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
+#include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
+#include "tensor_test_support.hpp"
+
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <cstdlib>
@@ -25,6 +30,12 @@
 namespace {
 
 using local_gguf_engine::frontends::cli::run_generate;
+using local_gguf_engine::engine::Gemma2ChatSession;
+using local_gguf_engine::engine::Gemma2ChatContextError;
+using local_gguf_engine::engine::Gemma2ChatSessionOptions;
+using local_gguf_engine::engine::Gemma2ChatTurnOptions;
+using local_gguf_engine::engine::TokenSamplerOptions;
+using local_gguf_engine::model_format::read_file_backed_gguf_model;
 using local_gguf_engine::model_format::GGUFMetadataArray;
 using local_gguf_engine::model_format::GGUFMetadataEntry;
 using local_gguf_engine::model_format::GGUFMetadataValue;
@@ -43,6 +54,8 @@ using local_gguf_engine::tests::metadata_i32_array;
 using local_gguf_engine::tests::metadata_string;
 using local_gguf_engine::tests::metadata_string_array;
 using local_gguf_engine::tests::metadata_u32;
+using local_gguf_engine::tests::tensor_f16_gguf_matrix;
+using local_gguf_engine::tests::tensor_f32_vector;
 
 class TempBinaryFile final {
 public:
@@ -111,6 +124,85 @@ int run_generate_for_path_with_greedy(
         "--greedy",
     };
     return run_generate(5, argv, output, error);
+}
+
+int run_generate_chat_for_path(
+    const std::filesystem::path& path,
+    std::string_view max_new_tokens,
+    std::istream& input,
+    std::ostringstream& output,
+    std::ostringstream& error
+) {
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const std::string max_new_tokens_string(max_new_tokens);
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "--chat",
+        "--max-new-tokens",
+        max_new_tokens_string.c_str(),
+    };
+    return run_generate(5, argv, input, output, error);
+}
+
+int run_generate_chat_for_path_with_reverse_stop(
+    const std::filesystem::path& path,
+    std::string_view max_new_tokens,
+    std::string_view reverse_stop,
+    std::istream& input,
+    std::ostringstream& output,
+    std::ostringstream& error
+) {
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const std::string max_new_tokens_string(max_new_tokens);
+    const std::string reverse_stop_string(reverse_stop);
+    const char* argv[] = {
+        program.c_str(),
+        path_string.c_str(),
+        "--chat",
+        "--max-new-tokens",
+        max_new_tokens_string.c_str(),
+        "--reverse-prompt",
+        reverse_stop_string.c_str(),
+    };
+    return run_generate(7, argv, input, output, error);
+}
+
+int run_generate_chat_for_path_with_sampling(
+    const std::filesystem::path& path,
+    std::istream& input,
+    std::ostringstream& output,
+    std::ostringstream& error
+) {
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const char* argv[] = {
+        program.c_str(), path_string.c_str(), "--chat", "--max-new-tokens", "3",
+        "--temperature", "1", "--top-k", "2", "--top-p", "1",
+        "--repeat-penalty", "1.1", "--seed", "42",
+    };
+    return run_generate(15, argv, input, output, error);
+}
+
+int run_generate_chat_with_extra_arguments(
+    const std::filesystem::path& path,
+    const std::vector<std::string>& extra_arguments,
+    std::ostringstream& output,
+    std::ostringstream& error
+) {
+    std::vector<std::string> arguments {
+        "local-gguf-generate", path.string(), "--chat", "--max-new-tokens", "1",
+    };
+    arguments.insert(arguments.end(), extra_arguments.begin(), extra_arguments.end());
+    std::vector<const char*> argv;
+    argv.reserve(arguments.size());
+    for (const auto& argument : arguments) {
+        argv.push_back(argument.c_str());
+    }
+    std::istringstream input("/exit\n");
+    return run_generate(static_cast<int>(argv.size()), argv.data(), input, output, error);
 }
 
 void append_u8(std::vector<std::uint8_t>& bytes, std::uint8_t value) {
@@ -394,6 +486,85 @@ std::vector<TinyGGUFTensor> tiny_gemma2_generate_cli_tensors() {
     return tensors;
 }
 
+void replace_tiny_tensor(
+    std::vector<TinyGGUFTensor>& tensors,
+    std::string_view name,
+    const local_gguf_engine::tensor::TensorStorage& storage
+) {
+    for (auto& tensor : tensors) {
+        if (tensor.name != name) {
+            continue;
+        }
+
+        tensor.bytes.assign(storage.bytes().begin(), storage.bytes().end());
+        return;
+    }
+
+    throw TestFailure(std::string("missing tiny tensor fixture ") + std::string(name));
+}
+
+void insert_output_weight_tensor(
+    std::vector<TinyGGUFTensor>& tensors,
+    const local_gguf_engine::tensor::TensorStorage& storage
+) {
+    tensors.insert(
+        tensors.begin() + 2,
+        TinyGGUFTensor {
+            .name = "output.weight",
+            .dimensions = {256, 110},
+            .type_id = gguf_type_id_for_dtype(DType::f16),
+            .bytes = std::vector<std::uint8_t>(storage.bytes().begin(), storage.bytes().end()),
+        }
+    );
+}
+
+std::vector<TinyGGUFTensor> tiny_gemma2_generate_cli_tensors_for_forced_token(
+    std::uint32_t token_id
+) {
+    auto tensors = tiny_gemma2_generate_cli_tensors();
+
+    std::vector<float> embedding_values(256U * 110U, 0.0F);
+    for (std::uint32_t token = 0; token < 110U; ++token) {
+        embedding_values[token] = 1.0F;
+    }
+    const auto embedding = tensor_f16_gguf_matrix(
+        256,
+        110,
+        std::span<const float>(embedding_values)
+    );
+    replace_tiny_tensor(tensors, "token_embd.weight", embedding);
+
+    std::vector<float> output_norm_values(256U, 0.0F);
+    output_norm_values[0] = 1.0F;
+    const auto output_norm = tensor_f32_vector(std::span<const float>(output_norm_values));
+    replace_tiny_tensor(tensors, "output_norm.weight", output_norm);
+
+    std::vector<float> output_weight_values(256U * 110U, 0.0F);
+    output_weight_values[token_id] = 1.0F;
+    const auto output_weight = tensor_f16_gguf_matrix(
+        256,
+        110,
+        std::span<const float>(output_weight_values)
+    );
+    insert_output_weight_tensor(tensors, output_weight);
+
+    return tensors;
+}
+
+std::vector<TinyGGUFTensor> tiny_gemma2_generate_cli_tensors_for_sampled_tokens() {
+    auto tensors = tiny_gemma2_generate_cli_tensors_for_forced_token(5);
+    std::vector<float> output_weight_values(256U * 110U, 0.0F);
+    output_weight_values[5] = 0.25F;
+    output_weight_values[11] = 0.20F;
+    const auto output_weight = tensor_f16_gguf_matrix(
+        256,
+        110,
+        std::span<const float>(output_weight_values)
+    );
+    replace_tiny_tensor(tensors, "output.weight", output_weight);
+    return tensors;
+}
+
 std::vector<std::uint8_t> tiny_gemma2_generate_cli_gguf_bytes() {
     return write_tiny_gguf_bytes(tiny_gemma2_generate_cli_metadata(), tiny_gemma2_generate_cli_tensors());
 }
@@ -430,6 +601,572 @@ void test_runs_generate_gemma2_greedy_when_available() {
     expect(exit_code == EXIT_SUCCESS, "generate Gemma2 greedy exit code mismatch");
     expect(output.str() == "\n", "generate Gemma2 greedy output mismatch");
     expect(error.str().empty(), "generate Gemma2 greedy should not write stderr");
+}
+
+void test_gemma2_chat_session_appends_second_turn_at_nonzero_cache_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors()
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-session", std::span<const std::uint8_t>(bytes));
+    auto file_model = read_file_backed_gguf_model(model.path());
+    auto session = Gemma2ChatSession(
+        std::move(file_model),
+        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+    );
+
+    const auto first_turn = session.generate_user_turn("Hello");
+    const auto second_turn = session.generate_user_turn("Hello");
+
+    expect(first_turn.cache_position == 0, "Gemma2 chat first turn cache position mismatch");
+    expect(second_turn.cache_position > 0, "Gemma2 chat second turn should append at nonzero cache position");
+    expect(second_turn.appended_token_count > 0, "Gemma2 chat second turn should append prompt tokens");
+    expect(session.message_count() == 4, "Gemma2 chat session message count mismatch after two turns");
+}
+
+void test_gemma2_chat_session_streams_visible_text_before_return_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-stream-session", std::span<const std::uint8_t>(bytes));
+    auto file_model = read_file_backed_gguf_model(model.path());
+    auto session = Gemma2ChatSession(
+        std::move(file_model),
+        Gemma2ChatSessionOptions {.max_new_tokens = 2}
+    );
+
+    bool returned = false;
+    std::vector<std::string> chunks;
+    const auto turn = session.generate_user_turn("Hello", [&](std::string_view text_delta) {
+        expect(!returned, "Gemma2 chat stream callback should run before generate_user_turn returns");
+        chunks.push_back(std::string(text_delta));
+    });
+    returned = true;
+
+    expect(chunks.size() == 2, "Gemma2 chat stream chunk count mismatch");
+    expect(chunks[0] == "Hello", "Gemma2 chat first stream chunk mismatch");
+    expect(chunks[1] == "Hello", "Gemma2 chat second stream chunk mismatch");
+    expect(turn.text == "HelloHello", "Gemma2 chat streamed final text mismatch");
+    expect(turn.generated_token_ids.size() == 2, "Gemma2 chat streamed token count mismatch");
+}
+
+void test_gemma2_chat_session_can_cancel_generation_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-cancel-session", std::span<const std::uint8_t>(bytes));
+    auto file_model = read_file_backed_gguf_model(model.path());
+    auto session = Gemma2ChatSession(
+        std::move(file_model),
+        Gemma2ChatSessionOptions {.max_new_tokens = 3}
+    );
+
+    bool should_stop = false;
+    std::string streamed;
+    const auto turn = session.generate_user_turn(
+        "Hello",
+        Gemma2ChatTurnOptions {
+            .on_text_delta = [&](std::string_view text_delta) {
+                streamed += text_delta;
+                should_stop = true;
+            },
+            .should_stop = [&]() {
+                return should_stop;
+            },
+        }
+    );
+
+    expect(turn.interrupted, "Gemma2 chat cancelled turn should report interrupted");
+    expect(streamed == "Hello", "Gemma2 chat cancelled turn stream mismatch");
+    expect(turn.text == streamed, "Gemma2 chat cancelled turn final text mismatch");
+    expect(turn.generated_token_ids.size() == 1, "Gemma2 chat cancelled turn token count mismatch");
+}
+
+void test_gemma2_chat_session_stops_on_eos_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(1)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-eos-stop", std::span<const std::uint8_t>(bytes));
+    auto file_model = read_file_backed_gguf_model(model.path());
+    auto session = Gemma2ChatSession(
+        std::move(file_model),
+        Gemma2ChatSessionOptions {.max_new_tokens = 3}
+    );
+
+    std::string streamed;
+    const auto turn = session.generate_user_turn("Hello", [&](std::string_view text_delta) {
+        streamed += text_delta;
+    });
+
+    expect(streamed.empty(), "Gemma2 chat EOS stop should not stream visible text");
+    expect(turn.text.empty(), "Gemma2 chat EOS stop text should be empty");
+    expect(turn.stop_token_id.has_value() && *turn.stop_token_id == 1U, "Gemma2 chat EOS stop token mismatch");
+    expect(turn.generated_token_ids.empty(), "Gemma2 chat EOS stop should not store visible tokens");
+}
+
+void test_gemma2_chat_session_stops_on_end_of_turn_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(107)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-eot-stop", std::span<const std::uint8_t>(bytes));
+    auto file_model = read_file_backed_gguf_model(model.path());
+    auto session = Gemma2ChatSession(
+        std::move(file_model),
+        Gemma2ChatSessionOptions {.max_new_tokens = 3}
+    );
+
+    std::string streamed;
+    const auto turn = session.generate_user_turn("Hello", [&](std::string_view text_delta) {
+        streamed += text_delta;
+    });
+
+    expect(streamed.empty(), "Gemma2 chat EOT stop should not stream visible text");
+    expect(turn.text.empty(), "Gemma2 chat EOT stop text should be empty");
+    expect(turn.stop_token_id.has_value() && *turn.stop_token_id == 107U, "Gemma2 chat EOT stop token mismatch");
+    expect(turn.generated_token_ids.empty(), "Gemma2 chat EOT stop should not store visible tokens");
+}
+
+void test_gemma2_chat_session_applies_reverse_stop_and_cleans_history_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-reverse-stop", std::span<const std::uint8_t>(bytes));
+    auto file_model = read_file_backed_gguf_model(model.path());
+    auto session = Gemma2ChatSession(
+        std::move(file_model),
+        Gemma2ChatSessionOptions {
+            .max_new_tokens = 3,
+            .reverse_stop_strings = {"Hello"},
+        }
+    );
+
+    std::string streamed;
+    const auto first_turn = session.generate_user_turn("Hello", [&](std::string_view text_delta) {
+        streamed += text_delta;
+    });
+    const auto second_turn = session.generate_user_turn("Hello");
+
+    expect(streamed.empty(), "Gemma2 chat reverse stop should not stream the stop string");
+    expect(first_turn.text.empty(), "Gemma2 chat reverse stop should trim final text");
+    expect(
+        first_turn.reverse_stop_string.has_value() && *first_turn.reverse_stop_string == "Hello",
+        "Gemma2 chat reverse stop marker mismatch"
+    );
+    expect(first_turn.generated_token_ids.empty(), "Gemma2 chat reverse stop should not store stop token ids");
+    expect(second_turn.cache_position > first_turn.cache_position, "Gemma2 chat reverse stop history should continue");
+    expect(session.message_count() == 4, "Gemma2 chat reverse stop message count mismatch");
+}
+
+void test_gemma2_chat_session_clear_and_reset_restore_empty_context_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(64),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-clear-reset", std::span<const std::uint8_t>(bytes));
+    auto session = Gemma2ChatSession(
+        read_file_backed_gguf_model(model.path()),
+        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+    );
+
+    const auto first_turn = session.generate_user_turn("Hello");
+    expect(session.cached_token_count() > 0U, "Gemma2 chat clear setup should cache tokens");
+    session.clear();
+    expect(session.cached_token_count() == 0U, "Gemma2 chat clear should reset cached tokens");
+    expect(session.message_count() == 0U, "Gemma2 chat clear should reset messages");
+    const auto after_clear = session.generate_user_turn("Hello");
+    expect(after_clear.cache_position == 0U, "Gemma2 chat after clear should restart at cache zero");
+    expect(after_clear.generated_token_ids == first_turn.generated_token_ids, "Gemma2 chat clear generation mismatch");
+
+    session.reset();
+    expect(session.cached_token_count() == 0U, "Gemma2 chat reset should reset cached tokens");
+    expect(session.message_count() == 0U, "Gemma2 chat reset should reset messages");
+    const auto after_reset = session.generate_user_turn("Hello");
+    expect(after_reset.cache_position == 0U, "Gemma2 chat after reset should restart at cache zero");
+    expect(after_reset.generated_token_ids == first_turn.generated_token_ids, "Gemma2 chat reset generation mismatch");
+}
+
+void test_gemma2_chat_session_regenerates_last_turn_without_full_replay_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(64),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-regen", std::span<const std::uint8_t>(bytes));
+    auto session = Gemma2ChatSession(
+        read_file_backed_gguf_model(model.path()),
+        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+    );
+
+    const auto first_turn = session.generate_user_turn("Hello");
+    const auto second_turn = session.generate_user_turn("Hello");
+    const auto regenerated = session.regenerate_last_turn();
+
+    expect(regenerated.cache_position == second_turn.cache_position, "Gemma2 chat regen cache rollback mismatch");
+    expect(regenerated.cache_position > first_turn.cache_position, "Gemma2 chat regen should retain earlier KV prefix");
+    expect(regenerated.generated_token_ids == second_turn.generated_token_ids, "Gemma2 chat greedy regen mismatch");
+    expect(session.message_count() == 4U, "Gemma2 chat regen should replace, not append, the last turn");
+}
+
+void test_gemma2_chat_session_reports_real_token_budget_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(64),
+        tiny_gemma2_generate_cli_tensors()
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-token-budget", std::span<const std::uint8_t>(bytes));
+    auto session = Gemma2ChatSession(
+        read_file_backed_gguf_model(model.path()),
+        Gemma2ChatSessionOptions {.max_new_tokens = 3}
+    );
+
+    expect(session.context_length() == 64U, "Gemma2 chat context length mismatch");
+    expect(session.remaining_context_tokens() == 64U, "Gemma2 chat initial remaining tokens mismatch");
+    expect(session.max_new_tokens() == 3U, "Gemma2 chat configured max-new-tokens mismatch");
+    const auto turn = session.generate_user_turn("Hello");
+    expect(
+        session.remaining_context_tokens() == session.context_length() - turn.cached_token_count,
+        "Gemma2 chat remaining tokens should reflect cached context"
+    );
+}
+
+void test_gemma2_chat_session_trims_oldest_turns_and_rebuilds_retained_context_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-context-trim", std::span<const std::uint8_t>(bytes));
+    auto session = Gemma2ChatSession(
+        read_file_backed_gguf_model(model.path()),
+        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+    );
+
+    bool rebuilt = false;
+    for (std::size_t turn_index = 0; turn_index < 8U; ++turn_index) {
+        const auto turn = session.generate_user_turn("Hello");
+        if (!turn.rebuilt_context) {
+            continue;
+        }
+
+        rebuilt = true;
+        expect(turn.trimmed_turn_count > 0U, "Gemma2 chat overflow should trim complete turns");
+        expect(turn.cache_position == 0U, "Gemma2 chat rebuilt context should prefill from cache zero");
+        expect(turn.generated_token_ids == std::vector<std::uint32_t> {5U}, "Gemma2 chat rebuilt output mismatch");
+        expect(turn.cached_token_count <= session.context_length(), "Gemma2 chat rebuilt cache exceeds context");
+        break;
+    }
+
+    expect(rebuilt, "Gemma2 chat long conversation should trigger context rebuild");
+}
+
+void test_gemma2_chat_session_rejects_impossible_turn_without_mutating_context_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-context-reject", std::span<const std::uint8_t>(bytes));
+    auto session = Gemma2ChatSession(
+        read_file_backed_gguf_model(model.path()),
+        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+    );
+    const auto first_turn = session.generate_user_turn("Hello");
+
+    bool rejected = false;
+    try {
+        static_cast<void>(session.generate_user_turn(std::string(128U, 'x')));
+    } catch (const Gemma2ChatContextError& error) {
+        rejected = std::string_view(error.what()).find("use a shorter prompt or lower --max-new-tokens")
+            != std::string_view::npos;
+    }
+
+    expect(rejected, "Gemma2 chat impossible turn should provide recovery guidance");
+    expect(session.cached_token_count() == first_turn.cached_token_count, "rejected turn should preserve cached context");
+    expect(session.message_count() == 2U, "rejected turn should preserve message history");
+    const auto next_turn = session.generate_user_turn("Hello");
+    expect(next_turn.cache_position == first_turn.cached_token_count, "turn after rejection should keep append position");
+}
+
+void test_gemma2_chat_session_seeded_sampling_and_regen_are_reproducible_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(64),
+        tiny_gemma2_generate_cli_tensors_for_sampled_tokens()
+    );
+    const TempBinaryFile first_model("tiny-gemma2-chat-sampled-a", std::span<const std::uint8_t>(bytes));
+    const TempBinaryFile second_model("tiny-gemma2-chat-sampled-b", std::span<const std::uint8_t>(bytes));
+    const auto options = Gemma2ChatSessionOptions {
+        .max_new_tokens = 3,
+        .sampler = TokenSamplerOptions {
+            .temperature = 1.0F,
+            .top_k = 2,
+            .top_p = 1.0F,
+            .repetition_penalty = 1.1F,
+            .seed = 42,
+        },
+    };
+    auto first_session = Gemma2ChatSession(read_file_backed_gguf_model(first_model.path()), options);
+    auto second_session = Gemma2ChatSession(read_file_backed_gguf_model(second_model.path()), options);
+
+    const auto first = first_session.generate_user_turn("Hello");
+    const auto same_seed = second_session.generate_user_turn("Hello");
+    const auto regenerated = first_session.regenerate_last_turn();
+
+    expect(first.generated_token_ids == same_seed.generated_token_ids, "seeded sampled sessions mismatch");
+    expect(first.generated_token_ids == regenerated.generated_token_ids, "sampled /regen should replay sampler state");
+    expect(first_session.message_count() == 2U, "sampled /regen should replace the previous response");
+}
+
+void test_runs_generate_gemma2_chat_loop_until_exit_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors()
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-cli", std::span<const std::uint8_t>(bytes));
+    std::istringstream input("Hello\nHello\n/exit\n");
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_chat_for_path(model.path(), "1", input, output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "generate Gemma2 chat CLI exit code mismatch");
+    expect(
+        output.str() == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> \n> \n> ",
+        "generate Gemma2 chat CLI output mismatch"
+    );
+    expect(error.str().empty(), "generate Gemma2 chat CLI should not write stderr");
+}
+
+void test_runs_generate_gemma2_chat_streams_visible_tokens_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-cli-stream", std::span<const std::uint8_t>(bytes));
+    std::istringstream input("Hello\n/exit\n");
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_chat_for_path(model.path(), "2", input, output, error);
+
+    expect(exit_code == EXIT_SUCCESS, "generate Gemma2 chat stream CLI exit code mismatch");
+    expect(
+        output.str() == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> HelloHello\n> ",
+        "generate Gemma2 chat stream CLI output mismatch"
+    );
+    expect(error.str().empty(), "generate Gemma2 chat stream CLI should not write stderr");
+}
+
+void test_runs_generate_gemma2_chat_reverse_stop_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-cli-reverse-stop", std::span<const std::uint8_t>(bytes));
+    std::istringstream input("Hello\n/exit\n");
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_chat_for_path_with_reverse_stop(
+        model.path(),
+        "3",
+        "Hello",
+        input,
+        output,
+        error
+    );
+
+    expect(exit_code == EXIT_SUCCESS, "generate Gemma2 chat reverse-stop CLI exit code mismatch");
+    expect(
+        output.str() == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> \n> ",
+        "generate Gemma2 chat reverse-stop CLI output mismatch"
+    );
+    expect(error.str().empty(), "generate Gemma2 chat reverse-stop CLI should not write stderr");
+}
+
+void test_runs_generate_gemma2_chat_gate3_commands_and_input_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(128),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-gate3-cli", std::span<const std::uint8_t>(bytes));
+    const std::vector<std::uint8_t> prompt_bytes {'H', 'e', 'l', 'l', 'o'};
+    const TempBinaryFile prompt_file("tiny-gemma2-chat-read-prompt", std::span<const std::uint8_t>(prompt_bytes));
+    std::istringstream input(
+        "/tokens\n/regen\n/bogus\n/read /definitely/missing/local-gguf-prompt\n"
+        "Hello\\\nHello\n/clear\nHello\n/reset\n/read " + prompt_file.path().string()
+        + "\n/regen\n/quit\n"
+    );
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_chat_for_path(model.path(), "1", input, output, error);
+    const auto text = output.str();
+
+    expect(exit_code == EXIT_SUCCESS, "generate Gemma2 Gate 3 CLI exit code mismatch");
+    expect(text.find("tokens: cached=0 remaining=128 max-new-tokens=1") != std::string::npos, "/tokens output mismatch");
+    expect(text.find("error: nothing to regenerate") != std::string::npos, "empty /regen output mismatch");
+    expect(text.find("error: unknown command '/bogus'") != std::string::npos, "invalid command output mismatch");
+    expect(text.find("error: could not read '/definitely/missing/local-gguf-prompt'") != std::string::npos, "missing /read output mismatch");
+    expect(text.find("... Hello") != std::string::npos, "multiline continuation/output mismatch");
+    expect(text.find("chat cleared") != std::string::npos, "/clear output mismatch");
+    expect(text.find("session reset") != std::string::npos, "/reset output mismatch");
+    std::size_t generated_hello_count = 0;
+    for (std::size_t position = 0; (position = text.find("Hello", position)) != std::string::npos; position += 5U) {
+        ++generated_hello_count;
+    }
+    expect(generated_hello_count == 4U, "Gate 3 multiline, /read, and /regen generation count mismatch");
+    expect(error.str().empty(), "generate Gemma2 Gate 3 CLI should not write stderr");
+}
+
+void test_runs_generate_gemma2_chat_context_trim_and_recovers_from_impossible_turn_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-context-cli", std::span<const std::uint8_t>(bytes));
+    std::istringstream input(
+        "Hello\nHello\nHello\nHello\n"
+        + std::string(128U, 'x') + "\n/tokens\n/exit\n"
+    );
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_chat_for_path(model.path(), "1", input, output, error);
+    const auto text = output.str();
+
+    expect(exit_code == EXIT_SUCCESS, "generate Gemma2 context CLI should survive turn rejection");
+    expect(text.find("context: dropped ") != std::string::npos, "context trim notice missing");
+    expect(text.find("oldest turn(s) and rebuilt retained KV") != std::string::npos, "context rebuild notice missing");
+    expect(text.find("error: context: turn requires ") != std::string::npos, "context rejection prefix missing");
+    expect(text.find("use a shorter prompt or lower --max-new-tokens") != std::string::npos, "context recovery guidance missing");
+    expect(text.find("tokens: cached=") != std::string::npos, "REPL should continue after context rejection");
+    expect(error.str().empty(), "generate Gemma2 context CLI should not write stderr");
+}
+
+void test_runs_generate_gemma2_chat_seeded_sampling_flags_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(64),
+        tiny_gemma2_generate_cli_tensors_for_sampled_tokens()
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-sampled-cli", std::span<const std::uint8_t>(bytes));
+    std::istringstream first_input("Hello\n/regen\n/exit\n");
+    std::istringstream second_input("Hello\n/regen\n/exit\n");
+    std::ostringstream first_output;
+    std::ostringstream second_output;
+    std::ostringstream first_error;
+    std::ostringstream second_error;
+
+    const auto first_exit = run_generate_chat_for_path_with_sampling(
+        model.path(), first_input, first_output, first_error
+    );
+    const auto second_exit = run_generate_chat_for_path_with_sampling(
+        model.path(), second_input, second_output, second_error
+    );
+
+    expect(first_exit == EXIT_SUCCESS && second_exit == EXIT_SUCCESS, "sampled chat CLI exit mismatch");
+    expect(first_output.str() == second_output.str(), "seeded sampled CLI transcript mismatch");
+    expect(first_error.str().empty() && second_error.str().empty(), "sampled chat CLI should not write stderr");
+}
+
+void test_rejects_generate_gemma2_chat_invalid_sampling_flags() {
+    const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-sampling.gguf";
+    struct InvalidCase {
+        std::vector<std::string> arguments;
+        std::string_view expected_error;
+    };
+    const std::vector<InvalidCase> cases {
+        {{"--temperature", "bad"}, "--temperature requires a finite number"},
+        {{"--temperature", "1", "--top-k", "0"}, "--top-k must be a positive integer"},
+        {{"--temperature", "1", "--top-p", "2"}, "--top-p must be in (0, 1]"},
+        {{"--temperature", "1", "--repeat-penalty", "0"}, "--repeat-penalty must be positive"},
+        {{"--temperature", "1", "--seed", "-1"}, "--seed must be an unsigned integer"},
+        {{"--greedy", "--temperature", "1"}, "--greedy cannot be combined"},
+        {{"--seed", "42"}, "sampling modifiers require --temperature greater than zero"},
+    };
+
+    for (const auto& test_case : cases) {
+        std::ostringstream output;
+        std::ostringstream error;
+        const auto exit_code = run_generate_chat_with_extra_arguments(
+            path, test_case.arguments, output, error
+        );
+        expect(exit_code == EXIT_FAILURE, "invalid sampling flags should fail");
+        expect(output.str().empty(), "invalid sampling flags should not write stdout");
+        expect(error.str().find(test_case.expected_error) != std::string::npos, "invalid sampling error mismatch");
+    }
 }
 
 void test_reports_generate_gemma2_metal_runtime_shell_unavailable_when_missing() {
@@ -594,6 +1331,82 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     {
         "runs generate Gemma2 greedy when available",
         test_runs_generate_gemma2_greedy_when_available,
+    },
+    {
+        "Gemma2 chat session appends second turn at nonzero cache when available",
+        test_gemma2_chat_session_appends_second_turn_at_nonzero_cache_when_available,
+    },
+    {
+        "Gemma2 chat session streams visible text before return when available",
+        test_gemma2_chat_session_streams_visible_text_before_return_when_available,
+    },
+    {
+        "Gemma2 chat session can cancel generation when available",
+        test_gemma2_chat_session_can_cancel_generation_when_available,
+    },
+    {
+        "Gemma2 chat session stops on EOS when available",
+        test_gemma2_chat_session_stops_on_eos_when_available,
+    },
+    {
+        "Gemma2 chat session stops on end-of-turn when available",
+        test_gemma2_chat_session_stops_on_end_of_turn_when_available,
+    },
+    {
+        "Gemma2 chat session applies reverse stop and cleans history when available",
+        test_gemma2_chat_session_applies_reverse_stop_and_cleans_history_when_available,
+    },
+    {
+        "Gemma2 chat session clear and reset restore empty context when available",
+        test_gemma2_chat_session_clear_and_reset_restore_empty_context_when_available,
+    },
+    {
+        "Gemma2 chat session regenerates last turn without full replay when available",
+        test_gemma2_chat_session_regenerates_last_turn_without_full_replay_when_available,
+    },
+    {
+        "Gemma2 chat session reports real token budget when available",
+        test_gemma2_chat_session_reports_real_token_budget_when_available,
+    },
+    {
+        "Gemma2 chat session trims oldest turns and rebuilds retained context when available",
+        test_gemma2_chat_session_trims_oldest_turns_and_rebuilds_retained_context_when_available,
+    },
+    {
+        "Gemma2 chat session rejects impossible turn without mutating context when available",
+        test_gemma2_chat_session_rejects_impossible_turn_without_mutating_context_when_available,
+    },
+    {
+        "Gemma2 chat session seeded sampling and regen are reproducible when available",
+        test_gemma2_chat_session_seeded_sampling_and_regen_are_reproducible_when_available,
+    },
+    {
+        "runs generate Gemma2 chat loop until exit when available",
+        test_runs_generate_gemma2_chat_loop_until_exit_when_available,
+    },
+    {
+        "runs generate Gemma2 chat streams visible tokens when available",
+        test_runs_generate_gemma2_chat_streams_visible_tokens_when_available,
+    },
+    {
+        "runs generate Gemma2 chat reverse stop when available",
+        test_runs_generate_gemma2_chat_reverse_stop_when_available,
+    },
+    {
+        "runs generate Gemma2 chat Gate 3 commands and input when available",
+        test_runs_generate_gemma2_chat_gate3_commands_and_input_when_available,
+    },
+    {
+        "runs generate Gemma2 chat context trim and recovers from impossible turn when available",
+        test_runs_generate_gemma2_chat_context_trim_and_recovers_from_impossible_turn_when_available,
+    },
+    {
+        "runs generate Gemma2 chat seeded sampling flags when available",
+        test_runs_generate_gemma2_chat_seeded_sampling_flags_when_available,
+    },
+    {
+        "rejects generate Gemma2 chat invalid sampling flags",
+        test_rejects_generate_gemma2_chat_invalid_sampling_flags,
     },
     {
         "reports generate Gemma2 Metal runtime shell unavailable when missing",

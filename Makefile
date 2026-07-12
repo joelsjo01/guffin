@@ -7,6 +7,7 @@ GGUF_INSPECT_BINARY := $(BUILD_DIR)/gguf-inspect
 GENERATE_BINARY := $(BUILD_DIR)/local-gguf-generate
 
 ENGINE_SOURCES := \
+	src/engine/gemma2_chat_session.cpp \
 	src/engine/gemma2_model.cpp \
 	src/engine/gemma2_metal_plan.cpp \
 	src/engine/gemma2_reference.cpp \

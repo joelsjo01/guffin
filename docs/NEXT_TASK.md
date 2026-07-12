@@ -1,87 +1,53 @@
 # Next Task
 
-Use this as the implementation baton. Keep it short and update it after each
-completed implementation slice.
+Use this as the implementation baton. Gates 1 through 5 of
+`docs/CLI_MILESTONES.md` are complete; do not redo them. Keep this file short
+and update it after the final gate.
 
 ## Objective
 
-Add end-to-end Gemma generation benchmark metrics.
+Implement Gate 6 from `docs/CLI_MILESTONES.md`: a matched, honest llama.cpp
+Metal parity comparison for the supported Gemma chat application.
 
-## Why
+## Current State
 
-Gemma now reaches a bounded real greedy generation path with resident top-1
-selection. Full scheduled prefill runs, scheduled prefill K/V writes into the
-resident KV cache, selected tokens feed repeated one-token decode steps, each
-decode appends resident K/V, logits stay on Metal for greedy selection, and
-only the selected token/logit is read back.
+- Persistent streaming chat, REPL commands, context trimming/rebuilds, greedy
+  generation, and seeded sampled generation are complete.
+- Greedy keeps Metal top-1 selection and one selected-token readback. Sampled
+  mode reads back final vocabulary logits for engine-owned CPU filtering/RNG;
+  model execution and KV remain Metal-resident.
+- `/regen` restores pre-turn sampler state and exactly replays seeded sampled
+  output.
+- Gate 5 CI passes with 297 tests.
 
-Latest reusable/runtime outputs:
+## Implement
 
-- `prefill_reusable_blocks`
-- `prefill_reusable_layer_inputs`
-- `prefill_kv_cache_writes`
-- `prefill_logits.logits`
-- `prefill_next_token_selection.token_id`
-- `first_decode_reusable_layer_inputs`
-- `first_decode_reusable_blocks`
-- `first_decode_terminal_feed_forward_output.feed_forward_residual`
-- `first_decode_output_norm.normalized_hidden_states`
-- `first_decode_logits.logits`
-- `first_decode_next_token_selection.token_id`
-- `generated_token_ids`
-- `decode_steps`
-- `tensor::ops::top_logit_f32_from_backend`
-
-The next blocker is evidence. The real Gemma path is still slow, but the major
-GPU-residency boundary is now clean enough to measure. Add compact end-to-end
-metrics to the same `local-gguf-generate` command path so the next optimization
-slice is chosen from data rather than guesses.
-
-## Read
-
-- `AGENTS.md`
-- `docs/ENGINE_PRINCIPLES.md`
-- `docs/GRAPH.md` only to locate files/tests
-- `docs/GEMMA_Q4_MILESTONES.md`
-- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` only if Gemma attention semantics
-  are needed
-
-## Touch
-
-- `include/local_gguf_engine/frontends/cli/generate.hpp`
-- `src/frontends/cli/generate.cpp`
-- `tests/frontends/cli/generate_cli_tests.cpp`
-- `docs/GEMMA_Q4_MILESTONES.md`
-- `docs/NEXT_TASK.md`
+- Compare against a current llama.cpp Metal interactive run using the same GGUF
+  model, Gemma chat template, prompt turns, context length, stop conditions,
+  sampler controls, seed, and relevant backend settings.
+- Capture TTFT, prompt/prefill tokens/s, decode tokens/s, total tokens/s,
+  memory notes, commands, transcript, and output differences.
+- Classify differences as tokenizer/template, sampler, context policy, runtime
+  performance, or known feature gaps.
+- Keep benchmark artifacts under ignored `benchmarks/results`.
 
 ## Do Not
 
-- Do not change Gemma generation semantics or token output.
-- Do not add non-greedy Gemma sampling, temperature, top-k, top-p, repetition
-  penalty, or RNG support.
-- Do not add broad graph abstractions or a generic model-family operator stack.
-- Do not refactor large Gemma runtime files in this slice.
-- Do not dequantize whole Gemma weight tensors.
-- Do not read benchmark result artifacts from prior runs; produce fresh metrics
-  if benchmarking is run.
-- Do not reintroduce sampled generation or debug-first-token paths.
-- Do not bring back the deleted `local-gguf-bench` scaffold for this work;
-  benchmark reporting should live on the real generate command path.
+- Do not change runtime behavior merely to force matching visible text.
+- Do not call the paths equivalent without matching tokenization and sampler
+  semantics.
+- Do not wrap llama.cpp as production inference.
+- Do not commit model weights or benchmark result output.
 
 ## Verify
 
-- Add CLI tests for benchmark flag parsing/report shape and failure paths.
-- Keep normal generation stdout stable when benchmarking is not requested.
-- Report at least TTFT, prompt eval tokens/s, decode tokens/s, total tokens/s,
-  prompt token count, generated token count, and total elapsed time.
-- Run focused CLI/benchmark tests touched by metrics.
-- Run release Gemma inspection.
-- Run release Gemma greedy generation smoke; it should remain successful.
-- Run a fresh release Gemma benchmark smoke if the command path is added.
-- Run `bash scripts/ci.sh` after implementation changes.
+- Rebuild release binaries before measurement.
+- Run both implementations from a normal Terminal with Metal available.
+- Record exact commands and enough setup detail to reproduce the comparison.
+- Run `bash scripts/ci.sh` if implementation or tracked behavior changes.
 
 ## Stop When
 
-The real Gemma `--greedy` command can emit compact end-to-end performance
-metrics for the same generation path, without changing generated text or
-backend rejection behavior.
+The comparison is reproducible, differences are honestly classified, and the
+supported Gemma path can be assessed as a llama.cpp-style local interactive
+application. Stop after reporting the final frontend gaps and results.

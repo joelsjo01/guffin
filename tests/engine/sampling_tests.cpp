@@ -16,6 +16,8 @@
 namespace {
 
 using local_gguf_engine::engine::top_logit_tokens_f32;
+using local_gguf_engine::engine::TokenSampler;
+using local_gguf_engine::engine::TokenSamplerOptions;
 using local_gguf_engine::tensor::DType;
 using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorDescriptor;
@@ -110,6 +112,62 @@ void test_rejects_top_logit_tokens_nonfinite_logit() {
     }
 }
 
+void test_seeded_token_sampler_is_reproducible_and_respects_top_k() {
+    const std::array<float, 4> logits_values {1.0F, 1.0F, 1.0F, 1.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    const auto options = TokenSamplerOptions {
+        .temperature = 1.0F,
+        .top_k = 2,
+        .top_p = 1.0F,
+        .seed = 123,
+    };
+    auto first = TokenSampler(options);
+    auto second = TokenSampler(options);
+
+    for (std::size_t index = 0; index < 16U; ++index) {
+        const auto first_token = first.sample(logits);
+        const auto second_token = second.sample(logits);
+        expect(first_token == second_token, "seeded token sampler sequence mismatch");
+        expect(first_token < 2U, "top-k sampler selected filtered token");
+    }
+}
+
+void test_token_sampler_snapshot_replays_rng_and_history() {
+    const std::array<float, 3> logits_values {1.0F, 0.9F, 0.8F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    auto sampler = TokenSampler(TokenSamplerOptions {
+        .temperature = 0.8F,
+        .top_k = 3,
+        .top_p = 1.0F,
+        .repetition_penalty = 1.2F,
+        .seed = 9,
+    });
+    const std::array<std::uint32_t, 2> history {0U, 1U};
+    sampler.observe_tokens(std::span<const std::uint32_t>(history));
+    const auto snapshot = sampler;
+
+    const auto selected = sampler.sample(logits);
+    auto replay = snapshot;
+    expect(replay.sample(logits) == selected, "token sampler snapshot should replay selection");
+}
+
+void test_rejects_invalid_token_sampler_options() {
+    const std::array<TokenSamplerOptions, 3> invalid_options {{
+        TokenSamplerOptions {.temperature = -1.0F},
+        TokenSamplerOptions {.temperature = 1.0F, .top_p = 0.0F},
+        TokenSamplerOptions {.temperature = 1.0F, .repetition_penalty = 0.0F},
+    }};
+    for (const auto& options : invalid_options) {
+        bool rejected = false;
+        try {
+            static_cast<void>(TokenSampler(options));
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        expect(rejected, "invalid token sampler options should fail");
+    }
+}
+
 const TestCase kSamplingTests[] = {
     {"selects top logit tokens from vector", test_selects_top_logit_tokens_from_vector},
     {"selects top logit tokens from last row", test_selects_top_logit_tokens_from_last_row},
@@ -117,6 +175,9 @@ const TestCase kSamplingTests[] = {
     {"rejects top logit tokens dtype mismatch", test_rejects_top_logit_tokens_dtype_mismatch},
     {"rejects top logit tokens rank above two", test_rejects_top_logit_tokens_rank_above_two},
     {"rejects top logit tokens nonfinite logit", test_rejects_top_logit_tokens_nonfinite_logit},
+    {"seeded token sampler is reproducible and respects top-k", test_seeded_token_sampler_is_reproducible_and_respects_top_k},
+    {"token sampler snapshot replays RNG and history", test_token_sampler_snapshot_replays_rng_and_history},
+    {"rejects invalid token sampler options", test_rejects_invalid_token_sampler_options},
 };
 
 }  // namespace

@@ -13,6 +13,7 @@
 #include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -59,6 +60,44 @@ void require_gemma2_metal_generation_inputs(
     if (prompt_token_ids.size() + max_new_tokens > static_cast<std::size_t>(config.context_length)) {
         throw std::invalid_argument("Gemma2 Metal generation token count exceeds context length");
     }
+}
+
+void require_gemma2_metal_plan_generation_inputs(
+    const Gemma2ModelConfig& config,
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::uint32_t cache_position,
+    std::size_t max_new_tokens
+) {
+    if (max_new_tokens == 0U) {
+        throw std::invalid_argument("Gemma2 Metal generation max_new_tokens must be positive");
+    }
+    if (prompt_token_ids.empty()) {
+        throw std::invalid_argument("Gemma2 Metal generation prompt token ids must not be empty");
+    }
+    if (prompt_token_ids.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("Gemma2 Metal generation prompt token count exceeds uint32");
+    }
+    if (max_new_tokens > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("Gemma2 Metal generation max_new_tokens exceeds uint32");
+    }
+    const auto context_length = static_cast<std::size_t>(config.context_length);
+    if (cache_position > config.context_length) {
+        throw std::invalid_argument("Gemma2 Metal generation cache position exceeds context length");
+    }
+    const auto used_context = static_cast<std::size_t>(cache_position);
+    if (prompt_token_ids.size() > context_length - used_context) {
+        throw std::invalid_argument("Gemma2 Metal generation token count exceeds context length");
+    }
+    if (prompt_token_ids.size() + max_new_tokens > context_length - used_context) {
+        throw std::invalid_argument("Gemma2 Metal generation token count exceeds context length");
+    }
+}
+
+[[nodiscard]] bool token_is_stop(
+    std::uint32_t token_id,
+    std::span<const std::uint32_t> stop_token_ids
+) noexcept {
+    return std::find(stop_token_ids.begin(), stop_token_ids.end(), token_id) != stop_token_ids.end();
 }
 
 void require_prefill_hidden_states_match_schedule(
@@ -1188,9 +1227,11 @@ void require_decode_logits_match_schedule(
     const auto key_length = plan.config().attention_key_length;
     const auto scale = 1.0F / std::sqrt(static_cast<float>(key_length));
     const auto attention_token_count = first_layer.attention_token_count;
-    auto scores = tensor::ops::causal_grouped_attention_scores_f32_to_backend(
+    const auto& cache_layer = plan.kv_cache().at(first_layer.layer_index);
+    require_prefill_kv_cache_layer_shape(plan, cache_layer);
+    auto scores = tensor::ops::causal_grouped_attention_scores_f32_with_kv_cache_to_backend(
         position.query,
-        position.key,
+        cache_layer.key,
         prefill.cache_position(),
         plan.config().attention_head_count,
         plan.config().attention_head_count_kv,
@@ -1246,9 +1287,11 @@ void require_decode_logits_match_schedule(
     const auto& first_layer = prefill.layers().front();
     const auto attention_token_count = first_layer.attention_token_count;
     const auto value_length = plan.config().attention_value_length;
-    auto attention_output = tensor::ops::causal_grouped_attention_values_f32_to_backend(
+    const auto& cache_layer = plan.kv_cache().at(first_layer.layer_index);
+    require_prefill_kv_cache_layer_shape(plan, cache_layer);
+    auto attention_output = tensor::ops::causal_grouped_attention_values_f32_with_kv_cache_to_backend(
         probabilities.probabilities,
-        projection.value,
+        cache_layer.value,
         prefill.cache_position(),
         plan.config().attention_head_count,
         plan.config().attention_head_count_kv,
@@ -1845,7 +1888,7 @@ std::optional<Gemma2MetalLayerHandoffActivations> create_gemma2_metal_scheduled_
 }
 
 Gemma2MetalPrefillBlockActivations run_gemma2_metal_scheduled_prefill_block(
-    const Gemma2MetalModelPlan& plan,
+    Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& prefill,
     std::uint32_t schedule_layer_offset,
     const tensor::BackendBuffer& normalized_attention_input,
@@ -1932,11 +1975,20 @@ Gemma2MetalPrefillBlockActivations run_gemma2_metal_scheduled_prefill_block(
         .key = std::move(positioned_key),
     };
 
+    auto kv_cache_write = write_gemma2_metal_prefill_kv_cache(
+        plan,
+        prefill,
+        schedule_layer_offset,
+        attention_position,
+        attention_projection
+    );
+    const auto& cache_layer = plan.kv_cache().at(scheduled_layer.layer_index);
+
     const auto scale = 1.0F / std::sqrt(static_cast<float>(head_dimension));
     const auto attention_token_count = scheduled_layer.attention_token_count;
-    auto scores = tensor::ops::causal_grouped_attention_scores_f32_to_backend(
+    auto scores = tensor::ops::causal_grouped_attention_scores_f32_with_kv_cache_to_backend(
         attention_position.query,
-        attention_position.key,
+        cache_layer.key,
         prefill.cache_position(),
         plan.config().attention_head_count,
         plan.config().attention_head_count_kv,
@@ -1975,9 +2027,9 @@ Gemma2MetalPrefillBlockActivations run_gemma2_metal_scheduled_prefill_block(
     };
 
     const auto value_length = plan.config().attention_value_length;
-    auto attention_output = tensor::ops::causal_grouped_attention_values_f32_to_backend(
+    auto attention_output = tensor::ops::causal_grouped_attention_values_f32_with_kv_cache_to_backend(
         attention_probabilities.probabilities,
-        attention_projection.value,
+        cache_layer.value,
         prefill.cache_position(),
         plan.config().attention_head_count,
         plan.config().attention_head_count_kv,
@@ -2135,6 +2187,7 @@ Gemma2MetalPrefillBlockActivations run_gemma2_metal_scheduled_prefill_block(
         .scratch_ownership = prefill.scratch_ownership(),
         .attention_projection = std::move(attention_projection),
         .attention_position = std::move(attention_position),
+        .kv_cache_write = std::move(kv_cache_write),
         .attention_scores = std::move(attention_scores),
         .attention_probabilities = std::move(attention_probabilities),
         .attention_values = std::move(attention_values),
@@ -2522,6 +2575,136 @@ Gemma2MetalDecodeStepActivations run_gemma2_metal_decode_step(
     };
 }
 
+[[nodiscard]] Gemma2MetalPrefillLogitsActivations run_gemma2_metal_prefill_for_logits(
+    Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& prefill,
+    std::span<const std::uint32_t> prompt_token_ids,
+    float embedding_scale
+) {
+    auto prefill_input = Gemma2MetalInputActivations {
+        .token_ids = std::vector<std::uint32_t>(prompt_token_ids.begin(), prompt_token_ids.end()),
+        .hidden_states = tensor::ops::embed_f16_gguf_weight_token_ids_to_backend(
+            prompt_token_ids,
+            plan.weights().token_embedding_weight,
+            embedding_scale
+        ),
+        .embedding_scale = embedding_scale,
+    };
+    auto prefill_first_layer_input = create_gemma2_metal_prefill_first_layer_input(
+        plan,
+        prefill,
+        prefill_input
+    );
+    auto prefill_first_layer_attention_projection =
+        create_gemma2_metal_prefill_first_layer_attention_projection(
+            plan,
+            prefill,
+            prefill_first_layer_input
+        );
+    auto prefill_first_layer_attention_position =
+        create_gemma2_metal_prefill_first_layer_attention_position(
+            plan,
+            prefill,
+            prefill_first_layer_attention_projection
+        );
+    (void)write_gemma2_metal_prefill_kv_cache(
+        plan,
+        prefill,
+        0,
+        prefill_first_layer_attention_position,
+        prefill_first_layer_attention_projection
+    );
+    auto prefill_first_layer_attention_scores =
+        create_gemma2_metal_prefill_first_layer_attention_scores(
+            plan,
+            prefill,
+            prefill_first_layer_attention_position
+        );
+    auto prefill_first_layer_attention_probabilities =
+        create_gemma2_metal_prefill_first_layer_attention_probabilities(
+            prefill,
+            prefill_first_layer_attention_scores
+        );
+    auto prefill_first_layer_attention_values =
+        create_gemma2_metal_prefill_first_layer_attention_values(
+            plan,
+            prefill,
+            prefill_first_layer_attention_projection,
+            prefill_first_layer_attention_probabilities
+        );
+    auto prefill_first_layer_attention_output_projection =
+        create_gemma2_metal_prefill_first_layer_attention_output_projection(
+            plan,
+            prefill,
+            prefill_first_layer_attention_values
+        );
+    auto prefill_first_layer_post_attention_residual =
+        create_gemma2_metal_prefill_first_layer_post_attention_residual(
+            plan,
+            prefill,
+            prefill_input,
+            prefill_first_layer_attention_output_projection
+        );
+    auto prefill_first_layer_feed_forward_gate_up =
+        create_gemma2_metal_prefill_first_layer_feed_forward_gate_up(
+            plan,
+            prefill,
+            prefill_first_layer_post_attention_residual
+        );
+    auto prefill_first_layer_feed_forward_output =
+        create_gemma2_metal_prefill_first_layer_feed_forward_output(
+            plan,
+            prefill,
+            prefill_first_layer_post_attention_residual,
+            prefill_first_layer_feed_forward_gate_up
+        );
+
+    std::vector<Gemma2MetalPrefillBlockActivations> reusable_blocks;
+    if (prefill.layers().size() > 1U) {
+        reusable_blocks.reserve(prefill.layers().size() - 1U);
+    }
+
+    const Gemma2MetalFeedForwardOutputActivations* terminal_feed_forward_output =
+        &prefill_first_layer_feed_forward_output;
+    for (
+        std::uint32_t schedule_layer_offset = 1U;
+        static_cast<std::size_t>(schedule_layer_offset) < prefill.layers().size();
+        ++schedule_layer_offset
+    ) {
+        auto next_layer_input = create_gemma2_metal_scheduled_prefill_layer_input(
+            plan,
+            prefill,
+            schedule_layer_offset,
+            *terminal_feed_forward_output
+        );
+        if (!next_layer_input.has_value()) {
+            break;
+        }
+
+        reusable_blocks.push_back(run_gemma2_metal_scheduled_prefill_block(
+            plan,
+            prefill,
+            schedule_layer_offset,
+            next_layer_input->normalized_attention_input,
+            terminal_feed_forward_output->feed_forward_residual
+        ));
+        terminal_feed_forward_output = &reusable_blocks.back().feed_forward_output;
+    }
+
+    auto terminal_output = *terminal_feed_forward_output;
+    auto prefill_output_norm = create_gemma2_metal_prefill_output_norm(
+        plan,
+        prefill,
+        terminal_output
+    );
+    auto prefill_logits = create_gemma2_metal_prefill_logits(
+        plan,
+        prefill,
+        prefill_output_norm
+    );
+    return prefill_logits;
+}
+
 Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
     const EngineModel& model,
     std::span<const std::uint32_t> prompt_token_ids
@@ -2557,6 +2740,13 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
             prefill,
             prefill_first_layer_attention_projection
         );
+    auto prefill_first_layer_kv_cache_write = write_gemma2_metal_prefill_kv_cache(
+        plan,
+        prefill,
+        0,
+        prefill_first_layer_attention_position,
+        prefill_first_layer_attention_projection
+    );
     auto prefill_first_layer_attention_scores =
         create_gemma2_metal_prefill_first_layer_attention_scores(
             plan,
@@ -2638,21 +2828,9 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
     }
     std::vector<Gemma2MetalPrefillKVCacheWriteActivations> prefill_kv_cache_writes;
     prefill_kv_cache_writes.reserve(scheduled_prefill_layer_count);
-    prefill_kv_cache_writes.push_back(write_gemma2_metal_prefill_kv_cache(
-        plan,
-        prefill,
-        0,
-        prefill_first_layer_attention_position,
-        prefill_first_layer_attention_projection
-    ));
+    prefill_kv_cache_writes.push_back(prefill_first_layer_kv_cache_write);
     for (const auto& block : prefill_reusable_blocks) {
-        prefill_kv_cache_writes.push_back(write_gemma2_metal_prefill_kv_cache(
-            plan,
-            prefill,
-            block.schedule_layer_offset,
-            block.attention_position,
-            block.attention_projection
-        ));
+        prefill_kv_cache_writes.push_back(block.kv_cache_write);
     }
 
     auto prefill_output_norm = create_gemma2_metal_prefill_output_norm(
@@ -2685,6 +2863,7 @@ Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(
         .prefill_first_layer_input = std::move(prefill_first_layer_input),
         .prefill_first_layer_attention_projection = std::move(prefill_first_layer_attention_projection),
         .prefill_first_layer_attention_position = std::move(prefill_first_layer_attention_position),
+        .prefill_first_layer_kv_cache_write = std::move(prefill_first_layer_kv_cache_write),
         .prefill_first_layer_attention_scores = std::move(prefill_first_layer_attention_scores),
         .prefill_first_layer_attention_probabilities = std::move(prefill_first_layer_attention_probabilities),
         .prefill_first_layer_attention_values = std::move(prefill_first_layer_attention_values),
@@ -2792,6 +2971,113 @@ Gemma2MetalGeneratedTokenLoopActivations create_gemma2_metal_generated_token_loo
         .runtime_shell = std::move(runtime_shell),
         .generated_token_ids = std::move(generated_token_ids),
         .decode_steps = std::move(decode_steps),
+    };
+}
+
+Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_argmax_tokens_with_plan(
+    Gemma2MetalModelPlan& plan,
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::uint32_t cache_position,
+    std::size_t max_new_tokens,
+    std::span<const std::uint32_t> stop_token_ids,
+    const Gemma2MetalGeneratedTokenCallback& on_token
+) {
+    const auto select_token = [](const tensor::BackendBuffer& logits) {
+        return tensor::ops::top_logit_f32_from_backend(logits).token;
+    };
+    return generate_gemma2_metal_sampled_tokens_with_plan(
+        plan,
+        prompt_token_ids,
+        cache_position,
+        max_new_tokens,
+        stop_token_ids,
+        select_token,
+        on_token
+    );
+}
+
+Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
+    Gemma2MetalModelPlan& plan,
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::uint32_t cache_position,
+    std::size_t max_new_tokens,
+    std::span<const std::uint32_t> stop_token_ids,
+    const Gemma2MetalTokenSelector& select_token,
+    const Gemma2MetalGeneratedTokenCallback& on_token
+) {
+    if (!select_token) {
+        throw std::invalid_argument("Gemma2 Metal sampled generation requires a token selector");
+    }
+    require_gemma2_metal_plan_generation_inputs(
+        plan.config(),
+        prompt_token_ids,
+        cache_position,
+        max_new_tokens
+    );
+
+    const auto prompt_token_count = checked_prompt_token_count(prompt_token_ids);
+    auto prefill = create_gemma2_metal_prefill_schedule(
+        plan,
+        prompt_token_count,
+        cache_position
+    );
+    const auto embedding_scale = gemma2_input_embedding_scale(plan.config().embedding_length);
+    auto prefill_logits = run_gemma2_metal_prefill_for_logits(
+        plan,
+        prefill,
+        prompt_token_ids,
+        embedding_scale
+    );
+    auto next_logits = std::move(prefill_logits.logits);
+
+    std::vector<std::uint32_t> generated_token_ids;
+    generated_token_ids.reserve(max_new_tokens);
+    auto cached_token_count = prefill.total_kv_token_count();
+    std::optional<std::uint32_t> stop_token_id;
+
+    for (std::size_t sampled_count = 0; sampled_count < max_new_tokens; ++sampled_count) {
+        const auto selected_token_id = select_token(next_logits);
+        if (selected_token_id >= plan.config().vocab_size) {
+            throw std::invalid_argument("Gemma2 Metal token selector returned token outside vocabulary");
+        }
+        const auto decode = create_gemma2_metal_decode_schedule(plan, cached_token_count);
+        auto decode_step = run_gemma2_metal_decode_step(
+            plan,
+            decode,
+            selected_token_id,
+            embedding_scale
+        );
+        cached_token_count = decode.total_kv_token_count();
+
+        if (token_is_stop(selected_token_id, stop_token_ids)) {
+            stop_token_id = selected_token_id;
+            break;
+        }
+
+        generated_token_ids.push_back(selected_token_id);
+        if (on_token) {
+            const auto decision = on_token(Gemma2MetalGeneratedTokenEvent {
+                .token_id = selected_token_id,
+                .generated_token_count = generated_token_ids.size(),
+                .cached_token_count = cached_token_count,
+            });
+            if (decision == Gemma2MetalTokenStreamDecision::stop_generation) {
+                break;
+            }
+        }
+        if (sampled_count + 1U == max_new_tokens) {
+            break;
+        }
+
+        next_logits = std::move(decode_step.logits.logits);
+    }
+
+    return Gemma2MetalPlanGeneratedTokens {
+        .generated_token_ids = std::move(generated_token_ids),
+        .stop_token_id = stop_token_id,
+        .prefill_cache_position = cache_position,
+        .prefill_token_count = prompt_token_count,
+        .cached_token_count = cached_token_count,
     };
 }
 

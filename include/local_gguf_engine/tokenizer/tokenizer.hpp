@@ -98,6 +98,7 @@ public:
         std::span<const std::uint32_t> token_ids,
         TokenizerDecodeOptions options
     ) const;
+    [[nodiscard]] bool token_id_is_special(std::uint32_t token_id) const noexcept;
 
 private:
     friend Tokenizer load_tokenizer_from_gguf_metadata(
@@ -118,7 +119,6 @@ private:
     ) const;
     void append_token_id_for_text(std::vector<std::uint32_t>& token_ids, std::string_view token_text) const;
 
-    [[nodiscard]] bool token_id_is_special(std::uint32_t token_id) const noexcept;
     [[nodiscard]] bool token_id_is_control(std::uint32_t token_id) const noexcept;
     [[nodiscard]] bool token_id_can_encode_text(std::uint32_t token_id) const noexcept;
     [[nodiscard]] bool token_id_can_encode_special(std::uint32_t token_id) const noexcept;

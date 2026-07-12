@@ -47,6 +47,7 @@ using local_gguf_engine::engine::create_gemma2_metal_generation_runtime_shell;
 using local_gguf_engine::engine::create_gemma2_metal_model_plan;
 using local_gguf_engine::engine::create_gemma2_metal_prefill_schedule;
 using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens;
+using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens_with_plan;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::run_gemma2_metal_scheduled_prefill_block;
 using local_gguf_engine::engine::top_logit_tokens_f32;
@@ -471,7 +472,7 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
     auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
 
-    const auto plan = create_gemma2_metal_model_plan(model);
+    auto plan = create_gemma2_metal_model_plan(model);
 
     expect(plan.backend() == BackendKind::metal, "Gemma2 Metal plan backend mismatch");
     expect(plan.config() == model.gemma2_config(), "Gemma2 Metal plan config mismatch");
@@ -685,6 +686,34 @@ void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_availa
     expect(prefill.layers()[1].attention_token_count == 12, "Gemma2 prefill full attention count mismatch");
     expect(decode.layers()[0].attention_token_count == 8, "Gemma2 decode sliding attention count mismatch");
     expect(decode.layers()[1].attention_token_count == 13, "Gemma2 decode full attention count mismatch");
+}
+
+void test_creates_gemma2_metal_append_prefill_schedule_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store(true, 2);
+    auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const auto plan = create_gemma2_metal_model_plan(model);
+
+    const auto prefill = create_gemma2_metal_prefill_schedule(plan, 3, 7);
+
+    expect(prefill.phase() == Gemma2MetalSchedulePhase::prefill, "Gemma2 append prefill phase mismatch");
+    expect(prefill.token_count() == 3, "Gemma2 append prefill token count mismatch");
+    expect(prefill.cache_position() == 7, "Gemma2 append prefill cache position mismatch");
+    expect(prefill.total_kv_token_count() == 10, "Gemma2 append prefill total KV count mismatch");
+    expect(
+        prefill.scratch().normalized_hidden.shape == Shape::from({3, 256}),
+        "Gemma2 append prefill normalized hidden scratch shape mismatch"
+    );
+    expect(
+        prefill.scratch().attention_scores.shape == Shape::from({3, 1, 10}),
+        "Gemma2 append prefill attention scores scratch shape mismatch"
+    );
+    expect(prefill.layers()[0].attention_token_count == 8, "Gemma2 append sliding attention count mismatch");
+    expect(prefill.layers()[1].attention_token_count == 10, "Gemma2 append full attention count mismatch");
 }
 
 void test_gemma2_metal_plan_tracks_projected_attention_output_shape_when_available() {
@@ -1418,7 +1447,7 @@ void test_gemma2_metal_prefill_block_runner_executes_scheduled_layer_when_availa
 
     auto view = tiny_model_view(tiny_gemma2_metadata(4), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
-    const auto plan = create_gemma2_metal_model_plan(model);
+    auto plan = create_gemma2_metal_model_plan(model);
     const auto prefill = create_gemma2_metal_prefill_schedule(plan, 2);
 
     std::vector<float> normalized_values(2U * 256U, 0.0F);
@@ -3147,6 +3176,95 @@ void test_gemma2_metal_generated_token_loop_repeats_decode_when_available() {
     }
 }
 
+void test_gemma2_metal_plan_generation_append_matches_full_replay_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store();
+    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    auto plan = create_gemma2_metal_model_plan(model);
+    const std::vector<std::uint32_t> prefix_token_ids {0, 1};
+    const std::vector<std::uint32_t> suffix_token_ids {2};
+    const std::vector<std::uint32_t> stop_token_ids;
+
+    const auto first = generate_gemma2_metal_argmax_tokens_with_plan(
+        plan,
+        std::span<const std::uint32_t>(prefix_token_ids),
+        0,
+        1,
+        std::span<const std::uint32_t>(stop_token_ids)
+    );
+    std::vector<std::uint32_t> full_prompt(prefix_token_ids.begin(), prefix_token_ids.end());
+    full_prompt.insert(full_prompt.end(), first.generated_token_ids.begin(), first.generated_token_ids.end());
+    const auto append_cache_position = static_cast<std::uint32_t>(full_prompt.size());
+    full_prompt.insert(full_prompt.end(), suffix_token_ids.begin(), suffix_token_ids.end());
+
+    const auto appended = generate_gemma2_metal_argmax_tokens_with_plan(
+        plan,
+        std::span<const std::uint32_t>(suffix_token_ids),
+        append_cache_position,
+        1,
+        std::span<const std::uint32_t>(stop_token_ids)
+    );
+    const auto replay = generate_gemma2_metal_argmax_tokens(
+        model,
+        std::span<const std::uint32_t>(full_prompt),
+        1
+    );
+
+    expect(appended.prefill_cache_position == append_cache_position, "Gemma2 append replay cache position mismatch");
+    expect(appended.generated_token_ids.size() == 1, "Gemma2 append replay generated count mismatch");
+    expect(
+        appended.generated_token_ids.front() == replay.back(),
+        "Gemma2 append generation should match full replay token"
+    );
+}
+
+void test_gemma2_metal_plan_generation_ignores_stale_kv_rows_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store();
+    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    auto plan = create_gemma2_metal_model_plan(model);
+    const std::vector<std::uint32_t> dirty_prefix_token_ids {0, 1, 2};
+    const std::vector<std::uint32_t> suffix_token_ids {3};
+    const std::vector<std::uint32_t> stop_token_ids;
+
+    (void)generate_gemma2_metal_argmax_tokens_with_plan(
+        plan,
+        std::span<const std::uint32_t>(dirty_prefix_token_ids),
+        0,
+        1,
+        std::span<const std::uint32_t>(stop_token_ids)
+    );
+
+    const auto appended = generate_gemma2_metal_argmax_tokens_with_plan(
+        plan,
+        std::span<const std::uint32_t>(suffix_token_ids),
+        1,
+        1,
+        std::span<const std::uint32_t>(stop_token_ids)
+    );
+    const std::vector<std::uint32_t> active_full_prompt {0, 3};
+    const auto replay = generate_gemma2_metal_argmax_tokens(
+        model,
+        std::span<const std::uint32_t>(active_full_prompt),
+        1
+    );
+
+    expect(appended.prefill_cache_position == 1, "Gemma2 stale-KV append cache position mismatch");
+    expect(appended.generated_token_ids.size() == 1, "Gemma2 stale-KV generated count mismatch");
+    expect(
+        appended.generated_token_ids.front() == replay.back(),
+        "Gemma2 append generation should ignore stale rows outside active context"
+    );
+}
+
 void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -3174,6 +3292,16 @@ void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
         expect(
             std::string_view(error.what()) == "Gemma2 Metal prefill schedule token count exceeds context length",
             "Gemma2 Metal oversized prefill error mismatch"
+        );
+    }
+
+    try {
+        (void)create_gemma2_metal_prefill_schedule(plan, 4, 13);
+        throw TestFailure("Gemma2 Metal append prefill schedule should reject context overflow");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Gemma2 Metal prefill schedule token count exceeds context length",
+            "Gemma2 Metal append prefill overflow error mismatch"
         );
     }
 
@@ -3250,6 +3378,10 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_available,
     },
     {
+        "creates Gemma2 Metal append prefill schedule when available",
+        test_creates_gemma2_metal_append_prefill_schedule_when_available,
+    },
+    {
         "Gemma2 Metal plan tracks projected attention output shape when available",
         test_gemma2_metal_plan_tracks_projected_attention_output_shape_when_available,
     },
@@ -3296,6 +3428,14 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 Metal generated-token loop repeats decode when available",
         test_gemma2_metal_generated_token_loop_repeats_decode_when_available,
+    },
+    {
+        "Gemma2 Metal plan generation append matches full replay when available",
+        test_gemma2_metal_plan_generation_append_matches_full_replay_when_available,
+    },
+    {
+        "Gemma2 Metal plan generation ignores stale KV rows when available",
+        test_gemma2_metal_plan_generation_ignores_stale_kv_rows_when_available,
     },
     {
         "rejects invalid Gemma2 Metal schedule shapes when available",

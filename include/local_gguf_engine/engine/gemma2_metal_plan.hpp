@@ -182,6 +182,11 @@ private:
         const Gemma2MetalModelPlan& plan,
         std::uint32_t prompt_token_count
     );
+    friend Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(
+        const Gemma2MetalModelPlan& plan,
+        std::uint32_t token_count,
+        std::uint32_t cache_position
+    );
     friend Gemma2MetalSchedule create_gemma2_metal_decode_schedule(
         const Gemma2MetalModelPlan& plan,
         std::uint32_t cached_token_count
@@ -212,6 +217,11 @@ private:
 [[nodiscard]] Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(
     const Gemma2MetalModelPlan& plan,
     std::uint32_t prompt_token_count
+);
+[[nodiscard]] Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(
+    const Gemma2MetalModelPlan& plan,
+    std::uint32_t token_count,
+    std::uint32_t cache_position
 );
 [[nodiscard]] Gemma2MetalSchedule create_gemma2_metal_decode_schedule(
     const Gemma2MetalModelPlan& plan,

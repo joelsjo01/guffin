@@ -342,11 +342,18 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     return total;
 }
 
-void require_prefill_token_count(const Gemma2ModelConfig& config, std::uint32_t prompt_token_count) {
-    if (prompt_token_count == 0) {
+void require_prefill_range(
+    const Gemma2ModelConfig& config,
+    std::uint32_t token_count,
+    std::uint32_t cache_position
+) {
+    if (token_count == 0) {
         throw std::invalid_argument("Gemma2 Metal prefill schedule token count must be positive");
     }
-    if (prompt_token_count > config.context_length) {
+    if (cache_position > config.context_length) {
+        throw std::invalid_argument("Gemma2 Metal prefill schedule cache position exceeds context length");
+    }
+    if (token_count > config.context_length - cache_position) {
         throw std::invalid_argument("Gemma2 Metal prefill schedule token count exceeds context length");
     }
 }
@@ -554,12 +561,21 @@ Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(
     const Gemma2MetalModelPlan& plan,
     std::uint32_t prompt_token_count
 ) {
-    require_prefill_token_count(plan.config(), prompt_token_count);
+    return create_gemma2_metal_prefill_schedule(plan, prompt_token_count, 0);
+}
 
-    auto layers = make_layer_schedules(plan, prompt_token_count);
+Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(
+    const Gemma2MetalModelPlan& plan,
+    std::uint32_t token_count,
+    std::uint32_t cache_position
+) {
+    require_prefill_range(plan.config(), token_count, cache_position);
+
+    const auto total_kv_token_count = cache_position + token_count;
+    auto layers = make_layer_schedules(plan, total_kv_token_count);
     auto scratch = make_phase_local_scratch(
         plan.config(),
-        prompt_token_count,
+        token_count,
         max_attention_token_count(std::span<const Gemma2MetalLayerSchedule>(layers))
     );
     const auto phase_scratch_bytes = schedule_scratch_byte_count(scratch);
@@ -573,9 +589,9 @@ Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(
         Gemma2MetalSchedulePhase::prefill,
         Gemma2MetalScratchOwnership::phase_local,
         std::move(scratch),
-        prompt_token_count,
-        0,
-        prompt_token_count,
+        token_count,
+        cache_position,
+        total_kv_token_count,
         plan.uploaded_weight_byte_count(),
         plan.kv_cache_byte_count(),
         plan.scratch_byte_count(),

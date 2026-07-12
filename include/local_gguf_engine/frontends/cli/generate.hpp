@@ -30,5 +30,12 @@ struct GenerateOptions {
 );
 
 int run_generate(int argc, const char* const* argv, std::ostream& output, std::ostream& error);
+int run_generate(
+    int argc,
+    const char* const* argv,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& error
+);
 
 }  // namespace local_gguf_engine::frontends::cli

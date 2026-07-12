@@ -12,6 +12,12 @@ The product path is Metal-first and model-resident: packed quantized weights,
 GPU-resident weights/KV/scratch, explicit prefill/decode paths, and real
 end-to-end generation throughput.
 
+The current Gemma path already has the important Metal residency boundary:
+packed weights, KV cache, prefill/decode schedules, logits, and greedy top-1
+selection stay on Metal, with only the selected token/logit read back. The next
+project focus is measuring that real path and using the numbers to choose
+optimization work.
+
 CPU work is correctness scaffolding only: metadata checks, tokenizer checks,
 tiny reference kernels, fixtures, and golden comparisons. Do not build a full
 Gemma 2 9B Q4 CPU runtime as the main track.
@@ -33,7 +39,7 @@ Gemma 2 9B Q4 CPU runtime as the main track.
 - Prefer focused Gemma 2 support over preserving old Llama execution paths.
 - Make reusable blocks at ownership boundaries: GGUF metadata, tokenizer,
   tensor layout, weight binding, execution planning, backend buffers, Metal
-  kernels, KV cache, sampling, and benchmarks.
+  kernels, KV cache, greedy token selection, and benchmark metrics.
 - Keep the Gemma Q4 hot path explicit and specialized when that is faster or
   clearer.
 - Do not add a broad model graph, virtual operator stack, or generic
@@ -54,24 +60,28 @@ Good comments explain:
 Avoid comments that restate names or describe obvious control flow. Prefer a
 short comment before a tricky block over many line-by-line comments.
 
-## Current Gemma Blockers
+## Current Gemma State
 
-See `docs/GEMMA_Q4_MILESTONES.md` for the compact route map and status.
+See `docs/CLI_MILESTONES.md` for the CLI application route map and status. The
+core Metal path is no longer a checklist of missing pieces; it is a working
+greedy path that now needs a persistent llama.cpp-style chat application on top
+of the engine-owned session/runtime state.
 
-- `gemma2` metadata and model binding.
-- Gemma 2 tokenizer/chat template support.
-- Q4_K/Q6_K tensor layout and validation.
-- Packed quantized Metal matmul.
-- Model-resident Metal weights, KV cache, and scratch.
-- Separate prefill and decode execution plans.
-- Real generation benchmarking with tokens/s and time-to-first-token.
+- Gemma 2 metadata, tokenizer/chat template, Q4_K/Q6_K layout, and weight
+  binding are in place.
+- Packed quantized weights, KV cache, scratch, prefill/decode schedules, logits,
+  and greedy token selection are on the Metal path.
+- The active application blocker is Gate 1 from `docs/CLI_MILESTONES.md`: add
+  `local-gguf-generate --chat` with a persistent Gemma session and nonzero
+  cache-position append.
 
 ## Benchmark Rule
 
 Generation performance must be measured on the real generation path.
 
-- `local-gguf-generate` should always report compact throughput.
-- `--bench` should produce detailed metrics for the same command path.
+- Normal `local-gguf-generate` output should stay stable unless the CLI contract
+  intentionally changes.
+- `--bench` should report metrics for the same command path.
 - Report prompt eval tokens/s, decode tokens/s, total tokens/s, and TTFT.
 - Keep benchmark reports under ignored `benchmarks/results`.
 - Do not resurrect the deleted standalone `local-gguf-bench` scaffold unless a
@@ -86,7 +96,7 @@ Before implementing, ask:
    path?
 3. Is any CPU work only correctness scaffolding?
 4. Does it remove a real blocker or produce measurable proof?
-5. What is the smallest coherent slice, and where should I stop?
+5. What is a good coherent slice, and where should I stop?
 
 After implementation:
 

@@ -1,5 +1,6 @@
 #include "local_gguf_engine/frontends/cli/generate.hpp"
 
+#include "local_gguf_engine/engine/gemma2_chat_session.hpp"
 #include "local_gguf_engine/engine/gemma2_model.hpp"
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/model.hpp"
@@ -10,11 +11,20 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <charconv>
+#include <cmath>
+#include <csignal>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <istream>
 #include <limits>
+#include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace local_gguf_engine::frontends::cli {
@@ -22,6 +32,11 @@ namespace local_gguf_engine::frontends::cli {
 namespace {
 
 using engine::EngineModelError;
+using engine::Gemma2ChatSession;
+using engine::Gemma2ChatContextError;
+using engine::Gemma2ChatSessionOptions;
+using engine::Gemma2ChatTurnOptions;
+using engine::TokenSamplerOptions;
 using engine::generate_gemma2_metal_argmax_tokens;
 using engine::load_engine_model_from_gguf;
 using engine::ModelArchitecture;
@@ -44,10 +59,86 @@ struct EncodedGeneratePrompt {
     std::vector<std::uint32_t> token_ids;
 };
 
+volatile std::sig_atomic_t g_chat_interrupt_count = 0;
+
+void handle_chat_interrupt(int) noexcept {
+    g_chat_interrupt_count = static_cast<std::sig_atomic_t>(g_chat_interrupt_count + 1);
+}
+
+[[nodiscard]] std::sig_atomic_t chat_interrupt_count() noexcept {
+    return g_chat_interrupt_count;
+}
+
+class ScopedSignalHandler final {
+public:
+    using SignalHandler = void (*)(int);
+
+    ScopedSignalHandler(int signal_number, SignalHandler handler)
+        : signal_number_(signal_number),
+          previous_(std::signal(signal_number, handler)) {}
+
+    ScopedSignalHandler(const ScopedSignalHandler&) = delete;
+    ScopedSignalHandler& operator=(const ScopedSignalHandler&) = delete;
+
+    ~ScopedSignalHandler() {
+        std::signal(signal_number_, previous_);
+    }
+
+private:
+    int signal_number_ = 0;
+    SignalHandler previous_ = SIG_DFL;
+};
+
 void write_generate_usage(std::ostream& error) {
     error << "usage: local-gguf-generate <model.gguf> <prompt> <max-new-tokens>"
           << " [--greedy] [--backend cpu|metal]"
+          << '\n'
+          << "       local-gguf-generate <model.gguf> --chat --max-new-tokens <N>"
+          << " [--greedy | --temperature T [--top-k K] [--top-p P]"
+          << " [--repeat-penalty R] [--seed S]] [--backend cpu|metal]"
+          << " [--reverse-prompt TEXT]"
           << '\n';
+}
+
+[[nodiscard]] bool starts_with_command_prefix(std::string_view line) noexcept {
+    return !line.empty() && line.front() == '/';
+}
+
+[[nodiscard]] std::string_view trim_left(std::string_view text) noexcept {
+    const auto first = text.find_first_not_of(" \t");
+    return first == std::string_view::npos ? std::string_view {} : text.substr(first);
+}
+
+[[nodiscard]] bool read_multiline_input(
+    std::istream& input,
+    std::ostream& output,
+    std::string& line
+) {
+    while (!line.empty() && line.back() == '\\') {
+        line.pop_back();
+        output << "... ";
+        std::string continuation;
+        if (!std::getline(input, continuation)) {
+            output << '\n';
+            return false;
+        }
+        line.push_back('\n');
+        line += continuation;
+    }
+    return true;
+}
+
+[[nodiscard]] std::string read_prompt_file(std::string_view path_text) {
+    if (path_text.empty()) {
+        throw std::runtime_error("usage: /read <path>");
+    }
+
+    const std::filesystem::path path(path_text);
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("could not read '" + path.string() + "'");
+    }
+    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
 
 [[nodiscard]] bool parse_positive_size(std::string_view text, std::size_t& value) noexcept {
@@ -76,6 +167,23 @@ void write_generate_usage(std::ostream& error) {
     return true;
 }
 
+[[nodiscard]] bool parse_u64(std::string_view text, std::uint64_t& value) noexcept {
+    if (text.empty()) {
+        return false;
+    }
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+    return result.ec == std::errc {} && result.ptr == text.data() + text.size();
+}
+
+[[nodiscard]] bool parse_float(std::string_view text, float& value) noexcept {
+    if (text.empty()) {
+        return false;
+    }
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+    return result.ec == std::errc {} && result.ptr == text.data() + text.size()
+        && std::isfinite(value);
+}
+
 [[nodiscard]] bool parse_backend_kind(std::string_view text, BackendKind& backend) noexcept {
     if (text == "cpu") {
         backend = BackendKind::cpu;
@@ -93,10 +201,11 @@ void write_generate_usage(std::ostream& error) {
 [[nodiscard]] bool parse_generate_options(
     int argc,
     const char* const* argv,
+    int start_index,
     GenerateOptions& options,
     std::ostream& error
 ) {
-    for (int index = 4; index < argc; ++index) {
+    for (int index = start_index; index < argc; ++index) {
         const std::string_view option(argv[index]);
         if (option == "--greedy") {
             continue;
@@ -121,6 +230,184 @@ void write_generate_usage(std::ostream& error) {
             error << "error: unknown option '" << option << "'\n";
             return false;
         }
+    }
+
+    return true;
+}
+
+[[nodiscard]] bool is_chat_option(std::string_view option) noexcept {
+    return option == "--chat" || option == "--conversation" || option == "-cnv";
+}
+
+[[nodiscard]] bool argv_requests_chat(int argc, const char* const* argv) noexcept {
+    for (int index = 2; index < argc; ++index) {
+        if (is_chat_option(argv[index])) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+struct ParsedChatCommand {
+    std::size_t max_new_tokens = 0;
+    GenerateOptions options;
+    std::vector<std::string> reverse_stop_strings;
+    TokenSamplerOptions sampler;
+    bool greedy_requested = false;
+    bool sampled_modifier_requested = false;
+};
+
+[[nodiscard]] bool parse_chat_command(
+    int argc,
+    const char* const* argv,
+    ParsedChatCommand& command,
+    std::ostream& error
+) {
+    for (int index = 2; index < argc; ++index) {
+        const std::string_view option(argv[index]);
+        if (is_chat_option(option)) {
+            continue;
+        }
+        if (option == "--greedy") {
+            command.greedy_requested = true;
+            continue;
+        }
+
+        if (option == "--max-new-tokens") {
+            if (index + 1 >= argc) {
+                write_generate_usage(error);
+                error << "error: --max-new-tokens requires a value\n";
+                return false;
+            }
+            if (!parse_positive_size(argv[index + 1], command.max_new_tokens)) {
+                write_generate_usage(error);
+                error << "error: max-new-tokens must be a positive integer\n";
+                return false;
+            }
+            ++index;
+            continue;
+        }
+
+        if (option == "--backend") {
+            if (index + 1 >= argc) {
+                write_generate_usage(error);
+                error << "error: --backend requires a value\n";
+                return false;
+            }
+
+            BackendKind backend = BackendKind::cpu;
+            if (!parse_backend_kind(argv[index + 1], backend)) {
+                write_generate_usage(error);
+                error << "error: --backend must be cpu or metal\n";
+                return false;
+            }
+
+            command.options.backend = backend;
+            ++index;
+            continue;
+        }
+
+        if (option == "--temperature" || option == "--top-p" || option == "--repeat-penalty") {
+            if (index + 1 >= argc) {
+                write_generate_usage(error);
+                error << "error: " << option << " requires a value\n";
+                return false;
+            }
+            float value = 0.0F;
+            if (!parse_float(argv[index + 1], value)) {
+                write_generate_usage(error);
+                error << "error: " << option << " requires a finite number\n";
+                return false;
+            }
+            if (option == "--temperature") {
+                command.sampler.temperature = value;
+            } else if (option == "--top-p") {
+                command.sampler.top_p = value;
+                command.sampled_modifier_requested = true;
+            } else {
+                command.sampler.repetition_penalty = value;
+                command.sampled_modifier_requested = true;
+            }
+            ++index;
+            continue;
+        }
+
+        if (option == "--top-k") {
+            if (index + 1 >= argc) {
+                write_generate_usage(error);
+                error << "error: --top-k requires a value\n";
+                return false;
+            }
+            std::size_t value = 0;
+            if (!parse_positive_size(argv[index + 1], value)) {
+                write_generate_usage(error);
+                error << "error: --top-k must be a positive integer\n";
+                return false;
+            }
+            command.sampler.top_k = value;
+            command.sampled_modifier_requested = true;
+            ++index;
+            continue;
+        }
+
+        if (option == "--seed") {
+            if (index + 1 >= argc) {
+                write_generate_usage(error);
+                error << "error: --seed requires a value\n";
+                return false;
+            }
+            if (!parse_u64(argv[index + 1], command.sampler.seed)) {
+                write_generate_usage(error);
+                error << "error: --seed must be an unsigned integer\n";
+                return false;
+            }
+            command.sampled_modifier_requested = true;
+            ++index;
+            continue;
+        }
+
+        if (option == "--reverse-prompt" || option == "--reverse-stop" || option == "--stop" || option == "-r") {
+            if (index + 1 >= argc) {
+                write_generate_usage(error);
+                error << "error: " << option << " requires a value\n";
+                return false;
+            }
+
+            command.reverse_stop_strings.push_back(argv[index + 1]);
+            ++index;
+            continue;
+        }
+
+        write_generate_usage(error);
+        error << "error: unknown chat option '" << option << "'\n";
+        return false;
+    }
+
+    if (command.max_new_tokens == 0U) {
+        write_generate_usage(error);
+        error << "error: --max-new-tokens is required in chat mode\n";
+        return false;
+    }
+    if (command.sampler.temperature < 0.0F) {
+        error << "error: --temperature must be nonnegative\n";
+        return false;
+    }
+    if (command.greedy_requested && command.sampler.temperature > 0.0F) {
+        error << "error: --greedy cannot be combined with positive --temperature\n";
+        return false;
+    }
+    if (command.sampler.temperature == 0.0F && command.sampled_modifier_requested) {
+        error << "error: sampling modifiers require --temperature greater than zero\n";
+        return false;
+    }
+    if (command.sampler.top_p <= 0.0F || command.sampler.top_p > 1.0F) {
+        error << "error: --top-p must be in (0, 1]\n";
+        return false;
+    }
+    if (command.sampler.repetition_penalty <= 0.0F) {
+        error << "error: --repeat-penalty must be positive\n";
+        return false;
     }
 
     return true;
@@ -200,6 +487,113 @@ void write_generate_usage(std::ostream& error) {
     );
 }
 
+int run_generate_chat(
+    const char* model_path,
+    const ParsedChatCommand& command,
+    std::istream& input,
+    std::ostream& output
+) {
+    const ScopedSignalHandler chat_interrupt_handler(SIGINT, handle_chat_interrupt);
+    auto file_model = read_file_backed_gguf_model(model_path);
+    auto session = Gemma2ChatSession(
+        std::move(file_model),
+        Gemma2ChatSessionOptions {
+            .max_new_tokens = command.max_new_tokens,
+            .backend = command.options.backend,
+            .reverse_stop_strings = command.reverse_stop_strings,
+            .sampler = command.sampler,
+        }
+    );
+
+    output << "local-gguf-engine chat\n";
+    output << "commands: /exit /quit /clear /reset /regen /tokens /read <path>\n";
+    output << "multiline: end a line with \\\n";
+
+    std::string line;
+    while (true) {
+        output << "> ";
+        const auto prompt_interrupt_count = chat_interrupt_count();
+        if (!std::getline(input, line)) {
+            output << '\n';
+            return 0;
+        }
+        if (chat_interrupt_count() != prompt_interrupt_count) {
+            output << '\n';
+            continue;
+        }
+
+        if (line == "/exit" || line == "/quit") {
+            return 0;
+        }
+
+        if (line == "/clear") {
+            session.clear();
+            output << "chat cleared\n";
+            continue;
+        }
+        if (line == "/reset") {
+            session.reset();
+            output << "session reset\n";
+            continue;
+        }
+        if (line == "/tokens") {
+            output << "tokens: cached=" << session.cached_token_count()
+                   << " remaining=" << session.remaining_context_tokens()
+                   << " max-new-tokens=" << session.max_new_tokens() << '\n';
+            continue;
+        }
+
+        bool regenerate = false;
+        if (line == "/regen") {
+            if (session.message_count() < 2U) {
+                output << "error: nothing to regenerate\n";
+                continue;
+            }
+            regenerate = true;
+        } else if (line == "/read" || line.starts_with("/read ") || line.starts_with("/read\t")) {
+            try {
+                line = read_prompt_file(trim_left(std::string_view(line).substr(5U)));
+            } catch (const std::exception& read_error) {
+                output << "error: " << read_error.what() << '\n';
+                continue;
+            }
+        } else if (starts_with_command_prefix(line)) {
+            output << "error: unknown command '" << line << "'\n";
+            continue;
+        } else if (!read_multiline_input(input, output, line)) {
+            return 0;
+        }
+
+        const auto turn_interrupt_count = chat_interrupt_count();
+        const auto turn_options = Gemma2ChatTurnOptions {
+                .on_text_delta = [&](std::string_view text_delta) {
+                    output << text_delta;
+                    output.flush();
+                },
+                .should_stop = [&]() {
+                    return chat_interrupt_count() != turn_interrupt_count;
+                },
+            };
+        std::optional<engine::Gemma2ChatTurnResult> turn;
+        try {
+            turn = regenerate
+                ? session.regenerate_last_turn(turn_options)
+                : session.generate_user_turn(line, turn_options);
+        } catch (const Gemma2ChatContextError& context_error) {
+            output << "error: context: " << context_error.what() << '\n';
+            continue;
+        }
+        output << '\n';
+        if (turn->rebuilt_context) {
+            output << "context: dropped " << turn->trimmed_turn_count
+                   << " oldest turn(s) and rebuilt retained KV\n";
+        }
+        if (turn->interrupted && chat_interrupt_count() > turn_interrupt_count + 1) {
+            return 130;
+        }
+    }
+}
+
 }  // namespace
 
 std::string generate_text_from_gguf_bytes(
@@ -221,6 +615,47 @@ std::string generate_text_from_gguf_bytes(
 }
 
 int run_generate(int argc, const char* const* argv, std::ostream& output, std::ostream& error) {
+    return run_generate(argc, argv, std::cin, output, error);
+}
+
+int run_generate(
+    int argc,
+    const char* const* argv,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& error
+) {
+    if (argc < 2) {
+        write_generate_usage(error);
+        error << "error: missing required argument\n";
+        return 1;
+    }
+
+    if (argv_requests_chat(argc, argv)) {
+        ParsedChatCommand command;
+        if (!parse_chat_command(argc, argv, command, error)) {
+            return 1;
+        }
+
+        try {
+            return run_generate_chat(argv[1], command, input, output);
+        } catch (const GGUFReadError& read_error) {
+            error << "error: invalid GGUF: " << read_error.what() << '\n';
+        } catch (const EngineModelError& model_error) {
+            error << "error: invalid model: " << model_error.what() << '\n';
+        } catch (const TokenizerError& tokenizer_error) {
+            error << "error: tokenizer: " << tokenizer_error.what() << '\n';
+        } catch (const BackendError& backend_error) {
+            error << "error: backend: " << backend_error.what() << '\n';
+        } catch (const TensorError& tensor_error) {
+            error << "error: tensor: " << tensor_error.what() << '\n';
+        } catch (const std::exception& unexpected_error) {
+            error << "error: " << unexpected_error.what() << '\n';
+        }
+
+        return 1;
+    }
+
     if (argc < 4) {
         write_generate_usage(error);
         error << "error: missing required argument\n";
@@ -235,7 +670,7 @@ int run_generate(int argc, const char* const* argv, std::ostream& output, std::o
     }
 
     GenerateOptions options {};
-    if (!parse_generate_options(argc, argv, options, error)) {
+    if (!parse_generate_options(argc, argv, 4, options, error)) {
         return 1;
     }
 
