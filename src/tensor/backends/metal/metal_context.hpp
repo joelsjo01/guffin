@@ -16,6 +16,7 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> matmul_q4_k_pipeline = nil;
     id<MTLComputePipelineState> matvec_q4_k_pipeline = nil;
     id<MTLComputePipelineState> matmul_q6_k_pipeline = nil;
+    id<MTLComputePipelineState> matvec_q6_k_pipeline = nil;
     id<MTLComputePipelineState> matmul_add_pipeline = nil;
     id<MTLComputePipelineState> silu_multiply_pipeline = nil;
     id<MTLComputePipelineState> add_pipeline = nil;

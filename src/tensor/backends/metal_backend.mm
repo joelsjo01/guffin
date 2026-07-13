@@ -283,6 +283,110 @@ kernel void matmul_f32_q6_k_gguf_weight_kernel(
     output[row * dims.columns + column] = sum;
 }
 
+// Q6_K uses two interleaved bit planes, so pairs of SIMD lanes walk two
+// blocks concurrently. Sixteen lanes cover one block while activations are
+// reused across two output columns; the full SIMD reduction combines all
+// block contributions without threadgroup memory.
+kernel void matvec_f32_q6_k_gguf_weight_kernel(
+    const device float* left [[buffer(0)]],
+    const device uchar* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulDimensions& dims [[buffer(3)]],
+    uint threadgroup_index [[threadgroup_position_in_grid]],
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint first_column = (threadgroup_index * 4) + uint(simdgroup_index) * 2;
+    const uint second_column = first_column + 1;
+    const uint block_parity = uint(lane) & 1;
+    const uint block_lane = uint(lane) >> 1;
+    const uint half_block = block_lane >> 3;
+    const uint lane_in_half = block_lane & 7;
+    const uint lane_offset = lane_in_half * 4;
+    const uint activation_base = half_block * 128 + lane_offset;
+    const uint low_base = half_block * 64 + lane_offset;
+    const uint high_base = half_block * 32 + lane_offset;
+    const uint scale_base = half_block * 8 + lane_offset / 16;
+    const uint blocks_per_column = dims.shared / 256;
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+
+    if (first_column < dims.columns) {
+        for (uint column_block = block_parity; column_block < blocks_per_column; column_block += 2) {
+            const device uchar* first_block =
+                right + (first_column * blocks_per_column + column_block) * 210;
+            const device uchar* second_block = second_column < dims.columns
+                ? right + (second_column * blocks_per_column + column_block) * 210
+                : first_block;
+            const device uchar* first_low = first_block;
+            const device uchar* first_high = first_block + 128;
+            const device uchar* first_scales = first_block + 192;
+            const device uchar* second_low = second_block;
+            const device uchar* second_high = second_block + 128;
+            const device uchar* second_scales = second_block + 192;
+            float first_block_sum = 0.0f;
+            float second_block_sum = 0.0f;
+
+            for (uint item = 0; item < 4; ++item) {
+                const float activation0 = left[column_block * 256 + activation_base + item];
+                const float activation1 = left[column_block * 256 + activation_base + 32 + item];
+                const float activation2 = left[column_block * 256 + activation_base + 64 + item];
+                const float activation3 = left[column_block * 256 + activation_base + 96 + item];
+
+                const uchar first_low0 = first_low[low_base + item];
+                const uchar first_low1 = first_low[low_base + 32 + item];
+                const uchar first_high_value = first_high[high_base + item];
+                const int first_q0 = int((first_low0 & 0x0f) | ((first_high_value & 0x03) << 4)) - 32;
+                const int first_q1 = int((first_low1 & 0x0f) | ((first_high_value & 0x0c) << 2)) - 32;
+                const int first_q2 = int((first_low0 >> 4) | (first_high_value & 0x30)) - 32;
+                const int first_q3 = int((first_low1 >> 4) | ((first_high_value & 0xc0) >> 2)) - 32;
+                first_block_sum += activation0 * float(first_q0 * signed_i8(first_scales[scale_base]))
+                    + activation1 * float(first_q1 * signed_i8(first_scales[scale_base + 2]))
+                    + activation2 * float(first_q2 * signed_i8(first_scales[scale_base + 4]))
+                    + activation3 * float(first_q3 * signed_i8(first_scales[scale_base + 6]));
+
+                if (second_column < dims.columns) {
+                    const uchar second_low0 = second_low[low_base + item];
+                    const uchar second_low1 = second_low[low_base + 32 + item];
+                    const uchar second_high_value = second_high[high_base + item];
+                    const int second_q0 = int(
+                        (second_low0 & 0x0f) | ((second_high_value & 0x03) << 4)
+                    ) - 32;
+                    const int second_q1 = int(
+                        (second_low1 & 0x0f) | ((second_high_value & 0x0c) << 2)
+                    ) - 32;
+                    const int second_q2 = int((second_low0 >> 4) | (second_high_value & 0x30)) - 32;
+                    const int second_q3 = int(
+                        (second_low1 >> 4) | ((second_high_value & 0xc0) >> 2)
+                    ) - 32;
+                    second_block_sum +=
+                        activation0 * float(second_q0 * signed_i8(second_scales[scale_base]))
+                        + activation1 * float(second_q1 * signed_i8(second_scales[scale_base + 2]))
+                        + activation2 * float(second_q2 * signed_i8(second_scales[scale_base + 4]))
+                        + activation3 * float(second_q3 * signed_i8(second_scales[scale_base + 6]));
+                }
+            }
+
+            first_sum += f16_bits_to_float(read_little_endian_u16(first_block, 208)) * first_block_sum;
+            if (second_column < dims.columns) {
+                second_sum += f16_bits_to_float(read_little_endian_u16(second_block, 208))
+                    * second_block_sum;
+            }
+        }
+    }
+
+    first_sum = simd_sum(first_sum);
+    second_sum = simd_sum(second_sum);
+    if (lane == 0) {
+        if (first_column < dims.columns) {
+            output[first_column] = first_sum;
+        }
+        if (second_column < dims.columns) {
+            output[second_column] = second_sum;
+        }
+    }
+}
+
 kernel void matmul_f32_f16_gguf_weight_add_kernel(
     const device float* left [[buffer(0)]],
     const device half* right [[buffer(1)]],

@@ -1545,21 +1545,31 @@ BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
         && shared % 256 == 0
         && state.matvec_q4_k_pipeline.threadExecutionWidth == 32
         && state.matvec_q4_k_pipeline.maxTotalThreadsPerThreadgroup >= 64;
-    [encoder setComputePipelineState:
-        use_q4_decode_matvec
-            ? state.matvec_q4_k_pipeline
-            : quantized_matmul_pipeline(state, right.descriptor().dtype)];
+    const bool use_q6_decode_matvec =
+        rows == 1
+        && right.descriptor().dtype == DType::q6_k
+        && shared % 256 == 0
+        && state.matvec_q6_k_pipeline.threadExecutionWidth == 32
+        && state.matvec_q6_k_pipeline.maxTotalThreadsPerThreadgroup >= 64;
+    id<MTLComputePipelineState> pipeline = quantized_matmul_pipeline(state, right.descriptor().dtype);
+    if (use_q4_decode_matvec) {
+        pipeline = state.matvec_q4_k_pipeline;
+    } else if (use_q6_decode_matvec) {
+        pipeline = state.matvec_q6_k_pipeline;
+    }
+    [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:left.buffer() offset:0 atIndex:0];
     [encoder setBuffer:right.buffer() offset:0 atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
+    const bool use_decode_matvec = use_q4_decode_matvec || use_q6_decode_matvec;
     const MTLSize threads_per_threadgroup =
-        use_q4_decode_matvec ? MTLSizeMake(64, 1, 1) : MTLSizeMake(16, 16, 1);
+        use_decode_matvec ? MTLSizeMake(64, 1, 1) : MTLSizeMake(16, 16, 1);
     const auto threadgroup_columns = static_cast<NSUInteger>(
-        use_q4_decode_matvec ? (columns + 3U) / 4U : (columns + 15U) / 16U
+        use_decode_matvec ? (columns + 3U) / 4U : (columns + 15U) / 16U
     );
-    const auto threadgroup_rows = static_cast<NSUInteger>(use_q4_decode_matvec ? 1U : (rows + 15U) / 16U);
+    const auto threadgroup_rows = static_cast<NSUInteger>(use_decode_matvec ? 1U : (rows + 15U) / 16U);
     const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
     [encoder endEncoding];

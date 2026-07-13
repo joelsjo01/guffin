@@ -16,9 +16,9 @@ The current Gemma path has the important Metal residency boundary: packed
 weights, KV cache, prefill/decode schedules, logits, and greedy top-1 selection
 stay on Metal, with only the selected token/logit read back. Production decode
 now encodes one complete token in one command buffer with one wait and no
-transient Metal buffers. Its one-row Q4_K projections use the measured
-SIMD-cooperative kernel; the next focus is measuring whether Q6_K or the tied
-F16 vocabulary projection is the larger remaining decode matvec cost.
+transient Metal buffers. Its one-row Q4_K and Q6_K projections use measured,
+format-specific SIMD-cooperative kernels; the next focus is the tied F16
+vocabulary projection.
 
 CPU work is correctness scaffolding only: metadata checks, tokenizer checks,
 tiny reference kernels, fixtures, and golden comparisons. Do not build a full
@@ -81,8 +81,10 @@ engine-owned session/runtime path.
 - The Q4_K SIMD decode matvec then improved the five-repetition warm greedy
   result to `2.404 t/s` mean (`2.366 t/s` median) while preserving the
   one-submit resident path.
-- The active task is measuring the remaining Q6_K versus tied-F16 projection
-  split before choosing the next kernel optimization.
+- The Q6_K SIMD decode matvec improved the result again to `3.130 t/s` mean
+  (`3.000 t/s` median); its real `[14336, 3584]` kernel is about `4.16x` faster
+  than the scalar Q6_K path.
+- The active task is the tied F16 vocabulary-projection decode kernel.
 
 ## Benchmark Rule
 

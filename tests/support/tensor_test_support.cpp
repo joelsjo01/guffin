@@ -364,6 +364,48 @@ TensorStorage tensor_q6_k_gguf_weight_matrix(std::uint64_t shared, std::uint64_t
     return storage;
 }
 
+TensorStorage tensor_q6_k_stress_gguf_weight_matrix(
+    std::uint64_t shared,
+    std::uint64_t columns,
+    std::uint64_t seed
+) {
+    auto storage = TensorStorage::allocate(TensorDescriptor::from_quantized_gguf_weight_matrix(
+        Shape::from({shared, columns}),
+        DType::q6_k
+    ));
+    auto bytes = storage.mutable_bytes();
+    const auto blocks_per_column = shared / Q6_KBlockView::element_count;
+
+    for (std::uint64_t column = 0; column < columns; ++column) {
+        for (std::uint64_t column_block = 0; column_block < blocks_per_column; ++column_block) {
+            const auto block_index = column * blocks_per_column + column_block;
+            auto block = bytes.subspan(
+                static_cast<std::size_t>(block_index * Q6_KBlockView::byte_count),
+                Q6_KBlockView::byte_count
+            );
+            write_little_endian_u16(block, Q6_KBlockView::byte_count - 2U, 0x2800U); // d = 0.03125
+
+            for (std::size_t group = 0; group < Q6_KBlockView::scale_byte_count; ++group) {
+                const auto raw = static_cast<int>(
+                    (seed + 11U * column + 7U * column_block + 13U * group) % 63U
+                ) - 31;
+                const auto scale = static_cast<std::int8_t>(raw == 0 ? -17 : raw);
+                set_q6_k_scale(block, group, scale);
+            }
+            for (std::size_t element = 0; element < Q6_KBlockView::element_count; ++element) {
+                const auto quantized = static_cast<std::int8_t>(
+                    static_cast<int>(
+                        (seed + 5U * column + 3U * column_block + 17U * element) % 64U
+                    ) - 32
+                );
+                set_q6_k_quantized_value(block, element, quantized);
+            }
+        }
+    }
+
+    return storage;
+}
+
 std::vector<float> tensor_f32_projection_values(std::uint64_t rows, std::uint64_t columns) {
     std::vector<float> values(static_cast<std::size_t>(rows * columns));
     for (std::uint64_t index = 0; index < rows * columns; ++index) {

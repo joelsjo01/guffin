@@ -242,15 +242,24 @@ void MetalCommandContext::encode_matmul(
         && shared % 256 == 0
         && impl_->state->matvec_q4_k_pipeline.threadExecutionWidth == 32
         && impl_->state->matvec_q4_k_pipeline.maxTotalThreadsPerThreadgroup >= 64;
-    [encoder setComputePipelineState:
-        use_q4_decode_matvec
-            ? impl_->state->matvec_q4_k_pipeline
-            : matmul_pipeline(*impl_->state, weight.descriptor().dtype)];
+    const bool use_q6_decode_matvec =
+        rows == 1
+        && weight.descriptor().dtype == DType::q6_k
+        && shared % 256 == 0
+        && impl_->state->matvec_q6_k_pipeline.threadExecutionWidth == 32
+        && impl_->state->matvec_q6_k_pipeline.maxTotalThreadsPerThreadgroup >= 64;
+    id<MTLComputePipelineState> pipeline = matmul_pipeline(*impl_->state, weight.descriptor().dtype);
+    if (use_q4_decode_matvec) {
+        pipeline = impl_->state->matvec_q4_k_pipeline;
+    } else if (use_q6_decode_matvec) {
+        pipeline = impl_->state->matvec_q6_k_pipeline;
+    }
+    [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
     [encoder setBuffer:storage(weight).buffer() offset:0 atIndex:1];
     [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
-    if (use_q4_decode_matvec) {
+    if (use_q4_decode_matvec || use_q6_decode_matvec) {
         constexpr std::uint64_t outputs_per_threadgroup = 4;
         [encoder dispatchThreadgroups:MTLSizeMake(
                                           static_cast<NSUInteger>(

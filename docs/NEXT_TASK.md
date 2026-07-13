@@ -1,112 +1,123 @@
-# Next Task: Measure The Remaining Decode Matvec Split
+# Next Task: M4 Tied-F16 Decode Projection Bake-Off
 
 ## Verified Starting Point
 
-The one-row Q4_K decode kernel is complete.
+One-row Q4_K and Q6_K decode projections now use format-specific
+SIMD-cooperative Metal kernels.
 
-- One 32-lane SIMD group produces two output columns.
-- Two SIMD groups form a 64-thread threadgroup and produce four columns.
-- Four 8-lane subgroups divide packed blocks, reuse activations for both
-  columns, accumulate in F32, and finish with `simd_sum`.
-- The specialized path is selected only for one-row Q4_K inputs with a
-  256-aligned inner width on a pipeline whose execution width is 32.
-- Multi-row Q4_K, Q6_K, and F16 paths retain their previous kernels.
+- Both produce two output columns per 32-lane SIMD group and use two SIMD
+  groups per 64-thread threadgroup.
+- Q4_K divides four packed blocks across four 8-lane subgroups.
+- Q6_K pairs lanes so sixteen lanes cover each of two interleaved packed
+  blocks, matching its separate low/high bit planes and signed scales.
+- Both reuse activations across two output columns, accumulate in F32, finish
+  with `simd_sum`, and use no threadgroup memory.
+- Specialized selection requires one row, a 256-aligned inner width, a
+  32-thread execution width, and capacity for a 64-thread threadgroup.
+- Multi-row kernels remain scalar fallbacks.
 - Production decode remains one command buffer, one commit, one wait, zero
-  transient Metal buffers, and no intermediate CPU readback.
+  transient buffers, and no intermediate CPU readback.
 
-Deterministic Metal parity covers packed-block counts `1`, `4`, `14`, `16`,
-and `56`, an odd five-column output tail, nonzero minimum terms, all scale/min
-packing branches, both nibbles, and mixed-sign activations against the CPU
-dequantized F32 oracle.
+Host Metal CI passes with `313` tests. Q6 parity covers packed-block counts
+`1`, `2`, `14`, `16`, and `56`, an odd output tail, both low nibbles, all four
+high-bit planes, signed scales, full six-bit values, and mixed-sign activations
+against the CPU dequantized F32 oracle.
 
-## Measured Result
+## Q6_K Result
 
-Allocation-free resident measurements used five encoded matvecs per command
-buffer and divided the command-buffer GPU duration by five:
+All `42` target-model Q6_K tensors are feed-forward down projections with
+shape `[14336, 3584]`.
 
-| Q4_K shape `[K, N]` | Scalar | SIMD | Speedup |
-| --- | ---: | ---: | ---: |
-| `3584 x 2048` | `3.765 ms` | `0.435 ms` | `8.65x` |
-| `4096 x 3584` | `4.348 ms` | `0.711 ms` | `6.11x` |
-| `14336 x 3584` | `10.395 ms` | `2.701 ms` | `3.85x` |
+| Resident Q6_K kernel | GPU duration | Relative |
+| --- | ---: | ---: |
+| Scalar | `9.006 ms` | `1.00x` |
+| SIMD | `2.166 ms` | `4.16x` |
 
-The exact release benchmark used eight generated tokens, one warmup, and five
-measured repetitions. Warm-first-turn generation results were:
+The exact eight-token release benchmark used one warmup and five measured
+repetitions. Warm-first-turn results were:
 
 | Repetition | Generation tokens/s |
 | ---: | ---: |
-| `0` | `2.686` |
-| `1` | `2.366` |
-| `2` | `2.180` |
-| `3` | `2.016` |
-| `4` | `2.770` |
-| Mean | `2.404` |
-| Median | `2.366` |
+| `0` | `2.996` |
+| `1` | `3.000` |
+| `2` | `2.765` |
+| `3` | `3.054` |
+| `4` | `3.835` |
+| Mean | `3.130` |
+| Median | `3.000` |
 
-The recorded scalar baseline was `0.930 t/s` mean, so the retained Q4_K
-kernel improved real warm greedy throughput by about `2.58x`. Host Metal CI
-passes with `312` tests.
+This is a further `30.2%` mean improvement over the Q4-only `2.404 t/s`
+result and about `3.37x` the original `0.930 t/s` scalar baseline.
 
-## Why Measurement Comes Next
+## Remaining Major Matvec
 
-One generated token still encodes:
+The tied token-embedding/output tensor is F16 with shape `[3584, 256000]` and
+streams about `1.84 GB` once per generated token. Its current decode kernel
+assigns one output column to one thread and serially walks all `3584` input
+values.
 
-- `42` scalar Q6_K matvecs streaming about `1.01 GB` of packed weights;
-- one scalar tied F16 vocabulary projection streaming about `1.84 GB`.
-
-Weight bytes alone no longer identify the dominant kernel. The Q6_K calls
-have dispatch and repeated-input costs, while the single vocabulary projection
-has a very large output width. Measure both on the resident production layout
-before choosing the next optimization.
+This is now the obvious next matvec to measure and optimize. Do not assume the
+Q4/Q6 two-output mapping wins unchanged: the unquantized F16 layout has
+different arithmetic intensity, a very large output width, and no unpacking
+cost.
 
 ## Implementation Gates
 
-### Gate 1: Enumerate The Real Workload
+### Gate 1: Lock The F16 Baseline
 
-- Enumerate the actual target model's Q6_K decode shapes and call counts from
-  the resident plan.
-- Confirm the tied F16 output projection shape and call count.
-- Keep this model-specific and read-only; do not introduce a generic graph or
-  profiling framework.
-
-### Gate 2: Measure Resident Kernel Cost
-
-- Use temporary internal instrumentation or a temporary allocation-free probe,
-  not permanent CLI timing output.
-- Reuse already uploaded buffers and caller-owned outputs.
-- Exclude model load, plan creation, buffer allocation, terminal output, and
-  CPU token selection.
-- Measure representative individual Q6_K shapes and the tied F16 projection
-  with enough repetitions to reduce timer noise.
+- Add deterministic one-row F16 GGUF-weight matvec parity fixtures with odd
+  output tails and mixed-sign values.
+- Preserve existing multi-row F16 behavior.
+- Measure the allocation-free resident `[3584, 256000]` projection over enough
+  repetitions to reduce timer noise.
 - Record pipeline execution width, maximum threads per threadgroup, and static
-  threadgroup memory for both pipelines.
-- Estimate per-token aggregate Q6_K and F16 projection time using the real call
-  counts, then validate the ranking on a complete resident decode token where
-  possible.
+  threadgroup memory.
 
-### Gate 3: Choose One Next Kernel
+### Gate 2: Compile-Time Decode GEMV Bake-Off
 
-- Select Q6_K only if its measured aggregate cost is larger.
-- Select the tied F16 projection only if its measured cost is larger.
-- If results overlap materially, repeat under the same thermal conditions and
-  use the complete-token result as the tiebreaker.
-- Put the chosen kernel, exact shapes, baseline timings, parity requirements,
-  candidate mapping, integration boundary, and rejection criteria into this
-  file before implementation.
+Start with a one-dimensional 32-lane SIMD group cooperatively reducing the
+`3584`-value dot product. Compare small compile-time layouts:
+
+1. one output column per SIMD group;
+2. two output columns per SIMD group with activation reuse;
+3. four output columns only if pipeline capacity and measured performance
+   justify the additional registers.
+
+Start with two SIMD groups per threadgroup. Test other group counts only if the
+isolated duration remains meaningfully different. Use `simd_sum`, F32
+accumulation, no threadgroup staging, and no intermediate weight conversion.
+Remove losing candidates; do not add runtime autotuning.
+
+### Gate 3: Integrate Narrowly
+
+- Select the winner only for one-row F16 GGUF-weight matvec with a 32-thread
+  execution width and sufficient threadgroup capacity.
+- Encode through `MetalCommandContext` into the existing resident logits
+  buffer.
+- Keep token embedding and multi-row F16 paths unchanged.
+- Preserve the one-submit/no-transient-buffer production invariants.
+
+### Gate 4: Prove End-To-End Value
+
+- Run CPU-oracle parity, resident diagnostic parity, full host Metal CI, and
+  `git diff --check`.
+- Repeat the exact eight-token, one-warmup, five-repetition release benchmark.
+- Compare against `3.130 t/s` mean and `3.000 t/s` median.
+- Reject a candidate whose improvement is within noise or whose numerical
+  tolerance, residency, or submission behavior regresses.
 
 ## Do Not
 
-- Do not optimize Q6_K or F16 in this measurement slice.
-- Do not alter the completed Q4_K kernel.
-- Do not change prefill, attention, KV, sampling, context handling, model
-  loading, or CLI behavior.
+- Do not alter the completed Q4_K or Q6_K kernels.
+- Do not change prefill, token embedding, attention, KV, sampling, context
+  handling, model loading, or CLI behavior.
 - Do not add permanent kernel-level CLI output, a benchmark executable,
   dashboards, databases, or runtime autotuning.
 - Do not begin the llama.cpp throughput comparison.
 
 ## Stop Condition
 
-Stop when the real resident Q6_K and tied-F16 costs have been measured with a
-repeatable method, one is identified as the next bottleneck beyond noise, and
-this baton contains a narrow implementation plan for that one kernel. Wait for
-approval before implementing it.
+Stop when one measured one-row F16 vocabulary-projection kernel has replaced
+the scalar kernel only on the resident decode path, all correctness and
+structural tests pass, and the exact five-repetition real-generation benchmark
+shows an improvement beyond noise.
