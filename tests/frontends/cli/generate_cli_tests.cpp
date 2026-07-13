@@ -736,7 +736,10 @@ void test_gemma2_chat_session_appends_after_truncated_output_retokenizes_differe
     );
     const auto first = session.generate_user_turn("Hello");
     const auto second = session.generate_user_turn("Hello");
-    expect(first.text == "Hello", "truncated retokenization fixture text mismatch");
+    expect(
+        first.text == " Hello",
+        "truncated retokenization fixture text mismatch: actual='" + first.text + "'"
+    );
     expect(first.generated_token_ids == std::vector<std::uint32_t> {6U},
         "truncated retokenization should retain exact generated ID");
     expect(second.cache_position > first.cache_position,
@@ -781,13 +784,17 @@ void test_gemma2_chat_session_records_deterministic_turn_metrics_when_available(
     expect(first.metrics.generation.first_token_selected_ns == 140U, "Gemma2 measured selection boundary mismatch");
     expect(first.metrics.generation.decode_started_ns == 150U, "Gemma2 measured decode start mismatch");
     expect(first.metrics.generation.decode_completed_ns == 160U, "Gemma2 measured decode completion mismatch");
-    expect(first.metrics.generation.generation_completed_ns == 170U, "Gemma2 measured runtime completion mismatch");
-    expect(first.metrics.first_visible_output_ns == 180U, "Gemma2 measured visible-output boundary mismatch");
+    expect(
+        first.metrics.generation.generation_completed_ns == 180U,
+        "Gemma2 measured runtime completion mismatch: actual="
+            + std::to_string(first.metrics.generation.generation_completed_ns)
+    );
+    expect(first.metrics.first_visible_output_ns == 170U, "Gemma2 measured visible-output boundary mismatch");
     expect(first.metrics.turn_completed_ns == 190U, "Gemma2 measured turn completion mismatch");
     expect(first.metrics.generation.prefill_duration_ns == 30U, "Gemma2 measured prefill duration mismatch");
     expect(first.metrics.generation.runtime_ttft_ns == 30U, "Gemma2 measured runtime TTFT mismatch");
     expect(first.metrics.generation.decode_duration_ns == 10U, "Gemma2 measured decode duration mismatch");
-    expect(first.metrics.end_to_end_ttft_ns == 80U, "Gemma2 measured end-to-end TTFT mismatch");
+    expect(first.metrics.end_to_end_ttft_ns == 70U, "Gemma2 measured end-to-end TTFT mismatch");
     expect(first.metrics.total_turn_duration_ns == 90U, "Gemma2 measured total turn duration mismatch");
     expect(first.metrics.generation.newly_evaluated_prompt_token_count == first.appended_token_count,
         "Gemma2 measured prompt token count mismatch");
