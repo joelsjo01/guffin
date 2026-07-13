@@ -45,7 +45,13 @@ struct Gemma2MetalKVCacheLayer {
 };
 
 struct Gemma2MetalDecodeScratch {
+    // The decode executor treats these buffers as a fixed liveness map. Raw
+    // Q/K must not alias their RoPE destinations because paired lanes are read
+    // concurrently by the current kernel.
+    tensor::BackendBuffer token_id_staging;
     tensor::BackendBuffer normalized_hidden;
+    tensor::BackendBuffer raw_query;
+    tensor::BackendBuffer raw_key;
     tensor::BackendBuffer query;
     tensor::BackendBuffer key;
     tensor::BackendBuffer value;
@@ -62,6 +68,7 @@ struct Gemma2MetalDecodeScratch {
     tensor::BackendBuffer feed_forward_residual;
     tensor::BackendBuffer layer_handoff_normalized_attention_input;
     tensor::BackendBuffer logits;
+    tensor::BackendBuffer top_logit_staging;
 };
 
 struct Gemma2MetalLayerState {

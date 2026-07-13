@@ -109,6 +109,26 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> matvec_q4_k_function =
+        [library newFunctionWithName:@"matvec_f32_q4_k_gguf_weight_kernel"];
+    if (matvec_q4_k_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Q4_K decode matvec kernel function was not found"
+        );
+    }
+
+    NSError* matvec_q4_k_error = nil;
+    matvec_q4_k_pipeline =
+        [device newComputePipelineStateWithFunction:matvec_q4_k_function error:&matvec_q4_k_error];
+    if (matvec_q4_k_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Q4_K decode matvec pipeline creation failed: "
+                + ns_error_message(matvec_q4_k_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> matmul_q6_k_function =
         [library newFunctionWithName:@"matmul_f32_q6_k_gguf_weight_kernel"];
     if (matmul_q6_k_function == nil) {

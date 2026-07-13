@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <span>
 #include <string>
@@ -49,6 +50,8 @@ using local_gguf_engine::engine::create_gemma2_metal_prefill_schedule;
 using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens;
 using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens_with_plan;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
+using local_gguf_engine::engine::run_gemma2_metal_decode_step;
+using local_gguf_engine::engine::run_gemma2_metal_resident_decode_step;
 using local_gguf_engine::engine::run_gemma2_metal_scheduled_prefill_block;
 using local_gguf_engine::engine::top_logit_tokens_f32;
 using local_gguf_engine::model_format::GGUFHeader;
@@ -416,7 +419,10 @@ std::size_t expected_kv_cache_byte_count(const Gemma2ModelConfig& config) {
 
 std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
     const auto& scratch = plan.decode_scratch();
-    return backend_buffer_byte_count(scratch.normalized_hidden)
+    return backend_buffer_byte_count(scratch.token_id_staging)
+        + backend_buffer_byte_count(scratch.normalized_hidden)
+        + backend_buffer_byte_count(scratch.raw_query)
+        + backend_buffer_byte_count(scratch.raw_key)
         + backend_buffer_byte_count(scratch.query)
         + backend_buffer_byte_count(scratch.key)
         + backend_buffer_byte_count(scratch.value)
@@ -432,7 +438,8 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(scratch.projected_feed_forward_output)
         + backend_buffer_byte_count(scratch.feed_forward_residual)
         + backend_buffer_byte_count(scratch.layer_handoff_normalized_attention_input)
-        + backend_buffer_byte_count(scratch.logits);
+        + backend_buffer_byte_count(scratch.logits)
+        + backend_buffer_byte_count(scratch.top_logit_staging);
 }
 
 std::size_t schedule_scratch_byte_count(const local_gguf_engine::engine::Gemma2MetalScheduleScratch& scratch) {
@@ -3176,6 +3183,93 @@ void test_gemma2_metal_generated_token_loop_repeats_decode_when_available() {
     }
 }
 
+void test_gemma2_metal_resident_decode_is_one_submission_and_matches_diagnostics_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = tiny_gemma2_payload_store(true, 2);
+    auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const std::array<std::uint32_t, 2> prompt_token_ids {1, 2};
+    auto diagnostic_shell = create_gemma2_metal_generation_runtime_shell(
+        model,
+        std::span<const std::uint32_t>(prompt_token_ids)
+    );
+    auto resident_shell = create_gemma2_metal_generation_runtime_shell(
+        model,
+        std::span<const std::uint32_t>(prompt_token_ids)
+    );
+    const auto token_id = diagnostic_shell.prefill_next_token_selection.token_id;
+    const auto embedding_scale = std::sqrt(
+        static_cast<float>(diagnostic_shell.plan.config().embedding_length)
+    );
+
+    const auto diagnostic = run_gemma2_metal_decode_step(
+        diagnostic_shell.plan,
+        diagnostic_shell.first_decode,
+        token_id,
+        embedding_scale
+    );
+    const auto resident = run_gemma2_metal_resident_decode_step(
+        resident_shell.plan,
+        resident_shell.first_decode,
+        token_id,
+        embedding_scale
+    );
+
+    expect(resident.execution.command_buffer_count == 1U, "resident decode command-buffer count mismatch");
+    expect(resident.execution.commit_count == 1U, "resident decode commit count mismatch");
+    expect(resident.execution.synchronous_wait_count == 1U, "resident decode wait count mismatch");
+    expect(
+        resident.execution.transient_buffer_allocation_count == 0U,
+        "resident decode transient allocation count mismatch"
+    );
+    expect(resident.execution.compute_encoder_count == 43U, "resident decode compute encoder count mismatch");
+    expect(resident.execution.blit_encoder_count == 2U, "resident decode blit encoder count mismatch");
+    expect(resident.next_token_selection.has_value(), "resident decode top-logit result missing");
+
+    const auto diagnostic_logits = copy_tensor_from_backend(diagnostic.logits.logits);
+    const auto resident_logits = copy_tensor_from_backend(resident.logits);
+    expect(
+        diagnostic_logits.descriptor() == resident_logits.descriptor(),
+        "resident decode logits descriptor mismatch"
+    );
+    for (std::uint64_t token = 0; token < diagnostic_logits.descriptor().element_count; ++token) {
+        float diagnostic_value = 0.0F;
+        float resident_value = 0.0F;
+        const auto byte_offset = static_cast<std::size_t>(token * sizeof(float));
+        std::memcpy(&diagnostic_value, diagnostic_logits.bytes().data() + byte_offset, sizeof(float));
+        std::memcpy(&resident_value, resident_logits.bytes().data() + byte_offset, sizeof(float));
+        expect_close(diagnostic_value, resident_value, 1.0e-5F, "resident decode logits parity mismatch");
+    }
+    expect(
+        resident.next_token_selection->token_id == diagnostic.next_token_selection.token_id,
+        "resident decode selected token mismatch"
+    );
+    expect_close(
+        resident.next_token_selection->logit,
+        diagnostic.next_token_selection.logit,
+        1.0e-5F,
+        "resident decode selected logit mismatch"
+    );
+
+    for (std::size_t layer = 0; layer < resident_shell.plan.kv_cache().size(); ++layer) {
+        const auto diagnostic_key = copy_tensor_from_backend(diagnostic_shell.plan.kv_cache()[layer].key);
+        const auto resident_key = copy_tensor_from_backend(resident_shell.plan.kv_cache()[layer].key);
+        const auto diagnostic_value = copy_tensor_from_backend(diagnostic_shell.plan.kv_cache()[layer].value);
+        const auto resident_value = copy_tensor_from_backend(resident_shell.plan.kv_cache()[layer].value);
+        expect(
+            std::equal(diagnostic_key.bytes().begin(), diagnostic_key.bytes().end(), resident_key.bytes().begin()),
+            "resident decode key-cache parity mismatch"
+        );
+        expect(
+            std::equal(diagnostic_value.bytes().begin(), diagnostic_value.bytes().end(), resident_value.bytes().begin()),
+            "resident decode value-cache parity mismatch"
+        );
+    }
+}
+
 void test_gemma2_metal_plan_generation_append_matches_full_replay_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -3428,6 +3522,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 Metal generated-token loop repeats decode when available",
         test_gemma2_metal_generated_token_loop_repeats_decode_when_available,
+    },
+    {
+        "Gemma2 Metal resident decode uses one submission and matches diagnostics when available",
+        test_gemma2_metal_resident_decode_is_one_submission_and_matches_diagnostics_when_available,
     },
     {
         "Gemma2 Metal plan generation append matches full replay when available",

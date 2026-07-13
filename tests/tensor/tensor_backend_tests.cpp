@@ -86,6 +86,7 @@ using local_gguf_engine::tests::tensor_f32_projection_values;
 using local_gguf_engine::tests::tensor_f32_matrix;
 using local_gguf_engine::tests::tensor_f32_vector;
 using local_gguf_engine::tests::tensor_q4_k_gguf_weight_matrix;
+using local_gguf_engine::tests::tensor_q4_k_stress_gguf_weight_matrix;
 using local_gguf_engine::tests::tensor_q6_k_gguf_weight_matrix;
 using local_gguf_engine::tests::TestCase;
 using local_gguf_engine::tests::TestFailure;
@@ -943,6 +944,32 @@ void test_matches_cpu_f32_by_q4_k_gguf_weight_matmul_on_metal_backend() {
     expect_f32_matrix_close(metal_output, cpu_output, 1.0e-3F, "Metal Q4_K GGUF matmul output");
 }
 
+void test_matches_cpu_q4_k_decode_matvec_for_packed_block_counts_and_output_tail_on_metal() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    constexpr std::array<std::uint64_t, 5> packed_block_counts {1, 4, 14, 16, 56};
+    constexpr std::uint64_t columns = 5;
+    for (const auto packed_block_count : packed_block_counts) {
+        const auto shared = packed_block_count * 256U;
+        const auto left_values = tensor_f32_projection_values(1, shared);
+        const auto left = tensor_f32_matrix(1, shared, std::span<const float>(left_values));
+        const auto right = tensor_q4_k_stress_gguf_weight_matrix(shared, columns, packed_block_count);
+        const auto expected = reference_f32_quantized_gguf_weight_matmul(left, right);
+        const auto output_buffer = matmul_f32_quantized_gguf_weight_to_backend(
+            copy_tensor_to_backend(left, BackendKind::metal),
+            copy_tensor_to_backend(right, BackendKind::metal)
+        );
+
+        expect_f32_matrix_close(
+            copy_tensor_from_backend(output_buffer),
+            expected,
+            0.1F,
+            "Metal Q4_K decode matvec packed-layout parity"
+        );
+    }
+}
 void test_multiplies_backend_f32_by_backend_q4_k_gguf_weight_to_metal_backend_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -2141,6 +2168,10 @@ const TestCase tensor_backend_tests[] {
     {
         "multiplies backend F32 by backend Q4_K GGUF weight to Metal backend buffer when available",
         test_multiplies_backend_f32_by_backend_q4_k_gguf_weight_to_metal_backend_when_available,
+    },
+    {
+        "matches CPU Q4_K decode matvec for packed block counts and output tail on Metal",
+        test_matches_cpu_q4_k_decode_matvec_for_packed_block_counts_and_output_tail_on_metal,
     },
     {
         "multiplies backend F32 by backend Q6_K GGUF weight to Metal backend buffer when available",

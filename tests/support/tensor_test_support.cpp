@@ -284,6 +284,55 @@ TensorStorage tensor_q4_k_gguf_weight_matrix(std::uint64_t shared, std::uint64_t
     return storage;
 }
 
+TensorStorage tensor_q4_k_stress_gguf_weight_matrix(
+    std::uint64_t shared,
+    std::uint64_t columns,
+    std::uint64_t seed
+) {
+    // GGUF projection weights are logically [K, N] but packed per output
+    // column. Use the weight-specific descriptor so the fixture can exercise
+    // an odd N tail; the generic quantized-row constructor aligns its final
+    // logical dimension and therefore cannot represent this diagnostic shape.
+    auto storage = TensorStorage::allocate(TensorDescriptor::from_quantized_gguf_weight_matrix(
+        Shape::from({shared, columns}),
+        DType::q4_k
+    ));
+    auto bytes = storage.mutable_bytes();
+    const auto blocks_per_column = shared / Q4_KBlockView::element_count;
+
+    for (std::uint64_t column = 0; column < columns; ++column) {
+        for (std::uint64_t column_block = 0; column_block < blocks_per_column; ++column_block) {
+            const auto block_index = column * blocks_per_column + column_block;
+            auto block = bytes.subspan(
+                static_cast<std::size_t>(block_index * Q4_KBlockView::byte_count),
+                Q4_KBlockView::byte_count
+            );
+            write_little_endian_u16(block, 0, 0x3000U);  // d = 0.125
+            write_little_endian_u16(block, 2, 0x2800U);  // dmin = 0.03125
+
+            for (std::size_t group = 0; group < 8U; ++group) {
+                // Values above 15 exercise the split high-bit packing used by
+                // groups four through seven as well as nonzero minimum terms.
+                const auto scale = static_cast<std::uint8_t>(
+                    1U + ((seed + 17U * column + 11U * column_block + 9U * group) % 63U)
+                );
+                const auto min = static_cast<std::uint8_t>(
+                    1U + ((seed + 13U * column + 7U * column_block + 15U * group) % 63U)
+                );
+                set_q4_k_scale_min(block, group, scale, min);
+            }
+            for (std::size_t element = 0; element < Q4_KBlockView::element_count; ++element) {
+                const auto nibble = static_cast<std::uint8_t>(
+                    (seed + 3U * column + 5U * column_block + 7U * element) % 16U
+                );
+                set_q4_k_quantized_nibble(block, element, nibble);
+            }
+        }
+    }
+
+    return storage;
+}
+
 TensorStorage tensor_q6_k_gguf_weight_matrix(std::uint64_t shared, std::uint64_t columns, std::uint64_t seed) {
     auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({shared, columns}), DType::q6_k));
     auto bytes = storage.mutable_bytes();

@@ -173,7 +173,10 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     std::size_t& allocated_byte_count
 ) {
     return Gemma2MetalDecodeScratch {
+        .token_id_staging = allocate_buffer(f32_descriptor({1}), allocated_byte_count),
         .normalized_hidden = allocate_buffer(f32_descriptor({1, config.embedding_length}), allocated_byte_count),
+        .raw_query = allocate_buffer(f32_descriptor({1, attention_query_width(config)}), allocated_byte_count),
+        .raw_key = allocate_buffer(f32_descriptor({1, attention_key_width(config)}), allocated_byte_count),
         .query = allocate_buffer(f32_descriptor({1, attention_query_width(config)}), allocated_byte_count),
         .key = allocate_buffer(f32_descriptor({1, attention_key_width(config)}), allocated_byte_count),
         .value = allocate_buffer(f32_descriptor({1, attention_value_width(config)}), allocated_byte_count),
@@ -214,6 +217,7 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
             allocated_byte_count
         ),
         .logits = allocate_buffer(f32_descriptor({1, config.vocab_size}), allocated_byte_count),
+        .top_logit_staging = allocate_buffer(f32_descriptor({2}), allocated_byte_count),
     };
 }
 
@@ -609,7 +613,9 @@ Gemma2MetalSchedule create_gemma2_metal_decode_schedule(
     const auto total_kv_token_count = cached_token_count + token_count;
     auto layers = make_layer_schedules(plan, total_kv_token_count);
     auto scratch = schedule_scratch_from_decode_scratch(plan.decode_scratch());
-    const auto phase_scratch_bytes = schedule_scratch_byte_count(scratch);
+    // Decode phase ownership includes staging and RoPE ping-pong buffers that
+    // are not exposed as operator-shape descriptors on the schedule.
+    const auto phase_scratch_bytes = plan.scratch_byte_count();
 
     return Gemma2MetalSchedule(
         plan.config(),

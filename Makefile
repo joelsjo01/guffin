@@ -23,6 +23,7 @@ ENGINE_SOURCES := \
 	src/tensor/backend_buffer.mm \
 	src/tensor/backends/cpu_backend.cpp \
 	src/tensor/backends/metal/metal_buffer.mm \
+	src/tensor/backends/metal/metal_command_context.mm \
 	src/tensor/backends/metal/metal_context.mm \
 	src/tensor/backends/metal/metal_tensor_ops.mm \
 	src/tensor/backends/metal_backend.mm \

@@ -1,6 +1,7 @@
 #include "local_gguf_engine/tensor/tensor.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace local_gguf_engine::tensor {
@@ -26,6 +27,47 @@ TensorDescriptor TensorDescriptor::from(const Shape& shape, DType dtype) {
         local_gguf_engine::tensor::element_count(shape),
         byte_size(shape, dtype)
     );
+}
+
+TensorDescriptor TensorDescriptor::from_quantized_gguf_weight_matrix(
+    const Shape& shape,
+    DType dtype
+) {
+    if (shape.rank() != 2) {
+        throw TensorError(TensorErrorCode::invalid_shape_rank, 2, static_cast<std::uint64_t>(shape.rank()));
+    }
+    if (dtype != DType::q4_k && dtype != DType::q6_k) {
+        throw TensorError(
+            TensorErrorCode::unsupported_quantized_dtype,
+            static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::q4_k)),
+            static_cast<std::uint64_t>(static_cast<std::uint8_t>(dtype))
+        );
+    }
+
+    const auto layout = dtype_layout(dtype);
+    const auto shared = shape.dimension(0);
+    const auto columns = shape.dimension(1);
+    if (shared % layout.block_element_count != 0) {
+        throw TensorError(TensorErrorCode::invalid_quantized_element_count, layout.block_element_count, shared);
+    }
+    if (shared > std::numeric_limits<std::uint64_t>::max() / columns) {
+        throw TensorError(TensorErrorCode::element_count_overflow, shared, columns);
+    }
+    const auto elements = shared * columns;
+    const auto blocks = (shared / layout.block_element_count) * columns;
+    if (blocks > std::numeric_limits<std::uint64_t>::max() / layout.block_byte_count) {
+        throw TensorError(TensorErrorCode::byte_size_overflow, blocks, layout.block_byte_count);
+    }
+    const auto bytes = blocks * layout.block_byte_count;
+    if (bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        throw TensorError(
+            TensorErrorCode::byte_size_overflow,
+            static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()),
+            bytes
+        );
+    }
+
+    return TensorDescriptor(shape, dtype, elements, static_cast<std::size_t>(bytes));
 }
 
 TensorDescriptor::TensorDescriptor(

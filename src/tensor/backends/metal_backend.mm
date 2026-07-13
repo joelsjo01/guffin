@@ -143,6 +143,94 @@ kernel void matmul_f32_q4_k_gguf_weight_kernel(
     output[row * dims.columns + column] = sum;
 }
 
+// Decode has a single activation row. Four 8-lane subgroups divide four
+// packed blocks while the full SIMD group reduces their independent partial
+// sums. This keeps packed reads contiguous inside each subgroup and avoids
+// staging either activations or dequantized weights in threadgroup memory.
+kernel void matvec_f32_q4_k_gguf_weight_kernel(
+    const device float* left [[buffer(0)]],
+    const device uchar* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulDimensions& dims [[buffer(3)]],
+    uint threadgroup_index [[threadgroup_position_in_grid]],
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint first_column = (threadgroup_index * 4) + uint(simdgroup_index) * 2;
+    const uint second_column = first_column + 1;
+    const uint subgroup = uint(lane) >> 3;
+    const uint subgroup_lane = uint(lane) & 7;
+    const uint blocks_per_column = dims.shared / 256;
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+
+    if (first_column < dims.columns) {
+        for (uint column_block = subgroup; column_block < blocks_per_column; column_block += 4) {
+            const device uchar* first_block =
+                right + (first_column * blocks_per_column + column_block) * 144;
+            const device uchar* second_block = second_column < dims.columns
+                ? right + (second_column * blocks_per_column + column_block) * 144
+                : first_block;
+            const float first_d = f16_bits_to_float(read_little_endian_u16(first_block, 0));
+            const float first_dmin = f16_bits_to_float(read_little_endian_u16(first_block, 2));
+            const device uchar* first_scale_min = first_block + 4;
+            const device uchar* first_quantized = first_block + 16;
+            const float second_d = second_column < dims.columns
+                ? f16_bits_to_float(read_little_endian_u16(second_block, 0))
+                : 0.0f;
+            const float second_dmin = second_column < dims.columns
+                ? f16_bits_to_float(read_little_endian_u16(second_block, 2))
+                : 0.0f;
+            const device uchar* second_scale_min = second_block + 4;
+            const device uchar* second_quantized = second_block + 16;
+
+            for (uint group = 0; group < 8; ++group) {
+                const uint element_base = group * 32 + subgroup_lane * 4;
+                const uint quantized_base = (group >> 1) * 32 + subgroup_lane * 4;
+                const uint shift = (group & 1) * 4;
+                float activation_sum = 0.0f;
+                float first_quantized_dot = 0.0f;
+                float second_quantized_dot = 0.0f;
+                for (uint item = 0; item < 4; ++item) {
+                    const float activation = left[column_block * 256 + element_base + item];
+                    activation_sum += activation;
+                    first_quantized_dot += activation
+                        * float((first_quantized[quantized_base + item] >> shift) & 0x0f);
+                    if (second_column < dims.columns) {
+                        second_quantized_dot += activation
+                            * float((second_quantized[quantized_base + item] >> shift) & 0x0f);
+                    }
+                }
+                first_sum += first_d
+                        * float(q4_k_scale_min_value(first_scale_min, group, false))
+                        * first_quantized_dot
+                    - first_dmin
+                        * float(q4_k_scale_min_value(first_scale_min, group, true))
+                        * activation_sum;
+                if (second_column < dims.columns) {
+                    second_sum += second_d
+                            * float(q4_k_scale_min_value(second_scale_min, group, false))
+                            * second_quantized_dot
+                        - second_dmin
+                            * float(q4_k_scale_min_value(second_scale_min, group, true))
+                            * activation_sum;
+                }
+            }
+        }
+    }
+
+    first_sum = simd_sum(first_sum);
+    second_sum = simd_sum(second_sum);
+    if (lane == 0) {
+        if (first_column < dims.columns) {
+            output[first_column] = first_sum;
+        }
+        if (second_column < dims.columns) {
+            output[second_column] = second_sum;
+        }
+    }
+}
+
 inline int signed_i8(uchar value) {
     return value >= 128 ? int(value) - 256 : int(value);
 }

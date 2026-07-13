@@ -210,6 +210,28 @@ void test_rejects_invalid_quantized_tensor_row_element_count() {
     }
 }
 
+void test_creates_quantized_gguf_weight_descriptor_with_output_tail() {
+    const auto descriptor = TensorDescriptor::from_quantized_gguf_weight_matrix(
+        Shape::from({512, 5}),
+        DType::q4_k
+    );
+    expect(descriptor.shape == Shape::from({512, 5}), "Q4_K GGUF weight descriptor shape mismatch");
+    expect(descriptor.element_count == 2560, "Q4_K GGUF weight descriptor element count mismatch");
+    expect(descriptor.byte_count == 1440, "Q4_K GGUF weight descriptor byte count mismatch");
+
+    try {
+        (void)TensorDescriptor::from_quantized_gguf_weight_matrix(Shape::from({384, 5}), DType::q4_k);
+        throw TestFailure("Q4_K GGUF weight descriptor should reject unaligned inner width");
+    } catch (const TensorError& error) {
+        expect(
+            error.code() == TensorErrorCode::invalid_quantized_element_count,
+            "Q4_K GGUF weight descriptor alignment error code mismatch"
+        );
+        expect(error.expected_value() == 256, "Q4_K GGUF weight descriptor expected alignment mismatch");
+        expect(error.actual_value() == 384, "Q4_K GGUF weight descriptor actual alignment mismatch");
+    }
+}
+
 void test_rejects_tensor_byte_size_overflow() {
     const auto shape = Shape::from({std::numeric_limits<std::uint64_t>::max() / 4 + 1});
 
@@ -2597,6 +2619,10 @@ const TestCase tensor_core_tests[] = {
     {
         "rejects invalid quantized tensor row element count",
         test_rejects_invalid_quantized_tensor_row_element_count,
+    },
+    {
+        "creates quantized GGUF weight descriptor with output tail",
+        test_creates_quantized_gguf_weight_descriptor_with_output_tail,
     },
     {"rejects tensor byte size overflow", test_rejects_tensor_byte_size_overflow},
     {"creates tensor descriptor from shape and dtype", test_creates_tensor_descriptor_from_shape_and_dtype},

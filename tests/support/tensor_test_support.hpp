@@ -34,6 +34,11 @@ local_gguf_engine::tensor::TensorStorage tensor_q4_k_gguf_weight_matrix(
     std::uint64_t columns,
     std::uint64_t seed = 0
 );
+local_gguf_engine::tensor::TensorStorage tensor_q4_k_stress_gguf_weight_matrix(
+    std::uint64_t shared,
+    std::uint64_t columns,
+    std::uint64_t seed = 0
+);
 local_gguf_engine::tensor::TensorStorage tensor_q6_k_gguf_weight_matrix(
     std::uint64_t shared,
     std::uint64_t columns,

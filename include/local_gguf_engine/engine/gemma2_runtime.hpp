@@ -298,6 +298,25 @@ struct Gemma2MetalDecodeStepActivations {
     Gemma2MetalDecodeNextTokenSelection next_token_selection;
 };
 
+struct Gemma2MetalDecodeExecutionStats {
+    std::uint32_t command_buffer_count = 0;
+    std::uint32_t commit_count = 0;
+    std::uint32_t synchronous_wait_count = 0;
+    std::uint32_t compute_encoder_count = 0;
+    std::uint32_t blit_encoder_count = 0;
+    std::uint32_t transient_buffer_allocation_count = 0;
+    std::uint64_t gpu_duration_ns = 0;
+};
+
+// Production decode exposes only values whose lifetime extends beyond scratch
+// reuse. The all-intermediate DecodeStepActivations API remains the explicit
+// diagnostic path for parity tests.
+struct Gemma2MetalResidentDecodeResult {
+    tensor::BackendBuffer logits;
+    std::optional<Gemma2MetalDecodeNextTokenSelection> next_token_selection;
+    Gemma2MetalDecodeExecutionStats execution;
+};
+
 struct Gemma2MetalGenerationRuntimeShell {
     Gemma2MetalModelPlan plan;
     Gemma2MetalSchedule prefill;
@@ -399,6 +418,14 @@ create_gemma2_metal_scheduled_decode_layer_input(
     const Gemma2MetalSchedule& decode,
     std::uint32_t token_id,
     float embedding_scale
+);
+
+[[nodiscard]] Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
+    Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    std::uint32_t token_id,
+    float embedding_scale,
+    bool select_top_logit = true
 );
 
 [[nodiscard]] Gemma2MetalGenerationRuntimeShell create_gemma2_metal_generation_runtime_shell(

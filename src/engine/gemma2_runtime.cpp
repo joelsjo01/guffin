@@ -11,6 +11,8 @@
 #include "local_gguf_engine/tensor/ops/reduction.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/ops/softmax.hpp"
+
+#include "../tensor/backends/metal/metal_command_context.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
 #include <algorithm>
@@ -1822,6 +1824,18 @@ create_gemma2_metal_prefill_first_layer_post_attention_residual(
     };
 }
 
+[[nodiscard]] Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
+    Gemma2MetalModelPlan& plan,
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::uint32_t cache_position,
+    std::size_t max_new_tokens,
+    std::span<const std::uint32_t> stop_token_ids,
+    const Gemma2MetalTokenSelector& select_token,
+    const Gemma2MetalGeneratedTokenCallback& on_token,
+    const Gemma2MonotonicClock& clock,
+    bool use_resident_top_logit
+);
+
 }  // namespace
 
 std::optional<Gemma2MetalLayerHandoffActivations> create_gemma2_metal_scheduled_prefill_layer_input(
@@ -2592,6 +2606,211 @@ Gemma2MetalDecodeStepActivations run_gemma2_metal_decode_step(
     };
 }
 
+Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
+    Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& decode,
+    std::uint32_t token_id,
+    float embedding_scale,
+    bool select_top_logit
+) {
+    if (decode.phase() != Gemma2MetalSchedulePhase::decode
+        || decode.scratch_ownership() != Gemma2MetalScratchOwnership::resident_decode
+        || decode.token_count() != 1U) {
+        throw std::invalid_argument("Gemma2 resident Metal decode requires a one-token decode schedule");
+    }
+    if (plan.backend() != decode.backend() || decode.layers().size() != plan.weights().blocks.size()) {
+        throw std::invalid_argument("Gemma2 resident Metal decode plan and schedule do not match");
+    }
+    if (token_id >= plan.config().vocab_size) {
+        throw std::invalid_argument("Gemma2 resident Metal decode token is outside vocabulary");
+    }
+
+    namespace metal = tensor::backends::metal;
+    metal::MetalCommandContext command("Gemma2 resident decode");
+    const auto& config = plan.config();
+    const auto& scratch = plan.decode_scratch();
+
+    command.write_u32(scratch.token_id_staging, token_id);
+    // feed_forward_residual is the layer-to-layer residual ping-pong endpoint;
+    // before layer zero it safely serves as the embedded hidden state.
+    command.encode_embedding(
+        scratch.token_id_staging,
+        plan.weights().token_embedding_weight,
+        scratch.feed_forward_residual,
+        embedding_scale
+    );
+
+    const auto head_dimension = config.attention_key_length;
+    const auto attention_scale = 1.0F / std::sqrt(static_cast<float>(head_dimension));
+    for (std::size_t offset = 0; offset < decode.layers().size(); ++offset) {
+        const auto& scheduled_layer = decode.layers()[offset];
+        const auto& block = plan.weights().blocks[scheduled_layer.layer_index];
+        const auto& attention = block.attention;
+        const auto& feed_forward = block.feed_forward;
+        const auto& cache = plan.kv_cache()[scheduled_layer.layer_index];
+
+        command.encode_rms_norm(
+            scratch.feed_forward_residual,
+            attention.attention_norm_weight,
+            scratch.normalized_hidden,
+            config.rms_norm_epsilon
+        );
+        command.encode_matmul(scratch.normalized_hidden, attention.query_weight, scratch.raw_query);
+        command.encode_matmul(scratch.normalized_hidden, attention.key_weight, scratch.raw_key);
+        command.encode_matmul(scratch.normalized_hidden, attention.value_weight, scratch.value);
+        command.encode_rope(
+            scratch.raw_query,
+            scratch.query,
+            decode.cache_position(),
+            config.attention_head_count,
+            head_dimension,
+            head_dimension,
+            gemma2_rope_frequency_base
+        );
+        command.encode_rope(
+            scratch.raw_key,
+            scratch.key,
+            decode.cache_position(),
+            config.attention_head_count_kv,
+            head_dimension,
+            head_dimension,
+            gemma2_rope_frequency_base
+        );
+        command.encode_kv_cache_write(
+            scratch.key,
+            scratch.value,
+            cache.key,
+            cache.value,
+            decode.cache_position()
+        );
+        command.encode_attention_scores(
+            scratch.query,
+            cache.key,
+            scratch.attention_scores,
+            decode.cache_position(),
+            config.attention_head_count,
+            config.attention_head_count_kv,
+            head_dimension,
+            scheduled_layer.attention_token_count,
+            attention_scale,
+            config.attention_logit_softcap
+        );
+        command.encode_softmax(
+            scratch.attention_scores,
+            scratch.attention_probabilities,
+            config.attention_head_count,
+            scheduled_layer.attention_token_count
+        );
+        command.encode_attention_values(
+            scratch.attention_probabilities,
+            cache.value,
+            scratch.attention_output,
+            decode.cache_position(),
+            config.attention_head_count,
+            config.attention_head_count_kv,
+            config.attention_value_length,
+            scheduled_layer.attention_token_count
+        );
+        command.encode_matmul(
+            scratch.attention_output,
+            attention.output_weight,
+            scratch.projected_attention_output
+        );
+        // RMSNorm is safe in place: the current kernel finishes its reduction
+        // before overwriting any element in the row.
+        command.encode_rms_norm(
+            scratch.projected_attention_output,
+            attention.post_attention_norm_weight,
+            scratch.projected_attention_output,
+            config.rms_norm_epsilon
+        );
+        command.encode_add(
+            scratch.feed_forward_residual,
+            scratch.projected_attention_output,
+            scratch.post_attention_residual
+        );
+        command.encode_rms_norm(
+            scratch.post_attention_residual,
+            feed_forward.feed_forward_norm_weight,
+            scratch.normalized_feed_forward_input,
+            config.rms_norm_epsilon
+        );
+        command.encode_matmul(
+            scratch.normalized_feed_forward_input,
+            feed_forward.gate_weight,
+            scratch.feed_forward_gate
+        );
+        command.encode_matmul(
+            scratch.normalized_feed_forward_input,
+            feed_forward.up_weight,
+            scratch.feed_forward_up
+        );
+        command.encode_silu_multiply(
+            scratch.feed_forward_gate,
+            scratch.feed_forward_up,
+            scratch.feed_forward_gated
+        );
+        command.encode_matmul(
+            scratch.feed_forward_gated,
+            feed_forward.down_weight,
+            scratch.projected_feed_forward_output
+        );
+        command.encode_rms_norm(
+            scratch.projected_feed_forward_output,
+            feed_forward.post_feed_forward_norm_weight,
+            scratch.projected_feed_forward_output,
+            config.rms_norm_epsilon
+        );
+        command.encode_add(
+            scratch.post_attention_residual,
+            scratch.projected_feed_forward_output,
+            scratch.feed_forward_residual
+        );
+    }
+
+    command.encode_rms_norm(
+        scratch.feed_forward_residual,
+        plan.weights().output_norm_weight,
+        scratch.normalized_hidden,
+        config.rms_norm_epsilon
+    );
+    command.encode_matmul(scratch.normalized_hidden, plan.weights().output_weight, scratch.logits);
+    command.encode_softcap(scratch.logits, scratch.logits, config.final_logit_softcap);
+    if (select_top_logit) {
+        command.encode_top_logit(scratch.logits, scratch.top_logit_staging);
+    }
+
+    const auto metal_stats = command.commit_and_wait();
+    std::optional<Gemma2MetalDecodeNextTokenSelection> selection;
+    if (select_top_logit) {
+        const auto top = command.read_top_logit(scratch.top_logit_staging);
+        selection = Gemma2MetalDecodeNextTokenSelection {
+            .schedule_layer_offset = static_cast<std::uint32_t>(decode.layers().size() - 1U),
+            .layer_index = decode.layers().back().layer_index,
+            .phase = decode.phase(),
+            .scratch_ownership = decode.scratch_ownership(),
+            .logits_row_index = 0,
+            .vocab_size = config.vocab_size,
+            .token_id = top.token,
+            .logit = top.logit,
+        };
+    }
+
+    return Gemma2MetalResidentDecodeResult {
+        .logits = scratch.logits,
+        .next_token_selection = std::move(selection),
+        .execution = Gemma2MetalDecodeExecutionStats {
+            .command_buffer_count = metal_stats.command_buffer_count,
+            .commit_count = metal_stats.commit_count,
+            .synchronous_wait_count = metal_stats.synchronous_wait_count,
+            .compute_encoder_count = metal_stats.compute_encoder_count,
+            .blit_encoder_count = metal_stats.blit_encoder_count,
+            .transient_buffer_allocation_count = metal_stats.transient_buffer_allocation_count,
+            .gpu_duration_ns = metal_stats.gpu_duration_ns,
+        },
+    };
+}
+
 [[nodiscard]] Gemma2MetalPrefillLogitsActivations run_gemma2_metal_prefill_for_logits(
     Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& prefill,
@@ -3003,7 +3222,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_argmax_tokens_with_plan(
     const auto select_token = [](const tensor::BackendBuffer& logits) {
         return tensor::ops::top_logit_f32_from_backend(logits).token;
     };
-    return generate_gemma2_metal_sampled_tokens_with_plan(
+    return generate_gemma2_metal_tokens_with_plan_impl(
         plan,
         prompt_token_ids,
         cache_position,
@@ -3011,11 +3230,14 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_argmax_tokens_with_plan(
         stop_token_ids,
         select_token,
         on_token,
-        clock
+        clock,
+        true
     );
 }
 
-Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
+namespace {
+
+Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
     Gemma2MetalModelPlan& plan,
     std::span<const std::uint32_t> prompt_token_ids,
     std::uint32_t cache_position,
@@ -3023,7 +3245,8 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
     std::span<const std::uint32_t> stop_token_ids,
     const Gemma2MetalTokenSelector& select_token,
     const Gemma2MetalGeneratedTokenCallback& on_token,
-    const Gemma2MonotonicClock& clock
+    const Gemma2MonotonicClock& clock,
+    bool use_resident_top_logit
 ) {
     if (!select_token) {
         throw std::invalid_argument("Gemma2 Metal sampled generation requires a token selector");
@@ -3059,11 +3282,14 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
     generated_token_ids.reserve(max_new_tokens);
     auto cached_token_count = prefill.total_kv_token_count();
     std::optional<std::uint32_t> stop_token_id;
+    std::optional<std::uint32_t> resident_selected_token;
     bool selected_first_token = false;
 
     for (std::size_t sampled_count = 0; sampled_count < max_new_tokens; ++sampled_count) {
         const auto selection_started_ns = monotonic_now_ns(clock);
-        const auto selected_token_id = select_token(next_logits);
+        const auto selected_token_id = resident_selected_token.has_value()
+            ? *resident_selected_token
+            : select_token(next_logits);
         const auto selection_completed_ns = monotonic_now_ns(clock);
         if (selected_token_id >= plan.config().vocab_size) {
             throw std::invalid_argument("Gemma2 Metal token selector returned token outside vocabulary");
@@ -3081,11 +3307,12 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
         if (metrics.decode_token_count == 0U) {
             metrics.decode_started_ns = decode_started_ns;
         }
-        auto decode_step = run_gemma2_metal_decode_step(
+        auto decode_step = run_gemma2_metal_resident_decode_step(
             plan,
             decode,
             selected_token_id,
-            embedding_scale
+            embedding_scale,
+            use_resident_top_logit
         );
         const auto decode_completed_ns = monotonic_now_ns(clock);
         metrics.decode_completed_ns = decode_completed_ns;
@@ -3115,7 +3342,10 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
             break;
         }
 
-        next_logits = std::move(decode_step.logits.logits);
+        next_logits = decode_step.logits;
+        resident_selected_token = decode_step.next_token_selection.has_value()
+            ? std::optional<std::uint32_t>(decode_step.next_token_selection->token_id)
+            : std::nullopt;
     }
 
     metrics.generation_completed_ns = monotonic_now_ns(clock);
@@ -3131,6 +3361,31 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
         .cached_token_count = cached_token_count,
         .metrics = metrics,
     };
+}
+
+}  // namespace
+
+Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
+    Gemma2MetalModelPlan& plan,
+    std::span<const std::uint32_t> prompt_token_ids,
+    std::uint32_t cache_position,
+    std::size_t max_new_tokens,
+    std::span<const std::uint32_t> stop_token_ids,
+    const Gemma2MetalTokenSelector& select_token,
+    const Gemma2MetalGeneratedTokenCallback& on_token,
+    const Gemma2MonotonicClock& clock
+) {
+    return generate_gemma2_metal_tokens_with_plan_impl(
+        plan,
+        prompt_token_ids,
+        cache_position,
+        max_new_tokens,
+        stop_token_ids,
+        select_token,
+        on_token,
+        clock,
+        false
+    );
 }
 
 std::vector<std::uint32_t> generate_gemma2_metal_argmax_tokens(

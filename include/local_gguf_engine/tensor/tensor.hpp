@@ -16,6 +16,10 @@ struct TensorDescriptor {
     std::size_t byte_count = 0;
 
     [[nodiscard]] static TensorDescriptor from(const Shape& shape, DType dtype);
+    [[nodiscard]] static TensorDescriptor from_quantized_gguf_weight_matrix(
+        const Shape& shape,
+        DType dtype
+    );
 
     constexpr bool operator==(const TensorDescriptor&) const = default;
 
