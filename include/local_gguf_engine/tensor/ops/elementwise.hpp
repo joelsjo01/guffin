@@ -12,7 +12,12 @@ namespace local_gguf_engine::tensor::ops {
 );
 [[nodiscard]] TensorStorage multiply_f32(const TensorStorage& left, const TensorStorage& right);
 [[nodiscard]] TensorStorage silu_f32(const TensorStorage& input);
+[[nodiscard]] TensorStorage gelu_tanh_f32(const TensorStorage& input);
 [[nodiscard]] BackendBuffer silu_multiply_f32_to_backend(
+    const BackendBuffer& gate,
+    const BackendBuffer& up
+);
+[[nodiscard]] BackendBuffer gelu_tanh_multiply_f32_to_backend(
     const BackendBuffer& gate,
     const BackendBuffer& up
 );

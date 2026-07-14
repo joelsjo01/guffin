@@ -184,6 +184,24 @@ BackendBuffer rope_f32_by_heads_with_cpu_buffer(
     ));
 }
 
+BackendBuffer rope_neox_f32_by_heads_with_cpu_buffer(
+    const CpuBackendBufferStorage& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    return copy_tensor_to_cpu_backend(ops::rope_neox_f32_by_heads_with_position_start(
+        input.storage(),
+        position_start,
+        head_count,
+        head_dimension,
+        rope_dimension_count,
+        frequency_base
+    ));
+}
+
 BackendBuffer causal_grouped_attention_scores_f32_with_cpu_buffers(
     const CpuBackendBufferStorage& query,
     const CpuBackendBufferStorage& key,
@@ -329,6 +347,14 @@ BackendBuffer silu_multiply_f32_with_cpu_buffers(
     const CpuBackendBufferStorage& up
 ) {
     const auto output = ops::multiply_f32(ops::silu_f32(gate.storage()), up.storage());
+    return copy_tensor_to_cpu_backend(output);
+}
+
+BackendBuffer gelu_tanh_multiply_f32_with_cpu_buffers(
+    const CpuBackendBufferStorage& gate,
+    const CpuBackendBufferStorage& up
+) {
+    const auto output = ops::multiply_f32(ops::gelu_tanh_f32(gate.storage()), up.storage());
     return copy_tensor_to_cpu_backend(output);
 }
 

@@ -434,6 +434,24 @@ kernel void silu_multiply_f32_kernel(
     output[gid] = (value / (1.0f + exp(-value))) * up[gid];
 }
 
+kernel void gelu_tanh_multiply_f32_kernel(
+    const device float* gate [[buffer(0)]],
+    const device float* up [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant ElementwiseDimensions& dims [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= dims.elements) {
+        return;
+    }
+
+    const float value = gate[gid];
+    constexpr float sqrt_two_over_pi = 0.7978845608028654f;
+    constexpr float cubic_coefficient = 0.044715f;
+    const float inner = sqrt_two_over_pi * (value + cubic_coefficient * value * value * value);
+    output[gid] = (0.5f * value * (1.0f + precise::tanh(inner))) * up[gid];
+}
+
 kernel void add_f32_kernel(
     const device float* left [[buffer(0)]],
     const device float* right [[buffer(1)]],
@@ -458,7 +476,7 @@ kernel void softcap_f32_kernel(
         return;
     }
 
-    output[gid] = tanh(input[gid] / dims.softcap) * dims.softcap;
+    output[gid] = precise::tanh(input[gid] / dims.softcap) * dims.softcap;
 }
 
 kernel void noop_kernel(uint gid [[thread_position_in_grid]]) {
@@ -590,6 +608,44 @@ kernel void rope_f32_by_heads_kernel(
         : first * angle_sin + second * angle_cos;
 }
 
+kernel void rope_neox_f32_by_heads_kernel(
+    const device float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant RoPEByHeadsDimensions& dims [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint column = gid.x;
+    const uint row = gid.y;
+    const uint row_width = dims.head_count * dims.head_dimension;
+    if (row >= dims.rows || column >= row_width) return;
+
+    const uint head_column = column % dims.head_dimension;
+    const uint input_index = row * row_width + column;
+    if (head_column >= dims.rope_dimension_count) {
+        output[input_index] = input[input_index];
+        return;
+    }
+
+    const uint half_dimension = dims.rope_dimension_count / 2;
+    const uint pair_column = head_column % half_dimension;
+    const uint head_first_column = column - head_column;
+    const uint first_index = row * row_width + head_first_column + pair_column;
+    const uint second_index = first_index + half_dimension;
+    const float first = input[first_index];
+    const float second = input[second_index];
+    const float angle = rope_angle(
+        dims.position_start + row,
+        pair_column * 2,
+        dims.rope_dimension_count,
+        dims.frequency_base
+    );
+    const float angle_cos = cos(angle);
+    const float angle_sin = sin(angle);
+    output[input_index] = head_column < half_dimension
+        ? first * angle_cos - second * angle_sin
+        : first * angle_sin + second * angle_cos;
+}
+
 kernel void causal_grouped_attention_scores_f32_kernel(
     const device float* query [[buffer(0)]],
     const device float* key [[buffer(1)]],
@@ -630,7 +686,7 @@ kernel void causal_grouped_attention_scores_f32_kernel(
     }
 
     const float scaled = dot * dims.scale;
-    output[output_index] = tanh(scaled / dims.logit_softcap) * dims.logit_softcap;
+    output[output_index] = precise::tanh(scaled / dims.logit_softcap) * dims.logit_softcap;
 }
 
 kernel void causal_grouped_attention_values_f32_kernel(

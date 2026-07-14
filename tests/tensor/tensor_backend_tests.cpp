@@ -57,6 +57,8 @@ using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32_to_bac
 using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32_with_kv_cache_to_backend;
 using local_gguf_engine::tensor::ops::embed_f16_gguf_weight_token_ids_to_backend;
 using local_gguf_engine::tensor::ops::gated_silu_projection_f32_f16_gguf_weight_to_backend;
+using local_gguf_engine::tensor::ops::gelu_tanh_f32;
+using local_gguf_engine::tensor::ops::gelu_tanh_multiply_f32_to_backend;
 using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight;
 using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight_to_backend;
 using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight_triple_to_backend;
@@ -68,6 +70,7 @@ using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32_to_backend;
 using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
 using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start_to_backend;
+using local_gguf_engine::tensor::ops::rope_neox_f32_by_heads_with_position_start_to_backend;
 using local_gguf_engine::tensor::ops::silu_f32;
 using local_gguf_engine::tensor::ops::silu_multiply_f32_to_backend;
 using local_gguf_engine::tensor::ops::softcap_f32;
@@ -730,6 +733,22 @@ void test_applies_silu_multiply_to_cpu_backend_buffers() {
     expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer SiLU multiply output");
 }
 
+void test_applies_gelu_tanh_multiply_to_cpu_backend_buffers() {
+    const std::array<float, 8> gate_values {-14.181760F, -2.0F, -1.0F, 0.0F, 0.5F, 1.0F, 2.0F, 14.181760F};
+    const std::array<float, 8> up_values {0.877355F, 0.25F, -0.5F, 1.0F, 1.5F, -2.0F, 0.75F, 0.877355F};
+    const auto gate = tensor_f32_matrix(2, 4, std::span<const float>(gate_values));
+    const auto up = tensor_f32_matrix(2, 4, std::span<const float>(up_values));
+    const auto gate_buffer = copy_tensor_to_backend(gate, BackendKind::cpu);
+    const auto up_buffer = copy_tensor_to_backend(up, BackendKind::cpu);
+
+    const auto output_buffer = gelu_tanh_multiply_f32_to_backend(gate_buffer, up_buffer);
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = multiply_f32(gelu_tanh_f32(gate), up);
+
+    expect(output_buffer.backend() == BackendKind::cpu, "CPU GELU-tanh multiply output backend mismatch");
+    expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer GELU-tanh multiply output");
+}
+
 void test_runs_gated_silu_projection_to_cpu_backend_buffer() {
     const std::array<float, 6> left_values {
         0.5F, -1.0F, 2.0F,
@@ -1312,6 +1331,28 @@ void test_matches_headwise_rope_to_metal_backend_buffer_when_available() {
     );
 }
 
+void test_matches_neox_rope_to_metal_backend_buffer_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 8> input_values {1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F, 7.0F, 8.0F};
+    const auto input = tensor_f32_matrix(2, 4, std::span<const float>(input_values));
+    const auto cpu_output = rope_neox_f32_by_heads_with_position_start_to_backend(
+        copy_tensor_to_backend(input, BackendKind::cpu), 3, 1, 4, 4, 10000.0F
+    );
+    const auto metal_output = rope_neox_f32_by_heads_with_position_start_to_backend(
+        copy_tensor_to_backend(input, BackendKind::metal), 3, 1, 4, 4, 10000.0F
+    );
+
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(metal_output),
+        copy_tensor_from_backend(cpu_output),
+        1.0e-5F,
+        "Metal backend-buffer NeoX RoPE output"
+    );
+}
+
 void test_matches_causal_grouped_attention_scores_to_metal_backend_buffer_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -1557,6 +1598,26 @@ void test_applies_silu_multiply_to_metal_backend_buffers_when_available() {
 
     expect(output_buffer.backend() == BackendKind::metal, "Metal SiLU multiply output backend mismatch");
     expect_f32_matrix_close(output, expected, 1.0e-5F, "Metal backend-buffer SiLU multiply output");
+}
+
+void test_applies_gelu_tanh_multiply_to_metal_backend_buffers_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const std::array<float, 6> gate_values {-2.0F, -1.0F, 0.0F, 0.5F, 1.0F, 2.0F};
+    const std::array<float, 6> up_values {0.25F, -0.5F, 1.0F, 1.5F, -2.0F, 0.75F};
+    const auto gate = tensor_f32_matrix(2, 3, std::span<const float>(gate_values));
+    const auto up = tensor_f32_matrix(2, 3, std::span<const float>(up_values));
+    const auto gate_buffer = copy_tensor_to_backend(gate, BackendKind::metal);
+    const auto up_buffer = copy_tensor_to_backend(up, BackendKind::metal);
+
+    const auto output_buffer = gelu_tanh_multiply_f32_to_backend(gate_buffer, up_buffer);
+    const auto output = copy_tensor_from_backend(output_buffer);
+    const auto expected = multiply_f32(gelu_tanh_f32(gate), up);
+
+    expect(output_buffer.backend() == BackendKind::metal, "Metal GELU-tanh multiply output backend mismatch");
+    expect_f32_matrix_close(output, expected, 1.0e-5F, "Metal backend-buffer GELU-tanh multiply output");
 }
 
 void test_runs_gated_silu_projection_to_metal_backend_buffer_when_available() {
@@ -2180,6 +2241,7 @@ const TestCase tensor_backend_tests[] {
         test_multiplies_backend_f32_by_three_backend_f16_gguf_weights_to_cpu_backend_buffers,
     },
     {"applies SiLU multiply to CPU backend buffers", test_applies_silu_multiply_to_cpu_backend_buffers},
+    {"applies GELU-tanh multiply to CPU backend buffers", test_applies_gelu_tanh_multiply_to_cpu_backend_buffers},
     {"runs gated SiLU projection to CPU backend buffer", test_runs_gated_silu_projection_to_cpu_backend_buffer},
     {
         "runs residual gated SiLU projection to CPU backend buffer",
@@ -2247,6 +2309,10 @@ const TestCase tensor_backend_tests[] {
         test_matches_headwise_rope_to_metal_backend_buffer_when_available,
     },
     {
+        "matches NeoX RoPE to Metal backend buffer when available",
+        test_matches_neox_rope_to_metal_backend_buffer_when_available,
+    },
+    {
         "matches causal grouped attention scores to Metal backend buffer when available",
         test_matches_causal_grouped_attention_scores_to_metal_backend_buffer_when_available,
     },
@@ -2273,6 +2339,10 @@ const TestCase tensor_backend_tests[] {
     {
         "applies SiLU multiply to Metal backend buffers when available",
         test_applies_silu_multiply_to_metal_backend_buffers_when_available,
+    },
+    {
+        "applies GELU-tanh multiply to Metal backend buffers when available",
+        test_applies_gelu_tanh_multiply_to_metal_backend_buffers_when_available,
     },
     {
         "runs gated SiLU projection to Metal backend buffer when available",

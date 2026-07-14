@@ -88,7 +88,9 @@ void require_f32_logits(const TensorDescriptor& descriptor) {
     for (std::uint64_t token = 0; token < vocab; ++token) {
         const auto logit = read_f32_linear(logits, row_offset + token);
         if (!std::isfinite(logit)) {
-            throw std::invalid_argument("sampling logits must be finite");
+            throw std::invalid_argument(
+                "sampling logit for token " + std::to_string(token) + " must be finite"
+            );
         }
 
         candidates.push_back(TokenLogit {
@@ -109,6 +111,9 @@ TokenSampler::TokenSampler(TokenSamplerOptions options)
     }
     if (!std::isfinite(options_.top_p) || options_.top_p <= 0.0F || options_.top_p > 1.0F) {
         throw std::invalid_argument("sampling top_p must be in (0, 1]");
+    }
+    if (!std::isfinite(options_.min_p) || options_.min_p < 0.0F || options_.min_p > 1.0F) {
+        throw std::invalid_argument("sampling min_p must be in [0, 1]");
     }
     if (
         !std::isfinite(options_.repetition_penalty)
@@ -151,15 +156,28 @@ std::uint32_t TokenSampler::sample(const TensorStorage& logits) {
     const auto max_logit = candidates.front().logit;
     std::vector<double> weights;
     weights.reserve(candidates.size());
-    double total_weight = 0.0;
     for (const auto& candidate : candidates) {
         const auto weight = std::exp(
             static_cast<double>(candidate.logit - max_logit)
                 / static_cast<double>(options_.temperature)
         );
         weights.push_back(weight);
-        total_weight += weight;
     }
+
+    // Weights are normalized relative to the best logit, whose weight is 1.
+    // Min-p removes the low-probability tail before nucleus sampling; this is
+    // important for quantized models whose tail logits can be comparatively noisy.
+    const auto min_weight = static_cast<double>(options_.min_p);
+    auto min_p_count = weights.size();
+    if (min_weight > 0.0) {
+        min_p_count = 1U;
+        while (min_p_count < weights.size() && weights[min_p_count] >= min_weight) {
+            ++min_p_count;
+        }
+        candidates.resize(min_p_count);
+        weights.resize(min_p_count);
+    }
+    const auto total_weight = std::accumulate(weights.begin(), weights.end(), 0.0);
 
     double retained_weight = 0.0;
     std::size_t retained_count = 0;
@@ -186,11 +204,31 @@ std::uint32_t TokenSampler::sample(const TensorStorage& logits) {
 }
 
 void TokenSampler::observe_tokens(std::span<const std::uint32_t> token_ids) {
+    if (options_.repetition_window == 0U) {
+        token_history_.clear();
+        return;
+    }
+    if (token_ids.size() >= options_.repetition_window) {
+        token_history_.assign(
+            token_ids.end() - static_cast<std::ptrdiff_t>(options_.repetition_window),
+            token_ids.end()
+        );
+        return;
+    }
+
+    const auto retained_history = options_.repetition_window - token_ids.size();
+    if (token_history_.size() > retained_history) {
+        token_history_.erase(
+            token_history_.begin(),
+            token_history_.end() - static_cast<std::ptrdiff_t>(retained_history)
+        );
+    }
     token_history_.insert(token_history_.end(), token_ids.begin(), token_ids.end());
 }
 
 void TokenSampler::reset_history(std::span<const std::uint32_t> token_ids) {
-    token_history_.assign(token_ids.begin(), token_ids.end());
+    token_history_.clear();
+    observe_tokens(token_ids);
 }
 
 std::vector<TokenLogit> top_logit_tokens_f32(const TensorStorage& logits, std::size_t max_tokens) {

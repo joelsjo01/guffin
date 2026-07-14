@@ -239,4 +239,47 @@ TensorStorage rope_f32_by_heads_with_position_start(
     );
 }
 
+TensorStorage rope_neox_f32_by_heads_with_position_start(
+    const TensorStorage& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    require_f32_operand(input);
+    require_matrix_descriptor(input.descriptor());
+    require_positive_head_layout(head_count, head_dimension);
+    require_head_width(input.descriptor(), head_count, head_dimension);
+    require_valid_rope_dimension_count(rope_dimension_count);
+    require_rope_dimension_within_hidden(head_dimension, rope_dimension_count);
+    require_positive_frequency_base(frequency_base);
+    require_row_position_window(input.descriptor().shape.dimension(0), position_start);
+
+    auto output = TensorStorage::from_bytes(input.descriptor(), input.bytes());
+    const auto row_count = input.descriptor().shape.dimension(0);
+    const auto row_width = input.descriptor().shape.dimension(1);
+    const auto half_dimension = rope_dimension_count / 2U;
+    for (std::uint64_t row = 0; row < row_count; ++row) {
+        const auto position = position_start + row;
+        const auto row_offset = row * row_width;
+        for (std::uint64_t head = 0; head < head_count; ++head) {
+            const auto head_offset = row_offset + head * head_dimension;
+            for (std::uint64_t pair = 0; pair < half_dimension; ++pair) {
+                const auto frequency_offset = pair * 2U;
+                const auto angle = rope_angle(position, frequency_offset, rope_dimension_count, frequency_base);
+                const auto angle_cos = static_cast<float>(std::cos(angle));
+                const auto angle_sin = static_cast<float>(std::sin(angle));
+                const auto first_index = head_offset + pair;
+                const auto second_index = first_index + half_dimension;
+                const auto first = read_f32_linear(input, first_index);
+                const auto second = read_f32_linear(input, second_index);
+                write_f32_linear(output, first_index, first * angle_cos - second * angle_sin);
+                write_f32_linear(output, second_index, first * angle_sin + second * angle_cos);
+            }
+        }
+    }
+    return output;
+}
+
 }  // namespace local_gguf_engine::tensor::ops

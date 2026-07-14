@@ -19,8 +19,10 @@ struct TokenSamplerOptions {
     float temperature = 0.0F;
     std::size_t top_k = 40;
     float top_p = 0.95F;
+    float min_p = 0.05F;
     float repetition_penalty = 1.0F;
     std::uint64_t seed = 0;
+    std::size_t repetition_window = 64;
 };
 
 class TokenSampler final {

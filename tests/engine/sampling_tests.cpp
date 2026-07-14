@@ -106,7 +106,7 @@ void test_rejects_top_logit_tokens_nonfinite_logit() {
         throw TestFailure("top logits should reject non-finite logits");
     } catch (const std::invalid_argument& error) {
         expect(
-            std::string_view(error.what()) == "sampling logits must be finite",
+            std::string_view(error.what()) == "sampling logit for token 2 must be finite",
             "top logits non-finite error text mismatch"
         );
     }
@@ -151,10 +151,48 @@ void test_token_sampler_snapshot_replays_rng_and_history() {
     expect(replay.sample(logits) == selected, "token sampler snapshot should replay selection");
 }
 
+void test_repetition_penalty_uses_only_recent_window() {
+    const std::array<float, 3> logits_values {1.0F, 0.75F, 0.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    auto sampler = TokenSampler(TokenSamplerOptions {
+        .temperature = 0.0F,
+        .top_k = 3,
+        .top_p = 1.0F,
+        .repetition_penalty = 2.0F,
+        .seed = 0,
+        .repetition_window = 2,
+    });
+
+    const std::array<std::uint32_t, 3> old_token_history {0U, 2U, 2U};
+    sampler.observe_tokens(std::span<const std::uint32_t>(old_token_history));
+    expect(sampler.sample(logits) == 0U, "token outside repetition window should not be penalized");
+
+    const std::array<std::uint32_t, 1> recent_token {0U};
+    sampler.observe_tokens(std::span<const std::uint32_t>(recent_token));
+    expect(sampler.sample(logits) == 1U, "token inside repetition window should be penalized");
+}
+
+void test_min_p_filters_low_probability_tail() {
+    const std::array<float, 3> logits_values {0.0F, -4.0F, -8.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    auto sampler = TokenSampler(TokenSamplerOptions {
+        .temperature = 1.0F,
+        .top_k = 3,
+        .top_p = 1.0F,
+        .min_p = 0.05F,
+        .seed = 17,
+    });
+
+    for (std::size_t index = 0; index < 32U; ++index) {
+        expect(sampler.sample(logits) == 0U, "min-p sampler selected filtered token");
+    }
+}
+
 void test_rejects_invalid_token_sampler_options() {
-    const std::array<TokenSamplerOptions, 3> invalid_options {{
+    const std::array<TokenSamplerOptions, 4> invalid_options {{
         TokenSamplerOptions {.temperature = -1.0F},
         TokenSamplerOptions {.temperature = 1.0F, .top_p = 0.0F},
+        TokenSamplerOptions {.temperature = 1.0F, .min_p = 1.1F},
         TokenSamplerOptions {.temperature = 1.0F, .repetition_penalty = 0.0F},
     }};
     for (const auto& options : invalid_options) {
@@ -177,6 +215,8 @@ const TestCase kSamplingTests[] = {
     {"rejects top logit tokens nonfinite logit", test_rejects_top_logit_tokens_nonfinite_logit},
     {"seeded token sampler is reproducible and respects top-k", test_seeded_token_sampler_is_reproducible_and_respects_top_k},
     {"token sampler snapshot replays RNG and history", test_token_sampler_snapshot_replays_rng_and_history},
+    {"repetition penalty uses only recent window", test_repetition_penalty_uses_only_recent_window},
+    {"min-p filters low probability tail", test_min_p_filters_low_probability_tail},
     {"rejects invalid token sampler options", test_rejects_invalid_token_sampler_options},
 };
 

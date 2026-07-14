@@ -939,6 +939,63 @@ BackendBuffer matmul_f32_f16_gguf_weight_with_metal_buffers(
     return make_metal_backend_buffer(output_descriptor, output_buffer);
 }
 
+BackendBuffer rope_neox_f32_by_heads_with_metal_buffer(
+    const MetalBackendBufferStorage& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    auto& state = shared_matmul_pipeline_state();
+    const auto rows = input.descriptor().shape.dimension(0);
+    const auto columns = input.descriptor().shape.dimension(1);
+    const RoPEByHeadsDimensions dims {
+        .rows = require_u32_dimension(rows, "rows"),
+        .head_count = require_u32_dimension(head_count, "head_count"),
+        .head_dimension = require_u32_dimension(head_dimension, "head_dimension"),
+        .rope_dimension_count = require_u32_dimension(rope_dimension_count, "rope_dimension_count"),
+        .position_start = require_u32_dimension(position_start, "position_start"),
+        .frequency_base = frequency_base,
+    };
+    const auto output_descriptor = input.descriptor();
+    id<MTLBuffer> output_buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(output_descriptor.byte_count)
+                                                            options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(RoPEByHeadsDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (output_buffer == nil || dims_buffer == nil) {
+        throw metal_error(runtime::BackendErrorCode::metal_execution_failed, "Metal NeoX RoPE buffer allocation failed");
+    }
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (command_buffer == nil || encoder == nil) {
+        throw metal_error(runtime::BackendErrorCode::metal_execution_failed, "Metal NeoX RoPE encoding failed");
+    }
+    [encoder setComputePipelineState:state.rope_neox_by_heads_pipeline];
+    [encoder setBuffer:input.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:output_buffer offset:0 atIndex:1];
+    [encoder setBuffer:dims_buffer offset:0 atIndex:2];
+    const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
+    const MTLSize threadgroups = MTLSizeMake(
+        static_cast<NSUInteger>((columns + 15U) / 16U),
+        static_cast<NSUInteger>((rows + 15U) / 16U),
+        1
+    );
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal NeoX RoPE command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+    return make_metal_backend_buffer(output_descriptor, output_buffer);
+}
+
 BackendBuffer embed_f16_gguf_weight_token_ids_with_metal_buffer(
     std::span<const std::uint32_t> token_ids,
     const MetalBackendBufferStorage& embedding_weight,
@@ -1759,6 +1816,64 @@ BackendBuffer silu_multiply_f32_with_metal_buffers(
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal SiLU multiply command failed: " + ns_error_message(execution_error, "unknown error")
+        );
+    }
+
+    return make_metal_backend_buffer(output_descriptor, output_buffer);
+}
+
+BackendBuffer gelu_tanh_multiply_f32_with_metal_buffers(
+    const MetalBackendBufferStorage& gate,
+    const MetalBackendBufferStorage& up
+) {
+    auto& state = shared_matmul_pipeline_state();
+
+    const auto element_count = gate.descriptor().element_count;
+    const ElementwiseDimensions dims {
+        .elements = require_u32_dimension(element_count, "elements"),
+    };
+    const auto output_descriptor = gate.descriptor();
+
+    id<MTLBuffer> output_buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(output_descriptor.byte_count)
+                                                            options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dims_buffer = [state.device newBufferWithBytes:&dims
+                                                          length:sizeof(ElementwiseDimensions)
+                                                         options:MTLResourceStorageModeShared];
+    if (output_buffer == nil || dims_buffer == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal GELU-tanh multiply buffer allocation failed"
+        );
+    }
+
+    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (command_buffer == nil || encoder == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal GELU-tanh multiply command encoding failed"
+        );
+    }
+
+    [encoder setComputePipelineState:state.gelu_tanh_multiply_pipeline];
+    [encoder setBuffer:gate.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:up.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:output_buffer offset:0 atIndex:2];
+    [encoder setBuffer:dims_buffer offset:0 atIndex:3];
+
+    const MTLSize threads_per_threadgroup = MTLSizeMake(256, 1, 1);
+    const auto threadgroup_count = static_cast<NSUInteger>((element_count + 255U) / 256U);
+    const MTLSize threadgroups = MTLSizeMake(threadgroup_count, 1, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    if ([command_buffer status] == MTLCommandBufferStatusError) {
+        NSError* execution_error = [command_buffer error];
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal GELU-tanh multiply command failed: " + ns_error_message(execution_error, "unknown error")
         );
     }
 
@@ -2667,6 +2782,51 @@ BackendBuffer rope_f32_by_heads_with_position_start_to_backend(
     );
 }
 
+BackendBuffer rope_neox_f32_by_heads_with_position_start_to_backend(
+    const BackendBuffer& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+) {
+    backends::metal::require_rope_f32_by_heads_operands(
+        input.descriptor(),
+        position_start,
+        head_count,
+        head_dimension,
+        rope_dimension_count,
+        frequency_base
+    );
+    switch (input.backend()) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::rope_neox_f32_by_heads_with_cpu_buffer(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(input)),
+                position_start,
+                head_count,
+                head_dimension,
+                rope_dimension_count,
+                frequency_base
+            );
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::rope_neox_f32_by_heads_with_metal_buffer(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(input)),
+                    position_start,
+                    head_count,
+                    head_dimension,
+                    rope_dimension_count,
+                    frequency_base
+                );
+            }
+    }
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        input.backend(),
+        "unsupported backend buffer for NeoX RoPE-by-heads"
+    );
+}
+
 BackendBuffer causal_grouped_attention_scores_f32_to_backend(
     const BackendBuffer& query,
     const BackendBuffer& key,
@@ -3105,6 +3265,35 @@ BackendBuffer silu_multiply_f32_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         gate.backend(),
         "unsupported backend buffers for SiLU multiply"
+    );
+}
+
+BackendBuffer gelu_tanh_multiply_f32_to_backend(
+    const BackendBuffer& gate,
+    const BackendBuffer& up
+) {
+    backends::metal::require_silu_multiply_f32_operands(gate.descriptor(), up.descriptor());
+    backends::metal::require_same_backend(gate.backend(), up.backend(), "GELU-tanh multiply");
+
+    switch (gate.backend()) {
+        case runtime::BackendKind::cpu:
+            return backends::cpu::gelu_tanh_multiply_f32_with_cpu_buffers(
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(gate)),
+                backends::cpu::require_cpu_backend_buffer(backend_buffer_storage(up))
+            );
+        case runtime::BackendKind::metal:
+            @autoreleasepool {
+                return backends::metal::gelu_tanh_multiply_f32_with_metal_buffers(
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(gate)),
+                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(up))
+                );
+            }
+    }
+
+    throw runtime::BackendError(
+        runtime::BackendErrorCode::unsupported_backend,
+        gate.backend(),
+        "unsupported backend buffers for GELU-tanh multiply"
     );
 }
 

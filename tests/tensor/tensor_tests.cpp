@@ -79,6 +79,7 @@ using local_gguf_engine::tensor::ops::copy_f32;
 using local_gguf_engine::tensor::ops::F32MatrixColumnView;
 using local_gguf_engine::tensor::ops::F32RoPEMatrixColumnView;
 using local_gguf_engine::tensor::ops::fill_f32;
+using local_gguf_engine::tensor::ops::gelu_tanh_f32;
 using local_gguf_engine::tensor::ops::matmul_f32;
 using local_gguf_engine::tensor::ops::matmul_f32_f16;
 using local_gguf_engine::tensor::ops::matmul_f32_f16_gguf_weight;
@@ -88,6 +89,7 @@ using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rms_f32;
 using local_gguf_engine::tensor::ops::rope_f32;
 using local_gguf_engine::tensor::ops::rope_f32_by_heads_with_position_start;
+using local_gguf_engine::tensor::ops::rope_neox_f32_by_heads_with_position_start;
 using local_gguf_engine::tensor::ops::rope_f32_with_position_start;
 using local_gguf_engine::tensor::ops::scaled_dot_product_attention_f32;
 using local_gguf_engine::tensor::ops::silu_f32;
@@ -1020,6 +1022,30 @@ void test_rejects_f32_silu_dtype_mismatch() {
     }
 }
 
+void test_applies_f32_gelu_tanh_approximation() {
+    const std::array<float, 5> values {-2.0F, -1.0F, 0.0F, 1.0F, 2.0F};
+    const auto input = tensor_f32_vector(std::span<const float>(values));
+    const auto output = gelu_tanh_f32(input);
+    const std::array<float, 5> expected {
+        -0.0454023F,
+        -0.158808F,
+        0.0F,
+        0.841192F,
+        1.95460F,
+    };
+
+    expect(output.descriptor() == input.descriptor(), "F32 GELU-tanh output descriptor mismatch");
+    for (std::uint64_t index = 0; index < expected.size(); ++index) {
+        const std::array<std::uint64_t, 1> tensor_index {index};
+        expect_close(
+            read_f32(output, std::span<const std::uint64_t>(tensor_index)),
+            expected[static_cast<std::size_t>(index)],
+            0.00001F,
+            "F32 GELU-tanh value mismatch"
+        );
+    }
+}
+
 void test_fills_f32_tensor_with_scalar() {
     const auto descriptor = TensorDescriptor::from(Shape::from({2, 3}), DType::f32);
     const auto output = fill_f32(descriptor, -3.25F);
@@ -1460,6 +1486,20 @@ void test_applies_f32_rope_to_batched_heads_with_position_start() {
     expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head1_col0)), 2.0F * row1_cosine, 0.000001F, "F32 headwise RoPE row 1 head 1 col 0 mismatch");
     expect_close(read_f32(output, std::span<const std::uint64_t>(row1_head1_col1)), 2.0F * row1_sine, 0.000001F, "F32 headwise RoPE row 1 head 1 col 1 mismatch");
     expect(read_f32(output, std::span<const std::uint64_t>(row1_head1_trailing)) == 6.0F, "F32 headwise RoPE row 1 head 1 trailing mismatch");
+}
+
+void test_applies_f32_neox_rope_by_split_halves() {
+    const std::array<float, 4> values {1.0F, 2.0F, 3.0F, 4.0F};
+    const auto input = tensor_f32_matrix(1, 4, std::span<const float>(values));
+
+    const auto output = rope_neox_f32_by_heads_with_position_start(input, 1, 1, 4, 4, 1.0F);
+    const auto cosine = static_cast<float>(std::cos(1.0));
+    const auto sine = static_cast<float>(std::sin(1.0));
+
+    expect_close(read_f32(output, std::array<std::uint64_t, 2> {0, 0}), 1.0F * cosine - 3.0F * sine, 0.000001F, "NeoX RoPE first split-half value mismatch");
+    expect_close(read_f32(output, std::array<std::uint64_t, 2> {0, 1}), 2.0F * cosine - 4.0F * sine, 0.000001F, "NeoX RoPE second split-half value mismatch");
+    expect_close(read_f32(output, std::array<std::uint64_t, 2> {0, 2}), 1.0F * sine + 3.0F * cosine, 0.000001F, "NeoX RoPE third split-half value mismatch");
+    expect_close(read_f32(output, std::array<std::uint64_t, 2> {0, 3}), 2.0F * sine + 4.0F * cosine, 0.000001F, "NeoX RoPE fourth split-half value mismatch");
 }
 
 void test_applies_f32_rope_frequency_base_by_pair() {
@@ -2673,6 +2713,7 @@ const TestCase tensor_core_tests[] = {
     {"rejects invalid F32 elementwise inputs", test_rejects_invalid_f32_elementwise_inputs},
     {"applies F32 SiLU", test_applies_f32_silu},
     {"rejects F32 SiLU dtype mismatch", test_rejects_f32_silu_dtype_mismatch},
+    {"applies F32 GELU-tanh approximation", test_applies_f32_gelu_tanh_approximation},
     {"fills F32 tensor with scalar", test_fills_f32_tensor_with_scalar},
     {"rejects F32 fill dtype mismatch", test_rejects_f32_fill_dtype_mismatch},
     {"copies F32 tensor storage", test_copies_f32_tensor_storage},
@@ -2702,6 +2743,7 @@ const TestCase tensor_core_tests[] = {
         "applies F32 RoPE to batched heads with position start",
         test_applies_f32_rope_to_batched_heads_with_position_start,
     },
+    {"applies F32 NeoX RoPE by split halves", test_applies_f32_neox_rope_by_split_halves},
     {"applies F32 RoPE frequency base by pair", test_applies_f32_rope_frequency_base_by_pair},
     {"rejects F32 RoPE dtype mismatch", test_rejects_f32_rope_dtype_mismatch},
     {"rejects F32 RoPE input rank above two", test_rejects_f32_rope_input_rank_above_two},

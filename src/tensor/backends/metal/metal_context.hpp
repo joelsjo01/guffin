@@ -19,11 +19,13 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> matvec_q6_k_pipeline = nil;
     id<MTLComputePipelineState> matmul_add_pipeline = nil;
     id<MTLComputePipelineState> silu_multiply_pipeline = nil;
+    id<MTLComputePipelineState> gelu_tanh_multiply_pipeline = nil;
     id<MTLComputePipelineState> add_pipeline = nil;
     id<MTLComputePipelineState> softcap_pipeline = nil;
     id<MTLComputePipelineState> noop_pipeline = nil;
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
     id<MTLComputePipelineState> rope_by_heads_pipeline = nil;
+    id<MTLComputePipelineState> rope_neox_by_heads_pipeline = nil;
     id<MTLComputePipelineState> causal_grouped_attention_scores_pipeline = nil;
     id<MTLComputePipelineState> causal_grouped_attention_values_pipeline = nil;
     id<MTLComputePipelineState> softmax_pipeline = nil;

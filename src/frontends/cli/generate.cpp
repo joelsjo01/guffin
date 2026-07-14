@@ -124,7 +124,7 @@ void write_generate_usage(std::ostream& error) {
           << " [--bench --warmup N --repetitions N --output human|jsonl]"
           << '\n'
           << "       local-gguf-generate <model.gguf> --chat --max-new-tokens <N>"
-          << " [--greedy | --temperature T [--top-k K] [--top-p P]"
+          << " [--greedy | --temperature T [--top-k K] [--top-p P] [--min-p P]"
           << " [--repeat-penalty R] [--seed S]] [--backend cpu|metal]"
           << " [--reverse-prompt TEXT]"
           << '\n';
@@ -260,6 +260,7 @@ struct ParsedGenerateCommand {
         .temperature = 0.8F,
         .top_k = 40U,
         .top_p = 0.95F,
+        .min_p = 0.05F,
         .repetition_penalty = 1.0F,
         .seed = 42U,
     };
@@ -325,7 +326,10 @@ struct ParsedGenerateCommand {
 
             command.options.backend = backend;
             ++index;
-        } else if (option == "--temperature" || option == "--top-p" || option == "--repeat-penalty") {
+        } else if (
+            option == "--temperature" || option == "--top-p" || option == "--min-p"
+            || option == "--repeat-penalty"
+        ) {
             command.benchmark_option_seen = true;
             if (index + 1 >= argc) {
                 error << "error: " << option << " requires a value\n";
@@ -338,6 +342,7 @@ struct ParsedGenerateCommand {
             }
             if (option == "--temperature") command.sampled_sampler.temperature = value;
             else if (option == "--top-p") command.sampled_sampler.top_p = value;
+            else if (option == "--min-p") command.sampled_sampler.min_p = value;
             else command.sampled_sampler.repetition_penalty = value;
         } else if (option == "--top-k") {
             command.benchmark_option_seen = true;
@@ -446,7 +451,10 @@ struct ParsedChatCommand {
             continue;
         }
 
-        if (option == "--temperature" || option == "--top-p" || option == "--repeat-penalty") {
+        if (
+            option == "--temperature" || option == "--top-p" || option == "--min-p"
+            || option == "--repeat-penalty"
+        ) {
             if (index + 1 >= argc) {
                 write_generate_usage(error);
                 error << "error: " << option << " requires a value\n";
@@ -462,6 +470,9 @@ struct ParsedChatCommand {
                 command.sampler.temperature = value;
             } else if (option == "--top-p") {
                 command.sampler.top_p = value;
+                command.sampled_modifier_requested = true;
+            } else if (option == "--min-p") {
+                command.sampler.min_p = value;
                 command.sampled_modifier_requested = true;
             } else {
                 command.sampler.repetition_penalty = value;
@@ -541,6 +552,10 @@ struct ParsedChatCommand {
     }
     if (command.sampler.top_p <= 0.0F || command.sampler.top_p > 1.0F) {
         error << "error: --top-p must be in (0, 1]\n";
+        return false;
+    }
+    if (command.sampler.min_p < 0.0F || command.sampler.min_p > 1.0F) {
+        error << "error: --min-p must be in [0, 1]\n";
         return false;
     }
     if (command.sampler.repetition_penalty <= 0.0F) {
@@ -866,6 +881,7 @@ void write_benchmark_jsonl(std::ostream& output, const GenerationBenchmarkRunRes
                << ",\"mode\":" << json_string(selection_mode_name(record.turn.selection_mode))
                << ",\"seed\":" << record.sampler.seed << ",\"temperature\":" << record.sampler.temperature
                << ",\"top_k\":" << record.sampler.top_k << ",\"top_p\":" << record.sampler.top_p
+               << ",\"min_p\":" << record.sampler.min_p
                << ",\"repeat_penalty\":" << record.sampler.repetition_penalty
                << ",\"prompt_tokens\":" << record.turn.generation.newly_evaluated_prompt_token_count
                << ",\"reused_tokens\":" << record.turn.reused_cached_token_count

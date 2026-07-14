@@ -1201,7 +1201,7 @@ void require_decode_logits_match_schedule(
     const auto head_dimension = plan.config().attention_key_length;
     const auto rope_dimension_count = head_dimension;
 
-    auto query = tensor::ops::rope_f32_by_heads_with_position_start_to_backend(
+    auto query = tensor::ops::rope_neox_f32_by_heads_with_position_start_to_backend(
         projection.query,
         prefill.cache_position(),
         plan.config().attention_head_count,
@@ -1209,7 +1209,7 @@ void require_decode_logits_match_schedule(
         rope_dimension_count,
         gemma2_rope_frequency_base
     );
-    auto key = tensor::ops::rope_f32_by_heads_with_position_start_to_backend(
+    auto key = tensor::ops::rope_neox_f32_by_heads_with_position_start_to_backend(
         projection.key,
         prefill.cache_position(),
         plan.config().attention_head_count_kv,
@@ -1447,7 +1447,7 @@ create_gemma2_metal_prefill_first_layer_post_attention_residual(
     require_prefill_feed_forward_gate_up_matches_schedule(prefill, post_attention_residual, gate_up);
     const auto& first_layer = prefill.layers().front();
     const auto& feed_forward = plan.weights().blocks.at(first_layer.layer_index).feed_forward;
-    auto feed_forward_gated = tensor::ops::silu_multiply_f32_to_backend(gate_up.gate, gate_up.up);
+    auto feed_forward_gated = tensor::ops::gelu_tanh_multiply_f32_to_backend(gate_up.gate, gate_up.up);
     auto projected_feed_forward_output = tensor::ops::matmul_f32_quantized_gguf_weight_to_backend(
         feed_forward_gated,
         feed_forward.down_weight
@@ -1964,7 +1964,7 @@ Gemma2MetalPrefillBlockActivations run_gemma2_metal_scheduled_prefill_block(
 
     const auto head_dimension = plan.config().attention_key_length;
     const auto rope_dimension_count = head_dimension;
-    auto positioned_query = tensor::ops::rope_f32_by_heads_with_position_start_to_backend(
+    auto positioned_query = tensor::ops::rope_neox_f32_by_heads_with_position_start_to_backend(
         attention_projection.query,
         prefill.cache_position(),
         plan.config().attention_head_count,
@@ -1972,7 +1972,7 @@ Gemma2MetalPrefillBlockActivations run_gemma2_metal_scheduled_prefill_block(
         rope_dimension_count,
         gemma2_rope_frequency_base
     );
-    auto positioned_key = tensor::ops::rope_f32_by_heads_with_position_start_to_backend(
+    auto positioned_key = tensor::ops::rope_neox_f32_by_heads_with_position_start_to_backend(
         attention_projection.key,
         prefill.cache_position(),
         plan.config().attention_head_count_kv,
@@ -2166,7 +2166,7 @@ Gemma2MetalPrefillBlockActivations run_gemma2_metal_scheduled_prefill_block(
         .up = std::move(up),
     };
 
-    auto feed_forward_gated = tensor::ops::silu_multiply_f32_to_backend(
+    auto feed_forward_gated = tensor::ops::gelu_tanh_multiply_f32_to_backend(
         feed_forward_gate_up.gate,
         feed_forward_gate_up.up
     );
@@ -2275,7 +2275,7 @@ Gemma2MetalDecodeBlockActivations run_gemma2_metal_scheduled_decode_block(
 
     const auto head_dimension = plan.config().attention_key_length;
     const auto rope_dimension_count = head_dimension;
-    auto positioned_query = tensor::ops::rope_f32_by_heads_with_position_start_to_backend(
+    auto positioned_query = tensor::ops::rope_neox_f32_by_heads_with_position_start_to_backend(
         attention_projection.query,
         decode.cache_position(),
         plan.config().attention_head_count,
@@ -2283,7 +2283,7 @@ Gemma2MetalDecodeBlockActivations run_gemma2_metal_scheduled_decode_block(
         rope_dimension_count,
         gemma2_rope_frequency_base
     );
-    auto positioned_key = tensor::ops::rope_f32_by_heads_with_position_start_to_backend(
+    auto positioned_key = tensor::ops::rope_neox_f32_by_heads_with_position_start_to_backend(
         attention_projection.key,
         decode.cache_position(),
         plan.config().attention_head_count_kv,
@@ -2459,7 +2459,7 @@ Gemma2MetalDecodeBlockActivations run_gemma2_metal_scheduled_decode_block(
         .up = std::move(up),
     };
 
-    auto feed_forward_gated = tensor::ops::silu_multiply_f32_to_backend(
+    auto feed_forward_gated = tensor::ops::gelu_tanh_multiply_f32_to_backend(
         feed_forward_gate_up.gate,
         feed_forward_gate_up.up
     );
@@ -2745,7 +2745,7 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             feed_forward.up_weight,
             scratch.feed_forward_up
         );
-        command.encode_silu_multiply(
+        command.encode_gelu_tanh_multiply(
             scratch.feed_forward_gate,
             scratch.feed_forward_up,
             scratch.feed_forward_gated

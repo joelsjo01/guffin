@@ -127,6 +127,14 @@ void require_f32_f16_matmul_gguf_weight_triple_operands(
     std::uint64_t rope_dimension_count,
     float frequency_base
 );
+[[nodiscard]] BackendBuffer rope_neox_f32_by_heads_with_metal_buffer(
+    const MetalBackendBufferStorage& input,
+    std::uint64_t position_start,
+    std::uint64_t head_count,
+    std::uint64_t head_dimension,
+    std::uint64_t rope_dimension_count,
+    float frequency_base
+);
 [[nodiscard]] BackendBuffer causal_grouped_attention_scores_f32_with_metal_buffers(
     const MetalBackendBufferStorage& query,
     const MetalBackendBufferStorage& key,
@@ -169,6 +177,10 @@ matmul_f32_f16_gguf_weight_triple_with_metal_buffers(
     const MetalBackendBufferStorage& third_right
 );
 [[nodiscard]] BackendBuffer silu_multiply_f32_with_metal_buffers(
+    const MetalBackendBufferStorage& gate,
+    const MetalBackendBufferStorage& up
+);
+[[nodiscard]] BackendBuffer gelu_tanh_multiply_f32_with_metal_buffers(
     const MetalBackendBufferStorage& gate,
     const MetalBackendBufferStorage& up
 );

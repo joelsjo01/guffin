@@ -76,6 +76,23 @@ TensorStorage silu_f32(const TensorStorage& input) {
     return output;
 }
 
+TensorStorage gelu_tanh_f32(const TensorStorage& input) {
+    require_f32_operand(input);
+
+    constexpr float k_sqrt_two_over_pi = 0.7978845608028654F;
+    constexpr float k_cubic_coefficient = 0.044715F;
+    auto output = TensorStorage::allocate(input.descriptor());
+    for (std::uint64_t linear_index = 0; linear_index < input.descriptor().element_count; ++linear_index) {
+        const auto indices = indices_from_linear_index(input.descriptor().shape, linear_index);
+        const auto index_view = std::span<const std::uint64_t>(indices.data(), input.descriptor().shape.rank());
+        const auto value = read_f32(input, index_view);
+        const auto inner = k_sqrt_two_over_pi * (value + k_cubic_coefficient * value * value * value);
+        write_f32(output, index_view, 0.5F * value * (1.0F + std::tanh(inner)));
+    }
+
+    return output;
+}
+
 TensorStorage softcap_f32(const TensorStorage& input, float softcap) {
     require_f32_operand(input);
     if (!(softcap > 0.0F) || !std::isfinite(softcap)) {

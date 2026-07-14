@@ -379,10 +379,26 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
         ) {
             next_turn_token_ids.erase(next_turn_token_ids.begin());
         }
+        const auto boundary_token_ids = tokenizer_.encode(
+            "\n",
+            tokenizer::TokenizerEncodeOptions {
+                .add_bos = false,
+                .add_eos = false,
+                .encode_special_tokens = false,
+            }
+        );
+        if (boundary_token_ids.empty()) {
+            throw std::runtime_error("Gemma2 chat template boundary did not encode any tokens");
+        }
         rendered_token_ids = cached_token_ids_;
         if (rendered_token_ids.empty() || rendered_token_ids.back() != *end_of_turn_token_id_) {
             rendered_token_ids.push_back(*end_of_turn_token_id_);
         }
+        rendered_token_ids.insert(
+            rendered_token_ids.end(),
+            boundary_token_ids.begin(),
+            boundary_token_ids.end()
+        );
         rendered_token_ids.insert(
             rendered_token_ids.end(),
             next_turn_token_ids.begin(),
@@ -471,17 +487,19 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             }
             return Gemma2MetalTokenStreamDecision::continue_generation;
         };
-    auto generation = working_sampler.is_greedy()
-        ? generate_gemma2_metal_argmax_tokens_with_plan(
-            plan_,
-            std::span<const std::uint32_t>(appended_token_ids),
-            cache_position,
-            max_new_tokens_,
-            std::span<const std::uint32_t>(stop_token_ids_),
-            on_generated_token,
-            clock_
-        )
-        : generate_gemma2_metal_sampled_tokens_with_plan(
+    const auto run_generation = [&]() {
+        if (working_sampler.is_greedy()) {
+            return generate_gemma2_metal_argmax_tokens_with_plan(
+                plan_,
+                std::span<const std::uint32_t>(appended_token_ids),
+                cache_position,
+                max_new_tokens_,
+                std::span<const std::uint32_t>(stop_token_ids_),
+                on_generated_token,
+                clock_
+            );
+        }
+        return generate_gemma2_metal_sampled_tokens_with_plan(
             plan_,
             std::span<const std::uint32_t>(appended_token_ids),
             cache_position,
@@ -495,6 +513,8 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             on_generated_token,
             clock_
         );
+    };
+    auto generation = run_generation();
 
     if (!reverse_stop_string.has_value()) {
         if (visible_token_ids.empty()) {
@@ -525,11 +545,14 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
     turn_sampler_states_.push_back(sampler_before_turn);
     sampler_ = std::move(working_sampler);
 
+    // KV contains every selected token, including non-visible control tokens
+    // and tokens hidden by reverse-stop handling. Cache identity must follow
+    // those exact IDs rather than a decoded/re-tokenized display string.
     cached_token_ids_ = std::move(rendered_token_ids);
     cached_token_ids_.insert(
         cached_token_ids_.end(),
-        cached_visible_token_ids.begin(),
-        cached_visible_token_ids.end()
+        generation.generated_token_ids.begin(),
+        generation.generated_token_ids.end()
     );
     if (
         generation.stop_token_id.has_value()

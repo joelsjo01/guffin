@@ -104,6 +104,11 @@ public:
         const BackendBuffer& up,
         const BackendBuffer& output
     );
+    void encode_gelu_tanh_multiply(
+        const BackendBuffer& gate,
+        const BackendBuffer& up,
+        const BackendBuffer& output
+    );
     void encode_softcap(
         const BackendBuffer& input,
         const BackendBuffer& output,

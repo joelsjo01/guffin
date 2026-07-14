@@ -75,6 +75,7 @@ Chat is greedy by default. Enable deterministic sampled generation with:
   --temperature 0.8 \
   --top-k 40 \
   --top-p 0.95 \
+  --min-p 0.05 \
   --repeat-penalty 1.1 \
   --seed 42
 ```

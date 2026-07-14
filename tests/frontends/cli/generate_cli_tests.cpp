@@ -516,6 +516,24 @@ std::vector<std::string> tiny_gemma2_generate_cli_token_texts() {
     tokens[9] = "user\n";
     tokens[10] = "model\n";
     tokens[11] = "\n";
+    tokens[12] = "H";
+    tokens[13] = "e";
+    tokens[14] = "l";
+    tokens[15] = "o";
+    tokens[16] = "He";
+    tokens[17] = "Hel";
+    tokens[18] = "Hell";
+    tokens[19] = "u";
+    tokens[20] = "s";
+    tokens[21] = "r";
+    tokens[22] = "us";
+    tokens[23] = "use";
+    tokens[24] = "user";
+    tokens[25] = "m";
+    tokens[26] = "mo";
+    tokens[27] = "mod";
+    tokens[28] = "mode";
+    tokens[29] = "model";
     tokens[106] = "<start_of_turn>";
     tokens[107] = "<end_of_turn>";
     return tokens;
@@ -744,8 +762,32 @@ void test_gemma2_chat_session_appends_after_truncated_output_retokenizes_differe
         "truncated retokenization should retain exact generated ID");
     expect(second.cache_position > first.cache_position,
         "truncated retokenization second turn should reuse resident KV");
+    expect(second.appended_token_count == 9U,
+        "truncated retokenization should append end-of-turn, newline, and canonical next-turn tokens");
     expect(second.metrics.reused_cached_token_count == second.cache_position,
         "truncated retokenization cache metric mismatch");
+}
+
+void test_gemma2_chat_session_tracks_nonvisible_generated_tokens_in_cache_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(64),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(106)
+    );
+    const TempBinaryFile model("tiny-gemma2-hidden-cache-token", std::span<const std::uint8_t>(bytes));
+    auto session = Gemma2ChatSession(
+        read_file_backed_gguf_model(model.path()),
+        Gemma2ChatSessionOptions {.max_new_tokens = 1U}
+    );
+
+    const auto first = session.generate_user_turn("Hello");
+    const auto second = session.generate_user_turn("Hello");
+
+    expect(first.generated_token_ids.empty(), "control token should remain hidden from chat output");
+    expect(first.cached_token_count == first.appended_token_count + 1U,
+        "exact cache identity should retain generated control token");
+    expect(second.cache_position == first.cached_token_count,
+        "second turn should append after the exact control-token KV position");
 }
 
 void test_gemma2_chat_session_records_deterministic_turn_metrics_when_available() {
@@ -1542,6 +1584,7 @@ void test_rejects_generate_gemma2_chat_invalid_sampling_flags() {
         {{"--temperature", "bad"}, "--temperature requires a finite number"},
         {{"--temperature", "1", "--top-k", "0"}, "--top-k must be a positive integer"},
         {{"--temperature", "1", "--top-p", "2"}, "--top-p must be in (0, 1]"},
+        {{"--temperature", "1", "--min-p", "2"}, "--min-p must be in [0, 1]"},
         {{"--temperature", "1", "--repeat-penalty", "0"}, "--repeat-penalty must be positive"},
         {{"--temperature", "1", "--seed", "-1"}, "--seed must be an unsigned integer"},
         {{"--greedy", "--temperature", "1"}, "--greedy cannot be combined"},
@@ -1734,6 +1777,10 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     {
         "Gemma2 chat session appends after truncated output retokenizes differently when available",
         test_gemma2_chat_session_appends_after_truncated_output_retokenizes_differently_when_available,
+    },
+    {
+        "Gemma2 chat session tracks nonvisible generated tokens in cache when available",
+        test_gemma2_chat_session_tracks_nonvisible_generated_tokens_in_cache_when_available,
     },
     {
         "Gemma2 chat session records deterministic turn metrics when available",

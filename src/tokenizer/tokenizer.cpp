@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <queue>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -708,32 +709,104 @@ void Tokenizer::append_piece_token_ids(
 }
 
 void Tokenizer::append_exact_token_ids(std::vector<std::uint32_t>& token_ids, std::string_view text) const {
-    std::size_t offset = 0;
-    while (offset < text.size()) {
-        bool matched = false;
-        for (const auto token_id : encode_candidate_token_ids_) {
-            const auto& token_text = vocabulary_[token_id].text;
-            if (!starts_with_at(text, offset, token_text)) {
-                continue;
-            }
-
-            token_ids.push_back(token_id);
-            offset += token_text.size();
-            matched = true;
-            break;
+    constexpr std::string_view sentencepiece_space = "\xE2\x96\x81";
+    std::string escaped;
+    escaped.reserve(text.size());
+    for (const auto character : text) {
+        if (character == ' ') {
+            escaped += sentencepiece_space;
+        } else {
+            escaped.push_back(character);
         }
+    }
 
-        if (matched) {
+    struct Symbol {
+        std::size_t offset = 0;
+        std::size_t size = 0;
+        std::int64_t previous = -1;
+        std::int64_t next = -1;
+    };
+    struct Bigram {
+        std::size_t left = 0;
+        std::size_t right = 0;
+        float score = 0.0F;
+        std::size_t size = 0;
+    };
+    struct HigherPriorityBigram {
+        bool operator()(const Bigram& left, const Bigram& right) const noexcept {
+            return left.score < right.score
+                || (left.score == right.score && left.left > right.left);
+        }
+    };
+
+    std::vector<Symbol> symbols;
+    for (std::size_t offset = 0; offset < escaped.size();) {
+        const auto lead = static_cast<unsigned char>(escaped[offset]);
+        std::size_t size = 1;
+        if ((lead & 0xE0U) == 0xC0U) size = 2;
+        else if ((lead & 0xF0U) == 0xE0U) size = 3;
+        else if ((lead & 0xF8U) == 0xF0U) size = 4;
+        size = std::min(size, escaped.size() - offset);
+        symbols.push_back(Symbol {
+            .offset = offset,
+            .size = size,
+            .previous = static_cast<std::int64_t>(symbols.size()) - 1,
+            .next = -1,
+        });
+        if (symbols.size() > 1U) {
+            symbols[symbols.size() - 2U].next = static_cast<std::int64_t>(symbols.size() - 1U);
+        }
+        offset += size;
+    }
+
+    std::priority_queue<Bigram, std::vector<Bigram>, HigherPriorityBigram> candidates;
+    const auto add_candidate = [&](std::int64_t left_index, std::int64_t right_index) {
+        if (left_index < 0 || right_index < 0) return;
+        const auto left = static_cast<std::size_t>(left_index);
+        const auto right = static_cast<std::size_t>(right_index);
+        const auto combined = escaped.substr(symbols[left].offset, symbols[left].size + symbols[right].size);
+        const auto found = token_text_to_id_.find(combined);
+        if (found == token_text_to_id_.end()) return;
+        candidates.push(Bigram {
+            .left = left,
+            .right = right,
+            .score = vocabulary_[found->second].score.value_or(0.0F),
+            .size = combined.size(),
+        });
+    };
+
+    for (std::size_t index = 1; index < symbols.size(); ++index) {
+        add_candidate(static_cast<std::int64_t>(index - 1U), static_cast<std::int64_t>(index));
+    }
+    while (!candidates.empty()) {
+        const auto candidate = candidates.top();
+        candidates.pop();
+        auto& left = symbols[candidate.left];
+        auto& right = symbols[candidate.right];
+        if (left.size == 0U || right.size == 0U || left.size + right.size != candidate.size
+            || left.next != static_cast<std::int64_t>(candidate.right)) {
             continue;
         }
+        left.size += right.size;
+        right.size = 0;
+        left.next = right.next;
+        if (right.next >= 0) symbols[static_cast<std::size_t>(right.next)].previous = static_cast<std::int64_t>(candidate.left);
+        add_candidate(left.previous, static_cast<std::int64_t>(candidate.left));
+        add_candidate(static_cast<std::int64_t>(candidate.left), left.next);
+    }
 
-        if (special_tokens_.unknown_token_id.has_value()) {
+    for (std::int64_t index = symbols.empty() ? -1 : 0; index >= 0;) {
+        const auto& symbol = symbols[static_cast<std::size_t>(index)];
+        const auto piece = escaped.substr(symbol.offset, symbol.size);
+        const auto found = token_text_to_id_.find(piece);
+        if (found != token_text_to_id_.end()) {
+            token_ids.push_back(found->second);
+        } else if (special_tokens_.unknown_token_id.has_value()) {
             token_ids.push_back(*special_tokens_.unknown_token_id);
-            ++offset;
-            continue;
+        } else {
+            throw TokenizerError(TokenizerErrorCode::no_matching_token, byte_offset_detail(symbol.offset));
         }
-
-        throw TokenizerError(TokenizerErrorCode::no_matching_token, byte_offset_detail(offset));
+        index = symbol.next;
     }
 }
 

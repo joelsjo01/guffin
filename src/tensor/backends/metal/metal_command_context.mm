@@ -326,7 +326,7 @@ void MetalCommandContext::encode_rope(
         .frequency_base = frequency_base,
     };
     auto encoder = impl_->compute_encoder("Gemma2 decode RoPE");
-    [encoder setComputePipelineState:impl_->state->rope_by_heads_pipeline];
+    [encoder setComputePipelineState:impl_->state->rope_neox_by_heads_pipeline];
     [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
     [encoder setBuffer:storage(output).buffer() offset:0 atIndex:1];
     [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
@@ -499,6 +499,26 @@ void MetalCommandContext::encode_silu_multiply(
     const ElementwiseDimensions dims {.elements = u32(elements, "SiLU elements")};
     auto encoder = impl_->compute_encoder("Gemma2 decode SiLU multiply");
     [encoder setComputePipelineState:impl_->state->silu_multiply_pipeline];
+    [encoder setBuffer:storage(gate).buffer() offset:0 atIndex:0];
+    [encoder setBuffer:storage(up).buffer() offset:0 atIndex:1];
+    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [encoder endEncoding];
+}
+
+void MetalCommandContext::encode_gelu_tanh_multiply(
+    const BackendBuffer& gate,
+    const BackendBuffer& up,
+    const BackendBuffer& output
+) {
+    const auto elements = gate.descriptor().element_count;
+    require_capacity(up, elements * sizeof(float), "GELU-tanh up");
+    require_capacity(output, elements * sizeof(float), "GELU-tanh output");
+    const ElementwiseDimensions dims {.elements = u32(elements, "GELU-tanh elements")};
+    auto encoder = impl_->compute_encoder("Gemma2 decode GELU-tanh multiply");
+    [encoder setComputePipelineState:impl_->state->gelu_tanh_multiply_pipeline];
     [encoder setBuffer:storage(gate).buffer() offset:0 atIndex:0];
     [encoder setBuffer:storage(up).buffer() offset:0 atIndex:1];
     [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];

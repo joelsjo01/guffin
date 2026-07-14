@@ -208,6 +208,27 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> gelu_tanh_multiply_function =
+        [library newFunctionWithName:@"gelu_tanh_multiply_f32_kernel"];
+    if (gelu_tanh_multiply_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal GELU-tanh multiply kernel function was not found"
+        );
+    }
+
+    NSError* gelu_tanh_multiply_pipeline_error = nil;
+    gelu_tanh_multiply_pipeline =
+        [device newComputePipelineStateWithFunction:gelu_tanh_multiply_function
+                                              error:&gelu_tanh_multiply_pipeline_error];
+    if (gelu_tanh_multiply_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal GELU-tanh multiply pipeline creation failed: "
+                + ns_error_message(gelu_tanh_multiply_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> add_function = [library newFunctionWithName:@"add_f32_kernel"];
     if (add_function == nil) {
         throw metal_error(
@@ -295,6 +316,26 @@ MatmulPipelineState::MatmulPipelineState() {
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal RoPE-by-heads pipeline creation failed: "
                 + ns_error_message(rope_by_heads_pipeline_error, "unknown error")
+        );
+    }
+
+    id<MTLFunction> rope_neox_by_heads_function =
+        [library newFunctionWithName:@"rope_neox_f32_by_heads_kernel"];
+    if (rope_neox_by_heads_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal NeoX RoPE-by-heads kernel function was not found"
+        );
+    }
+    NSError* rope_neox_by_heads_pipeline_error = nil;
+    rope_neox_by_heads_pipeline =
+        [device newComputePipelineStateWithFunction:rope_neox_by_heads_function
+                                              error:&rope_neox_by_heads_pipeline_error];
+    if (rope_neox_by_heads_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal NeoX RoPE-by-heads pipeline creation failed: "
+                + ns_error_message(rope_neox_by_heads_pipeline_error, "unknown error")
         );
     }
 
