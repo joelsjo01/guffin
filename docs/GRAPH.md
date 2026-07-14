@@ -9,20 +9,27 @@ Do not read as history.
 2. Read `docs/ENGINE_PRINCIPLES.md`.
 3. Read `docs/NEXT_TASK.md`.
 4. Read this file only when choosing files to inspect or edit.
-5. Read `docs/BENCH_MILESTONES.md` only for benchmark roadmap/status updates.
-6. Read `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` only for Gemma planning,
+5. Read `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` only for Gemma planning,
    architecture, performance, or upstream-comparison work.
-7. Then read only the relevant code/tests below.
+6. Then read only the relevant code/tests below.
 
 ## Dependency Flow
 
 ```text
 src/frontends/cli
   -> src/benchmarks
-  -> src/engine
-      -> src/model_format
-      -> src/tokenizer
-      -> src/runtime
+  -> src/engine/gemma2_chat_session.*
+
+src/benchmarks
+  -> src/engine/gemma2_chat_session.*
+
+src/engine/gemma2_chat_session.*
+  -> src/engine/model.cpp
+  -> src/model_format
+  -> src/tokenizer
+  -> src/engine/sampling.*
+  -> src/engine/gemma2_runtime.*
+      -> src/engine/gemma2_metal_plan.*
       -> src/tensor
           -> src/tensor/ops
           -> src/tensor/backends/cpu_backend.*
@@ -56,18 +63,20 @@ benchmark harness is not a live source route.
 | `src/model_format` | GGUF headers, metadata, tensor directories, payload views, payload-size validation | tokenizer logic, inference |
 | `src/tokenizer` | tokenizer metadata, encode/decode, Gemma prompt/chat formatting | model execution |
 | `src/runtime` | backend enum/error types shared across runtime layers | backend execution |
-| `src/benchmarks` | generation benchmark records, derived metrics, and statistics | inference execution, CLI formatting |
+| `src/benchmarks` | generation benchmark cases, runner, records, derived metrics, and statistics | inference execution, CLI formatting |
 | `src/engine/model.cpp` | engine model loading from GGUF model views, architecture boundary | raw GGUF parsing internals |
 | `src/engine/gemma2_model.*` | Gemma 2 config parsing and weight binding | backend upload/execution |
 | `src/engine/gemma2_metal_plan.*` | Metal resident weight upload, KV cache buffers, prefill/decode schedules | tokenization, CLI formatting |
-| `src/engine/gemma2_runtime.*` | Gemma Metal generation runtime shell, scheduled prefill/decode execution, greedy token loop | CLI parsing, raw GGUF parsing |
+| `src/engine/gemma2_runtime.*` | Gemma Metal prefill/decode execution, resident decode, metrics, argmax and selector-driven token loops | chat history, CLI parsing |
+| `src/engine/gemma2_chat_session.*` | persistent chat state, prompt rendering, KV-prefix reuse, context trimming, stops, streaming, regeneration, sampler integration | CLI commands and formatting |
 | `src/engine/gemma2_reference.*` | tiny CPU/reference Gemma numerics for parity tests | product CPU runtime |
-| `src/engine/sampling.*` | top-logit helpers used by greedy/reference checks | stochastic sampling surface |
+| `src/engine/sampling.*` | greedy and seeded stochastic token selection, top-k/top-p, repetition penalty, token history, top-logit helpers | model execution |
 | `src/tensor` | tensor descriptors/storage, dtype/layout, F16, quantization views, typed access, backend buffer wrapper | model-family policy |
 | `src/tensor/ops` | CPU/reference tensor ops and backend-dispatched op front doors | device setup |
 | `src/tensor/backends/cpu_backend.*` | CPU backend buffers and CPU backend execution helpers | product-speed Gemma path |
 | `src/tensor/backends/metal_backend.*` | public Metal backend bridge, availability, buffer copy/allocation | CLI behavior |
-| `src/tensor/backends/metal/*` | Metal context, buffers, kernels, Metal op implementations | benchmark reporting |
+| `src/tensor/backends/metal/metal_command_context.*` | one-command-buffer resident decode encoding, submission statistics, selected-token readback | model scheduling, chat state |
+| `src/tensor/backends/metal/*` | Metal device context, buffers, kernels, command encoding, Metal op implementations | benchmark reporting |
 | `src/frontends/cli` | command arguments, file IO, stdout/stderr formatting, error reporting | inference math |
 | `tests` | deterministic coverage and fixtures | real model weights, generated benchmark artifacts |
 
@@ -88,11 +97,19 @@ Gemma Metal plan and resident schedules:
 - `tests/engine/gemma2_metal_plan_tests.cpp`
 - `tests/support/tensor_test_support.*`
 
-Gemma Metal runtime and greedy generation loop:
+Gemma Metal runtime and resident decode execution:
 
 - `include/local_gguf_engine/engine/gemma2_runtime.hpp`
 - `src/engine/gemma2_runtime.cpp`
+- `src/tensor/backends/metal/metal_command_context.*`
 - `tests/engine/gemma2_metal_plan_tests.cpp`
+
+Gemma chat session and generation orchestration:
+
+- `include/local_gguf_engine/engine/gemma2_chat_session.hpp`
+- `src/engine/gemma2_chat_session.cpp`
+- `include/local_gguf_engine/engine/sampling.hpp`
+- `src/engine/sampling.cpp`
 - `tests/frontends/cli/generate_cli_tests.cpp`
 
 Gemma reference numerics:
@@ -167,30 +184,29 @@ Backend buffers and residency:
 Metal kernels and backend-dispatched Metal ops:
 
 - `src/tensor/backends/metal/metal_context.*`
+- `src/tensor/backends/metal/metal_command_context.*`
 - `src/tensor/backends/metal/metal_tensor_ops.*`
 - `src/tensor/backends/metal_backend.*`
 - `tests/tensor/tensor_backend_tests.cpp`
 - `tests/engine/gemma2_metal_plan_tests.cpp`
 
-Top-logit greedy selection:
+Token sampling and top-logit selection:
 
 - `include/local_gguf_engine/engine/sampling.hpp`
 - `src/engine/sampling.cpp`
 - `src/tensor/backends/metal/metal_tensor_ops.*`
 - `tests/engine/sampling_tests.cpp`
 - `tests/tensor/tensor_backend_tests.cpp`
+- `tests/frontends/cli/generate_cli_tests.cpp`
 
-Generation CLI, interactive CLI, and benchmark metrics:
+Generation and interactive CLI:
 
 - `include/local_gguf_engine/frontends/cli/generate.hpp`
 - `src/frontends/cli/generate.cpp`
 - `src/frontends/cli/generate_main.cpp`
 - `tests/frontends/cli/generate_cli_tests.cpp`
-- `docs/INTERACTIVE_CLI_RESEARCH.md` for interactive/conversation CLI planning
-- `docs/NEXT_TASK.md`
-- `docs/BENCH_MILESTONES.md`
 
-Generation benchmark records and statistics:
+Generation benchmark runner, records, and statistics:
 
 - `include/local_gguf_engine/benchmarks/generation_benchmark.hpp`
 - `src/benchmarks/generation_benchmark.cpp`
@@ -211,11 +227,10 @@ Shared test fixtures:
 
 Project docs:
 
-- `docs/ENGINE_PRINCIPLES.md` for current project direction
+- `docs/ENGINE_PRINCIPLES.md` for durable engineering judgment
 - `docs/NEXT_TASK.md` for the active baton
-- `docs/BENCH_MILESTONES.md` for the generation benchmark roadmap
-- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` for historical/performance research
-- `docs/INTERACTIVE_CLI_RESEARCH.md` for interactive/conversation CLI planning
+- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` for Gemma architecture and performance research
+- `docs/MAJOR_PERFORMANCE_PROBLEMS.md` for the broad integrated-benchmark problem snapshot
 - `docs/GRAPH.md` for this locator
 
 ## Test Map
@@ -227,9 +242,11 @@ Project docs:
 | Tensor layout/dtypes/quantization/accessors | `tests/tensor/tensor_tests.cpp` |
 | Tensor ops/backends/Metal parity | `tests/tensor/tensor_backend_tests.cpp` |
 | Engine model binding | `tests/engine/engine_model_tests.cpp` |
-| Gemma Metal plan/runtime | `tests/engine/gemma2_metal_plan_tests.cpp` |
+| Gemma Metal plan/runtime/resident command context | `tests/engine/gemma2_metal_plan_tests.cpp` |
+| Gemma chat session, KV reuse, stops, streaming, context, regeneration | `tests/frontends/cli/generate_cli_tests.cpp` |
 | Gemma reference numerics | `tests/engine/gemma2_reference_tests.cpp` |
-| Greedy top-logit helpers | `tests/engine/sampling_tests.cpp`, `tests/tensor/tensor_backend_tests.cpp` |
+| Token sampling and top-logit helpers | `tests/engine/sampling_tests.cpp`, `tests/tensor/tensor_backend_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp` |
+| Generation benchmark records, runner, and statistics | `tests/benchmarks/generation_benchmark_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp` |
 | Tokenizer/chat template | `tests/tokenizer/tokenizer_tests.cpp`, plus CLI tests when prompt rendering changes |
 | Generate CLI | `tests/frontends/cli/generate_cli_tests.cpp` |
 | Inspect CLI | `tests/frontends/cli/gguf_inspect_tests.cpp` |

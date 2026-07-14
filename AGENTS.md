@@ -1,13 +1,13 @@
 # Agent Instructions
 
-Read this first. Keep future context small: load deeper docs only when the task
-needs them.
+Read this first. This file is the repository operating contract. Current
+implementation state belongs in `docs/NEXT_TASK.md`.
 
-## Aim
+## Mission
 
-Build a from-scratch local GGUF inference engine optimized for this MacBook Air
-M4. The production runtime owns GGUF loading, tensors, operators, tokenization,
-KV cache, decoding, sampling, and backend selection.
+Build a from-scratch local GGUF inference engine for this MacBook Air M4. The
+production runtime owns the full inference stack from GGUF loading through
+token selection.
 
 Performance goal: beat `llama.cpp` on selected local GGUF models and
 quantization formats on this machine. Broad portability and model coverage are
@@ -15,71 +15,62 @@ secondary.
 
 Current main target: fast local Gemma 2 9B Q4 on Metal.
 
-## Hard Rules
+## Non-Negotiable Boundaries
 
-- Do not wrap `llama.cpp`, Ollama, MLX, PyTorch, TensorFlow, Core ML, or remote
-  inference APIs for production inference.
-- Reference libraries may be used only for benchmarks, compatibility checks,
-  golden outputs, and debugging.
-- For Gemma 2 9B Q4, the product path is Metal-first and model-resident. CPU
-  work is correctness scaffolding only.
-- Keep engine logic separate from CLI, server, UI, scripts, and benchmarks.
+- Production inference must remain engine-owned. Do not wrap `llama.cpp`,
+  Ollama, MLX, PyTorch, TensorFlow, Core ML, model servers, or remote inference
+  APIs.
+- Reference libraries may support benchmarks, compatibility checks, golden
+  outputs, and debugging, but must not execute the production path.
+- The Gemma 2 9B Q4 product path is Metal-first and model-resident. CPU work is
+  correctness scaffolding, not a parallel product runtime.
+- Keep engine logic separate from CLI, server, UI, scripts, diagnostics, and benchmarks.
 - Runtime inference must work locally without network access.
-- Never commit model weights, generated binaries, local env files, or benchmark
-  result output.
-- Preserve user changes. Never revert unrelated work.
+- Production dependencies must not provide inference execution or tensor
+  framework semantics. Development and infrastructure tooling is acceptable.
+- Never commit model weights, generated binaries, local environment files, or
+  benchmark result output.
+- Preserve user changes. Never revert or rewrite unrelated work.
 
-## Default Read Path
+## Read Path
 
 1. `AGENTS.md`
 2. `docs/ENGINE_PRINCIPLES.md`
 3. `docs/NEXT_TASK.md`
-4. `docs/GRAPH.md` only when locating modules, tests, or task-specific docs
-5. `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` only for Gemma planning/work
-6. Relevant code/tests only
+4. `docs/GRAPH.md` only when locating modules, tests, fixtures, or task docs
+5. `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` only for Gemma planning,
+   architecture, performance research, or upstream comparison
+6. Relevant code and tests only
 
-Do not bulk-read docs.
+Do not bulk-read docs or source trees when the task has a narrower route.
 
-## Workflow
+## Work Loop
 
-1. Inspect relevant code and tests.
-2. Make the smallest coherent change that advances the Gemma Q4 Metal-first
-   direction.
-3. Add or update tests for behavior changes.
-4. Update docs only when public behavior, architecture, backend policy, model
-   support, toolchain direction, or the next task changes.
-5. Run `bash scripts/ci.sh` after implementation changes. Doc-only edits do
-   not need CI.
-6. Report changed files, tests run, and known gaps.
+1. Follow the objective, constraints, verification, and stop condition in
+   `docs/NEXT_TASK.md`; do not silently broaden the task.
+2. Inspect the relevant implementation and tests, then make the smallest
+   coherent change that proves the intended behavior or hypothesis end to end.
+3. Add deterministic automated coverage for behavior changes. Metal work needs
+   parity or golden evidence and unavailable-device behavior; CLI/API work needs
+   success and failure paths.
+4. For performance work, run a comparable real-path benchmark or explain why
+   the current slice cannot produce one.
+5. Update durable docs only when their owned information changes.
+6. Run `bash scripts/ci.sh` after implementation changes. Doc-only edits do not
+   need CI.
+7. Stop at the baton boundary and report changed files, verification performed,
+   benchmark evidence when applicable, and known gaps.
 
-## Testing Expectations
+## Document Ownership
 
-- Add deterministic tests for behavior changes.
-- Use CPU/reference fixtures to prove correctness when needed.
-- Metal work needs parity or golden checks plus unavailable-device behavior.
-- CLI/API changes need success and failure-path tests.
-- Performance work needs a benchmark or a clear reason one was not run.
+- `AGENTS.md`: mission, non-negotiable boundaries, read path, and workflow.
+- `docs/ENGINE_PRINCIPLES.md`: durable engineering judgment.
+- `docs/NEXT_TASK.md`: verified current state, one active baton, constraints,
+  verification, and stop condition.
+- `docs/GRAPH.md`: locator for code, tests, fixtures, commands, and task docs;
+  no policy or project history.
+- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md`: detailed Gemma architecture,
+  performance, and upstream research.
 
-Manual testing is useful, but it does not replace automated tests.
-
-## Dependencies
-
-Allowed: build tooling, test frameworks, small parsers, CLI parsing,
-logging/tracing, and dev-only comparison tools.
-
-Restricted: production inference runtimes, tensor frameworks used as production
-executors, model-serving frameworks, and remote inference APIs.
-
-## Comments
-
-Explain non-obvious numerics, cache behavior, memory
-layout, backend constraints, hardware assumptions, or performance choices.
-Do not have comments that merely restate the code.
-
-## Doc Map
-
-- Engine principles: `docs/ENGINE_PRINCIPLES.md`
-- Current implementation baton: `docs/NEXT_TASK.md`
-- Where to look: `docs/GRAPH.md`
-- Benchmark milestone map: `docs/BENCH_MILESTONES.md`
-- Gemma planning and findings: `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md`
+Do not put milestones, benchmark results, completed-work history, or the active
+bottleneck in this file.

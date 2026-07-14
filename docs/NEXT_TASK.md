@@ -1,123 +1,170 @@
-# Next Task: M4 Tied-F16 Decode Projection Bake-Off
+# Next Task: Complete Resident Decode Bottleneck Attribution
 
-## Verified Starting Point
+## Objective
 
-One-row Q4_K and Q6_K decode projections now use format-specific
-SIMD-cooperative Metal kernels.
+Measure where one complete steady-state Gemma 2 decode token spends wall time
+after the Q4_K/Q6_K SIMD work. First reconcile host preparation, command
+encoding, GPU execution, and readback. Only then divide GPU time among kernel
+families and select the next optimization from measured aggregate cost.
 
-- Both produce two output columns per 32-lane SIMD group and use two SIMD
-  groups per 64-thread threadgroup.
-- Q4_K divides four packed blocks across four 8-lane subgroups.
-- Q6_K pairs lanes so sixteen lanes cover each of two interleaved packed
-  blocks, matching its separate low/high bit planes and signed scales.
-- Both reuse activations across two output columns, accumulate in F32, finish
-  with `simd_sum`, and use no threadgroup memory.
-- Specialized selection requires one row, a 256-aligned inner width, a
-  32-thread execution width, and capacity for a 64-thread threadgroup.
-- Multi-row kernels remain scalar fallbacks.
-- Production decode remains one command buffer, one commit, one wait, zero
-  transient buffers, and no intermediate CPU readback.
+Do not optimize another kernel or runtime subsystem until this attribution is
+complete.
 
-Host Metal CI passes with `313` tests. Q6 parity covers packed-block counts
-`1`, `2`, `14`, `16`, and `56`, an odd output tail, both low nibbles, all four
-high-bit planes, signed scales, full six-bit values, and mixed-sign activations
-against the CPU dequantized F32 oracle.
+## Why This Is Next
 
-## Q6_K Result
+The tied-F16 projection bake-off is complete, and its result changes the
+priority. The scalar `[1,3584] x [3584,256000]` projection is slower than a
+SIMD implementation in isolation, but it is not large enough to explain the
+remaining end-to-end decode time.
 
-All `42` target-model Q6_K tensors are feed-forward down projections with
-shape `[14336, 3584]`.
+The temporary real-weight probe loaded the model once and timed one projection
+per command buffer with `GPUStartTime`/`GPUEndTime`, using 10 warmups and 50
+measured repetitions. Every pipeline reported execution width `32`, maximum
+`1024` threads, and zero static threadgroup memory.
 
-| Resident Q6_K kernel | GPU duration | Relative |
-| --- | ---: | ---: |
-| Scalar | `9.006 ms` | `1.00x` |
-| SIMD | `2.166 ms` | `4.16x` |
+At 256 threads per threadgroup, the interleaved result was:
 
-The exact eight-token release benchmark used one warmup and five measured
-repetitions. Warm-first-turn results were:
+| Mapping | Median | Mean | Minimum | Stddev | Effective weight bandwidth |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Existing scalar | `21.242 ms` | `21.302 ms` | `21.125 ms` | `0.171 ms` | `86.384 GB/s` |
+| 1 output/SIMD | `17.690 ms` | `17.702 ms` | `17.539 ms` | `0.122 ms` | `103.734 GB/s` |
+| 2 outputs/SIMD | `17.761 ms` | `17.851 ms` | `17.669 ms` | `0.196 ms` | `103.314 GB/s` |
+| 4 outputs/SIMD | `17.846 ms` | `17.922 ms` | `17.677 ms` | `0.270 ms` | `102.823 GB/s` |
 
-| Repetition | Generation tokens/s |
-| ---: | ---: |
-| `0` | `2.996` |
-| `1` | `3.000` |
-| `2` | `2.765` |
-| `3` | `3.054` |
-| `4` | `3.835` |
-| Mean | `3.130` |
-| Median | `3.000` |
+The one-output mapping won under the predeclared tie rule. Its threadgroup
+medians were `17.939 ms` at 64 threads, `17.799 ms` at 128 threads, and
+`17.687 ms` at 256 threads. Deterministic parity passed for mixed signs,
+cancellation, output tails `1` through `5`, K values `127`, `128`, `129`, and
+the real `3584` width.
 
-This is a further `30.2%` mean improvement over the Q4-only `2.404 t/s`
-result and about `3.37x` the original `0.930 t/s` scalar baseline.
+However, the exact required production benchmark did not confirm an
+end-to-end improvement over the established `3.130 t/s` mean and `3.000 t/s`
+median warm baseline:
 
-## Remaining Major Matvec
+- first post-bake-off run: `2.912 t/s` mean, `2.900 t/s` median;
+- clean post-CI repeat: `2.737 t/s` mean, `2.748 t/s` median, with high
+  run-to-run variance.
 
-The tied token-embedding/output tensor is F16 with shape `[3584, 256000]` and
-streams about `1.84 GB` once per generated token. Its current decode kernel
-assigns one output column to one thread and serially walks all `3584` input
-values.
+The isolated winner saves about `3.55 ms` from a token whose measured decode
+duration is roughly hundreds of milliseconds. It therefore failed the task's
+production acceptance rule. The F16 candidate pipelines, diagnostic probe,
+environment switches, tests specific to the removed path, and integration were
+deleted. Production remains on the existing scalar F16 fallback; Q4_K/Q6_K
+and one-submit behavior are unchanged.
 
-This is now the obvious next matvec to measure and optimize. Do not assume the
-Q4/Q6 two-output mapping wins unchanged: the unquantized F16 layout has
-different arithmetic intensity, a very large output width, and no unpacking
-cost.
+The current throughput timer does not cover the complete token path. It starts
+after `create_gemma2_metal_decode_schedule`, so schedule construction is absent
+from reported generation throughput. That construction creates a layer vector
+and copies schedule-owned vectors of `BackendBuffer` handles for resident
+weights and KV buffers, causing allocations and shared-ownership reference
+updates even though tensor payloads remain resident.
 
-## Implementation Gates
+Inside the timed resident step, the command context creates about `803` compute
+encoders and `42` blit encoders per token. `GPUStartTime`/`GPUEndTime` excludes
+the CPU cost of creating and labeling those encoders. The resident path has no
+transient tensor-buffer allocations or payload copies, but schedule ownership,
+descriptor validation, command encoding, queue delay, and result readback must
+still be ruled out as material costs before blaming GPU kernels.
 
-### Gate 1: Lock The F16 Baseline
+## Measurement Task
 
-- Add deterministic one-row F16 GGUF-weight matvec parity fixtures with odd
-  output tails and mixed-sign values.
-- Preserve existing multi-row F16 behavior.
-- Measure the allocation-free resident `[3584, 256000]` projection over enough
-  repetitions to reduce timer noise.
-- Record pipeline execution width, maximum threads per threadgroup, and static
-  threadgroup memory.
+### 1. Reconcile Complete Inter-Token Wall Time
 
-### Gate 2: Compile-Time Decode GEMV Bake-Off
+Measure a real warm greedy token from immediately before decode-schedule
+creation until the selected result is available. Attribute it to:
 
-Start with a one-dimensional 32-lane SIMD group cooperatively reducing the
-`3584`-value dot product. Compare small compile-time layouts:
+1. decode-schedule construction, including allocations and handle copies;
+2. CPU command-buffer and encoder construction before commit;
+3. commit-to-GPU-start queue delay;
+4. complete GPU execution from `GPUStartTime` to `GPUEndTime`;
+5. completion wait, top-logit readback, and other post-GPU work.
 
-1. one output column per SIMD group;
-2. two output columns per SIMD group with activation reuse;
-3. four output columns only if pipeline capacity and measured performance
-   justify the additional registers.
+Report both the current `decode_duration_ns` interval and the wider true
+inter-token interval. Reconcile the latter closely enough that tensor, plan,
+and Metal command-encoding overhead cannot be hidden outside GPU timing.
 
-Start with two SIMD groups per threadgroup. Test other group counts only if the
-isolated duration remains meaningfully different. Use `simd_sum`, F32
-accumulation, no threadgroup staging, and no intermediate weight conversion.
-Remove losing candidates; do not add runtime autotuning.
+### 2. Attribute GPU Execution
 
-### Gate 3: Integrate Narrowly
+Attribute one resident decode token across these aggregate families:
 
-- Select the winner only for one-row F16 GGUF-weight matvec with a 32-thread
-  execution width and sufficient threadgroup capacity.
-- Encode through `MetalCommandContext` into the existing resident logits
-  buffer.
-- Keep token embedding and multi-row F16 paths unchanged.
-- Preserve the one-submit/no-transient-buffer production invariants.
+1. all Q4_K projection dispatches across 42 blocks;
+2. all Q6_K projection dispatches across 42 blocks;
+3. attention score, softmax, and attention-value dispatches;
+4. RMSNorm, residual add, SiLU multiply, RoPE, and KV writes;
+5. final F16 vocabulary projection, softcap, and top-1 selection;
+6. encoder transitions, command-buffer scheduling gaps, or other unattributed
+   GPU time.
 
-### Gate 4: Prove End-To-End Value
+Measure totals per family and counts per token, not only one representative
+kernel. The result must reconcile closely with the complete command buffer's
+GPU duration, which must in turn reconcile with the wider inter-token wall
+time.
 
-- Run CPU-oracle parity, resident diagnostic parity, full host Metal CI, and
-  `git diff --check`.
-- Repeat the exact eight-token, one-warmup, five-repetition release benchmark.
-- Compare against `3.130 t/s` mean and `3.000 t/s` median.
-- Reject a candidate whose improvement is within noise or whose numerical
-  tolerance, residency, or submission behavior regresses.
+## Method Constraints
+
+- Use the real resident decode schedule, real model buffers, real cache state,
+  and exact production tensor shapes.
+- Load/upload the model once. Warm the path before recording measurements.
+- Measure the schedule and host path without changing their ownership or
+  allocation behavior first.
+- Keep the production one-command-buffer path unchanged outside a temporary
+  diagnostic build.
+- Prefer Metal counter samples or another same-command-buffer timestamp method
+  if the M4 and current API support reliable per-encoder boundaries.
+- If reliable in-buffer timestamps are unavailable, use a temporary diagnostic
+  executor that isolates already-resident operations. Clearly account for the
+  synchronization distortion and reconcile isolated totals against whole-token
+  GPU time.
+- Use at least 10 warmups and 50 measured tokens. Report median, mean, minimum,
+  standard deviation, dispatch count, and aggregate milliseconds per family.
+- Interleave comparisons and keep thermal conditions stable.
+- Remove all diagnostic timing code, switches, and output after the report is
+  captured. Do not add permanent kernel-level timing.
+
+## Decision Rule
+
+Choose the next implementation only from the largest actionable aggregate
+cost. Prefer a change capable of removing at least 10% of true inter-token wall
+time; do not select another isolated micro-optimization whose theoretical
+whole-token gain is below measurement noise.
+
+If schedule construction or CPU command encoding is material, fix that host
+architecture before tuning kernels. Candidate areas include borrowing plan
+state instead of copying schedule-owned buffer graphs, reusing immutable decode
+schedule structure, or reducing encoder creation. Select among them only from
+the measured breakdown.
+
+If Q4_K or Q6_K remains dominant in aggregate, optimize the measured format and
+real shapes further. If attention or small elementwise dispatches dominate,
+research fusion or shape-specific kernels. Do not return to the F16 projection
+unless attribution shows a materially larger production share than the
+`~21 ms` isolated measurement.
+
+## Verification
+
+After the diagnostic work:
+
+- run `bash scripts/ci.sh` after removing all temporary code;
+- run `git diff --check`;
+- repeat the exact release benchmark command from the completed bake-off;
+- record the host/GPU reconciliation, GPU-family attribution, and selected next
+  optimization in this file;
+- stop and report the recommendation before implementing it.
 
 ## Do Not
 
-- Do not alter the completed Q4_K or Q6_K kernels.
-- Do not change prefill, token embedding, attention, KV, sampling, context
-  handling, model loading, or CLI behavior.
-- Do not add permanent kernel-level CLI output, a benchmark executable,
-  dashboards, databases, or runtime autotuning.
-- Do not begin the llama.cpp throughput comparison.
+- Do not retain the rejected F16 SIMD kernel.
+- Do not alter schedule ownership, tensor abstractions, command encoding,
+  Q4_K/Q6_K, prefill, attention, KV, sampling, context handling, model loading,
+  or CLI behavior during attribution.
+- Do not split production decode into extra submissions or waits.
+- Do not add a benchmark executable, runtime autotuning, dashboards, databases,
+  or a llama.cpp comparison.
 
 ## Stop Condition
 
-Stop when one measured one-row F16 vocabulary-projection kernel has replaced
-the scalar kernel only on the resident decode path, all correctness and
-structural tests pass, and the exact five-repetition real-generation benchmark
-shows an improvement beyond noise.
+Stop after true inter-token wall time reconciles with host and GPU costs, GPU
+time reconciles with its aggregate families, the largest actionable cost is
+identified, all diagnostic code is removed, CI passes, and this baton contains
+a concrete research/implementation target. Wait for approval before
+implementing that optimization.

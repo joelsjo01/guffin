@@ -1,116 +1,98 @@
 # Engine Principles
 
-Read this after `AGENTS.md`. Keep it short; this file is the current project
-compass, not a history log.
+Read this after `AGENTS.md`. This file defines durable engineering judgment,
+not project status. Keep current work, measurements, and completed milestones
+in `NEXT_TASK.md` or the relevant diagnosis document.
 
-## Goal
+## Optimize the System
 
-Build a from-scratch, engine-owned local GGUF inference engine optimized for
-this MacBook Air M4. The main target is `models/gemma-2-9b-Q4.gguf`.
+- Treat end-to-end inference as the product. Optimize a subsystem only when
+  evidence connects it to meaningful whole-path cost.
+- Profile before choosing work. Attribute aggregate time, dispatches, data
+  movement, allocation, synchronization, and CPU/GPU gaps.
+- Estimate the maximum end-to-end gain first. If it is within run-to-run noise
+  or does not justify the complexity, choose a larger bottleneck.
+- Use microbenchmarks to explain a cost, compare candidates, or validate a
+  hypothesis. Accept a performance change only when the real production path
+  improves under comparable conditions.
+- Prefer removing work, transfers, waits, allocations, and passes over making
+  unnecessary work slightly faster.
+- Measure release builds on representative inputs. Warm the path, repeat runs,
+  report variance, control thermals and system state when practical, and
+  interleave alternatives when drift could bias the result.
 
-The product path is Metal-first and model-resident: packed quantized weights,
-GPU-resident weights/KV/scratch, explicit prefill/decode paths, and real
-end-to-end generation throughput.
+## Protect the Architecture
 
-The current Gemma path has the important Metal residency boundary: packed
-weights, KV cache, prefill/decode schedules, logits, and greedy top-1 selection
-stay on Metal, with only the selected token/logit read back. Production decode
-now encodes one complete token in one command buffer with one wait and no
-transient Metal buffers. Its one-row Q4_K and Q6_K projections use measured,
-format-specific SIMD-cooperative kernels; the next focus is the tied F16
-vocabulary projection.
+- Put behavior with the component that owns it. Make layout, lifetime,
+  residency, synchronization, and mutation explicit at boundaries.
+- Keep engine semantics independent from CLI, UI, benchmark, and diagnostic
+  concerns. Diagnostics may observe production execution; they must not become
+  a second execution path without a strong reason.
+- Design the hot path for the intended hardware and workload, but keep
+  interfaces narrow so specialization does not leak everywhere.
+- Specialize when measured shapes or formats justify it. Generalize only when
+  repeated real cases reveal a stable boundary; do not build speculative layers.
+- Prefer the simplest design that preserves required invariants. Never trade a
+  clear ownership model for local convenience or a small isolated win.
+- Make performance-sensitive state persistent when its lifetime is persistent.
+  Avoid hidden copies, implicit format conversions, temporary allocations, and
+  synchronization inside cheap-looking abstractions.
+- Keep changes small and coherent, but not artificially tiny. A slice should
+  prove one useful behavior or hypothesis end to end and stop at a clean
+  boundary.
+- Do not mix performance work with unrelated cleanup, broad refactors, or new
+  features. Remove rejected candidates and temporary instrumentation.
 
-CPU work is correctness scaffolding only: metadata checks, tokenizer checks,
-tiny reference kernels, fixtures, and golden comparisons. Do not build a full
-Gemma 2 9B Q4 CPU runtime as the main track.
+## Prove Changes
 
-## Hard Rules
+- Encode invariants in types, validation, ownership, and tests where practical.
+  Treat dimensions, strides, packing, alignment, precision, aliasing, cache
+  position, and synchronization as correctness properties.
+- Validate assumptions where bad data enters and fail with enough context to
+  identify the violated model, tensor, layout, backend, or lifecycle contract.
+- Add deterministic tests for changed behavior and likely regressions. Cover
+  boundary shapes, tails, precision limits, and unavailable devices as relevant.
+- Use a small independent reference, golden output, or parity test to validate
+  optimized numerical code. Do not use the optimized implementation as its own
+  oracle.
+- Choose tolerances from the expected numerical error and accumulation method;
+  never loosen a tolerance merely to make a test pass.
+- Test the public path that owns the behavior. Unit tests isolate the mechanism;
+  integration tests prove the system connects correctly.
+- Keep fallback behavior explicit. It must not silently change backend,
+  residency, precision, or performance characteristics.
+- A performance change is complete only when correctness checks pass, the real
+  benchmark improves beyond noise, and the measurements support the claimed
+  cause.
 
-- Production inference must stay engine-owned.
-- Do not wrap `llama.cpp`, Ollama, MLX, PyTorch, TensorFlow, Core ML, or remote
-  inference APIs.
-- Reference runtimes are allowed only for benchmarks, compatibility checks,
-  golden outputs, and debugging.
-- Runtime inference must work locally without network access.
-- Do not commit model weights, generated binaries, local env files, or benchmark
-  result output.
-- Preserve user changes.
+## Comment for the Next Decision
 
-## Architecture Bias
+Write comments that preserve information a future reader cannot recover by
+reading the code alone:
 
-- Prefer focused Gemma 2 support over preserving old Llama execution paths.
-- Make reusable blocks at ownership boundaries: GGUF metadata, tokenizer,
-  tensor layout, weight binding, execution planning, backend buffers, Metal
-  kernels, KV cache, greedy token selection, and benchmark metrics.
-- Keep the Gemma Q4 hot path explicit and specialized when that is faster or
-  clearer.
-- Do not add a broad model graph, virtual operator stack, or generic
-  architecture layer before at least two real model families prove the shape.
+- why a design or algorithm was chosen over a plausible alternative;
+- numerical assumptions, precision choices, and acceptable error;
+- tensor shape, order, stride, packing, alignment, and aliasing invariants;
+- buffer ownership, residency, lifetime, and synchronization requirements;
+- hardware, backend, or API constraints and fallback behavior;
+- non-obvious performance tradeoffs and when they hold.
 
-## Comment Style
+Do not restate names, syntax, or obvious control flow. Prefer clearer code over
+comments that explain confusing code. Put a short comment before the relevant
+invariant or tricky block, and update or delete it with the code. Record durable
+design reasons, not benchmark results or a development diary.
 
-Good comments explain:
+## Before Committing to a Design
 
-- why a path exists
-- numerical assumptions and precision choices
-- quantized block layout and packing details
-- tensor shape/order invariants
-- Metal buffer ownership, residency, and synchronization
-- backend constraints and fallback behavior
-- performance tradeoffs that are not obvious from the code
+Ask:
 
-Avoid comments that restate names or describe obvious control flow. Prefer a
-short comment before a tricky block over many line-by-line comments.
+1. What measured whole-path problem does this solve?
+2. What is the plausible upper bound on the end-to-end improvement?
+3. Which ownership, layout, lifetime, or synchronization invariant changes?
+4. Can the same result come from removing work or simplifying the data flow?
+5. Is the abstraction supported by repeated cases, or only imagined future use?
+6. How will correctness and real-path performance be proved independently?
+7. If the idea fails, can all of its complexity be removed cleanly?
 
-## Current Gemma State
-
-The core Metal path, persistent chat frontend, and integrated generation
-benchmark are working. The next focus is measured optimization on the real
-engine-owned session/runtime path.
-
-- Gemma 2 metadata, tokenizer/chat template, Q4_K/Q6_K layout, and weight
-  binding are in place.
-- Packed quantized weights, KV cache, scratch, prefill/decode schedules, logits,
-  and greedy token selection are on the Metal path.
-- Persistent chat, streaming, commands, context management, greedy generation,
-  and seeded sampled generation are complete.
-- The six-gate benchmark foundation and real release Metal baseline are
-  complete.
-- Resident one-submit decode is complete and improved warm greedy generation
-  from about `0.287 t/s` to `0.930 t/s` mean in a five-repetition release run.
-- The Q4_K SIMD decode matvec then improved the five-repetition warm greedy
-  result to `2.404 t/s` mean (`2.366 t/s` median) while preserving the
-  one-submit resident path.
-- The Q6_K SIMD decode matvec improved the result again to `3.130 t/s` mean
-  (`3.000 t/s` median); its real `[14336, 3584]` kernel is about `4.16x` faster
-  than the scalar Q6_K path.
-- The active task is the tied F16 vocabulary-projection decode kernel.
-
-## Benchmark Rule
-
-Generation performance must be measured on the real generation path.
-
-- Normal chat will permanently print compact prompt and generation throughput
-  after Gate 2 of the benchmark roadmap.
-- `--bench` should report metrics for the same command path.
-- Report prompt eval tokens/s, decode tokens/s, total tokens/s, and TTFT.
-- Keep benchmark reports under ignored `benchmarks/results`.
-- Do not resurrect the deleted standalone `local-gguf-bench` scaffold unless a
-  specific kernel question cannot be answered on the real generate path.
-
-## Implementation Loop
-
-Before implementing, ask:
-
-1. Does this move us closer to fast local Gemma 2 9B Q4 on MacBook Air M4?
-2. Does it advance the Metal/model-resident path rather than polish the old CPU
-   path?
-3. Is any CPU work only correctness scaffolding?
-4. Does it remove a real blocker or produce measurable proof?
-5. What is a good coherent slice, and where should I stop?
-
-After implementation:
-
-- Run the relevant tests; normally run `bash scripts/ci.sh`.
-- For performance work, include a real benchmark or explain why it was not run.
-- Stop after the verified slice instead of drifting into speculative cleanup.
+If these questions do not have concrete answers, gather evidence before adding
+architecture.
