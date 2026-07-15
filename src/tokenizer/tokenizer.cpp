@@ -21,6 +21,25 @@ using model_format::GGUFMetadataValueType;
 constexpr std::int32_t gguf_token_type_unknown = 2;
 constexpr std::int32_t gguf_token_type_control = 3;
 constexpr std::int32_t gguf_token_type_unused = 5;
+constexpr std::int32_t gguf_token_type_byte = 6;
+
+[[nodiscard]] std::optional<std::uint8_t> parse_byte_token(std::string_view text) noexcept {
+    if (text.size() != 6U || !text.starts_with("<0x") || text.back() != '>') {
+        return std::nullopt;
+    }
+
+    const auto hex_value = [](char digit) -> std::optional<std::uint8_t> {
+        if (digit >= '0' && digit <= '9') return static_cast<std::uint8_t>(digit - '0');
+        if (digit >= 'A' && digit <= 'F') return static_cast<std::uint8_t>(digit - 'A' + 10);
+        if (digit >= 'a' && digit <= 'f') return static_cast<std::uint8_t>(digit - 'a' + 10);
+        return std::nullopt;
+    };
+
+    const auto high = hex_value(text[3]);
+    const auto low = hex_value(text[4]);
+    if (!high.has_value() || !low.has_value()) return std::nullopt;
+    return static_cast<std::uint8_t>((*high << 4U) | *low);
+}
 
 [[nodiscard]] std::string error_message(TokenizerErrorCode code, std::string_view detail) {
     std::string message;
@@ -585,7 +604,8 @@ Tokenizer::Tokenizer(
       special_tokens_(special_tokens),
       encode_candidate_token_ids_(),
       special_encode_candidate_token_ids_(),
-      token_text_to_id_() {
+      token_text_to_id_(),
+      byte_token_ids_() {
     encode_candidate_token_ids_.reserve(vocabulary_.size());
     special_encode_candidate_token_ids_.reserve(vocabulary_.size());
     token_text_to_id_.reserve(vocabulary_.size());
@@ -595,6 +615,18 @@ Tokenizer::Tokenizer(
         }
 
         const auto token_id = static_cast<std::uint32_t>(index);
+        if (vocabulary_[index].type == gguf_token_type_byte) {
+            const auto byte = parse_byte_token(vocabulary_[index].text);
+            if (!byte.has_value() || byte_token_ids_[*byte].has_value()) {
+                throw TokenizerError(
+                    TokenizerErrorCode::invalid_vocabulary,
+                    "invalid byte token at id " + std::to_string(token_id)
+                );
+            }
+            byte_token_ids_[*byte] = token_id;
+            continue;
+        }
+
         if (token_id_can_encode_text(token_id)) {
             encode_candidate_token_ids_.push_back(token_id);
             token_text_to_id_.emplace(vocabulary_[index].text, token_id);
@@ -801,10 +833,25 @@ void Tokenizer::append_exact_token_ids(std::vector<std::uint32_t>& token_ids, st
         const auto found = token_text_to_id_.find(piece);
         if (found != token_text_to_id_.end()) {
             token_ids.push_back(found->second);
-        } else if (special_tokens_.unknown_token_id.has_value()) {
-            token_ids.push_back(*special_tokens_.unknown_token_id);
         } else {
-            throw TokenizerError(TokenizerErrorCode::no_matching_token, byte_offset_detail(symbol.offset));
+            bool has_all_byte_tokens = true;
+            for (const auto character : piece) {
+                const auto byte = static_cast<unsigned char>(character);
+                if (!byte_token_ids_[byte].has_value()) {
+                    has_all_byte_tokens = false;
+                    break;
+                }
+            }
+            if (has_all_byte_tokens) {
+                for (const auto character : piece) {
+                    const auto byte = static_cast<unsigned char>(character);
+                    token_ids.push_back(*byte_token_ids_[byte]);
+                }
+            } else if (special_tokens_.unknown_token_id.has_value()) {
+                token_ids.push_back(*special_tokens_.unknown_token_id);
+            } else {
+                throw TokenizerError(TokenizerErrorCode::no_matching_token, byte_offset_detail(symbol.offset));
+            }
         }
         index = symbol.next;
     }
@@ -843,7 +890,19 @@ std::string Tokenizer::decode(
             continue;
         }
 
-        append_decoded_token_text(output, model_, vocabulary_[token_id].text);
+        const auto& token = vocabulary_[token_id];
+        if (token.type == gguf_token_type_byte) {
+            const auto byte = parse_byte_token(token.text);
+            if (!byte.has_value()) {
+                throw TokenizerError(
+                    TokenizerErrorCode::invalid_vocabulary,
+                    "invalid byte token at id " + std::to_string(token_id)
+                );
+            }
+            output.push_back(static_cast<char>(*byte));
+        } else {
+            append_decoded_token_text(output, model_, token.text);
+        }
     }
 
     return output;
@@ -878,7 +937,7 @@ bool Tokenizer::token_id_can_encode_text(std::uint32_t token_id) const noexcept 
     }
 
     const auto type = vocabulary_[token_id].type;
-    return type != gguf_token_type_unknown;
+    return type != gguf_token_type_unknown && type != gguf_token_type_byte;
 }
 
 bool Tokenizer::token_id_can_encode_special(std::uint32_t token_id) const noexcept {

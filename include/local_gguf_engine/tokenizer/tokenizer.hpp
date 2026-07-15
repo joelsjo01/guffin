@@ -2,6 +2,7 @@
 
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -133,6 +134,7 @@ private:
     std::vector<std::uint32_t> encode_candidate_token_ids_;
     std::vector<std::uint32_t> special_encode_candidate_token_ids_;
     std::unordered_map<std::string, std::uint32_t> token_text_to_id_;
+    std::array<std::optional<std::uint32_t>, 256> byte_token_ids_;
 };
 
 [[nodiscard]] std::string_view tokenizer_model_name(TokenizerModel model) noexcept;

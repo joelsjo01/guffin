@@ -3,6 +3,7 @@
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <span>
@@ -84,6 +85,12 @@ std::vector<std::string> tiny_gemma2_token_texts() {
     tokens[39] = "mod";
     tokens[40] = "mode";
     tokens[41] = "model";
+    tokens[42] = "<0xC3>";
+    tokens[43] = "<0xA9>";
+    tokens[44] = "<0xF0>";
+    tokens[45] = "<0x9F>";
+    tokens[46] = "<0x98>";
+    tokens[47] = "<0x80>";
     tokens[106] = "<start_of_turn>";
     tokens[107] = "<end_of_turn>";
     return tokens;
@@ -96,6 +103,9 @@ std::vector<std::int32_t> tiny_gemma2_token_types() {
     token_types[2] = 3;
     token_types[3] = 2;
     token_types[4] = 3;
+    for (std::size_t token_id = 42; token_id <= 47; ++token_id) {
+        token_types[token_id] = 6;
+    }
     token_types[106] = 3;
     token_types[107] = 3;
     return token_types;
@@ -365,6 +375,44 @@ void test_decodes_gemma2_sentencepiece_space_markers() {
     expect(skipped == "Hello seems question", "Gemma2 skip-special space-marker text mismatch");
 }
 
+void test_sentencepiece_byte_fallback_round_trips_unknown_text() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_gemma2_tokenizer_metadata()));
+    const auto ids = tokenizer.encode(
+        "\xC3\xA9\xF0\x9F\x98\x80",
+        TokenizerEncodeOptions {.add_bos = false}
+    );
+    const std::array<std::uint32_t, 6> expected {42, 43, 44, 45, 46, 47};
+
+    expect(
+        std::equal(ids.begin(), ids.end(), expected.begin(), expected.end()),
+        "SentencePiece byte fallback IDs mismatch"
+    );
+    expect(
+        tokenizer.decode(std::span<const std::uint32_t>(ids)) == "\xC3\xA9\xF0\x9F\x98\x80",
+        "SentencePiece byte fallback should round-trip UTF-8"
+    );
+}
+
+void test_rejects_malformed_sentencepiece_byte_token() {
+    auto metadata = tiny_gemma2_tokenizer_metadata();
+    for (auto& entry : metadata) {
+        if (entry.key == "tokenizer.ggml.tokens") {
+            auto& tokens = std::get<local_gguf_engine::model_format::GGUFMetadataArray>(entry.value.data);
+            auto& values = std::get<std::vector<std::string>>(tokens.values);
+            values[42] = "<0xZZ>";
+            break;
+        }
+    }
+
+    try {
+        (void)load_tokenizer_from_gguf_metadata(metadata_section(std::move(metadata)));
+        throw TestFailure("tokenizer should reject malformed byte token text");
+    } catch (const TokenizerError& error) {
+        expect(error.code() == TokenizerErrorCode::invalid_vocabulary, "malformed byte token error mismatch");
+        expect(error.detail() == "invalid byte token at id 42", "malformed byte token detail mismatch");
+    }
+}
+
 void test_rejects_tokenizer_decode_id_out_of_range() {
     const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_gemma2_tokenizer_metadata()));
     const std::array<std::uint32_t, 1> ids {110};
@@ -461,6 +509,14 @@ std::span<const TestCase> tokenizer_test_cases() {
         {
             "decodes Gemma2 SentencePiece space markers",
             test_decodes_gemma2_sentencepiece_space_markers,
+        },
+        {
+            "SentencePiece byte fallback round-trips unknown text",
+            test_sentencepiece_byte_fallback_round_trips_unknown_text,
+        },
+        {
+            "rejects malformed SentencePiece byte token",
+            test_rejects_malformed_sentencepiece_byte_token,
         },
         {"rejects tokenizer decode ID out of range", test_rejects_tokenizer_decode_id_out_of_range},
         {

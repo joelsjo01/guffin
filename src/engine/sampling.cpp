@@ -157,28 +157,13 @@ std::uint32_t TokenSampler::sample(const TensorStorage& logits) {
     std::vector<double> weights;
     weights.reserve(candidates.size());
     for (const auto& candidate : candidates) {
-        const auto weight = std::exp(
-            static_cast<double>(candidate.logit - max_logit)
-                / static_cast<double>(options_.temperature)
-        );
-        weights.push_back(weight);
+        weights.push_back(std::exp(static_cast<double>(candidate.logit - max_logit)));
     }
 
-    // Weights are normalized relative to the best logit, whose weight is 1.
-    // Min-p removes the low-probability tail before nucleus sampling; this is
-    // important for quantized models whose tail logits can be comparatively noisy.
-    const auto min_weight = static_cast<double>(options_.min_p);
-    auto min_p_count = weights.size();
-    if (min_weight > 0.0) {
-        min_p_count = 1U;
-        while (min_p_count < weights.size() && weights[min_p_count] >= min_weight) {
-            ++min_p_count;
-        }
-        candidates.resize(min_p_count);
-        weights.resize(min_p_count);
-    }
+    // These filters are deliberately non-commutative. Apply them to the
+    // untempered distribution in the runtime's public transform order:
+    // top-k, top-p, min-p, then temperature and random selection.
     const auto total_weight = std::accumulate(weights.begin(), weights.end(), 0.0);
-
     double retained_weight = 0.0;
     std::size_t retained_count = 0;
     do {
@@ -191,7 +176,27 @@ std::uint32_t TokenSampler::sample(const TensorStorage& logits) {
     candidates.resize(retained_count);
     weights.resize(retained_count);
 
-    std::uniform_real_distribution<double> distribution(0.0, retained_weight);
+    const auto min_weight = static_cast<double>(options_.min_p);
+    if (min_weight > 0.0) {
+        auto min_p_count = std::size_t {1};
+        while (min_p_count < weights.size() && weights[min_p_count] >= min_weight) {
+            ++min_p_count;
+        }
+        candidates.resize(min_p_count);
+        weights.resize(min_p_count);
+    }
+
+    weights.clear();
+    weights.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        weights.push_back(std::exp(
+            static_cast<double>(candidate.logit - max_logit)
+                / static_cast<double>(options_.temperature)
+        ));
+    }
+    const auto sampling_weight = std::accumulate(weights.begin(), weights.end(), 0.0);
+
+    std::uniform_real_distribution<double> distribution(0.0, sampling_weight);
     const auto draw = distribution(rng_);
     double cumulative = 0.0;
     for (std::size_t index = 0; index < candidates.size(); ++index) {

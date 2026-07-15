@@ -3,7 +3,8 @@
 ## Correctness Gate
 
 Pause performance tuning until sampled multi-turn chat has deterministic
-token, logit, and stability gates against `llama.cpp`.
+token, logit, and stability gates. Automated tests must remain self-contained;
+reference-runtime comparisons are manual diagnostics, not test dependencies.
 
 The collapse had three proven correctness causes, all now fixed:
 
@@ -19,15 +20,18 @@ comparison is cosine `0.999978`, RMSE `0.109`, with `39/40` top-token overlap.
 The formerly failing sampled decode now remains finite for the full 128-token
 probe.
 
+SentencePiece byte fallback now preserves text that has no normal vocabulary
+piece, including raw UTF-8 bytes, instead of collapsing the whole piece to
+`<unk>`. Sampling now applies the supported transforms in the fixed order
+repetition penalty, top-k, top-p, min-p, temperature, then distribution. Local
+fixtures lock both behaviors without invoking `llama.cpp`.
+
 Before returning to performance work:
 
-1. make the exact prompt token IDs a regression fixture and add SentencePiece
-   byte fallback for text not represented by a normal token;
-2. capture equivalent logit parity at an incremental second-turn boundary and
+1. make the exact known prompt token IDs a self-contained regression fixture;
+2. capture logit parity at an incremental second-turn boundary and
    after full replay of the same prefix;
-3. match llama.cpp's sampler transform order, then compare seeded outputs while
-   allowing only documented floating-point sampling divergence;
-4. run the reported three-turn chat without unknown prompt tokens, non-finite
+3. run the reported three-turn chat without unknown prompt tokens, non-finite
    logits, repetition collapse, or context loss.
 
 Do not tune sampling thresholds to conceal tokenization or forward-logit

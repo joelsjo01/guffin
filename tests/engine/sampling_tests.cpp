@@ -7,6 +7,7 @@
 #include "local_gguf_engine/tensor/tensor_error.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <span>
@@ -188,6 +189,46 @@ void test_min_p_filters_low_probability_tail() {
     }
 }
 
+void test_top_p_filters_before_temperature() {
+    const std::array<float, 2> logits_values {0.0F, -1.0F};
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+
+    for (std::uint64_t seed = 0; seed < 64U; ++seed) {
+        auto sampler = TokenSampler(TokenSamplerOptions {
+            .temperature = 2.0F,
+            .top_k = 2,
+            .top_p = 0.7F,
+            .min_p = 0.0F,
+            .seed = seed,
+        });
+        expect(sampler.sample(logits) == 0U, "top-p should filter the untempered distribution");
+    }
+}
+
+void test_top_p_filters_before_min_p() {
+    const std::array<float, 3> logits_values {
+        0.0F,
+        static_cast<float>(std::log(0.4)),
+        static_cast<float>(std::log(0.3)),
+    };
+    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+    bool selected_second_token = false;
+
+    for (std::uint64_t seed = 0; seed < 128U; ++seed) {
+        auto sampler = TokenSampler(TokenSamplerOptions {
+            .temperature = 1.0F,
+            .top_k = 3,
+            .top_p = 0.65F,
+            .min_p = 0.35F,
+            .seed = seed,
+        });
+        const auto selected = sampler.sample(logits);
+        expect(selected != 2U, "min-p should remove the low-probability tail after top-p");
+        selected_second_token = selected_second_token || selected == 1U;
+    }
+    expect(selected_second_token, "top-p should retain the second token before min-p is applied");
+}
+
 void test_rejects_invalid_token_sampler_options() {
     const std::array<TokenSamplerOptions, 4> invalid_options {{
         TokenSamplerOptions {.temperature = -1.0F},
@@ -217,6 +258,8 @@ const TestCase kSamplingTests[] = {
     {"token sampler snapshot replays RNG and history", test_token_sampler_snapshot_replays_rng_and_history},
     {"repetition penalty uses only recent window", test_repetition_penalty_uses_only_recent_window},
     {"min-p filters low probability tail", test_min_p_filters_low_probability_tail},
+    {"top-p filters before temperature", test_top_p_filters_before_temperature},
+    {"top-p filters before min-p", test_top_p_filters_before_min_p},
     {"rejects invalid token sampler options", test_rejects_invalid_token_sampler_options},
 };
 
