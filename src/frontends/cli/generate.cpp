@@ -123,10 +123,10 @@ void write_generate_usage(std::ostream& error) {
           << " [--greedy] [--backend cpu|metal]"
           << " [--bench --warmup N --repetitions N --output human|jsonl]"
           << '\n'
-          << "       local-gguf-generate <model.gguf> --chat --max-new-tokens <N>"
+          << "       local-gguf-generate <model.gguf> --chat [--max-new-tokens N]"
           << " [--greedy | --temperature T [--top-k K] [--top-p P] [--min-p P]"
           << " [--repeat-penalty R] [--seed S]] [--backend cpu|metal]"
-          << " [--reverse-prompt TEXT]"
+          << " [--reverse-prompt TEXT] [--context-shift]"
           << '\n';
 }
 
@@ -396,8 +396,18 @@ struct ParsedChatCommand {
     std::size_t max_new_tokens = 0;
     GenerateOptions options;
     std::vector<std::string> reverse_stop_strings;
-    TokenSamplerOptions sampler;
+    TokenSamplerOptions sampler {
+        .temperature = 0.8F,
+        .top_k = 40U,
+        .top_p = 0.95F,
+        .min_p = 0.05F,
+        .repetition_penalty = 1.0F,
+        .seed = TokenSamplerOptions::random_seed,
+        .repetition_window = 64U,
+    };
+    bool context_shift = false;
     bool greedy_requested = false;
+    bool temperature_requested = false;
     bool sampled_modifier_requested = false;
 };
 
@@ -414,6 +424,14 @@ struct ParsedChatCommand {
         }
         if (option == "--greedy") {
             command.greedy_requested = true;
+            continue;
+        }
+        if (option == "--context-shift") {
+            command.context_shift = true;
+            continue;
+        }
+        if (option == "--no-context-shift") {
+            command.context_shift = false;
             continue;
         }
 
@@ -468,6 +486,7 @@ struct ParsedChatCommand {
             }
             if (option == "--temperature") {
                 command.sampler.temperature = value;
+                command.temperature_requested = true;
             } else if (option == "--top-p") {
                 command.sampler.top_p = value;
                 command.sampled_modifier_requested = true;
@@ -506,9 +525,12 @@ struct ParsedChatCommand {
                 error << "error: --seed requires a value\n";
                 return false;
             }
-            if (!parse_u64(argv[index + 1], command.sampler.seed)) {
+            const auto seed_text = std::string_view(argv[index + 1]);
+            if (seed_text == "-1") {
+                command.sampler.seed = TokenSamplerOptions::random_seed;
+            } else if (!parse_u64(seed_text, command.sampler.seed)) {
                 write_generate_usage(error);
-                error << "error: --seed must be an unsigned integer\n";
+                error << "error: --seed must be -1 or an unsigned integer\n";
                 return false;
             }
             command.sampled_modifier_requested = true;
@@ -533,17 +555,15 @@ struct ParsedChatCommand {
         return false;
     }
 
-    if (command.max_new_tokens == 0U) {
-        write_generate_usage(error);
-        error << "error: --max-new-tokens is required in chat mode\n";
-        return false;
+    if (command.greedy_requested) {
+        if (command.temperature_requested && command.sampler.temperature > 0.0F) {
+            error << "error: --greedy cannot be combined with positive --temperature\n";
+            return false;
+        }
+        command.sampler.temperature = 0.0F;
     }
     if (command.sampler.temperature < 0.0F) {
         error << "error: --temperature must be nonnegative\n";
-        return false;
-    }
-    if (command.greedy_requested && command.sampler.temperature > 0.0F) {
-        error << "error: --greedy cannot be combined with positive --temperature\n";
         return false;
     }
     if (command.sampler.temperature == 0.0F && command.sampled_modifier_requested) {
@@ -653,6 +673,7 @@ int run_generate_chat(
         Gemma2ChatSessionOptions {
             .max_new_tokens = command.max_new_tokens,
             .backend = command.options.backend,
+            .context_shift = command.context_shift,
             .reverse_stop_strings = command.reverse_stop_strings,
             .sampler = command.sampler,
         }
@@ -692,7 +713,10 @@ int run_generate_chat(
         if (line == "/tokens") {
             output << "tokens: cached=" << session.cached_token_count()
                    << " remaining=" << session.remaining_context_tokens()
-                   << " max-new-tokens=" << session.max_new_tokens() << '\n';
+                   << " max-new-tokens=";
+            if (session.max_new_tokens() == 0U) output << "unlimited";
+            else output << session.max_new_tokens();
+            output << '\n';
             continue;
         }
 

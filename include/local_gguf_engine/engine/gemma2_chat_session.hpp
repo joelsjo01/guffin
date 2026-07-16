@@ -26,8 +26,10 @@ public:
 };
 
 struct Gemma2ChatSessionOptions {
-    std::size_t max_new_tokens = 128;
+    // Zero means generate until a stop token, cancellation, or context exhaustion.
+    std::size_t max_new_tokens = 0;
     runtime::BackendKind backend = runtime::BackendKind::metal;
+    bool context_shift = false;
     std::vector<std::string> reverse_stop_strings;
     TokenSamplerOptions sampler;
     Gemma2MonotonicClock clock;
@@ -151,6 +153,7 @@ private:
     std::vector<std::string> reverse_stop_strings_;
     std::optional<std::uint32_t> end_of_turn_token_id_;
     std::size_t max_new_tokens_ = 0;
+    bool context_shift_ = false;
     TokenSamplerOptions initial_sampler_options_;
     TokenSampler sampler_;
     Gemma2MonotonicClock clock_;

@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <span>
 #include <vector>
@@ -16,12 +17,14 @@ struct TokenLogit {
 };
 
 struct TokenSamplerOptions {
+    static constexpr std::uint64_t random_seed = std::numeric_limits<std::uint64_t>::max();
+
     float temperature = 0.0F;
     std::size_t top_k = 40;
     float top_p = 0.95F;
     float min_p = 0.05F;
     float repetition_penalty = 1.0F;
-    std::uint64_t seed = 0;
+    std::uint64_t seed = random_seed;
     std::size_t repetition_window = 64;
 };
 

@@ -203,8 +203,9 @@ int run_generate_chat_for_path(
         "--chat",
         "--max-new-tokens",
         max_new_tokens_string.c_str(),
+        "--greedy",
     };
-    return run_generate(5, argv, input, output, error);
+    return run_generate(6, argv, input, output, error);
 }
 
 int run_generate_chat_for_path_with_reverse_stop(
@@ -227,8 +228,9 @@ int run_generate_chat_for_path_with_reverse_stop(
         max_new_tokens_string.c_str(),
         "--reverse-prompt",
         reverse_stop_string.c_str(),
+        "--greedy",
     };
-    return run_generate(7, argv, input, output, error);
+    return run_generate(8, argv, input, output, error);
 }
 
 int run_generate_chat_for_path_with_sampling(
@@ -245,6 +247,35 @@ int run_generate_chat_for_path_with_sampling(
         "--repeat-penalty", "1.1", "--seed", "42",
     };
     return run_generate(15, argv, input, output, error);
+}
+
+int run_generate_chat_for_path_with_context_shift(
+    const std::filesystem::path& path,
+    std::string_view max_new_tokens,
+    std::istream& input,
+    std::ostringstream& output,
+    std::ostringstream& error
+) {
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const std::string max_new_tokens_string(max_new_tokens);
+    const char* argv[] = {
+        program.c_str(), path_string.c_str(), "--chat", "--max-new-tokens",
+        max_new_tokens_string.c_str(), "--context-shift", "--greedy",
+    };
+    return run_generate(7, argv, input, output, error);
+}
+
+int run_generate_chat_with_default_options(
+    const std::filesystem::path& path,
+    std::istream& input,
+    std::ostringstream& output,
+    std::ostringstream& error
+) {
+    const std::string program = "local-gguf-generate";
+    const std::string path_string = path.string();
+    const char* argv[] = {program.c_str(), path_string.c_str(), "--chat"};
+    return run_generate(3, argv, input, output, error);
 }
 
 int run_generate_chat_with_extra_arguments(
@@ -1121,7 +1152,7 @@ void test_gemma2_chat_session_trims_oldest_turns_and_rebuilds_retained_context_w
     const TempBinaryFile model("tiny-gemma2-chat-context-trim", std::span<const std::uint8_t>(bytes));
     auto session = Gemma2ChatSession(
         read_file_backed_gguf_model(model.path()),
-        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+        Gemma2ChatSessionOptions {.max_new_tokens = 1, .context_shift = true}
     );
 
     bool rebuilt = false;
@@ -1145,6 +1176,38 @@ void test_gemma2_chat_session_trims_oldest_turns_and_rebuilds_retained_context_w
     }
 
     expect(rebuilt, "Gemma2 chat long conversation should trigger context rebuild");
+}
+
+void test_gemma2_chat_session_does_not_shift_context_by_default_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-no-context-shift", std::span<const std::uint8_t>(bytes));
+    auto session = Gemma2ChatSession(
+        read_file_backed_gguf_model(model.path()),
+        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+    );
+
+    std::size_t completed_turns = 0;
+    bool rejected = false;
+    for (; completed_turns < 8U; ++completed_turns) {
+        try {
+            const auto turn = session.generate_user_turn("Hello");
+            expect(!turn.rebuilt_context, "default chat should not rebuild context");
+        } catch (const Gemma2ChatContextError&) {
+            rejected = true;
+            break;
+        }
+    }
+
+    expect(rejected, "default chat should stop when conversation history fills the context");
+    expect(completed_turns > 0U, "default no-shift fixture should complete an initial turn");
+    expect(session.message_count() == completed_turns * 2U, "context rejection should preserve full history");
 }
 
 void test_gemma2_chat_session_rejects_impossible_turn_without_mutating_context_when_available() {
@@ -1526,7 +1589,9 @@ void test_runs_generate_gemma2_chat_context_trim_and_recovers_from_impossible_tu
     std::ostringstream output;
     std::ostringstream error;
 
-    const auto exit_code = run_generate_chat_for_path(model.path(), "1", input, output, error);
+    const auto exit_code = run_generate_chat_for_path_with_context_shift(
+        model.path(), "1", input, output, error
+    );
     const auto text = output.str();
 
     expect(exit_code == EXIT_SUCCESS, "generate Gemma2 context CLI should survive turn rejection");
@@ -1539,6 +1604,30 @@ void test_runs_generate_gemma2_chat_context_trim_and_recovers_from_impossible_tu
     const auto timing_before_context = text.rfind("[ Prompt: ", text.find("context: dropped "));
     expect(timing_before_context != std::string::npos, "context rebuild timing should precede rebuild notice");
     expect(error.str().empty(), "generate Gemma2 context CLI should not write stderr");
+}
+
+void test_runs_generate_gemma2_chat_with_llama_like_defaults_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(64),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(107)
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-defaults", std::span<const std::uint8_t>(bytes));
+    std::istringstream input("/tokens\nHello\n/exit\n");
+    std::ostringstream output;
+    std::ostringstream error;
+
+    const auto exit_code = run_generate_chat_with_default_options(model.path(), input, output, error);
+    expect(exit_code == EXIT_SUCCESS, "default sampled chat CLI exit mismatch");
+    expect(
+        output.str().find("tokens: cached=0 remaining=64 max-new-tokens=unlimited") != std::string::npos,
+        "default chat should report an unlimited response budget"
+    );
+    expect(chat_timing_line_count(output.str()) == 1U, "default sampled chat should complete one turn");
+    expect(error.str().empty(), "default sampled chat should not write stderr");
 }
 
 void test_runs_generate_gemma2_chat_seeded_sampling_flags_when_available() {
@@ -1586,9 +1675,9 @@ void test_rejects_generate_gemma2_chat_invalid_sampling_flags() {
         {{"--temperature", "1", "--top-p", "2"}, "--top-p must be in (0, 1]"},
         {{"--temperature", "1", "--min-p", "2"}, "--min-p must be in [0, 1]"},
         {{"--temperature", "1", "--repeat-penalty", "0"}, "--repeat-penalty must be positive"},
-        {{"--temperature", "1", "--seed", "-1"}, "--seed must be an unsigned integer"},
+        {{"--temperature", "1", "--seed", "invalid"}, "--seed must be -1 or an unsigned integer"},
         {{"--greedy", "--temperature", "1"}, "--greedy cannot be combined"},
-        {{"--seed", "42"}, "sampling modifiers require --temperature greater than zero"},
+        {{"--greedy", "--seed", "42"}, "sampling modifiers require --temperature greater than zero"},
     };
 
     for (const auto& test_case : cases) {
@@ -1823,6 +1912,10 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
         test_gemma2_chat_session_trims_oldest_turns_and_rebuilds_retained_context_when_available,
     },
     {
+        "Gemma2 chat session does not shift context by default when available",
+        test_gemma2_chat_session_does_not_shift_context_by_default_when_available,
+    },
+    {
         "Gemma2 chat session rejects impossible turn without mutating context when available",
         test_gemma2_chat_session_rejects_impossible_turn_without_mutating_context_when_available,
     },
@@ -1861,6 +1954,10 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     {
         "runs generate Gemma2 chat context trim and recovers from impossible turn when available",
         test_runs_generate_gemma2_chat_context_trim_and_recovers_from_impossible_turn_when_available,
+    },
+    {
+        "runs generate Gemma2 chat with llama-like defaults when available",
+        test_runs_generate_gemma2_chat_with_llama_like_defaults_when_available,
     },
     {
         "runs generate Gemma2 chat seeded sampling flags when available",

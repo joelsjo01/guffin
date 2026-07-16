@@ -60,11 +60,15 @@ make MODE=release generate
 ./build/release/local-gguf-generate \
   models/gemma-2-9b-Q4.gguf \
   --chat \
-  --max-new-tokens 128 \
   --backend metal
 ```
 
-Chat is greedy by default. Enable deterministic sampled generation with:
+Chat uses the same effective defaults as ordinary `llama-cli`: temperature
+`0.8`, top-k `40`, top-p `0.95`, min-p `0.05`, repetition penalty `1.0`, a
+64-token repetition window, and a random seed. A turn runs until Gemma emits
+end-of-turn/EOS, the user interrupts it, or the context is exhausted.
+
+Use explicit options when reproducible output or a response limit is useful:
 
 ```bash
 ./build/release/local-gguf-generate \
@@ -76,9 +80,13 @@ Chat is greedy by default. Enable deterministic sampled generation with:
   --top-k 40 \
   --top-p 0.95 \
   --min-p 0.05 \
-  --repeat-penalty 1.1 \
+  --repeat-penalty 1.0 \
   --seed 42
 ```
+
+`--max-new-tokens N` adds an optional per-turn cap. `--context-shift` opts into
+dropping the oldest complete turns when the context fills; it is disabled by
+default.
 
 Available chat commands:
 

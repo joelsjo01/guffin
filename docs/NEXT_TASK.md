@@ -26,6 +26,11 @@ piece, including raw UTF-8 bytes, instead of collapsing the whole piece to
 repetition penalty, top-k, top-p, min-p, temperature, then distribution. Local
 fixtures lock both behaviors without invoking `llama.cpp`.
 
+Ordinary chat now uses llama-cli-compatible active defaults: temperature `0.8`,
+top-k `40`, top-p `0.95`, min-p `0.05`, repetition penalty `1.0`, a 64-token
+history, random seeding, no fixed response cap, and no context shifting unless
+explicitly requested.
+
 Before returning to performance work:
 
 1. make the exact known prompt token IDs a self-contained regression fixture;

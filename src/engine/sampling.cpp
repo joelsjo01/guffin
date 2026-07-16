@@ -102,10 +102,23 @@ void require_f32_logits(const TensorDescriptor& descriptor) {
     return candidates;
 }
 
+[[nodiscard]] std::mt19937_64 make_sampler_rng(std::uint64_t seed) {
+    if (seed != TokenSamplerOptions::random_seed) {
+        return std::mt19937_64(seed);
+    }
+
+    std::random_device entropy;
+    std::seed_seq random_seed {
+        entropy(), entropy(), entropy(), entropy(),
+        entropy(), entropy(), entropy(), entropy(),
+    };
+    return std::mt19937_64(random_seed);
+}
+
 }  // namespace
 
 TokenSampler::TokenSampler(TokenSamplerOptions options)
-    : options_(options), rng_(options.seed) {
+    : options_(options), rng_(make_sampler_rng(options.seed)) {
     if (!std::isfinite(options_.temperature) || options_.temperature < 0.0F) {
         throw std::invalid_argument("sampling temperature must be finite and nonnegative");
     }

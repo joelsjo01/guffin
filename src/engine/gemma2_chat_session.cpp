@@ -33,14 +33,6 @@ namespace {
     return end - start;
 }
 
-[[nodiscard]] std::size_t require_positive_max_new_tokens(std::size_t max_new_tokens) {
-    if (max_new_tokens == 0U) {
-        throw std::invalid_argument("Gemma2 chat session max_new_tokens must be positive");
-    }
-
-    return max_new_tokens;
-}
-
 [[nodiscard]] Gemma2MetalModelPlan create_chat_plan(
     const EngineModel& model,
     const Gemma2ChatSessionOptions& options
@@ -203,7 +195,8 @@ Gemma2ChatSession::Gemma2ChatSession(
       plan_(std::move(state.plan)),
       reverse_stop_strings_(std::move(options.reverse_stop_strings)),
       end_of_turn_token_id_(find_token_id_by_text(tokenizer_, "<end_of_turn>")),
-      max_new_tokens_(require_positive_max_new_tokens(options.max_new_tokens)),
+      max_new_tokens_(options.max_new_tokens),
+      context_shift_(options.context_shift),
       initial_sampler_options_(options.sampler),
       sampler_(initial_sampler_options_),
       clock_(std::move(options.clock)) {
@@ -325,11 +318,14 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
     auto rendered_token_ids = encode_messages(std::span<const tokenizer::ChatMessage>(messages));
     const auto context_length = static_cast<std::size_t>(plan_.config().context_length);
     const auto exceeds_context = [&](std::size_t prompt_token_count) {
+        if (max_new_tokens_ == 0U) {
+            return prompt_token_count >= context_length;
+        }
         return max_new_tokens_ > context_length
             || prompt_token_count > context_length - max_new_tokens_;
     };
     while (
-        exceeds_context(rendered_token_ids.size())
+        context_shift_ && exceeds_context(rendered_token_ids.size())
         && first_retained_message + 2U <= messages_.size()
     ) {
         first_retained_message += 2U;
@@ -337,11 +333,15 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
         rendered_token_ids = encode_messages(std::span<const tokenizer::ChatMessage>(messages));
     }
     if (exceeds_context(rendered_token_ids.size())) {
+        const auto response_budget = max_new_tokens_ == 0U
+            ? std::string("unlimited")
+            : std::to_string(max_new_tokens_);
         throw Gemma2ChatContextError(
             "turn requires prompt=" + std::to_string(rendered_token_ids.size())
-                + " plus response-budget=" + std::to_string(max_new_tokens_)
+                + " plus response-budget=" + response_budget
                 + " tokens but the model limit is " + std::to_string(context_length)
-                + "; use a shorter prompt or lower --max-new-tokens"
+                + "; use a shorter prompt"
+                + (max_new_tokens_ == 0U ? "" : " or lower --max-new-tokens")
         );
     }
 
@@ -412,6 +412,9 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
     }
 
     const auto cache_position = checked_cached_token_count(cached_token_ids_.size());
+    const auto generation_max_new_tokens = max_new_tokens_ == 0U
+        ? context_length - rendered_token_ids.size()
+        : max_new_tokens_;
     const auto suffix_begin = rendered_token_ids.begin()
         + static_cast<std::ptrdiff_t>(cached_token_ids_.size());
     std::vector<std::uint32_t> appended_token_ids(suffix_begin, rendered_token_ids.end());
@@ -493,7 +496,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
                 plan_,
                 std::span<const std::uint32_t>(appended_token_ids),
                 cache_position,
-                max_new_tokens_,
+                generation_max_new_tokens,
                 std::span<const std::uint32_t>(stop_token_ids_),
                 on_generated_token,
                 clock_
@@ -503,7 +506,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             plan_,
             std::span<const std::uint32_t>(appended_token_ids),
             cache_position,
-            max_new_tokens_,
+            generation_max_new_tokens,
             std::span<const std::uint32_t>(stop_token_ids_),
             [&](const tensor::BackendBuffer& logits) {
                 const auto token_id = working_sampler.sample(tensor::copy_tensor_from_backend(logits));
