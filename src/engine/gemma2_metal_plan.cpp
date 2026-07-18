@@ -178,8 +178,6 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
         .raw_query = allocate_buffer(f32_descriptor({1, attention_query_width(config)}), allocated_byte_count),
         .raw_key = allocate_buffer(f32_descriptor({1, attention_key_width(config)}), allocated_byte_count),
         .query = allocate_buffer(f32_descriptor({1, attention_query_width(config)}), allocated_byte_count),
-        .key = allocate_buffer(f32_descriptor({1, attention_key_width(config)}), allocated_byte_count),
-        .value = allocate_buffer(f32_descriptor({1, attention_value_width(config)}), allocated_byte_count),
         .attention_scores = allocate_buffer(
             f32_descriptor({1, config.attention_head_count, config.context_length}),
             allocated_byte_count
@@ -209,10 +207,6 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
             allocated_byte_count
         ),
         .feed_forward_residual = allocate_buffer(
-            f32_descriptor({1, config.embedding_length}),
-            allocated_byte_count
-        ),
-        .layer_handoff_normalized_attention_input = allocate_buffer(
             f32_descriptor({1, config.embedding_length}),
             allocated_byte_count
         ),
@@ -282,31 +276,6 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     return layers;
 }
 
-[[nodiscard]] Gemma2MetalScheduleScratch schedule_scratch_from_decode_scratch(
-    const Gemma2MetalDecodeScratch& scratch
-) {
-    return Gemma2MetalScheduleScratch {
-        .normalized_hidden = scratch.normalized_hidden.descriptor(),
-        .query = scratch.query.descriptor(),
-        .key = scratch.key.descriptor(),
-        .value = scratch.value.descriptor(),
-        .attention_scores = scratch.attention_scores.descriptor(),
-        .attention_probabilities = scratch.attention_probabilities.descriptor(),
-        .attention_output = scratch.attention_output.descriptor(),
-        .projected_attention_output = scratch.projected_attention_output.descriptor(),
-        .post_attention_residual = scratch.post_attention_residual.descriptor(),
-        .normalized_feed_forward_input = scratch.normalized_feed_forward_input.descriptor(),
-        .feed_forward_gate = scratch.feed_forward_gate.descriptor(),
-        .feed_forward_up = scratch.feed_forward_up.descriptor(),
-        .feed_forward_gated = scratch.feed_forward_gated.descriptor(),
-        .projected_feed_forward_output = scratch.projected_feed_forward_output.descriptor(),
-        .feed_forward_residual = scratch.feed_forward_residual.descriptor(),
-        .layer_handoff_normalized_attention_input =
-            scratch.layer_handoff_normalized_attention_input.descriptor(),
-        .logits = scratch.logits.descriptor(),
-    };
-}
-
 [[nodiscard]] std::uint32_t layer_attention_token_count(
     const Gemma2ModelConfig& config,
     const Gemma2MetalLayerState& layer,
@@ -334,64 +303,6 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     }
 
     return layers;
-}
-
-[[nodiscard]] std::uint32_t max_attention_token_count(std::span<const Gemma2MetalLayerSchedule> layers) {
-    std::uint32_t max_tokens = 0;
-    for (const auto& layer : layers) {
-        max_tokens = std::max(max_tokens, layer.attention_token_count);
-    }
-
-    return max_tokens;
-}
-
-[[nodiscard]] Gemma2MetalScheduleScratch make_prefill_schedule_scratch(
-    const Gemma2ModelConfig& config,
-    std::uint32_t token_count,
-    std::uint32_t attention_token_count
-) {
-    return Gemma2MetalScheduleScratch {
-        .normalized_hidden = f32_descriptor({token_count, config.embedding_length}),
-        .query = f32_descriptor({token_count, attention_query_width(config)}),
-        .key = f32_descriptor({token_count, attention_key_width(config)}),
-        .value = f32_descriptor({token_count, attention_value_width(config)}),
-        .attention_scores = f32_descriptor({token_count, config.attention_head_count, attention_token_count}),
-        .attention_probabilities = f32_descriptor({token_count, config.attention_head_count, attention_token_count}),
-        .attention_output = f32_descriptor({token_count, attention_output_width(config)}),
-        .projected_attention_output = f32_descriptor({token_count, config.embedding_length}),
-        .post_attention_residual = f32_descriptor({token_count, config.embedding_length}),
-        .normalized_feed_forward_input = f32_descriptor({token_count, config.embedding_length}),
-        .feed_forward_gate = f32_descriptor({token_count, config.feed_forward_length}),
-        .feed_forward_up = f32_descriptor({token_count, config.feed_forward_length}),
-        .feed_forward_gated = f32_descriptor({token_count, config.feed_forward_length}),
-        .projected_feed_forward_output = f32_descriptor({token_count, config.embedding_length}),
-        .feed_forward_residual = f32_descriptor({token_count, config.embedding_length}),
-        .layer_handoff_normalized_attention_input = f32_descriptor({token_count, config.embedding_length}),
-        .logits = f32_descriptor({token_count, config.vocab_size}),
-    };
-}
-
-[[nodiscard]] std::size_t schedule_scratch_byte_count(const Gemma2MetalScheduleScratch& scratch) {
-    std::size_t total = 0;
-    checked_add_bytes(total, scratch.normalized_hidden.byte_count);
-    checked_add_bytes(total, scratch.query.byte_count);
-    checked_add_bytes(total, scratch.key.byte_count);
-    checked_add_bytes(total, scratch.value.byte_count);
-    checked_add_bytes(total, scratch.attention_scores.byte_count);
-    checked_add_bytes(total, scratch.attention_probabilities.byte_count);
-    checked_add_bytes(total, scratch.attention_output.byte_count);
-    checked_add_bytes(total, scratch.projected_attention_output.byte_count);
-    checked_add_bytes(total, scratch.post_attention_residual.byte_count);
-    checked_add_bytes(total, scratch.normalized_feed_forward_input.byte_count);
-    checked_add_bytes(total, scratch.feed_forward_gate.byte_count);
-    checked_add_bytes(total, scratch.feed_forward_up.byte_count);
-    checked_add_bytes(total, scratch.feed_forward_gated.byte_count);
-    checked_add_bytes(total, scratch.projected_feed_forward_output.byte_count);
-    checked_add_bytes(total, scratch.feed_forward_residual.byte_count);
-    checked_add_bytes(total, scratch.layer_handoff_normalized_attention_input.byte_count);
-    checked_add_bytes(total, scratch.logits.byte_count);
-
-    return total;
 }
 
 void require_prefill_range(
@@ -487,44 +398,22 @@ std::size_t Gemma2MetalModelPlan::scratch_byte_count() const noexcept {
 }
 
 Gemma2MetalSchedule::Gemma2MetalSchedule(
-    Gemma2ModelConfig config,
-    Gemma2MetalModelWeightBuffers weights,
-    std::vector<Gemma2MetalKVCacheLayer> kv_cache,
-    Gemma2MetalDecodeScratch resident_decode_scratch,
     std::vector<Gemma2MetalLayerSchedule> layers,
     Gemma2MetalSchedulePhase phase,
     Gemma2MetalScratchOwnership scratch_ownership,
-    Gemma2MetalScheduleScratch scratch,
     std::uint32_t token_count,
     std::uint32_t cache_position,
-    std::uint32_t total_kv_token_count,
-    std::size_t resident_weight_byte_count,
-    std::size_t resident_kv_cache_byte_count,
-    std::size_t resident_decode_scratch_byte_count,
-    std::size_t phase_scratch_byte_count
+    std::uint32_t total_kv_token_count
 )
-    : config_(config),
-      weights_(std::move(weights)),
-      kv_cache_(std::move(kv_cache)),
-      resident_decode_scratch_(std::move(resident_decode_scratch)),
-      layers_(std::move(layers)),
+    : layers_(std::move(layers)),
       phase_(phase),
       scratch_ownership_(scratch_ownership),
-      scratch_(std::move(scratch)),
       token_count_(token_count),
       cache_position_(cache_position),
-      total_kv_token_count_(total_kv_token_count),
-      resident_weight_byte_count_(resident_weight_byte_count),
-      resident_kv_cache_byte_count_(resident_kv_cache_byte_count),
-      resident_decode_scratch_byte_count_(resident_decode_scratch_byte_count),
-      phase_scratch_byte_count_(phase_scratch_byte_count) {}
+      total_kv_token_count_(total_kv_token_count) {}
 
 runtime::BackendKind Gemma2MetalSchedule::backend() const noexcept {
     return gemma_backend;
-}
-
-const Gemma2ModelConfig& Gemma2MetalSchedule::config() const noexcept {
-    return config_;
 }
 
 Gemma2MetalSchedulePhase Gemma2MetalSchedule::phase() const noexcept {
@@ -547,40 +436,8 @@ Gemma2MetalScratchOwnership Gemma2MetalSchedule::scratch_ownership() const noexc
     return scratch_ownership_;
 }
 
-const Gemma2MetalScheduleScratch& Gemma2MetalSchedule::scratch() const noexcept {
-    return scratch_;
-}
-
-const Gemma2MetalModelWeightBuffers& Gemma2MetalSchedule::weights() const noexcept {
-    return weights_;
-}
-
-const std::vector<Gemma2MetalKVCacheLayer>& Gemma2MetalSchedule::kv_cache() const noexcept {
-    return kv_cache_;
-}
-
-const Gemma2MetalDecodeScratch& Gemma2MetalSchedule::resident_decode_scratch() const noexcept {
-    return resident_decode_scratch_;
-}
-
 const std::vector<Gemma2MetalLayerSchedule>& Gemma2MetalSchedule::layers() const noexcept {
     return layers_;
-}
-
-std::size_t Gemma2MetalSchedule::resident_weight_byte_count() const noexcept {
-    return resident_weight_byte_count_;
-}
-
-std::size_t Gemma2MetalSchedule::resident_kv_cache_byte_count() const noexcept {
-    return resident_kv_cache_byte_count_;
-}
-
-std::size_t Gemma2MetalSchedule::resident_decode_scratch_byte_count() const noexcept {
-    return resident_decode_scratch_byte_count_;
-}
-
-std::size_t Gemma2MetalSchedule::phase_scratch_byte_count() const noexcept {
-    return phase_scratch_byte_count_;
 }
 
 Gemma2MetalModelPlan create_gemma2_metal_model_plan(const EngineModel& model) {
@@ -633,29 +490,14 @@ Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(
 
     const auto total_kv_token_count = cache_position + token_count;
     auto layers = make_layer_schedules(plan, total_kv_token_count);
-    auto scratch = make_prefill_schedule_scratch(
-        plan.config(),
-        token_count,
-        max_attention_token_count(std::span<const Gemma2MetalLayerSchedule>(layers))
-    );
-    const auto phase_scratch_bytes = schedule_scratch_byte_count(scratch);
 
     return Gemma2MetalSchedule(
-        plan.config(),
-        plan.weights(),
-        plan.kv_cache(),
-        plan.decode_scratch(),
         std::move(layers),
         Gemma2MetalSchedulePhase::prefill,
         Gemma2MetalScratchOwnership::resident_prefill,
-        std::move(scratch),
         token_count,
         cache_position,
-        total_kv_token_count,
-        plan.uploaded_weight_byte_count(),
-        plan.kv_cache_byte_count(),
-        plan.scratch_byte_count(),
-        phase_scratch_bytes
+        total_kv_token_count
     );
 }
 
@@ -668,27 +510,14 @@ Gemma2MetalSchedule create_gemma2_metal_decode_schedule(
     const auto token_count = 1U;
     const auto total_kv_token_count = cached_token_count + token_count;
     auto layers = make_layer_schedules(plan, total_kv_token_count);
-    auto scratch = schedule_scratch_from_decode_scratch(plan.decode_scratch());
-    // Decode phase ownership includes staging and RoPE ping-pong buffers that
-    // are not exposed as operator-shape descriptors on the schedule.
-    const auto phase_scratch_bytes = plan.scratch_byte_count();
 
     return Gemma2MetalSchedule(
-        plan.config(),
-        plan.weights(),
-        plan.kv_cache(),
-        plan.decode_scratch(),
         std::move(layers),
         Gemma2MetalSchedulePhase::decode,
         Gemma2MetalScratchOwnership::resident_decode,
-        std::move(scratch),
         token_count,
         cached_token_count,
-        total_kv_token_count,
-        plan.uploaded_weight_byte_count(),
-        plan.kv_cache_byte_count(),
-        plan.scratch_byte_count(),
-        phase_scratch_bytes
+        total_kv_token_count
     );
 }
 

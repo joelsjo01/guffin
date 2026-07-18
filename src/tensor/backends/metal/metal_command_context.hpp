@@ -15,7 +15,9 @@ struct MetalCommandStats {
     std::uint32_t commit_count = 0;
     std::uint32_t synchronous_wait_count = 0;
     std::uint32_t compute_encoder_count = 0;
+    std::uint32_t compute_dispatch_count = 0;
     std::uint32_t blit_encoder_count = 0;
+    std::uint32_t memory_barrier_count = 0;
     std::uint32_t transient_buffer_allocation_count = 0;
     std::uint64_t gpu_duration_ns = 0;
 };
@@ -25,7 +27,7 @@ struct MetalCommandStats {
 // constant buffers in the token hot path.
 class MetalCommandContext final {
 public:
-    explicit MetalCommandContext(std::string_view label);
+    explicit MetalCommandContext(std::string_view label, bool concurrent_compute = false);
     ~MetalCommandContext();
 
     MetalCommandContext(const MetalCommandContext&) = delete;
@@ -51,7 +53,8 @@ public:
         const BackendBuffer& input,
         const BackendBuffer& weight,
         const BackendBuffer& output,
-        std::uint32_t row_count = 0
+        std::uint32_t row_count = 0,
+        std::uint64_t output_byte_offset = 0
     );
     void encode_rms_norm(
         const BackendBuffer& input,
@@ -69,7 +72,8 @@ public:
         std::uint32_t head_dimension,
         std::uint32_t rope_dimension_count,
         float frequency_base,
-        std::uint32_t row_count = 0
+        std::uint32_t row_count = 0,
+        std::uint64_t output_byte_offset = 0
     );
     void encode_kv_cache_write(
         const BackendBuffer& key,
@@ -137,6 +141,7 @@ public:
         const BackendBuffer& logits,
         const BackendBuffer& result
     );
+    void encode_memory_barrier();
 
     [[nodiscard]] MetalCommandStats commit();
     [[nodiscard]] MetalCommandStats wait_until_completed();

@@ -14,16 +14,15 @@ what to measure first, not proof of exact milliseconds saved.
 
 The main problem is not one slow kernel. The engine now has resident model
 state, resident prefill scratch, one command buffer per 16-token prefill chunk,
-and a one-command-buffer decode path. The largest remaining gaps are:
+and a one-command-buffer/one-compute-encoder decode path. The largest remaining
+gaps are:
 
-1. decode uses one command buffer but creates about `803` compute encoders and
-   `42` blit encoders per token;
-2. attention is three materialized F32 passes rather than fused attention;
-3. RMSNorm and softmax reductions are serial within each row;
-4. multi-token quantized projection is a scalar inner loop, while only
+1. attention is three materialized F32 passes rather than fused attention;
+2. RMSNorm and softmax reductions are serial within each row;
+3. multi-token quantized projection is a scalar inner loop, while only
    single-token decode has a cooperative SIMD kernel;
-5. KV is a full-context F32 allocation for every layer;
-6. sampled generation copies and fully sorts all `256000` logits on the CPU.
+4. KV is a full-context F32 allocation for every layer;
+5. sampled generation copies and fully sorts all `256000` logits on the CPU.
 
 `llama.cpp` instead treats inference as a reserved, reusable compute graph. Its
 Metal backend keeps one compute encoder open across many graph nodes, inserts
@@ -31,9 +30,9 @@ memory barriers only for real dependencies, fuses supported node sequences,
 uses fused attention, selects different projection kernels by batch shape, and
 uses cooperative reductions.
 
-The operation-at-a-time prefill gap described in the original analysis has
-been removed. The next structural target is decode encoder consolidation,
-followed by the largest measured fused kernel family.
+The operation-at-a-time prefill gap and decode encoder fragmentation described
+in the original analysis have been removed. The next structural target is the
+largest measured fused kernel family, beginning with decode attention.
 
 ## Ranked Findings
 
@@ -49,29 +48,29 @@ were deleted.
 The remaining prefill gap is kernel quality: the resident executor still uses
 separate encoders and scalar multi-row Q4_K/Q6_K projection kernels.
 
-### 1. Decode has one submission but extreme encoder fragmentation
+### 1. Completed: decode had one submission but extreme encoder fragmentation
 
-`run_gemma2_metal_resident_decode_step` correctly uses one command buffer and
-resident scratch, but every logical operation calls `computeCommandEncoder` or
-`blitCommandEncoder` and immediately ends it. The current 42-layer token creates
-about `803` compute encoders and `42` blit encoders.
+`run_gemma2_metal_resident_decode_step` now keeps one concurrent compute encoder
+open for the complete token, uses explicit fixed-schedule memory barriers, and
+writes K/V directly into their cache rows. The 42-layer top-logit path performs
+`803` compute dispatches through `1` compute encoder, `0` blit encoders, one
+command buffer, one commit, and one wait.
 
 `llama.cpp` creates one Metal encoder for a command-buffer graph slice, encodes
 many nodes through it, and uses memory barriers plus tracked buffer ranges for
 dependencies. It can also encode independent graph regions concurrently and
 split a large graph across a small number of command buffers.
 
-The local path therefore pays large Objective-C encoding overhead and creates
-hundreds of encoder transitions even though it already has the correct
-one-submit lifetime.
+The staged decode executor, its activation hierarchy and tests, schedule-owned
+resident buffer copies, and decode K/V scratch buffers were removed.
 
-**Likely impact:** potentially high for decode, but must be separated into CPU
-encoding time and GPU transition/gap time.
+**Measured impact:** Gemma 2 9B Q4 greedy decode improved by `11.4%` on warm
+first turns and `13.3%` on cached second turns in five-repetition release
+benchmarks. Seeded sampled decode improved by `4.4%`; warm prefill was unchanged
+within noise.
 
-**Required structural change:** make the command context hold one long-lived
-compute encoder and represent KV writes as compute copies or a small number of
-intentional blit phases. Add explicit barriers where scratch dependencies
-require them. Do not merely split the token into more command buffers.
+**Status:** complete and retained after independent nonzero CPU-reference tests,
+all `315` repository tests, structural count checks, and real-path benchmarks.
 
 ### 2. Attention materializes scores and probabilities; llama.cpp uses fused attention
 

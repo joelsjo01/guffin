@@ -133,30 +133,45 @@ void require_capacity(const BackendBuffer& buffer, std::uint64_t bytes, const ch
 struct MetalCommandContext::Impl {
     MatmulPipelineState* state = nullptr;
     id<MTLCommandBuffer> command_buffer = nil;
+    id<MTLComputeCommandEncoder> active_compute_encoder = nil;
     MetalCommandStats stats;
+    bool concurrent_compute = false;
     bool submitted = false;
     bool waited = false;
+
+    void end_compute_encoding() noexcept {
+        if (active_compute_encoder != nil) {
+            [active_compute_encoder endEncoding];
+            active_compute_encoder = nil;
+        }
+    }
 
     [[nodiscard]] id<MTLComputeCommandEncoder> compute_encoder(const char* label) {
         if (submitted) {
             throw std::logic_error("Metal resident execution command buffer was already submitted");
         }
-        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
-        if (encoder == nil) {
+        if (active_compute_encoder != nil) {
+            return active_compute_encoder;
+        }
+        active_compute_encoder = concurrent_compute
+            ? [command_buffer computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]
+            : [command_buffer computeCommandEncoder];
+        if (active_compute_encoder == nil) {
             throw metal_error(
                 runtime::BackendErrorCode::metal_execution_failed,
                 std::string("Metal resident execution compute encoder creation failed: ") + label
             );
         }
-        encoder.label = [NSString stringWithUTF8String:label];
+        active_compute_encoder.label = [NSString stringWithUTF8String:label];
         ++stats.compute_encoder_count;
-        return encoder;
+        return active_compute_encoder;
     }
 
     [[nodiscard]] id<MTLBlitCommandEncoder> blit_encoder(const char* label) {
         if (submitted) {
             throw std::logic_error("Metal resident execution command buffer was already submitted");
         }
+        end_compute_encoding();
         id<MTLBlitCommandEncoder> encoder = [command_buffer blitCommandEncoder];
         if (encoder == nil) {
             throw metal_error(
@@ -168,10 +183,15 @@ struct MetalCommandContext::Impl {
         ++stats.blit_encoder_count;
         return encoder;
     }
+
+    ~Impl() {
+        end_compute_encoding();
+    }
 };
 
-MetalCommandContext::MetalCommandContext(std::string_view label)
+MetalCommandContext::MetalCommandContext(std::string_view label, bool concurrent_compute)
     : impl_(std::make_unique<Impl>()) {
+    impl_->concurrent_compute = concurrent_compute;
     impl_->state = &shared_matmul_pipeline_state();
     impl_->command_buffer = [impl_->state->queue commandBuffer];
     if (impl_->command_buffer == nil) {
@@ -238,14 +258,15 @@ void MetalCommandContext::encode_embedding(
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((hidden + 15U) / 16U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_matmul(
     const BackendBuffer& input,
     const BackendBuffer& weight,
     const BackendBuffer& output,
-    std::uint32_t row_count
+    std::uint32_t row_count,
+    std::uint64_t output_byte_offset
 ) {
     const auto rows = row_count == 0U ? input.descriptor().shape.dimension(0) : row_count;
     const auto shared = input.descriptor().shape.dimension(1);
@@ -253,7 +274,11 @@ void MetalCommandContext::encode_matmul(
     if (shared != weight.descriptor().shape.dimension(0)) {
         throw std::invalid_argument("Metal resident execution matmul inner dimensions do not match");
     }
-    require_capacity(output, rows * columns * sizeof(float), "matmul output");
+    const auto output_bytes = rows * columns * sizeof(float);
+    if (output_byte_offset > std::numeric_limits<std::uint64_t>::max() - output_bytes) {
+        throw std::invalid_argument("Metal resident execution matmul output byte range overflows");
+    }
+    require_capacity(output, output_byte_offset + output_bytes, "matmul output");
     const MatmulDimensions dims {
         .rows = u32(rows, "matmul rows"),
         .shared = u32(shared, "matmul shared"),
@@ -281,7 +306,7 @@ void MetalCommandContext::encode_matmul(
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
     [encoder setBuffer:storage(weight).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
+    [encoder setBuffer:storage(output).buffer() offset:static_cast<NSUInteger>(output_byte_offset) atIndex:2];
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     if (use_q4_decode_matvec || use_q6_decode_matvec) {
         constexpr std::uint64_t outputs_per_threadgroup = 4;
@@ -301,7 +326,7 @@ void MetalCommandContext::encode_matmul(
                                       )
                   threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     }
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_rms_norm(
@@ -332,7 +357,7 @@ void MetalCommandContext::encode_rms_norm(
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((rows + 63U) / 64U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_rope(
@@ -343,11 +368,16 @@ void MetalCommandContext::encode_rope(
     std::uint32_t head_dimension,
     std::uint32_t rope_dimension_count,
     float frequency_base,
-    std::uint32_t row_count
+    std::uint32_t row_count,
+    std::uint64_t output_byte_offset
 ) {
     const auto rows = row_count == 0U ? input.descriptor().shape.dimension(0) : row_count;
     const auto columns = static_cast<std::uint64_t>(head_count) * head_dimension;
-    require_capacity(output, rows * columns * sizeof(float), "RoPE output");
+    const auto output_bytes = rows * columns * sizeof(float);
+    if (output_byte_offset > std::numeric_limits<std::uint64_t>::max() - output_bytes) {
+        throw std::invalid_argument("Metal resident execution RoPE output byte range overflows");
+    }
+    require_capacity(output, output_byte_offset + output_bytes, "RoPE output");
     const RoPEByHeadsDimensions dims {
         .rows = u32(rows, "RoPE rows"),
         .head_count = head_count,
@@ -359,7 +389,7 @@ void MetalCommandContext::encode_rope(
     auto encoder = impl_->compute_encoder("Gemma2 RoPE");
     [encoder setComputePipelineState:impl_->state->rope_neox_by_heads_pipeline];
     [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:1];
+    [encoder setBuffer:storage(output).buffer() offset:static_cast<NSUInteger>(output_byte_offset) atIndex:1];
     [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((columns + 15U) / 16U),
@@ -367,7 +397,7 @@ void MetalCommandContext::encode_rope(
                                       1
                                   )
               threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_kv_cache_write(
@@ -442,7 +472,7 @@ void MetalCommandContext::encode_attention_scores(
                                       static_cast<NSUInteger>((query_rows + 1U) / 2U)
                                   )
               threadsPerThreadgroup:MTLSizeMake(8, 8, 2)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_softmax(
@@ -461,7 +491,7 @@ void MetalCommandContext::encode_softmax(
     [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((rows + 63U) / 64U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_attention_values(
@@ -505,7 +535,7 @@ void MetalCommandContext::encode_attention_values(
                                       static_cast<NSUInteger>((query_rows + 1U) / 2U)
                                   )
               threadsPerThreadgroup:MTLSizeMake(8, 8, 2)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_add(
@@ -526,7 +556,7 @@ void MetalCommandContext::encode_add(
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_silu_multiply(
@@ -547,7 +577,7 @@ void MetalCommandContext::encode_silu_multiply(
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_gelu_tanh_multiply(
@@ -568,7 +598,7 @@ void MetalCommandContext::encode_gelu_tanh_multiply(
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_softcap(
@@ -587,7 +617,7 @@ void MetalCommandContext::encode_softcap(
     [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_top_logit(
@@ -608,13 +638,20 @@ void MetalCommandContext::encode_top_logit(
     [encoder setBuffer:storage(result).buffer() offset:0 atIndex:1];
     [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
     [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-    [encoder endEncoding];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_memory_barrier() {
+    auto encoder = impl_->compute_encoder("Gemma2 dependency barrier");
+    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    ++impl_->stats.memory_barrier_count;
 }
 
 MetalCommandStats MetalCommandContext::commit() {
     if (impl_->submitted) {
         throw std::logic_error("Metal resident command buffer was already submitted");
     }
+    impl_->end_compute_encoding();
     impl_->submitted = true;
     [impl_->command_buffer commit];
     ++impl_->stats.commit_count;

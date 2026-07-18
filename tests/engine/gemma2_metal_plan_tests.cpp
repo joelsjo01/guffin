@@ -1,6 +1,7 @@
 #include "gemma2_metal_plan_tests.hpp"
 
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
+#include "local_gguf_engine/engine/gemma2_model.hpp"
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
@@ -11,6 +12,7 @@
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
+#include "local_gguf_engine/tensor/ops/embedding.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
@@ -41,14 +43,15 @@ using local_gguf_engine::engine::EngineModelErrorCode;
 using local_gguf_engine::engine::Gemma2MetalSchedulePhase;
 using local_gguf_engine::engine::Gemma2MetalScratchOwnership;
 using local_gguf_engine::engine::Gemma2MetalModelPlan;
+using local_gguf_engine::engine::Gemma2ModelWeights;
 using local_gguf_engine::engine::Gemma2ModelConfig;
 using local_gguf_engine::engine::create_gemma2_metal_decode_schedule;
 using local_gguf_engine::engine::create_gemma2_metal_model_plan;
 using local_gguf_engine::engine::create_gemma2_metal_prefill_schedule;
+using local_gguf_engine::engine::bind_gemma2_model_weights;
 using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens;
 using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens_with_plan;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
-using local_gguf_engine::engine::run_gemma2_metal_decode_step;
 using local_gguf_engine::engine::run_gemma2_metal_resident_prefill;
 using local_gguf_engine::engine::run_gemma2_metal_resident_decode_step;
 using local_gguf_engine::engine::top_logit_tokens_f32;
@@ -65,8 +68,10 @@ using local_gguf_engine::runtime::BackendKind;
 using local_gguf_engine::tensor::DType;
 using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorDescriptor;
+using local_gguf_engine::tensor::TensorStorage;
 using local_gguf_engine::tensor::backend_buffer_storage;
 using local_gguf_engine::tensor::copy_tensor_to_backend;
+using local_gguf_engine::tensor::copy_tensor_view_to_backend;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
 using local_gguf_engine::tensor::ops::add_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
@@ -77,8 +82,10 @@ using local_gguf_engine::tensor::ops::multiply_f32;
 using local_gguf_engine::tensor::ops::rms_norm_f32;
 using local_gguf_engine::tensor::ops::rope_neox_f32_by_heads_with_position_start;
 using local_gguf_engine::tensor::ops::gelu_tanh_f32;
+using local_gguf_engine::tensor::ops::embed_f16_gguf_weight_token_ids_to_backend;
 using local_gguf_engine::tensor::ops::softcap_f32;
 using local_gguf_engine::tensor::ops::softmax_f32;
+using local_gguf_engine::tensor::ops::write_kv_cache_f32_to_backend;
 using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tests::TestCase;
@@ -241,6 +248,60 @@ TinyGemma2PayloadStore tiny_gemma2_payload_store(
     return store;
 }
 
+void add_payload_storage(
+    TinyGemma2PayloadStore& store,
+    std::string name,
+    std::vector<std::uint64_t> dimensions,
+    const local_gguf_engine::tensor::TensorStorage& storage
+) {
+    store.bytes.emplace_back(storage.bytes().begin(), storage.bytes().end());
+    store.payloads.push_back(tensor_payload_view(
+        std::move(name),
+        std::move(dimensions),
+        storage.descriptor().dtype,
+        std::span<const std::uint8_t>(store.bytes.back())
+    ));
+}
+
+TinyGemma2PayloadStore nonzero_tiny_gemma2_payload_store(std::uint32_t block_count = 2) {
+    TinyGemma2PayloadStore store;
+    store.bytes.reserve(static_cast<std::size_t>(2 + block_count * 11));
+    store.payloads.reserve(static_cast<std::size_t>(2 + block_count * 11));
+
+    std::vector<float> embedding_values(256U * 4U);
+    for (std::size_t index = 0; index < embedding_values.size(); ++index) {
+        embedding_values[index] = static_cast<float>(static_cast<int>(index % 19U) - 9) * 0.0125F;
+    }
+    add_payload_storage(
+        store,
+        "token_embd.weight",
+        {256, 4},
+        tensor_f16_gguf_matrix(256, 4, std::span<const float>(embedding_values))
+    );
+
+    std::vector<float> norm_values(256U);
+    for (std::size_t index = 0; index < norm_values.size(); ++index) {
+        norm_values[index] = 0.9F + static_cast<float>(index % 11U) * 0.02F;
+    }
+    add_payload_storage(store, "output_norm.weight", {256}, tensor_f32_vector(norm_values));
+
+    for (std::uint32_t block = 0; block < block_count; ++block) {
+        const auto seed = static_cast<std::uint64_t>(31U + block * 17U);
+        add_payload_storage(store, block_tensor_name(block, "attn_norm.weight"), {256}, tensor_f32_vector(norm_values));
+        add_payload_storage(store, block_tensor_name(block, "post_attention_norm.weight"), {256}, tensor_f32_vector(norm_values));
+        add_payload_storage(store, block_tensor_name(block, "attn_q.weight"), {256, 256}, tensor_q4_k_gguf_weight_matrix(256, 256, seed));
+        add_payload_storage(store, block_tensor_name(block, "attn_k.weight"), {256, 256}, tensor_q4_k_gguf_weight_matrix(256, 256, seed + 1U));
+        add_payload_storage(store, block_tensor_name(block, "attn_v.weight"), {256, 256}, tensor_q6_k_gguf_weight_matrix(256, 256, seed + 2U));
+        add_payload_storage(store, block_tensor_name(block, "attn_output.weight"), {256, 256}, tensor_q4_k_gguf_weight_matrix(256, 256, seed + 3U));
+        add_payload_storage(store, block_tensor_name(block, "ffn_norm.weight"), {256}, tensor_f32_vector(norm_values));
+        add_payload_storage(store, block_tensor_name(block, "post_ffw_norm.weight"), {256}, tensor_f32_vector(norm_values));
+        add_payload_storage(store, block_tensor_name(block, "ffn_gate.weight"), {256, 256}, tensor_q4_k_gguf_weight_matrix(256, 256, seed + 4U));
+        add_payload_storage(store, block_tensor_name(block, "ffn_up.weight"), {256, 256}, tensor_q4_k_gguf_weight_matrix(256, 256, seed + 5U));
+        add_payload_storage(store, block_tensor_name(block, "ffn_down.weight"), {256, 256}, tensor_q6_k_gguf_weight_matrix(256, 256, seed + 6U));
+    }
+    return store;
+}
+
 
 std::size_t payload_byte_count(std::span<const GGUFTensorPayloadView> payloads) {
     std::size_t total = 0;
@@ -277,6 +338,167 @@ void expect_f32_matrix_close(
             );
         }
     }
+}
+
+void expect_f32_storage_close(
+    const TensorStorage& actual,
+    const TensorStorage& expected,
+    float tolerance,
+    std::string_view message
+) {
+    expect(actual.descriptor() == expected.descriptor(), std::string(message) + " descriptor mismatch");
+    for (std::uint64_t index = 0; index < actual.descriptor().element_count; ++index) {
+        float actual_value = 0.0F;
+        float expected_value = 0.0F;
+        const auto offset = static_cast<std::size_t>(index * sizeof(float));
+        std::memcpy(&actual_value, actual.bytes().data() + offset, sizeof(float));
+        std::memcpy(&expected_value, expected.bytes().data() + offset, sizeof(float));
+        expect_close(actual_value, expected_value, tolerance, message);
+    }
+}
+
+TensorStorage copy_tensor_view(const local_gguf_engine::tensor::TensorView& view) {
+    return TensorStorage::from_bytes(view.descriptor(), view.bytes());
+}
+
+TensorStorage reference_weight_matmul(
+    const TensorStorage& input,
+    const local_gguf_engine::tensor::TensorView& weight
+) {
+    const auto storage = copy_tensor_view(weight);
+    if (weight.descriptor().dtype == DType::f16) {
+        return matmul_f32_f16_gguf_weight(input, storage);
+    }
+    return matmul_f32_quantized_gguf_weight(input, storage);
+}
+
+void write_cache_row(TensorStorage& cache, const TensorStorage& row, std::uint32_t position) {
+    const auto row_bytes = row.descriptor().byte_count;
+    const auto offset = static_cast<std::size_t>(position) * row_bytes;
+    expect(offset + row_bytes <= cache.mutable_bytes().size(), "reference KV row range mismatch");
+    std::memcpy(cache.mutable_bytes().data() + offset, row.bytes().data(), row_bytes);
+}
+
+struct ReferenceDecodeResult {
+    TensorStorage logits;
+    std::vector<TensorStorage> key_cache;
+    std::vector<TensorStorage> value_cache;
+};
+
+ReferenceDecodeResult reference_decode(
+    const Gemma2ModelConfig& config,
+    const Gemma2ModelWeights& weights,
+    std::uint32_t token_id,
+    std::uint32_t cache_position,
+    std::vector<TensorStorage> key_cache,
+    std::vector<TensorStorage> value_cache
+) {
+    const auto embedding_weight = copy_tensor_view_to_backend(
+        weights.token_embedding_weight,
+        BackendKind::cpu
+    );
+    const std::array<std::uint32_t, 1> token_ids {token_id};
+    auto hidden = copy_tensor_from_backend(embed_f16_gguf_weight_token_ids_to_backend(
+        std::span<const std::uint32_t>(token_ids),
+        embedding_weight,
+        std::sqrt(static_cast<float>(config.embedding_length))
+    ));
+    const auto head_dimension = config.attention_key_length;
+    const auto attention_scale = 1.0F / std::sqrt(static_cast<float>(head_dimension));
+
+    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        const auto& block = weights.blocks[layer];
+        const auto normalized_attention = rms_norm_f32(
+            hidden,
+            copy_tensor_view(block.attention.attention_norm_weight),
+            config.rms_norm_epsilon
+        );
+        const auto raw_query = reference_weight_matmul(normalized_attention, block.attention.query_weight);
+        const auto raw_key = reference_weight_matmul(normalized_attention, block.attention.key_weight);
+        const auto value = reference_weight_matmul(normalized_attention, block.attention.value_weight);
+        const auto query = rope_neox_f32_by_heads_with_position_start(
+            raw_query,
+            cache_position,
+            config.attention_head_count,
+            head_dimension,
+            head_dimension,
+            10000.0F
+        );
+        const auto key = rope_neox_f32_by_heads_with_position_start(
+            raw_key,
+            cache_position,
+            config.attention_head_count_kv,
+            head_dimension,
+            head_dimension,
+            10000.0F
+        );
+        write_cache_row(key_cache[layer], key, cache_position);
+        write_cache_row(value_cache[layer], value, cache_position);
+
+        const auto total_tokens = cache_position + 1U;
+        const auto attention_tokens = layer % 2U == 0U
+            ? std::min(total_tokens, config.sliding_window)
+            : total_tokens;
+        const auto scores = causal_grouped_attention_scores_f32(
+            query,
+            key_cache[layer],
+            cache_position,
+            config.attention_head_count,
+            config.attention_head_count_kv,
+            head_dimension,
+            attention_tokens,
+            attention_scale,
+            config.attention_logit_softcap
+        );
+        const auto probabilities = softmax_f32(scores);
+        const auto attention_output = causal_grouped_attention_values_f32(
+            probabilities,
+            value_cache[layer],
+            cache_position,
+            config.attention_head_count,
+            config.attention_head_count_kv,
+            config.attention_value_length,
+            attention_tokens
+        );
+        const auto projected_attention = reference_weight_matmul(
+            attention_output,
+            block.attention.output_weight
+        );
+        const auto post_attention = rms_norm_f32(
+            projected_attention,
+            copy_tensor_view(block.attention.post_attention_norm_weight),
+            config.rms_norm_epsilon
+        );
+        const auto attention_residual = add_f32(hidden, post_attention);
+        const auto normalized_ffn = rms_norm_f32(
+            attention_residual,
+            copy_tensor_view(block.feed_forward.feed_forward_norm_weight),
+            config.rms_norm_epsilon
+        );
+        const auto gate = reference_weight_matmul(normalized_ffn, block.feed_forward.gate_weight);
+        const auto up = reference_weight_matmul(normalized_ffn, block.feed_forward.up_weight);
+        const auto gated = multiply_f32(gelu_tanh_f32(gate), up);
+        const auto projected_ffn = reference_weight_matmul(gated, block.feed_forward.down_weight);
+        const auto post_ffn = rms_norm_f32(
+            projected_ffn,
+            copy_tensor_view(block.feed_forward.post_feed_forward_norm_weight),
+            config.rms_norm_epsilon
+        );
+        hidden = add_f32(attention_residual, post_ffn);
+    }
+
+    const auto normalized_output = rms_norm_f32(
+        hidden,
+        copy_tensor_view(weights.output_norm_weight),
+        config.rms_norm_epsilon
+    );
+    auto logits = reference_weight_matmul(normalized_output, weights.output_weight);
+    logits = softcap_f32(logits, config.final_logit_softcap);
+    return ReferenceDecodeResult {
+        .logits = std::move(logits),
+        .key_cache = std::move(key_cache),
+        .value_cache = std::move(value_cache),
+    };
 }
 
 
@@ -324,8 +546,6 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(decode.raw_query)
         + backend_buffer_byte_count(decode.raw_key)
         + backend_buffer_byte_count(decode.query)
-        + backend_buffer_byte_count(decode.key)
-        + backend_buffer_byte_count(decode.value)
         + backend_buffer_byte_count(decode.attention_scores)
         + backend_buffer_byte_count(decode.attention_probabilities)
         + backend_buffer_byte_count(decode.attention_output)
@@ -337,36 +557,8 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(decode.feed_forward_gated)
         + backend_buffer_byte_count(decode.projected_feed_forward_output)
         + backend_buffer_byte_count(decode.feed_forward_residual)
-        + backend_buffer_byte_count(decode.layer_handoff_normalized_attention_input)
         + backend_buffer_byte_count(decode.logits)
         + backend_buffer_byte_count(decode.top_logit_staging);
-}
-
-std::size_t schedule_scratch_byte_count(const local_gguf_engine::engine::Gemma2MetalScheduleScratch& scratch) {
-    return scratch.normalized_hidden.byte_count
-        + scratch.query.byte_count
-        + scratch.key.byte_count
-        + scratch.value.byte_count
-        + scratch.attention_scores.byte_count
-        + scratch.attention_probabilities.byte_count
-        + scratch.attention_output.byte_count
-        + scratch.projected_attention_output.byte_count
-        + scratch.post_attention_residual.byte_count
-        + scratch.normalized_feed_forward_input.byte_count
-        + scratch.feed_forward_gate.byte_count
-        + scratch.feed_forward_up.byte_count
-        + scratch.feed_forward_gated.byte_count
-        + scratch.projected_feed_forward_output.byte_count
-        + scratch.feed_forward_residual.byte_count
-        + scratch.layer_handoff_normalized_attention_input.byte_count
-        + scratch.logits.byte_count;
-}
-
-bool shares_backend_storage(
-    const local_gguf_engine::tensor::BackendBuffer& left,
-    const local_gguf_engine::tensor::BackendBuffer& right
-) {
-    return &backend_buffer_storage(left) == &backend_buffer_storage(right);
 }
 
 void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() {
@@ -437,10 +629,6 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
         plan.decode_scratch().feed_forward_residual.descriptor().shape == Shape::from({1, 256}),
         "Gemma2 Metal FFN residual scratch shape mismatch"
     );
-    expect(
-        plan.decode_scratch().layer_handoff_normalized_attention_input.descriptor().shape == Shape::from({1, 256}),
-        "Gemma2 Metal layer handoff normalized attention input scratch shape mismatch"
-    );
 }
 
 void test_gemma2_metal_plan_roundtrips_uploaded_borrowed_weight_when_available() {
@@ -463,7 +651,7 @@ void test_gemma2_metal_plan_roundtrips_uploaded_borrowed_weight_when_available()
     );
 }
 
-void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_available() {
+void test_creates_gemma2_metal_schedules_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
@@ -472,482 +660,176 @@ void test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_availa
     auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
     const auto plan = create_gemma2_metal_model_plan(model);
+    const auto prefill = create_gemma2_metal_prefill_schedule(plan, 3, 4);
+    const auto decode = create_gemma2_metal_decode_schedule(plan, 9);
 
-    const auto prefill = create_gemma2_metal_prefill_schedule(plan, 12);
-    const auto decode = create_gemma2_metal_decode_schedule(plan, 12);
-
-    expect(prefill.backend() == BackendKind::metal, "Gemma2 prefill schedule backend mismatch");
-    expect(decode.backend() == BackendKind::metal, "Gemma2 decode schedule backend mismatch");
-    expect(prefill.config() == plan.config(), "Gemma2 prefill schedule config mismatch");
-    expect(decode.config() == plan.config(), "Gemma2 decode schedule config mismatch");
-    expect(prefill.phase() == Gemma2MetalSchedulePhase::prefill, "Gemma2 prefill schedule phase mismatch");
-    expect(decode.phase() == Gemma2MetalSchedulePhase::decode, "Gemma2 decode schedule phase mismatch");
-
-    expect(prefill.token_count() == 12, "Gemma2 prefill token count mismatch");
-    expect(prefill.cache_position() == 0, "Gemma2 prefill cache position mismatch");
-    expect(prefill.total_kv_token_count() == 12, "Gemma2 prefill total KV token count mismatch");
-    expect(decode.token_count() == 1, "Gemma2 decode token count mismatch");
-    expect(decode.cache_position() == 12, "Gemma2 decode cache position mismatch");
-    expect(decode.total_kv_token_count() == 13, "Gemma2 decode total KV token count mismatch");
-
-    expect(
-        prefill.scratch_ownership() == Gemma2MetalScratchOwnership::resident_prefill,
-        "Gemma2 prefill scratch ownership mismatch"
-    );
-    expect(
-        decode.scratch_ownership() == Gemma2MetalScratchOwnership::resident_decode,
-        "Gemma2 decode scratch ownership mismatch"
-    );
-    expect(
-        prefill.scratch().normalized_hidden.shape == Shape::from({12, 256}),
-        "Gemma2 prefill normalized hidden scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().attention_scores.shape == Shape::from({12, 1, 12}),
-        "Gemma2 prefill attention score scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().attention_probabilities.shape == Shape::from({12, 1, 12}),
-        "Gemma2 prefill attention probability scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().projected_attention_output.shape == Shape::from({12, 256}),
-        "Gemma2 prefill projected attention output scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().post_attention_residual.shape == Shape::from({12, 256}),
-        "Gemma2 prefill post-attention residual scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().normalized_feed_forward_input.shape == Shape::from({12, 256}),
-        "Gemma2 prefill normalized FFN input scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().feed_forward_gate.shape == Shape::from({12, 256}),
-        "Gemma2 prefill FFN gate scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().feed_forward_up.shape == Shape::from({12, 256}),
-        "Gemma2 prefill FFN up scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().feed_forward_gated.shape == Shape::from({12, 256}),
-        "Gemma2 prefill gated FFN scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().projected_feed_forward_output.shape == Shape::from({12, 256}),
-        "Gemma2 prefill projected FFN output scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().feed_forward_residual.shape == Shape::from({12, 256}),
-        "Gemma2 prefill FFN residual scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().layer_handoff_normalized_attention_input.shape == Shape::from({12, 256}),
-        "Gemma2 prefill layer handoff normalized attention input scratch shape mismatch"
-    );
-    expect(
-        decode.scratch().normalized_hidden.shape == Shape::from({1, 256}),
-        "Gemma2 decode normalized hidden scratch shape mismatch"
-    );
-    expect(
-        decode.scratch().attention_scores.shape == Shape::from({1, 1, 16}),
-        "Gemma2 decode resident attention score scratch shape mismatch"
-    );
-    expect(
-        decode.scratch().attention_probabilities.shape == Shape::from({1, 1, 16}),
-        "Gemma2 decode resident attention probability scratch shape mismatch"
-    );
-    expect(
-        decode.scratch().normalized_feed_forward_input.shape == Shape::from({1, 256}),
-        "Gemma2 decode resident normalized FFN input scratch shape mismatch"
-    );
-    expect(
-        decode.scratch().projected_feed_forward_output.shape == Shape::from({1, 256}),
-        "Gemma2 decode resident projected FFN output scratch shape mismatch"
-    );
-    expect(
-        decode.scratch().feed_forward_residual.shape == Shape::from({1, 256}),
-        "Gemma2 decode resident FFN residual scratch shape mismatch"
-    );
-    expect(
-        decode.scratch().layer_handoff_normalized_attention_input.shape == Shape::from({1, 256}),
-        "Gemma2 decode resident layer handoff normalized attention input scratch shape mismatch"
-    );
-    expect(
-        prefill.phase_scratch_byte_count() == schedule_scratch_byte_count(prefill.scratch()),
-        "Gemma2 prefill schedule scratch byte count mismatch"
-    );
-    expect(
-        decode.phase_scratch_byte_count() == plan.scratch_byte_count(),
-        "Gemma2 decode schedule scratch byte count mismatch"
-    );
-
-    expect(prefill.layers().size() == 2, "Gemma2 prefill layer schedule count mismatch");
-    expect(decode.layers().size() == 2, "Gemma2 decode layer schedule count mismatch");
-    expect(prefill.layers()[0].layer_index == 0, "Gemma2 prefill layer 0 index mismatch");
-    expect(prefill.layers()[0].uses_sliding_window, "Gemma2 prefill layer 0 should use sliding attention");
-    expect(prefill.layers()[0].attention_token_count == 8, "Gemma2 prefill sliding attention count mismatch");
-    expect(prefill.layers()[1].layer_index == 1, "Gemma2 prefill layer 1 index mismatch");
-    expect(!prefill.layers()[1].uses_sliding_window, "Gemma2 prefill layer 1 should use full attention");
-    expect(prefill.layers()[1].attention_token_count == 12, "Gemma2 prefill full attention count mismatch");
-    expect(decode.layers()[0].attention_token_count == 8, "Gemma2 decode sliding attention count mismatch");
-    expect(decode.layers()[1].attention_token_count == 13, "Gemma2 decode full attention count mismatch");
+    expect(prefill.phase() == Gemma2MetalSchedulePhase::prefill, "prefill phase mismatch");
+    expect(prefill.scratch_ownership() == Gemma2MetalScratchOwnership::resident_prefill, "prefill ownership mismatch");
+    expect(prefill.token_count() == 3U && prefill.cache_position() == 4U, "prefill range mismatch");
+    expect(prefill.total_kv_token_count() == 7U, "prefill KV count mismatch");
+    expect(decode.phase() == Gemma2MetalSchedulePhase::decode, "decode phase mismatch");
+    expect(decode.scratch_ownership() == Gemma2MetalScratchOwnership::resident_decode, "decode ownership mismatch");
+    expect(decode.token_count() == 1U && decode.cache_position() == 9U, "decode range mismatch");
+    expect(decode.layers().size() == 2U, "decode layer count mismatch");
+    expect(decode.layers()[0].attention_token_count == 8U, "sliding attention count mismatch");
+    expect(decode.layers()[1].attention_token_count == 10U, "global attention count mismatch");
 }
 
-void test_creates_gemma2_metal_append_prefill_schedule_when_available() {
+void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
 
-    auto payload_store = tiny_gemma2_payload_store(true, 2);
+    auto payload_store = nonzero_tiny_gemma2_payload_store();
     auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
-    const auto plan = create_gemma2_metal_model_plan(model);
+    const auto weights = bind_gemma2_model_weights(model);
+    auto plan = create_gemma2_metal_model_plan(model);
+    auto no_selection_plan = create_gemma2_metal_model_plan(model);
+    const auto& config = plan.config();
+    constexpr std::uint32_t cache_position = 9U;
 
-    const auto prefill = create_gemma2_metal_prefill_schedule(plan, 3, 7);
-
-    expect(prefill.phase() == Gemma2MetalSchedulePhase::prefill, "Gemma2 append prefill phase mismatch");
-    expect(prefill.token_count() == 3, "Gemma2 append prefill token count mismatch");
-    expect(prefill.cache_position() == 7, "Gemma2 append prefill cache position mismatch");
-    expect(prefill.total_kv_token_count() == 10, "Gemma2 append prefill total KV count mismatch");
-    expect(
-        prefill.scratch().normalized_hidden.shape == Shape::from({3, 256}),
-        "Gemma2 append prefill normalized hidden scratch shape mismatch"
-    );
-    expect(
-        prefill.scratch().attention_scores.shape == Shape::from({3, 1, 10}),
-        "Gemma2 append prefill attention scores scratch shape mismatch"
-    );
-    expect(prefill.layers()[0].attention_token_count == 8, "Gemma2 append sliding attention count mismatch");
-    expect(prefill.layers()[1].attention_token_count == 10, "Gemma2 append full attention count mismatch");
-}
-
-void test_gemma2_metal_plan_tracks_projected_attention_output_shape_when_available() {
-    if (!tensor_backend_is_available(BackendKind::metal)) {
-        return;
+    std::vector<TensorStorage> key_cache;
+    std::vector<TensorStorage> value_cache;
+    key_cache.reserve(config.block_count);
+    value_cache.reserve(config.block_count);
+    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        auto keys = TensorStorage::allocate(TensorDescriptor::from(
+            Shape::from({config.context_length, config.attention_head_count_kv * config.attention_key_length}),
+            DType::f32
+        ));
+        auto values = TensorStorage::allocate(TensorDescriptor::from(
+            Shape::from({config.context_length, config.attention_head_count_kv * config.attention_value_length}),
+            DType::f32
+        ));
+        for (std::uint32_t position = 0; position < cache_position; ++position) {
+            std::vector<float> key_row(config.attention_key_length);
+            std::vector<float> value_row(config.attention_value_length);
+            for (std::size_t column = 0; column < key_row.size(); ++column) {
+                key_row[column] = static_cast<float>((layer + 1U) * (position + 1U))
+                    * static_cast<float>(static_cast<int>(column % 7U) - 3) * 0.001F;
+            }
+            for (std::size_t column = 0; column < value_row.size(); ++column) {
+                value_row[column] = static_cast<float>((layer + 2U) * (position + 1U))
+                    * static_cast<float>(static_cast<int>(column % 5U) - 2) * 0.0015F;
+            }
+            write_cache_row(keys, tensor_f32_matrix(1, config.attention_key_length, key_row), position);
+            write_cache_row(values, tensor_f32_matrix(1, config.attention_value_length, value_row), position);
+        }
+        key_cache.push_back(std::move(keys));
+        value_cache.push_back(std::move(values));
     }
 
-    auto payload_store = tiny_gemma2_payload_store();
-    auto metadata = tiny_gemma2_metadata(1, 2, 1, 256);
-    auto view = tiny_model_view(std::move(metadata), std::move(payload_store.payloads));
-    const auto model = load_engine_model_from_gguf(view);
-    const auto plan = create_gemma2_metal_model_plan(model);
-
-    const auto prefill = create_gemma2_metal_prefill_schedule(plan, 3);
-    const auto decode = create_gemma2_metal_decode_schedule(plan, 3);
-
-    expect(
-        prefill.scratch().attention_output.shape == Shape::from({3, 512}),
-        "Gemma2 prefill attention output scratch should follow query heads times value length"
-    );
-    expect(
-        prefill.scratch().projected_attention_output.shape == Shape::from({3, 256}),
-        "Gemma2 prefill projected attention output scratch should return to hidden width"
-    );
-    expect(
-        prefill.scratch().post_attention_residual.shape == Shape::from({3, 256}),
-        "Gemma2 prefill post-attention residual scratch should stay at hidden width"
-    );
-    expect(
-        prefill.scratch().normalized_feed_forward_input.shape == Shape::from({3, 256}),
-        "Gemma2 prefill normalized FFN input scratch should stay at hidden width"
-    );
-    expect(
-        prefill.scratch().feed_forward_gate.shape == Shape::from({3, 256}),
-        "Gemma2 prefill FFN gate scratch should follow feed-forward width"
-    );
-    expect(
-        prefill.scratch().feed_forward_up.shape == Shape::from({3, 256}),
-        "Gemma2 prefill FFN up scratch should follow feed-forward width"
-    );
-    expect(
-        prefill.scratch().feed_forward_gated.shape == Shape::from({3, 256}),
-        "Gemma2 prefill gated FFN scratch should follow feed-forward width"
-    );
-    expect(
-        prefill.scratch().projected_feed_forward_output.shape == Shape::from({3, 256}),
-        "Gemma2 prefill projected FFN output scratch should return to hidden width"
-    );
-    expect(
-        prefill.scratch().feed_forward_residual.shape == Shape::from({3, 256}),
-        "Gemma2 prefill FFN residual scratch should stay at hidden width"
-    );
-    expect(
-        prefill.scratch().layer_handoff_normalized_attention_input.shape == Shape::from({3, 256}),
-        "Gemma2 prefill layer handoff normalized attention input scratch should stay at hidden width"
-    );
-    expect(
-        decode.scratch().attention_output.shape == Shape::from({1, 512}),
-        "Gemma2 decode attention output scratch should follow query heads times value length"
-    );
-    expect(
-        decode.scratch().projected_attention_output.shape == Shape::from({1, 256}),
-        "Gemma2 decode projected attention output scratch should return to hidden width"
-    );
-    expect(
-        decode.scratch().post_attention_residual.shape == Shape::from({1, 256}),
-        "Gemma2 decode post-attention residual scratch should stay at hidden width"
-    );
-    expect(
-        decode.scratch().normalized_feed_forward_input.shape == Shape::from({1, 256}),
-        "Gemma2 decode normalized FFN input scratch should stay at hidden width"
-    );
-    expect(
-        decode.scratch().projected_feed_forward_output.shape == Shape::from({1, 256}),
-        "Gemma2 decode projected FFN output scratch should return to hidden width"
-    );
-    expect(
-        decode.scratch().feed_forward_residual.shape == Shape::from({1, 256}),
-        "Gemma2 decode FFN residual scratch should stay at hidden width"
-    );
-    expect(
-        decode.scratch().layer_handoff_normalized_attention_input.shape == Shape::from({1, 256}),
-        "Gemma2 decode layer handoff normalized attention input scratch should stay at hidden width"
-    );
-}
-
-void test_gemma2_metal_schedules_share_resident_buffers_when_available() {
-    if (!tensor_backend_is_available(BackendKind::metal)) {
-        return;
-    }
-
-    auto payload_store = tiny_gemma2_payload_store();
-    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
-    const auto model = load_engine_model_from_gguf(view);
-    const auto plan = create_gemma2_metal_model_plan(model);
-
-    const auto prefill = create_gemma2_metal_prefill_schedule(plan, 4);
-    const auto decode = create_gemma2_metal_decode_schedule(plan, 4);
-
-    expect(
-        shares_backend_storage(prefill.weights().token_embedding_weight, plan.weights().token_embedding_weight),
-        "Gemma2 prefill schedule should share token embedding buffer"
-    );
-    expect(
-        shares_backend_storage(decode.weights().blocks[0].attention.query_weight, plan.weights().blocks[0].attention.query_weight),
-        "Gemma2 decode schedule should share query weight buffer"
-    );
-    expect(
-        shares_backend_storage(prefill.kv_cache()[0].key, plan.kv_cache()[0].key),
-        "Gemma2 prefill schedule should share KV key buffer"
-    );
-    expect(
-        shares_backend_storage(decode.kv_cache()[0].value, plan.kv_cache()[0].value),
-        "Gemma2 decode schedule should share KV value buffer"
-    );
-    expect(
-        shares_backend_storage(decode.resident_decode_scratch().logits, plan.decode_scratch().logits),
-        "Gemma2 decode schedule should share resident logits scratch buffer"
-    );
-    expect(
-        shares_backend_storage(
-            decode.resident_decode_scratch().projected_attention_output,
-            plan.decode_scratch().projected_attention_output
-        ),
-        "Gemma2 decode schedule should share resident projected attention output scratch buffer"
-    );
-    expect(
-        shares_backend_storage(
-            decode.resident_decode_scratch().post_attention_residual,
-            plan.decode_scratch().post_attention_residual
-        ),
-        "Gemma2 decode schedule should share resident post-attention residual scratch buffer"
-    );
-    expect(
-        shares_backend_storage(
-            decode.resident_decode_scratch().normalized_feed_forward_input,
-            plan.decode_scratch().normalized_feed_forward_input
-        ),
-        "Gemma2 decode schedule should share resident normalized FFN input scratch buffer"
-    );
-    expect(
-        shares_backend_storage(
-            decode.resident_decode_scratch().projected_feed_forward_output,
-            plan.decode_scratch().projected_feed_forward_output
-        ),
-        "Gemma2 decode schedule should share resident projected FFN output scratch buffer"
-    );
-    expect(
-        shares_backend_storage(
-            decode.resident_decode_scratch().feed_forward_residual,
-            plan.decode_scratch().feed_forward_residual
-        ),
-        "Gemma2 decode schedule should share resident FFN residual scratch buffer"
-    );
-    expect(
-        shares_backend_storage(
-            decode.resident_decode_scratch().layer_handoff_normalized_attention_input,
-            plan.decode_scratch().layer_handoff_normalized_attention_input
-        ),
-        "Gemma2 decode schedule should share resident layer handoff normalized attention input scratch buffer"
-    );
-    expect(
-        prefill.resident_weight_byte_count() == plan.uploaded_weight_byte_count(),
-        "Gemma2 prefill resident weight byte count mismatch"
-    );
-    expect(
-        decode.resident_kv_cache_byte_count() == plan.kv_cache_byte_count(),
-        "Gemma2 decode resident KV byte count mismatch"
-    );
-    expect(
-        decode.resident_decode_scratch_byte_count() == plan.scratch_byte_count(),
-        "Gemma2 decode resident scratch byte count mismatch"
-    );
-}
-
-void test_gemma2_metal_schedule_retains_buffers_after_plan_lifetime_when_available() {
-    if (!tensor_backend_is_available(BackendKind::metal)) {
-        return;
-    }
-
-    const auto schedule = [] {
-        auto payload_store = tiny_gemma2_payload_store();
-        auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
-        const auto model = load_engine_model_from_gguf(view);
-        const auto plan = create_gemma2_metal_model_plan(model);
-
-        return create_gemma2_metal_decode_schedule(plan, 4);
-    }();
-
-    const auto roundtrip = copy_tensor_from_backend(schedule.weights().token_embedding_weight);
-    expect(
-        roundtrip.descriptor() == schedule.weights().token_embedding_weight.descriptor(),
-        "Gemma2 Metal schedule retained weight descriptor mismatch"
-    );
-    expect(schedule.kv_cache().size() == 1, "Gemma2 Metal schedule retained KV cache count mismatch");
-    expect(
-        schedule.resident_decode_scratch().logits.descriptor().shape == Shape::from({1, 4}),
-        "Gemma2 Metal schedule retained logits scratch shape mismatch"
-    );
-    expect(
-        schedule.resident_decode_scratch().projected_attention_output.descriptor().shape == Shape::from({1, 256}),
-        "Gemma2 Metal schedule retained projected attention output scratch shape mismatch"
-    );
-    expect(
-        schedule.resident_decode_scratch().post_attention_residual.descriptor().shape == Shape::from({1, 256}),
-        "Gemma2 Metal schedule retained post-attention residual scratch shape mismatch"
-    );
-    expect(
-        schedule.resident_decode_scratch().normalized_feed_forward_input.descriptor().shape == Shape::from({1, 256}),
-        "Gemma2 Metal schedule retained normalized FFN input scratch shape mismatch"
-    );
-    expect(
-        schedule.resident_decode_scratch().projected_feed_forward_output.descriptor().shape == Shape::from({1, 256}),
-        "Gemma2 Metal schedule retained projected FFN output scratch shape mismatch"
-    );
-    expect(
-        schedule.resident_decode_scratch().feed_forward_residual.descriptor().shape == Shape::from({1, 256}),
-        "Gemma2 Metal schedule retained FFN residual scratch shape mismatch"
-    );
-    expect(
-        schedule.resident_decode_scratch().layer_handoff_normalized_attention_input.descriptor().shape
-            == Shape::from({1, 256}),
-        "Gemma2 Metal schedule retained layer handoff normalized attention input scratch shape mismatch"
-    );
-}
-
-void test_gemma2_metal_resident_decode_is_one_submission_and_matches_diagnostics_when_available() {
-    if (!tensor_backend_is_available(BackendKind::metal)) {
-        return;
-    }
-
-    auto payload_store = tiny_gemma2_payload_store(true, 2);
-    auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
-    const auto model = load_engine_model_from_gguf(view);
-    const std::array<std::uint32_t, 2> prompt_token_ids {1, 2};
-    auto diagnostic_plan = create_gemma2_metal_model_plan(model);
-    auto resident_plan = create_gemma2_metal_model_plan(model);
-    const auto embedding_scale = std::sqrt(
-        static_cast<float>(diagnostic_plan.config().embedding_length)
-    );
-    const auto diagnostic_prefill = run_gemma2_metal_resident_prefill(
-        diagnostic_plan,
-        std::span<const std::uint32_t>(prompt_token_ids),
-        0,
-        embedding_scale,
-        true
-    );
-    const auto resident_prefill = run_gemma2_metal_resident_prefill(
-        resident_plan,
-        std::span<const std::uint32_t>(prompt_token_ids),
-        0,
-        embedding_scale,
-        true
-    );
-    expect(diagnostic_prefill.next_token_selection.has_value(), "diagnostic prefill token missing");
-    expect(resident_prefill.next_token_selection.has_value(), "resident prefill token missing");
-    const auto token_id = diagnostic_prefill.next_token_selection->token_id;
-    const auto diagnostic_schedule = create_gemma2_metal_decode_schedule(
-        diagnostic_plan,
-        static_cast<std::uint32_t>(prompt_token_ids.size())
-    );
-    const auto resident_schedule = create_gemma2_metal_decode_schedule(
-        resident_plan,
-        static_cast<std::uint32_t>(prompt_token_ids.size())
-    );
-
-    const auto diagnostic = run_gemma2_metal_decode_step(
-        diagnostic_plan,
-        diagnostic_schedule,
-        token_id,
-        embedding_scale
-    );
-    const auto resident = run_gemma2_metal_resident_decode_step(
-        resident_plan,
-        resident_schedule,
-        token_id,
-        embedding_scale
-    );
-
-    expect(resident.execution.command_buffer_count == 1U, "resident decode command-buffer count mismatch");
-    expect(resident.execution.commit_count == 1U, "resident decode commit count mismatch");
-    expect(resident.execution.synchronous_wait_count == 1U, "resident decode wait count mismatch");
-    expect(
-        resident.execution.transient_buffer_allocation_count == 0U,
-        "resident decode transient allocation count mismatch"
-    );
-    expect(resident.execution.compute_encoder_count == 43U, "resident decode compute encoder count mismatch");
-    expect(resident.execution.blit_encoder_count == 2U, "resident decode blit encoder count mismatch");
-    expect(resident.next_token_selection.has_value(), "resident decode top-logit result missing");
-
-    const auto diagnostic_logits = copy_tensor_from_backend(diagnostic.logits.logits);
-    const auto resident_logits = copy_tensor_from_backend(resident.logits);
-    expect(
-        diagnostic_logits.descriptor() == resident_logits.descriptor(),
-        "resident decode logits descriptor mismatch"
-    );
-    for (std::uint64_t token = 0; token < diagnostic_logits.descriptor().element_count; ++token) {
-        float diagnostic_value = 0.0F;
-        float resident_value = 0.0F;
-        const auto byte_offset = static_cast<std::size_t>(token * sizeof(float));
-        std::memcpy(&diagnostic_value, diagnostic_logits.bytes().data() + byte_offset, sizeof(float));
-        std::memcpy(&resident_value, resident_logits.bytes().data() + byte_offset, sizeof(float));
-        expect_close(diagnostic_value, resident_value, 1.0e-5F, "resident decode logits parity mismatch");
-    }
-    expect(
-        resident.next_token_selection->token_id == diagnostic.next_token_selection.token_id,
-        "resident decode selected token mismatch"
-    );
-    expect_close(
-        resident.next_token_selection->logit,
-        diagnostic.next_token_selection.logit,
-        1.0e-5F,
-        "resident decode selected logit mismatch"
-    );
-
-    for (std::size_t layer = 0; layer < resident_plan.kv_cache().size(); ++layer) {
-        const auto diagnostic_key = copy_tensor_from_backend(diagnostic_plan.kv_cache()[layer].key);
-        const auto resident_key = copy_tensor_from_backend(resident_plan.kv_cache()[layer].key);
-        const auto diagnostic_value = copy_tensor_from_backend(diagnostic_plan.kv_cache()[layer].value);
-        const auto resident_value = copy_tensor_from_backend(resident_plan.kv_cache()[layer].value);
-        expect(
-            std::equal(diagnostic_key.bytes().begin(), diagnostic_key.bytes().end(), resident_key.bytes().begin()),
-            "resident decode key-cache parity mismatch"
+    for (std::size_t layer = 0; layer < key_cache.size(); ++layer) {
+        const auto metal_keys = TensorStorage::from_bytes(
+            plan.kv_cache()[layer].key.descriptor(),
+            key_cache[layer].bytes()
         );
+        const auto metal_values = TensorStorage::from_bytes(
+            plan.kv_cache()[layer].value.descriptor(),
+            value_cache[layer].bytes()
+        );
+        plan.kv_cache()[layer].key = copy_tensor_to_backend(metal_keys, BackendKind::metal);
+        plan.kv_cache()[layer].value = copy_tensor_to_backend(metal_values, BackendKind::metal);
+        no_selection_plan.kv_cache()[layer].key = copy_tensor_to_backend(metal_keys, BackendKind::metal);
+        no_selection_plan.kv_cache()[layer].value = copy_tensor_to_backend(metal_values, BackendKind::metal);
+    }
+
+    constexpr std::uint32_t token_id = 3U;
+    ReferenceDecodeResult expected = [&] {
+        try {
+            return reference_decode(
+                config,
+                weights,
+                token_id,
+                cache_position,
+                key_cache,
+                value_cache
+            );
+        } catch (const std::exception& error) {
+            throw TestFailure(std::string("CPU reference failed: ") + error.what());
+        }
+    }();
+    const auto schedule = create_gemma2_metal_decode_schedule(plan, cache_position);
+    const auto result = run_gemma2_metal_resident_decode_step(
+        plan,
+        schedule,
+        token_id,
+        std::sqrt(static_cast<float>(config.embedding_length)),
+        true
+    );
+
+    expect(result.execution.command_buffer_count == 1U, "decode command-buffer count mismatch");
+    expect(result.execution.commit_count == 1U, "decode commit count mismatch");
+    expect(result.execution.synchronous_wait_count == 1U, "decode wait count mismatch");
+    expect(result.execution.compute_encoder_count == 1U, "decode compute encoder count mismatch");
+    expect(result.execution.compute_dispatch_count == 43U, "decode dispatch count mismatch");
+    expect(result.execution.blit_encoder_count == 0U, "decode blit encoder count mismatch");
+    expect(result.execution.memory_barrier_count == 34U, "decode barrier count mismatch");
+    expect(result.execution.transient_buffer_allocation_count == 0U, "decode transient allocation mismatch");
+    expect(1U + 19U * 42U + 4U == 803U, "real decode dispatch formula mismatch");
+    expect(15U * 42U + 4U == 634U, "real decode barrier formula mismatch");
+
+    const auto actual_logits = copy_tensor_from_backend(result.logits);
+    expect_f32_matrix_close(actual_logits, expected.logits, 3.0e-3F, "decode CPU-reference logits");
+    expect(result.next_token_selection.has_value(), "decode selected token missing");
+    const auto expected_top = top_logit_tokens_f32(expected.logits, 1).front();
+    expect(result.next_token_selection->token_id == expected_top.token, "decode selected token mismatch");
+    expect_close(result.next_token_selection->logit, expected_top.logit, 3.0e-3F, "decode selected logit mismatch");
+
+    for (std::size_t layer = 0; layer < key_cache.size(); ++layer) {
+        expect_f32_storage_close(
+            copy_tensor_from_backend(plan.kv_cache()[layer].key),
+            TensorStorage::from_bytes(
+                plan.kv_cache()[layer].key.descriptor(),
+                expected.key_cache[layer].bytes()
+            ),
+            3.0e-3F,
+            "decode direct key-cache write"
+        );
+        expect_f32_storage_close(
+            copy_tensor_from_backend(plan.kv_cache()[layer].value),
+            TensorStorage::from_bytes(
+                plan.kv_cache()[layer].value.descriptor(),
+                expected.value_cache[layer].bytes()
+            ),
+            3.0e-3F,
+            "decode direct value-cache write"
+        );
+    }
+
+    const auto no_selection_schedule = create_gemma2_metal_decode_schedule(no_selection_plan, cache_position);
+    const auto no_selection = run_gemma2_metal_resident_decode_step(
+        no_selection_plan,
+        no_selection_schedule,
+        token_id,
+        std::sqrt(static_cast<float>(config.embedding_length)),
+        false
+    );
+    expect(!no_selection.next_token_selection.has_value(), "decode should omit top-logit result");
+    expect(no_selection.execution.compute_encoder_count == 1U, "no-selection encoder count mismatch");
+    expect(no_selection.execution.compute_dispatch_count == 42U, "no-selection dispatch count mismatch");
+    expect(no_selection.execution.blit_encoder_count == 0U, "no-selection blit count mismatch");
+    expect(no_selection.execution.memory_barrier_count == 33U, "no-selection barrier count mismatch");
+    expect_f32_matrix_close(
+        copy_tensor_from_backend(no_selection.logits),
+        expected.logits,
+        3.0e-3F,
+        "no-selection decode logits"
+    );
+
+    try {
+        (void)run_gemma2_metal_resident_decode_step(
+            plan,
+            schedule,
+            config.vocab_size,
+            1.0F
+        );
+        throw TestFailure("decode should reject invalid token");
+    } catch (const std::invalid_argument& error) {
         expect(
-            std::equal(diagnostic_value.bytes().begin(), diagnostic_value.bytes().end(), resident_value.bytes().begin()),
-            "resident decode value-cache parity mismatch"
+            std::string_view(error.what()) == "Gemma2 resident Metal decode token is outside vocabulary",
+            "decode invalid-token error mismatch"
         );
     }
 }
@@ -1295,28 +1177,12 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_gemma2_metal_plan_roundtrips_uploaded_borrowed_weight_when_available,
     },
     {
-        "creates distinct Gemma2 Metal prefill and decode schedules when available",
-        test_creates_distinct_gemma2_metal_prefill_and_decode_schedules_when_available,
+        "creates Gemma2 Metal schedules when available",
+        test_creates_gemma2_metal_schedules_when_available,
     },
     {
-        "creates Gemma2 Metal append prefill schedule when available",
-        test_creates_gemma2_metal_append_prefill_schedule_when_available,
-    },
-    {
-        "Gemma2 Metal plan tracks projected attention output shape when available",
-        test_gemma2_metal_plan_tracks_projected_attention_output_shape_when_available,
-    },
-    {
-        "Gemma2 Metal schedules share resident buffers when available",
-        test_gemma2_metal_schedules_share_resident_buffers_when_available,
-    },
-    {
-        "Gemma2 Metal schedule retains buffers after plan lifetime when available",
-        test_gemma2_metal_schedule_retains_buffers_after_plan_lifetime_when_available,
-    },
-    {
-        "Gemma2 Metal resident decode uses one submission and matches diagnostics when available",
-        test_gemma2_metal_resident_decode_is_one_submission_and_matches_diagnostics_when_available,
+        "Gemma2 Metal decode matches nonzero CPU reference when available",
+        test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available,
     },
     {
         "Gemma2 Metal resident prefill chunks once waits once and matches incremental when available",
