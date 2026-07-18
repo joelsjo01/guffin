@@ -71,6 +71,34 @@ struct Gemma2MetalDecodeScratch {
     tensor::BackendBuffer top_logit_staging;
 };
 
+inline constexpr std::uint32_t gemma2_metal_prefill_chunk_size = 16U;
+
+struct Gemma2MetalPrefillScratch {
+    // Token IDs are staged by absolute cache position so consecutive command
+    // buffers never race with CPU writes while sharing activation scratch.
+    tensor::BackendBuffer token_id_staging;
+    tensor::BackendBuffer normalized_hidden;
+    tensor::BackendBuffer raw_query;
+    tensor::BackendBuffer raw_key;
+    tensor::BackendBuffer query;
+    tensor::BackendBuffer key;
+    tensor::BackendBuffer value;
+    tensor::BackendBuffer attention_scores;
+    tensor::BackendBuffer attention_probabilities;
+    tensor::BackendBuffer attention_output;
+    tensor::BackendBuffer projected_attention_output;
+    tensor::BackendBuffer post_attention_residual;
+    tensor::BackendBuffer normalized_feed_forward_input;
+    tensor::BackendBuffer feed_forward_gate;
+    tensor::BackendBuffer feed_forward_up;
+    tensor::BackendBuffer feed_forward_gated;
+    tensor::BackendBuffer projected_feed_forward_output;
+    tensor::BackendBuffer feed_forward_residual;
+    tensor::BackendBuffer final_normalized_hidden;
+    tensor::BackendBuffer logits;
+    tensor::BackendBuffer top_logit_staging;
+};
+
 struct Gemma2MetalLayerState {
     std::uint32_t layer_index = 0;
     bool uses_sliding_window = false;
@@ -82,7 +110,7 @@ enum class Gemma2MetalSchedulePhase {
 };
 
 enum class Gemma2MetalScratchOwnership {
-    phase_local,
+    resident_prefill,
     resident_decode,
 };
 
@@ -118,6 +146,7 @@ public:
         Gemma2ModelConfig config,
         Gemma2MetalModelWeightBuffers weights,
         std::vector<Gemma2MetalKVCacheLayer> kv_cache,
+        Gemma2MetalPrefillScratch prefill_scratch,
         Gemma2MetalDecodeScratch decode_scratch,
         std::vector<Gemma2MetalLayerState> layers,
         std::size_t uploaded_weight_byte_count,
@@ -130,6 +159,7 @@ public:
     [[nodiscard]] const Gemma2MetalModelWeightBuffers& weights() const noexcept;
     [[nodiscard]] std::vector<Gemma2MetalKVCacheLayer>& kv_cache() noexcept;
     [[nodiscard]] const std::vector<Gemma2MetalKVCacheLayer>& kv_cache() const noexcept;
+    [[nodiscard]] const Gemma2MetalPrefillScratch& prefill_scratch() const noexcept;
     [[nodiscard]] const Gemma2MetalDecodeScratch& decode_scratch() const noexcept;
     [[nodiscard]] const std::vector<Gemma2MetalLayerState>& layers() const noexcept;
     [[nodiscard]] std::size_t uploaded_weight_byte_count() const noexcept;
@@ -140,6 +170,7 @@ private:
     Gemma2ModelConfig config_;
     Gemma2MetalModelWeightBuffers weights_;
     std::vector<Gemma2MetalKVCacheLayer> kv_cache_;
+    Gemma2MetalPrefillScratch prefill_scratch_;
     Gemma2MetalDecodeScratch decode_scratch_;
     std::vector<Gemma2MetalLayerState> layers_;
     std::size_t uploaded_weight_byte_count_ = 0;

@@ -75,7 +75,7 @@ benchmark harness is not a live source route.
 | `src/tensor/ops` | CPU/reference tensor ops and backend-dispatched op front doors | device setup |
 | `src/tensor/backends/cpu_backend.*` | CPU backend buffers and CPU backend execution helpers | product-speed Gemma path |
 | `src/tensor/backends/metal_backend.*` | public Metal backend bridge, availability, buffer copy/allocation | CLI behavior |
-| `src/tensor/backends/metal/metal_command_context.*` | one-command-buffer resident decode encoding, submission statistics, selected-token readback | model scheduling, chat state |
+| `src/tensor/backends/metal/metal_command_context.*` | resident prefill/decode command encoding, submission statistics, selected-token readback | model scheduling, chat state |
 | `src/tensor/backends/metal/*` | Metal device context, buffers, kernels, command encoding, Metal op implementations | benchmark reporting |
 | `src/frontends/cli` | command arguments, file IO, stdout/stderr formatting, error reporting | inference math |
 | `tests` | deterministic coverage and fixtures | real model weights, generated benchmark artifacts |
@@ -97,7 +97,7 @@ Gemma Metal plan and resident schedules:
 - `tests/engine/gemma2_metal_plan_tests.cpp`
 - `tests/support/tensor_test_support.*`
 
-Gemma Metal runtime and resident decode execution:
+Gemma Metal runtime and resident prefill/decode execution:
 
 - `include/local_gguf_engine/engine/gemma2_runtime.hpp`
 - `src/engine/gemma2_runtime.cpp`
@@ -229,8 +229,7 @@ Project docs:
 
 - `docs/ENGINE_PRINCIPLES.md` for durable engineering judgment
 - `docs/NEXT_TASK.md` for the active baton
-- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` for Gemma architecture and performance research
-- `docs/MAJOR_PERFORMANCE_PROBLEMS.md` for the broad integrated-benchmark problem snapshot
+- `docs/LLAMA_CPP_PIPELINE_GAP_ANALYSIS.md` for the current Gemma Metal structural comparison with `llama.cpp`
 - `docs/GRAPH.md` for this locator
 
 ## Test Map

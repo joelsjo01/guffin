@@ -27,6 +27,7 @@ struct EmbeddingDimensions {
     uint tokens;
     uint hidden;
     uint vocab;
+    uint token_offset;
     float scale;
 };
 
@@ -64,7 +65,7 @@ kernel void embed_f16_gguf_weight_token_ids_kernel(
         return;
     }
 
-    const uint token_id = token_ids[token_index];
+    const uint token_id = token_ids[dims.token_offset + token_index];
     if (token_id >= dims.vocab) {
         return;
     }
@@ -486,6 +487,7 @@ kernel void noop_kernel(uint gid [[thread_position_in_grid]]) {
 struct RMSNormDimensions {
     uint rows;
     uint hidden;
+    uint input_row_start;
     float epsilon;
 };
 
@@ -547,15 +549,17 @@ kernel void rms_norm_f32_kernel(
     }
 
     float sum_squares = 0.0f;
-    const uint row_offset = row * dims.hidden;
+    const uint input_row_offset = (dims.input_row_start + row) * dims.hidden;
+    const uint output_row_offset = row * dims.hidden;
     for (uint column = 0; column < dims.hidden; ++column) {
-        const float value = input[row_offset + column];
+        const float value = input[input_row_offset + column];
         sum_squares += value * value;
     }
 
     const float inverse_rms = rsqrt((sum_squares / float(dims.hidden)) + dims.epsilon);
     for (uint column = 0; column < dims.hidden; ++column) {
-        output[row_offset + column] = input[row_offset + column] * inverse_rms * weight[column];
+        output[output_row_offset + column] =
+            input[input_row_offset + column] * inverse_rms * weight[column];
     }
 }
 

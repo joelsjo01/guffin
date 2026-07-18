@@ -38,6 +38,7 @@ struct EmbeddingDimensions {
     std::uint32_t tokens = 0;
     std::uint32_t hidden = 0;
     std::uint32_t vocab = 0;
+    std::uint32_t token_offset = 0;
     float scale = 1.0F;
 };
 
@@ -53,6 +54,7 @@ struct SoftcapDimensions {
 struct RMSNormDimensions {
     std::uint32_t rows = 0;
     std::uint32_t hidden = 0;
+    std::uint32_t input_row_start = 0;
     float epsilon = 0.0F;
 };
 
@@ -1009,6 +1011,7 @@ BackendBuffer embed_f16_gguf_weight_token_ids_with_metal_buffer(
         .tokens = require_u32_dimension(token_ids.size(), "tokens"),
         .hidden = require_u32_dimension(hidden, "hidden"),
         .vocab = require_u32_dimension(vocab, "vocab"),
+        .token_offset = 0,
         .scale = scale,
     };
     const auto output_descriptor = TensorDescriptor::from(
@@ -1081,6 +1084,7 @@ BackendBuffer rms_norm_f32_with_metal_buffers(
     const RMSNormDimensions dims {
         .rows = require_u32_dimension(rows, "rows"),
         .hidden = require_u32_dimension(hidden, "hidden"),
+        .input_row_start = 0,
         .epsilon = epsilon,
     };
     const auto output_descriptor = input.descriptor();
