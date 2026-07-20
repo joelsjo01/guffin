@@ -300,6 +300,24 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> rms_norm_add_function = [library newFunctionWithName:@"rms_norm_add_f32_kernel"];
+    if (rms_norm_add_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal fused RMSNorm-add kernel function was not found"
+        );
+    }
+    NSError* rms_norm_add_pipeline_error = nil;
+    rms_norm_add_pipeline = [device newComputePipelineStateWithFunction:rms_norm_add_function
+                                                                  error:&rms_norm_add_pipeline_error];
+    if (rms_norm_add_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal fused RMSNorm-add pipeline creation failed: "
+                + ns_error_message(rms_norm_add_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> rope_by_heads_function = [library newFunctionWithName:@"rope_f32_by_heads_kernel"];
     if (rope_by_heads_function == nil) {
         throw metal_error(

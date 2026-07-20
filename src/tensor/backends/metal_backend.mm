@@ -559,24 +559,106 @@ kernel void rms_norm_f32_kernel(
     const device float* weight [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant RMSNormDimensions& dims [[buffer(3)]],
-    uint row [[thread_position_in_grid]]
+    uint row [[threadgroup_position_in_grid]],
+    uint thread_index [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simdgroup_index [[simdgroup_index_in_threadgroup]],
+    uint simdgroup_count [[simdgroups_per_threadgroup]],
+    uint thread_count [[threads_per_threadgroup]]
 ) {
     if (row >= dims.rows) {
         return;
     }
 
-    float sum_squares = 0.0f;
+    threadgroup float partial_sums[32];
     const uint input_row_offset = (dims.input_row_start + row) * dims.hidden;
     const uint output_row_offset = row * dims.hidden;
-    for (uint column = 0; column < dims.hidden; ++column) {
-        const float value = input[input_row_offset + column];
-        sum_squares += value * value;
+
+    float sum_squares = 0.0f;
+    if ((dims.hidden & 3u) == 0u) {
+        const device float4* input4 = reinterpret_cast<const device float4*>(input + input_row_offset);
+        const uint vector_count = dims.hidden / 4u;
+        for (uint column = thread_index; column < vector_count; column += thread_count) {
+            const float4 value = input4[column];
+            sum_squares += dot(value, value);
+        }
+    } else {
+        for (uint column = thread_index; column < dims.hidden; column += thread_count) {
+            const float value = input[input_row_offset + column];
+            sum_squares += value * value;
+        }
     }
 
-    const float inverse_rms = rsqrt((sum_squares / float(dims.hidden)) + dims.epsilon);
-    for (uint column = 0; column < dims.hidden; ++column) {
-        output[output_row_offset + column] =
-            input[input_row_offset + column] * inverse_rms * weight[column];
+    sum_squares = simd_sum(sum_squares);
+    if (lane == 0u) {
+        partial_sums[simdgroup_index] = sum_squares;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simdgroup_index == 0u) {
+        sum_squares = simd_sum(lane < simdgroup_count ? partial_sums[lane] : 0.0f);
+        if (lane == 0u) {
+            partial_sums[0] = sum_squares;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float inverse_rms = rsqrt((partial_sums[0] / float(dims.hidden)) + dims.epsilon);
+    if ((dims.hidden & 3u) == 0u) {
+        const device float4* input4 = reinterpret_cast<const device float4*>(input + input_row_offset);
+        const device float4* weight4 = reinterpret_cast<const device float4*>(weight);
+        device float4* output4 = reinterpret_cast<device float4*>(output + output_row_offset);
+        const uint vector_count = dims.hidden / 4u;
+        for (uint column = thread_index; column < vector_count; column += thread_count) {
+            output4[column] = input4[column] * inverse_rms * weight4[column];
+        }
+    } else {
+        for (uint column = thread_index; column < dims.hidden; column += thread_count) {
+            output[output_row_offset + column] =
+                input[input_row_offset + column] * inverse_rms * weight[column];
+        }
+    }
+}
+
+kernel void rms_norm_add_f32_kernel(
+    const device float* input [[buffer(0)]],
+    const device float* weight [[buffer(1)]],
+    const device float* residual [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant RMSNormDimensions& dims [[buffer(4)]],
+    uint thread_index [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simdgroup_index [[simdgroup_index_in_threadgroup]],
+    uint simdgroup_count [[simdgroups_per_threadgroup]],
+    uint thread_count [[threads_per_threadgroup]]
+) {
+    threadgroup float partial_sums[32];
+    float sum_squares = 0.0f;
+    const uint vector_count = dims.hidden / 4u;
+    const device float4* input4 = reinterpret_cast<const device float4*>(input);
+    for (uint column = thread_index; column < vector_count; column += thread_count) {
+        const float4 value = input4[column];
+        sum_squares += dot(value, value);
+    }
+
+    sum_squares = simd_sum(sum_squares);
+    if (lane == 0u) {
+        partial_sums[simdgroup_index] = sum_squares;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simdgroup_index == 0u) {
+        sum_squares = simd_sum(lane < simdgroup_count ? partial_sums[lane] : 0.0f);
+        if (lane == 0u) {
+            partial_sums[0] = sum_squares;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float inverse_rms = rsqrt((partial_sums[0] / float(dims.hidden)) + dims.epsilon);
+    const device float4* weight4 = reinterpret_cast<const device float4*>(weight);
+    const device float4* residual4 = reinterpret_cast<const device float4*>(residual);
+    device float4* output4 = reinterpret_cast<device float4*>(output);
+    for (uint column = thread_index; column < vector_count; column += thread_count) {
+        output4[column] = input4[column] * inverse_rms * weight4[column] + residual4[column];
     }
 }
 

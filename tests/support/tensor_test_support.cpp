@@ -10,6 +10,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <iomanip>
 #include <cstddef>
 #include <cstdint>
 #include <sstream>
@@ -33,7 +34,7 @@ using local_gguf_engine::tensor::write_f32;
 void expect_close(float actual, float expected, float tolerance, std::string_view message) {
     if (std::fabs(actual - expected) > tolerance) {
         std::ostringstream stream;
-        stream << message << ": expected " << expected << ", got " << actual;
+        stream << std::setprecision(9) << message << ": expected " << expected << ", got " << actual;
         throw TestFailure(stream.str());
     }
 }

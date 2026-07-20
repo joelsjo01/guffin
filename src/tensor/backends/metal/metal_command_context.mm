@@ -385,8 +385,40 @@ void MetalCommandContext::encode_rms_norm(
     [encoder setBuffer:storage(weight).buffer() offset:0 atIndex:1];
     [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
-    [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((rows + 63U) / 64U), 1, 1)
-              threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(rows), 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_rms_norm_add(
+    const BackendBuffer& input,
+    const BackendBuffer& weight,
+    const BackendBuffer& residual,
+    const BackendBuffer& output,
+    float epsilon
+) {
+    const auto hidden = input.descriptor().shape.dimension(1);
+    if ((hidden & 3U) != 0U) {
+        throw std::invalid_argument("Metal fused RMSNorm-add hidden width must be divisible by four");
+    }
+    require_capacity(weight, hidden * sizeof(float), "fused RMSNorm-add weight");
+    require_capacity(residual, hidden * sizeof(float), "fused RMSNorm-add residual");
+    require_capacity(output, hidden * sizeof(float), "fused RMSNorm-add output");
+    const RMSNormDimensions dims {
+        .rows = 1U,
+        .hidden = u32(hidden, "fused RMSNorm-add hidden"),
+        .input_row_start = 0U,
+        .epsilon = epsilon,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 fused RMSNorm-add");
+    [encoder setComputePipelineState:impl_->state->rms_norm_add_pipeline];
+    [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
+    [encoder setBuffer:storage(weight).buffer() offset:0 atIndex:1];
+    [encoder setBuffer:storage(residual).buffer() offset:0 atIndex:2];
+    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:3];
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     ++impl_->stats.compute_dispatch_count;
 }
 

@@ -1118,8 +1118,8 @@ BackendBuffer rms_norm_f32_with_metal_buffers(
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
-    const MTLSize threads_per_threadgroup = MTLSizeMake(64, 1, 1);
-    const auto threadgroup_count = static_cast<NSUInteger>((rows + 63U) / 64U);
+    const MTLSize threads_per_threadgroup = MTLSizeMake(256, 1, 1);
+    const auto threadgroup_count = static_cast<NSUInteger>(rows);
     const MTLSize threadgroups = MTLSizeMake(threadgroup_count, 1, 1);
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
     [encoder endEncoding];
@@ -2278,8 +2278,8 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buff
     [rms_norm_encoder setBuffer:normalized_buffer offset:0 atIndex:2];
     [rms_norm_encoder setBuffer:rms_norm_dims_buffer offset:0 atIndex:3];
 
-    const MTLSize rms_norm_threads_per_threadgroup = MTLSizeMake(64, 1, 1);
-    const auto rms_norm_threadgroup_count = static_cast<NSUInteger>((rows + 63U) / 64U);
+    const MTLSize rms_norm_threads_per_threadgroup = MTLSizeMake(256, 1, 1);
+    const auto rms_norm_threadgroup_count = static_cast<NSUInteger>(rows);
     const MTLSize rms_norm_threadgroups = MTLSizeMake(rms_norm_threadgroup_count, 1, 1);
     [rms_norm_encoder dispatchThreadgroups:rms_norm_threadgroups
                      threadsPerThreadgroup:rms_norm_threads_per_threadgroup];

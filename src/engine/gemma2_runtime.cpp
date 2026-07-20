@@ -232,19 +232,12 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             scratch.projected_attention_output
         );
         command.encode_memory_barrier();
-        // RMSNorm is safe in place: the current kernel finishes its reduction
-        // before overwriting any element in the row.
-        command.encode_rms_norm(
+        command.encode_rms_norm_add(
             scratch.projected_attention_output,
             attention.post_attention_norm_weight,
-            scratch.projected_attention_output,
-            config.rms_norm_epsilon
-        );
-        command.encode_memory_barrier();
-        command.encode_add(
             scratch.feed_forward_residual,
-            scratch.projected_attention_output,
-            scratch.post_attention_residual
+            scratch.post_attention_residual,
+            config.rms_norm_epsilon
         );
         command.encode_memory_barrier();
         command.encode_rms_norm(
@@ -277,17 +270,12 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             scratch.projected_feed_forward_output
         );
         command.encode_memory_barrier();
-        command.encode_rms_norm(
+        command.encode_rms_norm_add(
             scratch.projected_feed_forward_output,
             feed_forward.post_feed_forward_norm_weight,
-            scratch.projected_feed_forward_output,
-            config.rms_norm_epsilon
-        );
-        command.encode_memory_barrier();
-        command.encode_add(
             scratch.post_attention_residual,
-            scratch.projected_feed_forward_output,
-            scratch.feed_forward_residual
+            scratch.feed_forward_residual,
+            config.rms_norm_epsilon
         );
         command.encode_memory_barrier();
     }

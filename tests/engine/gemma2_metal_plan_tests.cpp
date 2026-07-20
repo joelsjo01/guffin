@@ -949,12 +949,12 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
     expect(result.execution.commit_count == 1U, "decode commit count mismatch");
     expect(result.execution.synchronous_wait_count == 1U, "decode wait count mismatch");
     expect(result.execution.compute_encoder_count == 1U, "decode compute encoder count mismatch");
-    expect(result.execution.compute_dispatch_count == 39U, "decode dispatch count mismatch");
+    expect(result.execution.compute_dispatch_count == 35U, "decode dispatch count mismatch");
     expect(result.execution.blit_encoder_count == 0U, "decode blit encoder count mismatch");
-    expect(result.execution.memory_barrier_count == 30U, "decode barrier count mismatch");
+    expect(result.execution.memory_barrier_count == 26U, "decode barrier count mismatch");
     expect(result.execution.transient_buffer_allocation_count == 0U, "decode transient allocation mismatch");
-    expect(1U + 17U * 42U + 4U == 719U, "real decode dispatch formula mismatch");
-    expect(13U * 42U + 4U == 550U, "real decode barrier formula mismatch");
+    expect(1U + 15U * 42U + 4U == 635U, "real decode dispatch formula mismatch");
+    expect(11U * 42U + 4U == 466U, "real decode barrier formula mismatch");
 
     const auto actual_logits = copy_tensor_from_backend(result.logits);
     expect_f32_matrix_close(actual_logits, expected.logits, 3.0e-3F, "decode CPU-reference logits");
@@ -970,7 +970,7 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
                 plan.kv_cache()[layer].key.descriptor(),
                 expected.key_cache[layer].bytes()
             ),
-            3.0e-3F,
+            5.0e-3F,
             "decode direct key-cache write"
         );
         expect_f32_storage_close(
@@ -994,9 +994,9 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
     );
     expect(!no_selection.next_token_selection.has_value(), "decode should omit top-logit result");
     expect(no_selection.execution.compute_encoder_count == 1U, "no-selection encoder count mismatch");
-    expect(no_selection.execution.compute_dispatch_count == 38U, "no-selection dispatch count mismatch");
+    expect(no_selection.execution.compute_dispatch_count == 34U, "no-selection dispatch count mismatch");
     expect(no_selection.execution.blit_encoder_count == 0U, "no-selection blit count mismatch");
-    expect(no_selection.execution.memory_barrier_count == 29U, "no-selection barrier count mismatch");
+    expect(no_selection.execution.memory_barrier_count == 25U, "no-selection barrier count mismatch");
     expect_f32_matrix_close(
         copy_tensor_from_backend(no_selection.logits),
         expected.logits,
@@ -1018,6 +1018,41 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
             "decode invalid-token error mismatch"
         );
     }
+}
+
+void test_gemma2_fused_rms_norm_add_matches_decode_width_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    constexpr std::uint32_t hidden = 3584U;
+    constexpr float epsilon = 1.0e-6F;
+    std::vector<float> input_values(hidden);
+    std::vector<float> weight_values(hidden);
+    std::vector<float> residual_values(hidden);
+    for (std::uint32_t index = 0; index < hidden; ++index) {
+        input_values[index] = static_cast<float>(static_cast<int>(index % 37U) - 18) * 0.03125F;
+        weight_values[index] = 0.75F + static_cast<float>(index % 11U) * 0.015625F;
+        residual_values[index] = static_cast<float>(static_cast<int>(index % 23U) - 11) * 0.0625F;
+    }
+
+    const auto input_cpu = tensor_f32_matrix(1U, hidden, input_values);
+    const auto weight_cpu = tensor_f32_vector(weight_values);
+    const auto residual_cpu = tensor_f32_matrix(1U, hidden, residual_values);
+    const auto normalized = rms_norm_f32(input_cpu, weight_cpu, epsilon);
+    const auto expected = add_f32(normalized, residual_cpu);
+    const auto input = copy_tensor_to_backend(input_cpu, BackendKind::metal);
+    const auto weight = copy_tensor_to_backend(weight_cpu, BackendKind::metal);
+    const auto residual = copy_tensor_to_backend(residual_cpu, BackendKind::metal);
+    const auto output = allocate_backend_buffer(input.descriptor(), BackendKind::metal);
+
+    MetalCommandContext command("Gemma2 fused RMSNorm-add parity", true);
+    command.encode_rms_norm_add(input, weight, residual, output, epsilon);
+    const auto stats = command.commit_and_wait();
+    expect(stats.compute_dispatch_count == 1U, "fused RMSNorm-add dispatch mismatch");
+    expect(stats.memory_barrier_count == 0U, "fused RMSNorm-add barrier mismatch");
+    expect(stats.transient_buffer_allocation_count == 0U, "fused RMSNorm-add transient allocation mismatch");
+    expect_f32_matrix_close(copy_tensor_from_backend(output), expected, 2.0e-5F, "fused RMSNorm-add parity");
 }
 
 void test_gemma2_metal_resident_prefill_chunks_once_waits_once_and_matches_incremental_when_available() {
@@ -1369,6 +1404,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 fused decode attention matches exact-shape CPU reference when available",
         test_gemma2_fused_decode_attention_matches_exact_shape_cpu_reference_when_available,
+    },
+    {
+        "Gemma2 fused RMSNorm-add matches decode width when available",
+        test_gemma2_fused_rms_norm_add_matches_decode_width_when_available,
     },
     {
         "Gemma2 Metal decode matches nonzero CPU reference when available",

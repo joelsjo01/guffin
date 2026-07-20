@@ -24,6 +24,7 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> softcap_pipeline = nil;
     id<MTLComputePipelineState> noop_pipeline = nil;
     id<MTLComputePipelineState> rms_norm_pipeline = nil;
+    id<MTLComputePipelineState> rms_norm_add_pipeline = nil;
     id<MTLComputePipelineState> rope_by_heads_pipeline = nil;
     id<MTLComputePipelineState> rope_neox_by_heads_pipeline = nil;
     id<MTLComputePipelineState> causal_grouped_attention_scores_pipeline = nil;

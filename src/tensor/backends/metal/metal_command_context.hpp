@@ -68,6 +68,13 @@ public:
         std::uint32_t row_count = 0,
         std::uint32_t input_row_start = 0
     );
+    void encode_rms_norm_add(
+        const BackendBuffer& input,
+        const BackendBuffer& weight,
+        const BackendBuffer& residual,
+        const BackendBuffer& output,
+        float epsilon
+    );
     void encode_rope(
         const BackendBuffer& input,
         const BackendBuffer& output,
