@@ -80,6 +80,21 @@ struct GroupedAttentionValueDimensions {
     std::uint32_t query_position_start;
 };
 
+struct Gemma2DecodeAttentionDimensions {
+    std::uint32_t cache_rows;
+    std::uint32_t first_position;
+    std::uint32_t attention_token_count;
+    std::uint32_t partition_count;
+    std::uint32_t query_head_count;
+    std::uint32_t kv_head_count;
+    std::uint32_t key_dimension;
+    std::uint32_t value_dimension;
+    float scale;
+    float logit_softcap;
+};
+
+static_assert(sizeof(Gemma2DecodeAttentionDimensions) == 40U);
+
 struct SoftmaxDimensions {
     std::uint32_t rows;
     std::uint32_t columns;
@@ -129,6 +144,21 @@ void require_capacity(const BackendBuffer& buffer, std::uint64_t bytes, const ch
 }
 
 }  // namespace
+
+std::uint32_t gemma2_decode_attention_partition_count(
+    std::uint32_t attention_token_count
+) noexcept {
+    // Keep the direct path through eight 32-token blocks; beyond that, doubling
+    // partitions with context bounds per-workgroup streaming while keeping the
+    // reduction fan-out within the 32 persistent partials. Medium/long real-path
+    // measurements own any future threshold adjustment.
+    if (attention_token_count <= 256U) return 1U;
+    if (attention_token_count <= 512U) return 2U;
+    if (attention_token_count <= 1024U) return 4U;
+    if (attention_token_count <= 2048U) return 8U;
+    if (attention_token_count <= 4096U) return 16U;
+    return 32U;
+}
 
 struct MetalCommandContext::Impl {
     MatmulPipelineState* state = nullptr;
@@ -536,6 +566,144 @@ void MetalCommandContext::encode_attention_values(
                                   )
               threadsPerThreadgroup:MTLSizeMake(8, 8, 2)];
     ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_gemma2_decode_attention(
+    const BackendBuffer& query,
+    const BackendBuffer& key_cache,
+    const BackendBuffer& value_cache,
+    const BackendBuffer& output,
+    const BackendBuffer& partial_output,
+    const BackendBuffer& partial_maxima,
+    const BackendBuffer& partial_denominators,
+    std::uint32_t cache_position,
+    std::uint32_t attention_token_count,
+    float scale,
+    float logit_softcap
+) {
+    constexpr std::uint32_t dimension = 256U;
+    constexpr std::uint32_t max_partitions = 32U;
+    const auto require_f32_shape = [](const BackendBuffer& buffer,
+                                      std::initializer_list<std::uint64_t> dimensions,
+                                      const char* name) {
+        const auto& descriptor = buffer.descriptor();
+        const auto expected = tensor::TensorDescriptor::from(
+            tensor::Shape::from(dimensions),
+            DType::f32
+        );
+        if (descriptor != expected) {
+            throw std::invalid_argument(
+                std::string("Metal Gemma 2 decode attention ") + name + " layout is invalid"
+            );
+        }
+        (void)storage(buffer);
+    };
+
+    const auto& query_descriptor = query.descriptor();
+    if (query_descriptor.dtype != DType::f32
+        || query_descriptor.shape.rank() != 2U
+        || query_descriptor.shape.dimension(0) != 1U
+        || query_descriptor.shape.dimension(1) % dimension != 0U) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention query layout is invalid");
+    }
+    const auto query_heads = u32(
+        query_descriptor.shape.dimension(1) / dimension,
+        "attention query heads"
+    );
+    const auto& key_descriptor = key_cache.descriptor();
+    const auto& value_descriptor = value_cache.descriptor();
+    if (key_descriptor.dtype != DType::f32
+        || key_descriptor.shape.rank() != 3U
+        || key_descriptor.shape.dimension(2) != dimension) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention key-cache layout is invalid");
+    }
+    const auto kv_heads = u32(key_descriptor.shape.dimension(1), "attention KV heads");
+    if (query_heads == 0U || query_heads > 16U || kv_heads == 0U || query_heads != kv_heads * 2U) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention requires paired-query GQA");
+    }
+    if (value_descriptor.dtype != DType::f32
+        || value_descriptor.shape.rank() != 3U
+        || value_descriptor.shape.dimension(0) != key_descriptor.shape.dimension(0)
+        || value_descriptor.shape.dimension(1) != kv_heads
+        || value_descriptor.shape.dimension(2) != dimension) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention value-cache layout is invalid");
+    }
+    (void)storage(key_cache);
+    (void)storage(value_cache);
+    (void)storage(query);
+    require_f32_shape(output, {1U, static_cast<std::uint64_t>(query_heads) * dimension}, "output");
+    if (partial_output.descriptor().dtype != DType::f32
+        || partial_output.descriptor().byte_count
+            < static_cast<std::uint64_t>(max_partitions) * query_heads * dimension * sizeof(float)) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention partial-output buffer is too small");
+    }
+    if (partial_maxima.descriptor().dtype != DType::f32
+        || partial_maxima.descriptor().byte_count
+            < static_cast<std::uint64_t>(max_partitions) * query_heads * sizeof(float)) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention partial-maxima buffer is too small");
+    }
+    if (partial_denominators.descriptor().dtype != DType::f32
+        || partial_denominators.descriptor().byte_count
+            < static_cast<std::uint64_t>(max_partitions) * query_heads * sizeof(float)) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention partial-denominators buffer is too small");
+    }
+    (void)storage(partial_output);
+    (void)storage(partial_maxima);
+    (void)storage(partial_denominators);
+    const auto cache_rows = u32(key_descriptor.shape.dimension(0), "attention cache rows");
+    if (attention_token_count == 0U) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention token count must not be zero");
+    }
+    if (cache_position >= cache_rows) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention cache position is outside capacity");
+    }
+    if (attention_token_count > cache_position + 1U) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention window exceeds populated cache");
+    }
+    if (!std::isfinite(scale) || !std::isfinite(logit_softcap) || logit_softcap <= 0.0F) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention scale or softcap is invalid");
+    }
+
+    const auto partitions = gemma2_decode_attention_partition_count(attention_token_count);
+    const Gemma2DecodeAttentionDimensions dims {
+        .cache_rows = cache_rows,
+        .first_position = cache_position + 1U - attention_token_count,
+        .attention_token_count = attention_token_count,
+        .partition_count = partitions,
+        .query_head_count = query_heads,
+        .kv_head_count = kv_heads,
+        .key_dimension = dimension,
+        .value_dimension = dimension,
+        .scale = scale,
+        .logit_softcap = logit_softcap,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 fused decode attention");
+    [encoder setComputePipelineState:impl_->state->gemma2_decode_attention_pipeline];
+    [encoder setBuffer:storage(query).buffer() offset:0 atIndex:0];
+    [encoder setBuffer:storage(key_cache).buffer() offset:0 atIndex:1];
+    [encoder setBuffer:storage(value_cache).buffer() offset:0 atIndex:2];
+    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:3];
+    [encoder setBuffer:storage(partial_output).buffer() offset:0 atIndex:4];
+    [encoder setBuffer:storage(partial_maxima).buffer() offset:0 atIndex:5];
+    [encoder setBuffer:storage(partial_denominators).buffer() offset:0 atIndex:6];
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:7];
+    [encoder dispatchThreadgroups:MTLSizeMake(kv_heads, partitions, 1)
+              threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    ++impl_->stats.compute_dispatch_count;
+
+    if (partitions > 1U) {
+        encode_memory_barrier();
+        encoder = impl_->compute_encoder("Gemma2 fused decode attention reduction");
+        [encoder setComputePipelineState:impl_->state->gemma2_decode_attention_reduce_pipeline];
+        [encoder setBuffer:storage(partial_output).buffer() offset:0 atIndex:0];
+        [encoder setBuffer:storage(partial_maxima).buffer() offset:0 atIndex:1];
+        [encoder setBuffer:storage(partial_denominators).buffer() offset:0 atIndex:2];
+        [encoder setBuffer:storage(output).buffer() offset:0 atIndex:3];
+        [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(kv_heads, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        ++impl_->stats.compute_dispatch_count;
+    }
 }
 
 void MetalCommandContext::encode_add(

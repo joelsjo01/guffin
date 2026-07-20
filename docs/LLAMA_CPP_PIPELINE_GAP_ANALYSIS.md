@@ -53,7 +53,7 @@ separate encoders and scalar multi-row Q4_K/Q6_K projection kernels.
 `run_gemma2_metal_resident_decode_step` now keeps one concurrent compute encoder
 open for the complete token, uses explicit fixed-schedule memory barriers, and
 writes K/V directly into their cache rows. The 42-layer top-logit path performs
-`803` compute dispatches through `1` compute encoder, `0` blit encoders, one
+`719` compute dispatches through `1` compute encoder, `0` blit encoders, one
 command buffer, one commit, and one wait.
 
 `llama.cpp` creates one Metal encoder for a command-buffer graph slice, encodes
@@ -72,15 +72,15 @@ within noise.
 **Status:** complete and retained after independent nonzero CPU-reference tests,
 all `315` repository tests, structural count checks, and real-path benchmarks.
 
-### 2. Attention materializes scores and probabilities; llama.cpp uses fused attention
+### 2. Decode completed: fused online-softmax attention; prefill remains
 
-Each local layer performs:
+Prefill still performs:
 
 1. an F32 QK score kernel;
 2. a separate F32 softmax kernel;
 3. a separate F32 probability-times-V kernel.
 
-Scores and probabilities are written to full intermediate buffers. The value
+Its scores and probabilities are written to full intermediate buffers. The value
 kernel then rereads probabilities and walks the KV sequence again. At longer
 contexts this creates substantial global-memory traffic.
 
@@ -90,11 +90,36 @@ threadgroup memory, compute softmax online, include logit softcapping, and emit
 the attention result without materializing the full score and probability
 matrices.
 
-**Likely impact:** high and increasing with context length.
+Single-token decode no longer uses that sequence. One paired-query Metal
+workgroup owns each KV head and its two Gemma query heads, streams K/V in
+32-token blocks, and maintains two stable online-softmax states without writing
+scores or probabilities. Contexts through 256 tokens write the normalized
+result directly. Longer contexts use 2-32 persistent partials and one
+cooperative reduction dispatch. Sliding and global layers pass their existing
+contiguous attention windows unchanged.
 
-**Required structural change:** implement a Gemma-shaped fused attention kernel,
-starting with the single-query decode case (`head_dim=256`, 16 Q heads, 8 KV
-heads), then a batched prefill case. Preserve the alternating global/sliding
+Decode scratch now owns 516 KiB of reusable partial state instead of 1 MiB of
+score/probability buffers. The all-short 42-layer top-logit path is 719
+dispatches and 550 barriers; a layer using partitioned attention adds one
+dispatch and one barrier. It remains one compute encoder, one command buffer,
+one commit, and one wait.
+
+Exact 16-Q/8-KV/256-dimensional CPU parity covers token counts 1, 31, 32, 33,
+256, 257, 4096, and 8192. The production decode integration matches independent
+CPU logits, selected token, selected logit, and appended K/V state. All 316
+repository tests pass.
+
+**Measured impact:** the canonical short greedy benchmark is neutral within
+noise: 4.94 versus 4.92 tok/s mean (+0.5%). That prompt never reaches the
+partitioned path, so medium/long-context speedup still needs a thermally
+controlled real-path measurement. Resident scratch fell by about 508 KiB.
+
+**Status:** decode structural work is complete. Batched fused prefill attention
+remains a separate task after competitive multi-token projection kernels; its
+current three-pass operators remain live and tested.
+
+**Remaining structural change:** add batched fused prefill attention after the
+prefill projection strategy is fixed. Preserve alternating global/sliding
 attention semantics.
 
 ### 3. Reduction kernels are serial and small ops are not fused

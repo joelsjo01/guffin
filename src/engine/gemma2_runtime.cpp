@@ -212,35 +212,18 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             key_cache_offset
         );
         command.encode_memory_barrier();
-        command.encode_attention_scores(
+        command.encode_gemma2_decode_attention(
             scratch.query,
             cache.key,
-            scratch.attention_scores,
+            cache.value,
+            scratch.attention_output,
+            scratch.attention_partial_output,
+            scratch.attention_partial_maxima,
+            scratch.attention_partial_denominators,
             decode.cache_position(),
-            config.attention_head_count,
-            config.attention_head_count_kv,
-            head_dimension,
             scheduled_layer.attention_token_count,
             attention_scale,
             config.attention_logit_softcap
-        );
-        command.encode_memory_barrier();
-        command.encode_softmax(
-            scratch.attention_scores,
-            scratch.attention_probabilities,
-            config.attention_head_count,
-            scheduled_layer.attention_token_count
-        );
-        command.encode_memory_barrier();
-        command.encode_attention_values(
-            scratch.attention_probabilities,
-            cache.value,
-            scratch.attention_output,
-            decode.cache_position(),
-            config.attention_head_count,
-            config.attention_head_count_kv,
-            config.attention_value_length,
-            scheduled_layer.attention_token_count
         );
         command.encode_memory_barrier();
         command.encode_matmul(

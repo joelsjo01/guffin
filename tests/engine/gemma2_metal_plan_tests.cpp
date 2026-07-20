@@ -22,6 +22,7 @@
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
 #include "tensor_test_support.hpp"
+#include "../../src/tensor/backends/metal/metal_command_context.hpp"
 
 #include <algorithm>
 #include <array>
@@ -70,6 +71,7 @@ using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorDescriptor;
 using local_gguf_engine::tensor::TensorStorage;
 using local_gguf_engine::tensor::backend_buffer_storage;
+using local_gguf_engine::tensor::allocate_backend_buffer;
 using local_gguf_engine::tensor::copy_tensor_to_backend;
 using local_gguf_engine::tensor::copy_tensor_view_to_backend;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
@@ -88,6 +90,8 @@ using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::write_kv_cache_f32_to_backend;
 using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::tensor_backend_is_available;
+using local_gguf_engine::tensor::backends::metal::MetalCommandContext;
+using local_gguf_engine::tensor::backends::metal::gemma2_decode_attention_partition_count;
 using local_gguf_engine::tests::TestCase;
 using local_gguf_engine::tests::TestFailure;
 using local_gguf_engine::tests::expect;
@@ -173,7 +177,7 @@ GGUFTensorPayloadView tensor_payload_view(
 
 std::vector<GGUFMetadataEntry> tiny_gemma2_metadata(
     std::uint32_t block_count = 1,
-    std::uint32_t attention_head_count = 1,
+    std::uint32_t attention_head_count = 2,
     std::uint32_t attention_head_count_kv = 1,
     std::uint32_t attention_value_length = 256,
     std::uint32_t context_length = 16
@@ -233,10 +237,10 @@ TinyGemma2PayloadStore tiny_gemma2_payload_store(
     for (std::uint32_t block_index = 0; block_index < block_count; ++block_index) {
         add_payload(store, block_tensor_name(block_index, "attn_norm.weight"), {256}, DType::f32);
         add_payload(store, block_tensor_name(block_index, "post_attention_norm.weight"), {256}, DType::f32);
-        add_payload(store, block_tensor_name(block_index, "attn_q.weight"), {256, 256}, DType::q4_k);
+        add_payload(store, block_tensor_name(block_index, "attn_q.weight"), {256, 512}, DType::q4_k);
         add_payload(store, block_tensor_name(block_index, "attn_k.weight"), {256, 256}, DType::q4_k);
         add_payload(store, block_tensor_name(block_index, "attn_v.weight"), {256, 256}, DType::q6_k);
-        add_payload(store, block_tensor_name(block_index, "attn_output.weight"), {256, 256}, DType::q4_k);
+        add_payload(store, block_tensor_name(block_index, "attn_output.weight"), {512, 256}, DType::q4_k);
         add_payload(store, block_tensor_name(block_index, "ffn_norm.weight"), {256}, DType::f32);
         if (include_post_ffw_norm) {
             add_payload(store, block_tensor_name(block_index, "post_ffw_norm.weight"), {256}, DType::f32);
@@ -289,10 +293,10 @@ TinyGemma2PayloadStore nonzero_tiny_gemma2_payload_store(std::uint32_t block_cou
         const auto seed = static_cast<std::uint64_t>(31U + block * 17U);
         add_payload_storage(store, block_tensor_name(block, "attn_norm.weight"), {256}, tensor_f32_vector(norm_values));
         add_payload_storage(store, block_tensor_name(block, "post_attention_norm.weight"), {256}, tensor_f32_vector(norm_values));
-        add_payload_storage(store, block_tensor_name(block, "attn_q.weight"), {256, 256}, tensor_q4_k_gguf_weight_matrix(256, 256, seed));
+        add_payload_storage(store, block_tensor_name(block, "attn_q.weight"), {256, 512}, tensor_q4_k_gguf_weight_matrix(256, 512, seed));
         add_payload_storage(store, block_tensor_name(block, "attn_k.weight"), {256, 256}, tensor_q4_k_gguf_weight_matrix(256, 256, seed + 1U));
         add_payload_storage(store, block_tensor_name(block, "attn_v.weight"), {256, 256}, tensor_q6_k_gguf_weight_matrix(256, 256, seed + 2U));
-        add_payload_storage(store, block_tensor_name(block, "attn_output.weight"), {256, 256}, tensor_q4_k_gguf_weight_matrix(256, 256, seed + 3U));
+        add_payload_storage(store, block_tensor_name(block, "attn_output.weight"), {512, 256}, tensor_q4_k_gguf_weight_matrix(512, 256, seed + 3U));
         add_payload_storage(store, block_tensor_name(block, "ffn_norm.weight"), {256}, tensor_f32_vector(norm_values));
         add_payload_storage(store, block_tensor_name(block, "post_ffw_norm.weight"), {256}, tensor_f32_vector(norm_values));
         add_payload_storage(store, block_tensor_name(block, "ffn_gate.weight"), {256, 256}, tensor_q4_k_gguf_weight_matrix(256, 256, seed + 4U));
@@ -546,8 +550,9 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(decode.raw_query)
         + backend_buffer_byte_count(decode.raw_key)
         + backend_buffer_byte_count(decode.query)
-        + backend_buffer_byte_count(decode.attention_scores)
-        + backend_buffer_byte_count(decode.attention_probabilities)
+        + backend_buffer_byte_count(decode.attention_partial_output)
+        + backend_buffer_byte_count(decode.attention_partial_maxima)
+        + backend_buffer_byte_count(decode.attention_partial_denominators)
         + backend_buffer_byte_count(decode.attention_output)
         + backend_buffer_byte_count(decode.projected_attention_output)
         + backend_buffer_byte_count(decode.post_attention_residual)
@@ -675,6 +680,187 @@ void test_creates_gemma2_metal_schedules_when_available() {
     expect(decode.layers()[1].attention_token_count == 10U, "global attention count mismatch");
 }
 
+void test_gemma2_fused_decode_attention_matches_exact_shape_cpu_reference_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    constexpr std::uint32_t query_heads = 16U;
+    constexpr std::uint32_t kv_heads = 8U;
+    constexpr std::uint32_t dimension = 256U;
+    constexpr std::uint32_t cache_rows = 8192U;
+    constexpr float scale = 1.0F / 16.0F;
+    constexpr float softcap = 50.0F;
+
+    std::vector<float> query_values(query_heads * dimension);
+    for (std::uint32_t head = 0; head < query_heads; ++head) {
+        for (std::uint32_t column = 0; column < dimension; ++column) {
+            query_values[head * dimension + column] =
+                1.25F + static_cast<float>(head) * 0.03125F
+                + static_cast<float>(static_cast<int>(column % 13U) - 6) * 0.015625F;
+        }
+    }
+    std::vector<float> key_values(static_cast<std::size_t>(cache_rows) * kv_heads * dimension);
+    std::vector<float> value_values(key_values.size());
+    for (std::uint32_t position = 0; position < cache_rows; ++position) {
+        for (std::uint32_t head = 0; head < kv_heads; ++head) {
+            for (std::uint32_t column = 0; column < dimension; ++column) {
+                const auto index = (static_cast<std::size_t>(position) * kv_heads + head) * dimension + column;
+                key_values[index] =
+                    1.5F + static_cast<float>(head) * 0.0625F
+                    + static_cast<float>(static_cast<int>((position + column) % 17U) - 8) * 0.0078125F;
+                value_values[index] =
+                    static_cast<float>(static_cast<int>(position % 29U) - 14) * 0.003F
+                    + static_cast<float>(head) * 0.021F
+                    + static_cast<float>(static_cast<int>(column % 11U) - 5) * 0.002F;
+            }
+        }
+    }
+
+    const auto query_cpu = tensor_f32_matrix(1, query_heads * dimension, query_values);
+    const auto key_cpu = tensor_f32_matrix(cache_rows, kv_heads * dimension, key_values);
+    const auto value_cpu = tensor_f32_matrix(cache_rows, kv_heads * dimension, value_values);
+    const auto query = copy_tensor_to_backend(query_cpu, BackendKind::metal);
+    const auto key = copy_tensor_to_backend(
+        TensorStorage::from_bytes(
+            TensorDescriptor::from(Shape::from({cache_rows, kv_heads, dimension}), DType::f32),
+            key_cpu.bytes()
+        ),
+        BackendKind::metal
+    );
+    const auto value = copy_tensor_to_backend(
+        TensorStorage::from_bytes(
+            TensorDescriptor::from(Shape::from({cache_rows, kv_heads, dimension}), DType::f32),
+            value_cpu.bytes()
+        ),
+        BackendKind::metal
+    );
+    const auto output = allocate_backend_buffer(
+        TensorDescriptor::from(Shape::from({1U, query_heads * dimension}), DType::f32),
+        BackendKind::metal
+    );
+    const auto partial_output = allocate_backend_buffer(
+        TensorDescriptor::from(Shape::from({32U, query_heads, dimension}), DType::f32),
+        BackendKind::metal
+    );
+    const auto partial_maxima = allocate_backend_buffer(
+        TensorDescriptor::from(Shape::from({32U, query_heads}), DType::f32),
+        BackendKind::metal
+    );
+    const auto partial_denominators = allocate_backend_buffer(
+        TensorDescriptor::from(Shape::from({32U, query_heads}), DType::f32),
+        BackendKind::metal
+    );
+
+    constexpr std::array<std::uint32_t, 8> token_counts {1U, 31U, 32U, 33U, 256U, 257U, 4096U, 8192U};
+    for (const auto token_count : token_counts) {
+        MetalCommandContext command("Gemma2 fused-attention parity", true);
+        command.encode_gemma2_decode_attention(
+            query,
+            key,
+            value,
+            output,
+            partial_output,
+            partial_maxima,
+            partial_denominators,
+            cache_rows - 1U,
+            token_count,
+            scale,
+            softcap
+        );
+        const auto stats = command.commit_and_wait();
+        const auto partitions = gemma2_decode_attention_partition_count(token_count);
+        expect(stats.compute_dispatch_count == (partitions == 1U ? 1U : 2U), "fused attention dispatch mismatch");
+        expect(stats.memory_barrier_count == (partitions == 1U ? 0U : 1U), "fused attention barrier mismatch");
+        expect(stats.transient_buffer_allocation_count == 0U, "fused attention transient allocation mismatch");
+
+        const auto scores = causal_grouped_attention_scores_f32(
+            query_cpu,
+            key_cpu,
+            cache_rows - 1U,
+            query_heads,
+            kv_heads,
+            dimension,
+            token_count,
+            scale,
+            softcap
+        );
+        const auto probabilities = softmax_f32(scores);
+        const auto expected = causal_grouped_attention_values_f32(
+            probabilities,
+            value_cpu,
+            cache_rows - 1U,
+            query_heads,
+            kv_heads,
+            dimension,
+            token_count
+        );
+        expect_f32_matrix_close(
+            copy_tensor_from_backend(output),
+            expected,
+            4.0e-4F,
+            "exact-shape fused attention CPU parity"
+        );
+    }
+
+    try {
+        MetalCommandContext command("Gemma2 fused-attention invalid window", true);
+        command.encode_gemma2_decode_attention(
+            query,
+            key,
+            value,
+            output,
+            partial_output,
+            partial_maxima,
+            partial_denominators,
+            0U,
+            0U,
+            scale,
+            softcap
+        );
+        throw TestFailure("fused attention should reject an empty window");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Metal Gemma 2 decode attention token count must not be zero",
+            "fused attention empty-window error mismatch"
+        );
+    }
+
+    try {
+        MetalCommandContext command("Gemma2 fused-attention invalid cache position", true);
+        command.encode_gemma2_decode_attention(
+            query, key, value, output, partial_output, partial_maxima, partial_denominators,
+            cache_rows, 1U, scale, softcap
+        );
+        throw TestFailure("fused attention should reject a cache position outside capacity");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what())
+                == "Metal Gemma 2 decode attention cache position is outside capacity",
+            "fused attention cache-position error mismatch"
+        );
+    }
+
+    const auto undersized_partials = allocate_backend_buffer(
+        TensorDescriptor::from(Shape::from({1U}), DType::f32),
+        BackendKind::metal
+    );
+    try {
+        MetalCommandContext command("Gemma2 fused-attention undersized partials", true);
+        command.encode_gemma2_decode_attention(
+            query, key, value, output, undersized_partials, partial_maxima, partial_denominators,
+            0U, 1U, scale, softcap
+        );
+        throw TestFailure("fused attention should reject undersized partial output");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what())
+                == "Metal Gemma 2 decode attention partial-output buffer is too small",
+            "fused attention partial-output error mismatch"
+        );
+    }
+}
+
 void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -763,12 +949,12 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
     expect(result.execution.commit_count == 1U, "decode commit count mismatch");
     expect(result.execution.synchronous_wait_count == 1U, "decode wait count mismatch");
     expect(result.execution.compute_encoder_count == 1U, "decode compute encoder count mismatch");
-    expect(result.execution.compute_dispatch_count == 43U, "decode dispatch count mismatch");
+    expect(result.execution.compute_dispatch_count == 39U, "decode dispatch count mismatch");
     expect(result.execution.blit_encoder_count == 0U, "decode blit encoder count mismatch");
-    expect(result.execution.memory_barrier_count == 34U, "decode barrier count mismatch");
+    expect(result.execution.memory_barrier_count == 30U, "decode barrier count mismatch");
     expect(result.execution.transient_buffer_allocation_count == 0U, "decode transient allocation mismatch");
-    expect(1U + 19U * 42U + 4U == 803U, "real decode dispatch formula mismatch");
-    expect(15U * 42U + 4U == 634U, "real decode barrier formula mismatch");
+    expect(1U + 17U * 42U + 4U == 719U, "real decode dispatch formula mismatch");
+    expect(13U * 42U + 4U == 550U, "real decode barrier formula mismatch");
 
     const auto actual_logits = copy_tensor_from_backend(result.logits);
     expect_f32_matrix_close(actual_logits, expected.logits, 3.0e-3F, "decode CPU-reference logits");
@@ -808,9 +994,9 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
     );
     expect(!no_selection.next_token_selection.has_value(), "decode should omit top-logit result");
     expect(no_selection.execution.compute_encoder_count == 1U, "no-selection encoder count mismatch");
-    expect(no_selection.execution.compute_dispatch_count == 42U, "no-selection dispatch count mismatch");
+    expect(no_selection.execution.compute_dispatch_count == 38U, "no-selection dispatch count mismatch");
     expect(no_selection.execution.blit_encoder_count == 0U, "no-selection blit count mismatch");
-    expect(no_selection.execution.memory_barrier_count == 33U, "no-selection barrier count mismatch");
+    expect(no_selection.execution.memory_barrier_count == 29U, "no-selection barrier count mismatch");
     expect_f32_matrix_close(
         copy_tensor_from_backend(no_selection.logits),
         expected.logits,
@@ -841,7 +1027,7 @@ void test_gemma2_metal_resident_prefill_chunks_once_waits_once_and_matches_incre
 
     auto payload_store = tiny_gemma2_payload_store(true, 2);
     auto view = tiny_model_view(
-        tiny_gemma2_metadata(2, 1, 1, 256, 32),
+        tiny_gemma2_metadata(2, 2, 1, 256, 32),
         std::move(payload_store.payloads)
     );
     const auto model = load_engine_model_from_gguf(view);
@@ -1179,6 +1365,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "creates Gemma2 Metal schedules when available",
         test_creates_gemma2_metal_schedules_when_available,
+    },
+    {
+        "Gemma2 fused decode attention matches exact-shape CPU reference when available",
+        test_gemma2_fused_decode_attention_matches_exact_shape_cpu_reference_when_available,
     },
     {
         "Gemma2 Metal decode matches nonzero CPU reference when available",

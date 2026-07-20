@@ -22,6 +22,10 @@ struct MetalCommandStats {
     std::uint64_t gpu_duration_ns = 0;
 };
 
+[[nodiscard]] std::uint32_t gemma2_decode_attention_partition_count(
+    std::uint32_t attention_token_count
+) noexcept;
+
 // Owns one command buffer for a complete resident Gemma execution. Encoding operations
 // take explicit destinations so this context never allocates activation or
 // constant buffers in the token hot path.
@@ -112,6 +116,19 @@ public:
         std::uint32_t value_length,
         std::uint32_t attention_token_count,
         std::uint32_t query_row_count = 0
+    );
+    void encode_gemma2_decode_attention(
+        const BackendBuffer& query,
+        const BackendBuffer& key_cache,
+        const BackendBuffer& value_cache,
+        const BackendBuffer& output,
+        const BackendBuffer& partial_output,
+        const BackendBuffer& partial_maxima,
+        const BackendBuffer& partial_denominators,
+        std::uint32_t cache_position,
+        std::uint32_t attention_token_count,
+        float scale,
+        float logit_softcap
     );
     void encode_add(
         const BackendBuffer& left,

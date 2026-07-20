@@ -44,6 +44,10 @@ struct Gemma2MetalKVCacheLayer {
     tensor::BackendBuffer value;
 };
 
+inline constexpr std::uint32_t gemma2_decode_attention_max_partitions = 32U;
+inline constexpr std::uint32_t gemma2_decode_attention_query_heads = 16U;
+inline constexpr std::uint32_t gemma2_decode_attention_head_dimension = 256U;
+
 struct Gemma2MetalDecodeScratch {
     // The decode executor treats these buffers as a fixed liveness map. Raw
     // Q/K must not alias their RoPE destinations because paired lanes are read
@@ -53,8 +57,9 @@ struct Gemma2MetalDecodeScratch {
     tensor::BackendBuffer raw_query;
     tensor::BackendBuffer raw_key;
     tensor::BackendBuffer query;
-    tensor::BackendBuffer attention_scores;
-    tensor::BackendBuffer attention_probabilities;
+    tensor::BackendBuffer attention_partial_output;
+    tensor::BackendBuffer attention_partial_maxima;
+    tensor::BackendBuffer attention_partial_denominators;
     tensor::BackendBuffer attention_output;
     tensor::BackendBuffer projected_attention_output;
     tensor::BackendBuffer post_attention_residual;

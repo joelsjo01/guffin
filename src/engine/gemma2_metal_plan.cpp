@@ -178,12 +178,20 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
         .raw_query = allocate_buffer(f32_descriptor({1, attention_query_width(config)}), allocated_byte_count),
         .raw_key = allocate_buffer(f32_descriptor({1, attention_key_width(config)}), allocated_byte_count),
         .query = allocate_buffer(f32_descriptor({1, attention_query_width(config)}), allocated_byte_count),
-        .attention_scores = allocate_buffer(
-            f32_descriptor({1, config.attention_head_count, config.context_length}),
+        .attention_partial_output = allocate_buffer(
+            f32_descriptor({
+                gemma2_decode_attention_max_partitions,
+                gemma2_decode_attention_query_heads,
+                gemma2_decode_attention_head_dimension,
+            }),
             allocated_byte_count
         ),
-        .attention_probabilities = allocate_buffer(
-            f32_descriptor({1, config.attention_head_count, config.context_length}),
+        .attention_partial_maxima = allocate_buffer(
+            f32_descriptor({gemma2_decode_attention_max_partitions, gemma2_decode_attention_query_heads}),
+            allocated_byte_count
+        ),
+        .attention_partial_denominators = allocate_buffer(
+            f32_descriptor({gemma2_decode_attention_max_partitions, gemma2_decode_attention_query_heads}),
             allocated_byte_count
         ),
         .attention_output = allocate_buffer(f32_descriptor({1, attention_output_width(config)}), allocated_byte_count),

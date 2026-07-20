@@ -522,6 +522,23 @@ struct GroupedAttentionValueDimensions {
     uint query_position_start;
 };
 
+// Keep this layout byte-for-byte aligned with Gemma2DecodeAttentionDimensions
+// in metal_command_context.mm. The production specialization deliberately
+// carries the fixed shape as arguments so host validation and device indexing
+// cannot silently disagree.
+struct Gemma2DecodeAttentionDimensions {
+    uint cache_rows;
+    uint first_position;
+    uint attention_token_count;
+    uint partition_count;
+    uint query_head_count;
+    uint kv_head_count;
+    uint key_dimension;
+    uint value_dimension;
+    float scale;
+    float logit_softcap;
+};
+
 struct SoftmaxDimensions {
     uint rows;
     uint columns;
@@ -691,6 +708,199 @@ kernel void causal_grouped_attention_scores_f32_kernel(
 
     const float scaled = dot * dims.scale;
     output[output_index] = precise::tanh(scaled / dims.logit_softcap) * dims.logit_softcap;
+}
+
+// Each workgroup owns one KV head and both query heads that share it. Four
+// SIMD groups stream disjoint 32-token blocks; a lane owns eight adjacent head
+// elements as two float4 values. K/V therefore enter the shader once per
+// grouped pair, while both online-softmax states remain register resident.
+kernel void gemma2_decode_attention_f32_kernel(
+    const device float4* query [[buffer(0)]],
+    const device float4* key [[buffer(1)]],
+    const device float4* value [[buffer(2)]],
+    device float4* output [[buffer(3)]],
+    device float4* partial_output [[buffer(4)]],
+    device float* partial_maxima [[buffer(5)]],
+    device float* partial_denominators [[buffer(6)]],
+    constant Gemma2DecodeAttentionDimensions& dims [[buffer(7)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    ushort simd_group [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint kv_head = group.x;
+    const uint partition = group.y;
+    const uint first_query_head = kv_head * 2;
+    const uint second_query_head = first_query_head + 1;
+    const uint vector_lane = uint(lane) * 2;
+    const uint query_vectors_per_head = dims.key_dimension / 4;
+    const uint cache_vectors_per_row = dims.kv_head_count * query_vectors_per_head;
+
+    const float4 query_first_0 = query[first_query_head * query_vectors_per_head + vector_lane];
+    const float4 query_first_1 = query[first_query_head * query_vectors_per_head + vector_lane + 1];
+    const float4 query_second_0 = query[second_query_head * query_vectors_per_head + vector_lane];
+    const float4 query_second_1 = query[second_query_head * query_vectors_per_head + vector_lane + 1];
+
+    float maximum_first = -INFINITY;
+    float maximum_second = -INFINITY;
+    float denominator_first = 0.0f;
+    float denominator_second = 0.0f;
+    float4 accumulated_first_0 = 0.0f;
+    float4 accumulated_first_1 = 0.0f;
+    float4 accumulated_second_0 = 0.0f;
+    float4 accumulated_second_1 = 0.0f;
+
+    const uint first_block = partition * 4 + uint(simd_group);
+    const uint block_stride = dims.partition_count * 4;
+    const uint block_count = (dims.attention_token_count + 31) / 32;
+    for (uint block = first_block; block < block_count; block += block_stride) {
+        const uint token_begin = block * 32;
+        const uint token_end = min(token_begin + 32, dims.attention_token_count);
+        for (uint token = token_begin; token < token_end; ++token) {
+            const uint cache_row = dims.first_position + token;
+            const uint cache_vector = cache_row * cache_vectors_per_row
+                + kv_head * query_vectors_per_head + vector_lane;
+            const float4 key_0 = key[cache_vector];
+            const float4 key_1 = key[cache_vector + 1];
+            float score_first = dot(query_first_0, key_0) + dot(query_first_1, key_1);
+            float score_second = dot(query_second_0, key_0) + dot(query_second_1, key_1);
+            score_first = simd_sum(score_first);
+            score_second = simd_sum(score_second);
+            score_first = precise::tanh((score_first * dims.scale) / dims.logit_softcap)
+                * dims.logit_softcap;
+            score_second = precise::tanh((score_second * dims.scale) / dims.logit_softcap)
+                * dims.logit_softcap;
+
+            const float new_maximum_first = max(maximum_first, score_first);
+            const float new_maximum_second = max(maximum_second, score_second);
+            const float old_scale_first = denominator_first == 0.0f
+                ? 0.0f : exp(maximum_first - new_maximum_first);
+            const float old_scale_second = denominator_second == 0.0f
+                ? 0.0f : exp(maximum_second - new_maximum_second);
+            const float new_scale_first = exp(score_first - new_maximum_first);
+            const float new_scale_second = exp(score_second - new_maximum_second);
+            const float4 value_0 = value[cache_vector];
+            const float4 value_1 = value[cache_vector + 1];
+            accumulated_first_0 = accumulated_first_0 * old_scale_first + value_0 * new_scale_first;
+            accumulated_first_1 = accumulated_first_1 * old_scale_first + value_1 * new_scale_first;
+            accumulated_second_0 = accumulated_second_0 * old_scale_second + value_0 * new_scale_second;
+            accumulated_second_1 = accumulated_second_1 * old_scale_second + value_1 * new_scale_second;
+            denominator_first = denominator_first * old_scale_first + new_scale_first;
+            denominator_second = denominator_second * old_scale_second + new_scale_second;
+            maximum_first = new_maximum_first;
+            maximum_second = new_maximum_second;
+        }
+    }
+
+    threadgroup float4 shared_output[8 * 64];
+    threadgroup float shared_maxima[8];
+    threadgroup float shared_denominators[8];
+    const uint first_state = uint(simd_group) * 2;
+    const uint second_state = first_state + 1;
+    shared_output[first_state * 64 + vector_lane] = accumulated_first_0;
+    shared_output[first_state * 64 + vector_lane + 1] = accumulated_first_1;
+    shared_output[second_state * 64 + vector_lane] = accumulated_second_0;
+    shared_output[second_state * 64 + vector_lane + 1] = accumulated_second_1;
+    if (lane == 0) {
+        shared_maxima[first_state] = maximum_first;
+        shared_maxima[second_state] = maximum_second;
+        shared_denominators[first_state] = denominator_first;
+        shared_denominators[second_state] = denominator_second;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group != 0) return;
+    for (uint paired_head = 0; paired_head < 2; ++paired_head) {
+        float merged_maximum = -INFINITY;
+        float merged_denominator = 0.0f;
+        float4 merged_0 = 0.0f;
+        float4 merged_1 = 0.0f;
+        for (uint source_simd = 0; source_simd < 4; ++source_simd) {
+            const uint state = source_simd * 2 + paired_head;
+            const float source_denominator = shared_denominators[state];
+            if (source_denominator == 0.0f) continue;
+            const float source_maximum = shared_maxima[state];
+            const float4 source_0 = shared_output[state * 64 + vector_lane];
+            const float4 source_1 = shared_output[state * 64 + vector_lane + 1];
+            if (merged_denominator == 0.0f) {
+                merged_maximum = source_maximum;
+                merged_denominator = source_denominator;
+                merged_0 = source_0;
+                merged_1 = source_1;
+                continue;
+            }
+            const float new_maximum = max(merged_maximum, source_maximum);
+            const float old_scale = exp(merged_maximum - new_maximum);
+            const float source_scale = exp(source_maximum - new_maximum);
+            merged_0 = merged_0 * old_scale + source_0 * source_scale;
+            merged_1 = merged_1 * old_scale + source_1 * source_scale;
+            merged_denominator = merged_denominator * old_scale + source_denominator * source_scale;
+            merged_maximum = new_maximum;
+        }
+
+        const uint query_head = first_query_head + paired_head;
+        if (dims.partition_count == 1) {
+            const uint output_vector = query_head * query_vectors_per_head + vector_lane;
+            output[output_vector] = merged_0 / merged_denominator;
+            output[output_vector + 1] = merged_1 / merged_denominator;
+        } else {
+            const uint partial_vector =
+                (partition * dims.query_head_count + query_head) * query_vectors_per_head + vector_lane;
+            partial_output[partial_vector] = merged_0;
+            partial_output[partial_vector + 1] = merged_1;
+            if (lane == 0) {
+                const uint scalar = partition * dims.query_head_count + query_head;
+                partial_maxima[scalar] = merged_maximum;
+                partial_denominators[scalar] = merged_denominator;
+            }
+        }
+    }
+}
+
+kernel void gemma2_decode_attention_reduce_f32_kernel(
+    const device float4* partial_output [[buffer(0)]],
+    const device float* partial_maxima [[buffer(1)]],
+    const device float* partial_denominators [[buffer(2)]],
+    device float4* output [[buffer(3)]],
+    constant Gemma2DecodeAttentionDimensions& dims [[buffer(4)]],
+    uint kv_head [[threadgroup_position_in_grid]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint vectors_per_head = dims.value_dimension / 4;
+    const uint vector_lane = uint(lane) * 2;
+    const uint first_query_head = kv_head * 2;
+    for (uint paired_head = 0; paired_head < 2; ++paired_head) {
+        const uint query_head = first_query_head + paired_head;
+        float merged_maximum = -INFINITY;
+        float merged_denominator = 0.0f;
+        float4 merged_0 = 0.0f;
+        float4 merged_1 = 0.0f;
+        for (uint partition = 0; partition < dims.partition_count; ++partition) {
+            const uint scalar = partition * dims.query_head_count + query_head;
+            const float source_denominator = partial_denominators[scalar];
+            if (source_denominator == 0.0f) continue;
+            const uint source_vector = scalar * vectors_per_head + vector_lane;
+            const float source_maximum = partial_maxima[scalar];
+            const float4 source_0 = partial_output[source_vector];
+            const float4 source_1 = partial_output[source_vector + 1];
+            if (merged_denominator == 0.0f) {
+                merged_maximum = source_maximum;
+                merged_denominator = source_denominator;
+                merged_0 = source_0;
+                merged_1 = source_1;
+                continue;
+            }
+            const float new_maximum = max(merged_maximum, source_maximum);
+            const float old_scale = exp(merged_maximum - new_maximum);
+            const float source_scale = exp(source_maximum - new_maximum);
+            merged_0 = merged_0 * old_scale + source_0 * source_scale;
+            merged_1 = merged_1 * old_scale + source_1 * source_scale;
+            merged_denominator = merged_denominator * old_scale + source_denominator * source_scale;
+            merged_maximum = new_maximum;
+        }
+        const uint output_vector = query_head * vectors_per_head + vector_lane;
+        output[output_vector] = merged_0 / merged_denominator;
+        output[output_vector + 1] = merged_1 / merged_denominator;
+    }
 }
 
 kernel void causal_grouped_attention_values_f32_kernel(

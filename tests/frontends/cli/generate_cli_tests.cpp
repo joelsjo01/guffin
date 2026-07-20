@@ -590,7 +590,7 @@ std::vector<GGUFMetadataEntry> tiny_gemma2_generate_cli_metadata(std::uint32_t c
         metadata_u32("gemma2.embedding_length", 256),
         metadata_u32("gemma2.block_count", 1),
         metadata_u32("gemma2.feed_forward_length", 256),
-        metadata_u32("gemma2.attention.head_count", 1),
+        metadata_u32("gemma2.attention.head_count", 2),
         metadata_u32("gemma2.attention.head_count_kv", 1),
         metadata_u32("gemma2.attention.key_length", 256),
         metadata_u32("gemma2.attention.value_length", 256),
@@ -618,10 +618,10 @@ std::vector<TinyGGUFTensor> tiny_gemma2_generate_cli_tensors() {
     tensors.push_back(tiny_zero_tensor("output_norm.weight", {256}, DType::f32));
     tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_norm.weight"), {256}, DType::f32));
     tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "post_attention_norm.weight"), {256}, DType::f32));
-    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_q.weight"), {256, 256}, DType::q4_k));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_q.weight"), {256, 512}, DType::q4_k));
     tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_k.weight"), {256, 256}, DType::q4_k));
     tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_v.weight"), {256, 256}, DType::q6_k));
-    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_output.weight"), {256, 256}, DType::q4_k));
+    tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "attn_output.weight"), {512, 256}, DType::q4_k));
     tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "ffn_norm.weight"), {256}, DType::f32));
     tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "post_ffw_norm.weight"), {256}, DType::f32));
     tensors.push_back(tiny_zero_tensor(gemma2_block_tensor_name(0, "ffn_gate.weight"), {256, 256}, DType::q4_k));

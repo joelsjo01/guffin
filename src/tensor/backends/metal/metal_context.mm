@@ -381,6 +381,46 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    id<MTLFunction> gemma2_decode_attention_function =
+        [library newFunctionWithName:@"gemma2_decode_attention_f32_kernel"];
+    if (gemma2_decode_attention_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Gemma 2 decode attention kernel function was not found"
+        );
+    }
+    NSError* gemma2_decode_attention_pipeline_error = nil;
+    gemma2_decode_attention_pipeline =
+        [device newComputePipelineStateWithFunction:gemma2_decode_attention_function
+                                              error:&gemma2_decode_attention_pipeline_error];
+    if (gemma2_decode_attention_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Gemma 2 decode attention pipeline creation failed: "
+                + ns_error_message(gemma2_decode_attention_pipeline_error, "unknown error")
+        );
+    }
+
+    id<MTLFunction> gemma2_decode_attention_reduce_function =
+        [library newFunctionWithName:@"gemma2_decode_attention_reduce_f32_kernel"];
+    if (gemma2_decode_attention_reduce_function == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Gemma 2 decode attention reduction kernel function was not found"
+        );
+    }
+    NSError* gemma2_decode_attention_reduce_pipeline_error = nil;
+    gemma2_decode_attention_reduce_pipeline =
+        [device newComputePipelineStateWithFunction:gemma2_decode_attention_reduce_function
+                                              error:&gemma2_decode_attention_reduce_pipeline_error];
+    if (gemma2_decode_attention_reduce_pipeline == nil) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Gemma 2 decode attention reduction pipeline creation failed: "
+                + ns_error_message(gemma2_decode_attention_reduce_pipeline_error, "unknown error")
+        );
+    }
+
     id<MTLFunction> softmax_function = [library newFunctionWithName:@"softmax_f32_kernel"];
     if (softmax_function == nil) {
         throw metal_error(
