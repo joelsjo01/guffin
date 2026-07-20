@@ -101,48 +101,83 @@ inline uint q4_k_scale_min_value(
     return uint(low_source & 0x0f) | high_bits;
 }
 
-inline float q4_k_value(const device uchar* block, uint element_index) {
-    const float d = f16_bits_to_float(read_little_endian_u16(block, 0));
-    const float dmin = f16_bits_to_float(read_little_endian_u16(block, 2));
-    const device uchar* scale_min = block + 4;
-    const device uchar* quantized = block + 16;
-
-    const uint group_index = element_index / 32;
-    const uint super_group_base = (element_index / 64) * 32;
-    const uint index_in_super_group = element_index % 64;
-    const uchar packed = quantized[super_group_base + (index_in_super_group % 32)];
-    const uint shift = index_in_super_group < 32 ? 0 : 4;
-    const uint nibble = uint((packed >> shift) & 0x0f);
-
-    return d * float(q4_k_scale_min_value(scale_min, group_index, false)) * float(nibble)
-        - dmin * float(q4_k_scale_min_value(scale_min, group_index, true));
-}
-
-// GGUF/GGML projection weights are shaped [input_width, output_columns], while
-// packed K-quant blocks are stored contiguously per output column.
-kernel void matmul_f32_q4_k_gguf_weight_kernel(
+// One SIMD group owns one output column. Each lane decodes eight values from a
+// native 256-value block once, then reuses them across a compile-time row tile.
+// Four SIMD groups provide enough independent columns for occupancy without
+// duplicating packed-weight reads between activation rows.
+template <ushort row_tile>
+inline void matmul_f32_q4_k_rows(
     const device float* left [[buffer(0)]],
     const device uchar* right [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant MatmulDimensions& dims [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]
+    uint2 threadgroup_index,
+    ushort simdgroup_index,
+    ushort lane
 ) {
-    const uint column = gid.x;
-    const uint row = gid.y;
-    if (row >= dims.rows || column >= dims.columns) {
-        return;
-    }
-
+    const uint column = threadgroup_index.x * 4 + uint(simdgroup_index);
+    const uint first_row = threadgroup_index.y * uint(row_tile);
     const uint blocks_per_column = dims.shared / 256;
-    float sum = 0.0f;
-    for (uint inner = 0; inner < dims.shared; ++inner) {
-        const uint block_index = column * blocks_per_column + (inner / 256);
-        const device uchar* block = right + block_index * 144;
-        sum += left[row * dims.shared + inner] * q4_k_value(block, inner % 256);
+    float sums[row_tile];
+    for (ushort row = 0; row < row_tile; ++row) {
+        sums[row] = 0.0f;
     }
 
-    output[row * dims.columns + column] = sum;
+    if (column < dims.columns) {
+        for (uint column_block = 0; column_block < blocks_per_column; ++column_block) {
+            const device uchar* block = right + (column * blocks_per_column + column_block) * 144;
+            const float d = f16_bits_to_float(read_little_endian_u16(block, 0));
+            const float dmin = f16_bits_to_float(read_little_endian_u16(block, 2));
+            const device uchar* scale_min = block + 4;
+            const device uchar* quantized = block + 16;
+
+            for (uint group = 0; group < 8; ++group) {
+                const uint inner = column_block * 256 + group * 32 + uint(lane);
+                const uint packed_index = (group >> 1) * 32 + uint(lane);
+                const uint shift = (group & 1) * 4;
+                const float quantized_value = float((quantized[packed_index] >> shift) & 0x0f);
+                const float weight = d
+                        * float(q4_k_scale_min_value(scale_min, group, false))
+                        * quantized_value
+                    - dmin * float(q4_k_scale_min_value(scale_min, group, true));
+                for (ushort row = 0; row < row_tile; ++row) {
+                    const uint output_row = first_row + uint(row);
+                    if (output_row < dims.rows) {
+                        sums[row] += left[output_row * dims.shared + inner] * weight;
+                    }
+                }
+            }
+        }
+    }
+
+    for (ushort row = 0; row < row_tile; ++row) {
+        sums[row] = simd_sum(sums[row]);
+        const uint output_row = first_row + uint(row);
+        if (lane == 0 && column < dims.columns && output_row < dims.rows) {
+            output[output_row * dims.columns + column] = sums[row];
+        }
+    }
 }
+
+#define DEFINE_Q4_K_ROW_KERNEL(rows) \
+kernel void matmul_f32_q4_k_rows_##rows##_kernel( \
+    const device float* left [[buffer(0)]], \
+    const device uchar* right [[buffer(1)]], \
+    device float* output [[buffer(2)]], \
+    constant MatmulDimensions& dims [[buffer(3)]], \
+    uint2 threadgroup_index [[threadgroup_position_in_grid]], \
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]], \
+    ushort lane [[thread_index_in_simdgroup]] \
+) { \
+    matmul_f32_q4_k_rows<rows>( \
+        left, right, output, dims, threadgroup_index, simdgroup_index, lane \
+    ); \
+}
+
+DEFINE_Q4_K_ROW_KERNEL(2)
+DEFINE_Q4_K_ROW_KERNEL(4)
+DEFINE_Q4_K_ROW_KERNEL(8)
+DEFINE_Q4_K_ROW_KERNEL(16)
 
 // Decode has a single activation row. Four 8-lane subgroups divide four
 // packed blocks while the full SIMD group reduces their independent partial
@@ -236,53 +271,85 @@ inline int signed_i8(uchar value) {
     return value >= 128 ? int(value) - 256 : int(value);
 }
 
-inline float q6_k_value(const device uchar* block, uint element_index) {
-    const device uchar* low_bits = block;
-    const device uchar* high_bits = block + 128;
-    const device uchar* scales = block + 192;
-    const float d = f16_bits_to_float(read_little_endian_u16(block, 208));
-
-    const uint half_block_index = element_index / 128;
-    const uint index_in_half_block = element_index % 128;
-    const uint lane_index = index_in_half_block % 32;
-    const uint low_base = half_block_index * 64;
-    const uint low_plane_offset = ((index_in_half_block / 32) % 2) * 32;
-    const uint low_shift = index_in_half_block < 64 ? 0 : 4;
-    const uint low = uint((low_bits[low_base + low_plane_offset + lane_index] >> low_shift) & 0x0f);
-
-    const uint high_base = half_block_index * 32;
-    const uint high_shift = (index_in_half_block / 32) * 2;
-    const uint high = uint((high_bits[high_base + lane_index] >> high_shift) & 0x03);
-    const int quantized = int(low | (high << 4)) - 32;
-    const int scale = signed_i8(scales[element_index / 16]);
-
-    return d * float(scale) * float(quantized);
-}
-
-// Keep this separate from Q4_K: the block sizes and bit-plane layout differ.
-kernel void matmul_f32_q6_k_gguf_weight_kernel(
+// Q6_K uses the same row-reuse ownership as Q4_K but retains its native
+// interleaved low/high bit planes and signed per-16-value scales.
+template <ushort row_tile>
+inline void matmul_f32_q6_k_rows(
     const device float* left [[buffer(0)]],
     const device uchar* right [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant MatmulDimensions& dims [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]
+    uint2 threadgroup_index,
+    ushort simdgroup_index,
+    ushort lane
 ) {
-    const uint column = gid.x;
-    const uint row = gid.y;
-    if (row >= dims.rows || column >= dims.columns) {
-        return;
-    }
-
+    const uint column = threadgroup_index.x * 4 + uint(simdgroup_index);
+    const uint first_row = threadgroup_index.y * uint(row_tile);
     const uint blocks_per_column = dims.shared / 256;
-    float sum = 0.0f;
-    for (uint inner = 0; inner < dims.shared; ++inner) {
-        const uint block_index = column * blocks_per_column + (inner / 256);
-        const device uchar* block = right + block_index * 210;
-        sum += left[row * dims.shared + inner] * q6_k_value(block, inner % 256);
+    float sums[row_tile];
+    for (ushort row = 0; row < row_tile; ++row) {
+        sums[row] = 0.0f;
     }
 
-    output[row * dims.columns + column] = sum;
+    if (column < dims.columns) {
+        for (uint column_block = 0; column_block < blocks_per_column; ++column_block) {
+            const device uchar* block = right + (column * blocks_per_column + column_block) * 210;
+            const device uchar* low_bits = block;
+            const device uchar* high_bits = block + 128;
+            const device uchar* scales = block + 192;
+            const float d = f16_bits_to_float(read_little_endian_u16(block, 208));
+
+            for (uint group = 0; group < 8; ++group) {
+                const uint half_block = group >> 2;
+                const uint group_in_half = group & 3;
+                const uint low_index = half_block * 64 + (group_in_half & 1) * 32 + uint(lane);
+                const uint low_shift = group_in_half < 2 ? 0 : 4;
+                const uint low = uint((low_bits[low_index] >> low_shift) & 0x0f);
+                const uint high_index = half_block * 32 + uint(lane);
+                const uint high_shift = group_in_half * 2;
+                const uint high = uint((high_bits[high_index] >> high_shift) & 0x03);
+                const int quantized = int(low | (high << 4)) - 32;
+                const int scale = signed_i8(scales[group * 2 + uint(lane) / 16]);
+                const float weight = d * float(scale * quantized);
+                const uint inner = column_block * 256 + group * 32 + uint(lane);
+                for (ushort row = 0; row < row_tile; ++row) {
+                    const uint output_row = first_row + uint(row);
+                    if (output_row < dims.rows) {
+                        sums[row] += left[output_row * dims.shared + inner] * weight;
+                    }
+                }
+            }
+        }
+    }
+
+    for (ushort row = 0; row < row_tile; ++row) {
+        sums[row] = simd_sum(sums[row]);
+        const uint output_row = first_row + uint(row);
+        if (lane == 0 && column < dims.columns && output_row < dims.rows) {
+            output[output_row * dims.columns + column] = sums[row];
+        }
+    }
 }
+
+#define DEFINE_Q6_K_ROW_KERNEL(rows) \
+kernel void matmul_f32_q6_k_rows_##rows##_kernel( \
+    const device float* left [[buffer(0)]], \
+    const device uchar* right [[buffer(1)]], \
+    device float* output [[buffer(2)]], \
+    constant MatmulDimensions& dims [[buffer(3)]], \
+    uint2 threadgroup_index [[threadgroup_position_in_grid]], \
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]], \
+    ushort lane [[thread_index_in_simdgroup]] \
+) { \
+    matmul_f32_q6_k_rows<rows>( \
+        left, right, output, dims, threadgroup_index, simdgroup_index, lane \
+    ); \
+}
+
+DEFINE_Q6_K_ROW_KERNEL(2)
+DEFINE_Q6_K_ROW_KERNEL(4)
+DEFINE_Q6_K_ROW_KERNEL(8)
+DEFINE_Q6_K_ROW_KERNEL(16)
 
 // Q6_K uses two interleaved bit planes, so pairs of SIMD lanes walk two
 // blocks concurrently. Sixteen lanes cover one block while activations are

@@ -1,10 +1,12 @@
 #pragma once
 
 #include "local_gguf_engine/runtime/backend_error.hpp"
+#include "local_gguf_engine/tensor/dtype.hpp"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <cstdint>
 #include <string>
 
 namespace local_gguf_engine::tensor::backends::metal {
@@ -13,10 +15,16 @@ struct MatmulPipelineState {
     id<MTLDevice> device = nil;
     id<MTLComputePipelineState> matmul_pipeline = nil;
     id<MTLComputePipelineState> embedding_pipeline = nil;
-    id<MTLComputePipelineState> matmul_q4_k_pipeline = nil;
     id<MTLComputePipelineState> matvec_q4_k_pipeline = nil;
-    id<MTLComputePipelineState> matmul_q6_k_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q4_k_rows_2_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q4_k_rows_4_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q4_k_rows_8_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q4_k_rows_16_pipeline = nil;
     id<MTLComputePipelineState> matvec_q6_k_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q6_k_rows_2_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q6_k_rows_4_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q6_k_rows_8_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q6_k_rows_16_pipeline = nil;
     id<MTLComputePipelineState> matmul_add_pipeline = nil;
     id<MTLComputePipelineState> silu_multiply_pipeline = nil;
     id<MTLComputePipelineState> gelu_tanh_multiply_pipeline = nil;
@@ -38,6 +46,12 @@ struct MatmulPipelineState {
     MatmulPipelineState();
 };
 
+struct QuantizedMatmulDispatch {
+    id<MTLComputePipelineState> pipeline = nil;
+    MTLSize threadgroups = MTLSizeMake(0, 0, 0);
+    MTLSize threads_per_threadgroup = MTLSizeMake(0, 0, 0);
+};
+
 [[nodiscard]] const char* metal_kernel_source() noexcept;
 [[nodiscard]] std::string ns_error_message(NSError* error, const char* fallback);
 [[nodiscard]] runtime::BackendError metal_error(
@@ -46,5 +60,12 @@ struct MatmulPipelineState {
 );
 [[nodiscard]] id<MTLDevice> metal_device_or_throw();
 [[nodiscard]] MatmulPipelineState& shared_matmul_pipeline_state();
+[[nodiscard]] QuantizedMatmulDispatch select_quantized_matmul_dispatch(
+    MatmulPipelineState& state,
+    DType dtype,
+    std::uint64_t rows,
+    std::uint64_t shared,
+    std::uint64_t columns
+);
 
 }  // namespace local_gguf_engine::tensor::backends::metal

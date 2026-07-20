@@ -1068,7 +1068,10 @@ void test_gemma2_metal_resident_prefill_chunks_once_waits_once_and_matches_incre
     const auto model = load_engine_model_from_gguf(view);
     auto chunked_plan = create_gemma2_metal_model_plan(model);
     auto incremental_plan = create_gemma2_metal_model_plan(model);
-    std::vector<std::uint32_t> prompt_token_ids(17);
+    // A full 16-row chunk followed by seven rows crosses the matrix and
+    // small-batch projection tiers. The separate decode parity test covers the
+    // retained one-row cooperative matvec.
+    std::vector<std::uint32_t> prompt_token_ids(23);
     for (std::size_t index = 0; index < prompt_token_ids.size(); ++index) {
         prompt_token_ids[index] = static_cast<std::uint32_t>(index % 4U);
     }
@@ -1092,7 +1095,7 @@ void test_gemma2_metal_resident_prefill_chunks_once_waits_once_and_matches_incre
     );
     const auto last = run_gemma2_metal_resident_prefill(
         incremental_plan,
-        std::span<const std::uint32_t>(prompt_token_ids).last(1),
+        std::span<const std::uint32_t>(prompt_token_ids).last(7),
         16,
         embedding_scale,
         true

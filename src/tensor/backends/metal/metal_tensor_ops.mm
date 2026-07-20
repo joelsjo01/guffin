@@ -306,28 +306,6 @@ void require_grouped_attention_value_layout(
     }
 }
 
-id<MTLComputePipelineState> quantized_matmul_pipeline(
-    MatmulPipelineState& state,
-    DType dtype
-) {
-    switch (dtype) {
-        case DType::q4_k:
-            return state.matmul_q4_k_pipeline;
-        case DType::q6_k:
-            return state.matmul_q6_k_pipeline;
-        case DType::f32:
-        case DType::f16:
-        case DType::q8_0:
-            break;
-    }
-
-    throw TensorError(
-        TensorErrorCode::unsupported_operator_dtype,
-        static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::q4_k)),
-        static_cast<std::uint64_t>(static_cast<std::uint8_t>(dtype))
-    );
-}
-
 }  // namespace
 
 std::uint32_t require_u32_dimension(std::uint64_t value, const char* name) {
@@ -1600,39 +1578,17 @@ BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
         );
     }
 
-    const bool use_q4_decode_matvec =
-        rows == 1
-        && right.descriptor().dtype == DType::q4_k
-        && shared % 256 == 0
-        && state.matvec_q4_k_pipeline.threadExecutionWidth == 32
-        && state.matvec_q4_k_pipeline.maxTotalThreadsPerThreadgroup >= 64;
-    const bool use_q6_decode_matvec =
-        rows == 1
-        && right.descriptor().dtype == DType::q6_k
-        && shared % 256 == 0
-        && state.matvec_q6_k_pipeline.threadExecutionWidth == 32
-        && state.matvec_q6_k_pipeline.maxTotalThreadsPerThreadgroup >= 64;
-    id<MTLComputePipelineState> pipeline = quantized_matmul_pipeline(state, right.descriptor().dtype);
-    if (use_q4_decode_matvec) {
-        pipeline = state.matvec_q4_k_pipeline;
-    } else if (use_q6_decode_matvec) {
-        pipeline = state.matvec_q6_k_pipeline;
-    }
-    [encoder setComputePipelineState:pipeline];
+    const auto dispatch = select_quantized_matmul_dispatch(
+        state, right.descriptor().dtype, rows, shared, columns
+    );
+    [encoder setComputePipelineState:dispatch.pipeline];
     [encoder setBuffer:left.buffer() offset:0 atIndex:0];
     [encoder setBuffer:right.buffer() offset:0 atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
-    const bool use_decode_matvec = use_q4_decode_matvec || use_q6_decode_matvec;
-    const MTLSize threads_per_threadgroup =
-        use_decode_matvec ? MTLSizeMake(64, 1, 1) : MTLSizeMake(16, 16, 1);
-    const auto threadgroup_columns = static_cast<NSUInteger>(
-        use_decode_matvec ? (columns + 3U) / 4U : (columns + 15U) / 16U
-    );
-    const auto threadgroup_rows = static_cast<NSUInteger>(use_decode_matvec ? 1U : (rows + 15U) / 16U);
-    const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
-    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder dispatchThreadgroups:dispatch.threadgroups
+              threadsPerThreadgroup:dispatch.threads_per_threadgroup];
     [encoder endEncoding];
     [command_buffer commit];
     [command_buffer waitUntilCompleted];

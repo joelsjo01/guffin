@@ -1,5 +1,7 @@
 #include "metal_context.hpp"
 
+#include <stdexcept>
+
 namespace local_gguf_engine::tensor::backends::metal {
 
 std::string ns_error_message(NSError* error, const char* fallback) {
@@ -89,25 +91,35 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
-    id<MTLFunction> matmul_q4_k_function =
-        [library newFunctionWithName:@"matmul_f32_q4_k_gguf_weight_kernel"];
-    if (matmul_q4_k_function == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal Q4_K matmul kernel function was not found"
-        );
-    }
+    auto make_pipeline = [&](NSString* function_name, const char* description) {
+        id<MTLFunction> function = [library newFunctionWithName:function_name];
+        if (function == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + description + " kernel function was not found"
+            );
+        }
+        NSError* error = nil;
+        id<MTLComputePipelineState> pipeline =
+            [device newComputePipelineStateWithFunction:function error:&error];
+        if (pipeline == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + description + " pipeline creation failed: "
+                    + ns_error_message(error, "unknown error")
+            );
+        }
+        return pipeline;
+    };
 
-    NSError* matmul_q4_k_pipeline_error = nil;
-    matmul_q4_k_pipeline = [device newComputePipelineStateWithFunction:matmul_q4_k_function
-                                                                  error:&matmul_q4_k_pipeline_error];
-    if (matmul_q4_k_pipeline == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal Q4_K matmul pipeline creation failed: "
-                + ns_error_message(matmul_q4_k_pipeline_error, "unknown error")
-        );
-    }
+    matmul_q4_k_rows_2_pipeline =
+        make_pipeline(@"matmul_f32_q4_k_rows_2_kernel", "Q4_K two-row matmul");
+    matmul_q4_k_rows_4_pipeline =
+        make_pipeline(@"matmul_f32_q4_k_rows_4_kernel", "Q4_K four-row matmul");
+    matmul_q4_k_rows_8_pipeline =
+        make_pipeline(@"matmul_f32_q4_k_rows_8_kernel", "Q4_K eight-row matmul");
+    matmul_q4_k_rows_16_pipeline =
+        make_pipeline(@"matmul_f32_q4_k_rows_16_kernel", "Q4_K sixteen-row matmul");
 
     id<MTLFunction> matvec_q4_k_function =
         [library newFunctionWithName:@"matvec_f32_q4_k_gguf_weight_kernel"];
@@ -129,25 +141,14 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
-    id<MTLFunction> matmul_q6_k_function =
-        [library newFunctionWithName:@"matmul_f32_q6_k_gguf_weight_kernel"];
-    if (matmul_q6_k_function == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal Q6_K matmul kernel function was not found"
-        );
-    }
-
-    NSError* matmul_q6_k_pipeline_error = nil;
-    matmul_q6_k_pipeline = [device newComputePipelineStateWithFunction:matmul_q6_k_function
-                                                                  error:&matmul_q6_k_pipeline_error];
-    if (matmul_q6_k_pipeline == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal Q6_K matmul pipeline creation failed: "
-                + ns_error_message(matmul_q6_k_pipeline_error, "unknown error")
-        );
-    }
+    matmul_q6_k_rows_2_pipeline =
+        make_pipeline(@"matmul_f32_q6_k_rows_2_kernel", "Q6_K two-row matmul");
+    matmul_q6_k_rows_4_pipeline =
+        make_pipeline(@"matmul_f32_q6_k_rows_4_kernel", "Q6_K four-row matmul");
+    matmul_q6_k_rows_8_pipeline =
+        make_pipeline(@"matmul_f32_q6_k_rows_8_kernel", "Q6_K eight-row matmul");
+    matmul_q6_k_rows_16_pipeline =
+        make_pipeline(@"matmul_f32_q6_k_rows_16_kernel", "Q6_K sixteen-row matmul");
 
     id<MTLFunction> matvec_q6_k_function =
         [library newFunctionWithName:@"matvec_f32_q6_k_gguf_weight_kernel"];
@@ -489,6 +490,69 @@ MatmulPipelineState::MatmulPipelineState() {
 MatmulPipelineState& shared_matmul_pipeline_state() {
     static MatmulPipelineState state;
     return state;
+}
+
+QuantizedMatmulDispatch select_quantized_matmul_dispatch(
+    MatmulPipelineState& state,
+    DType dtype,
+    std::uint64_t rows,
+    std::uint64_t shared,
+    std::uint64_t columns
+) {
+    if (dtype != DType::q4_k && dtype != DType::q6_k) {
+        throw std::invalid_argument("Metal K-quant matmul weight dtype is unsupported");
+    }
+    if (rows == 0 || shared == 0 || columns == 0 || shared % 256 != 0) {
+        throw std::invalid_argument("Metal K-quant matmul dimensions are unsupported");
+    }
+
+    id<MTLComputePipelineState> pipeline = nil;
+    std::uint64_t row_tile = 1;
+    std::uint64_t threads = 64;
+    if (rows == 1) {
+        pipeline = dtype == DType::q4_k ? state.matvec_q4_k_pipeline : state.matvec_q6_k_pipeline;
+    } else {
+        threads = 128;
+        if (rows <= 2) {
+            row_tile = 2;
+            pipeline = dtype == DType::q4_k
+                ? state.matmul_q4_k_rows_2_pipeline
+                : state.matmul_q6_k_rows_2_pipeline;
+        } else if (rows <= 4) {
+            row_tile = 4;
+            pipeline = dtype == DType::q4_k
+                ? state.matmul_q4_k_rows_4_pipeline
+                : state.matmul_q6_k_rows_4_pipeline;
+        } else if (rows <= 8) {
+            row_tile = 8;
+            pipeline = dtype == DType::q4_k
+                ? state.matmul_q4_k_rows_8_pipeline
+                : state.matmul_q6_k_rows_8_pipeline;
+        } else {
+            row_tile = 16;
+            pipeline = dtype == DType::q4_k
+                ? state.matmul_q4_k_rows_16_pipeline
+                : state.matmul_q6_k_rows_16_pipeline;
+        }
+    }
+
+    if (pipeline == nil || pipeline.threadExecutionWidth != 32
+        || pipeline.maxTotalThreadsPerThreadgroup < threads) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal K-quant matmul requires 32-lane SIMD groups and its selected threadgroup size"
+        );
+    }
+
+    return QuantizedMatmulDispatch {
+        .pipeline = pipeline,
+        .threadgroups = MTLSizeMake(
+            static_cast<NSUInteger>((columns + 3) / 4),
+            static_cast<NSUInteger>((rows + row_tile - 1) / row_tile),
+            1
+        ),
+        .threads_per_threadgroup = MTLSizeMake(static_cast<NSUInteger>(threads), 1, 1),
+    };
 }
 
 }  // namespace local_gguf_engine::tensor::backends::metal

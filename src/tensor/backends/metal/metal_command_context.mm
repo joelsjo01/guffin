@@ -134,10 +134,6 @@ void require_capacity(const BackendBuffer& buffer, std::uint64_t bytes, const ch
     switch (dtype) {
         case DType::f16:
             return state.matmul_pipeline;
-        case DType::q4_k:
-            return state.matmul_q4_k_pipeline;
-        case DType::q6_k:
-            return state.matmul_q6_k_pipeline;
         default:
             throw std::invalid_argument("Metal resident execution matmul weight dtype is unsupported");
     }
@@ -315,39 +311,26 @@ void MetalCommandContext::encode_matmul(
         .columns = u32(columns, "matmul columns"),
     };
     auto encoder = impl_->compute_encoder("Gemma2 matmul");
-    const bool use_q4_decode_matvec =
-        rows == 1
-        && weight.descriptor().dtype == DType::q4_k
-        && shared % 256 == 0
-        && impl_->state->matvec_q4_k_pipeline.threadExecutionWidth == 32
-        && impl_->state->matvec_q4_k_pipeline.maxTotalThreadsPerThreadgroup >= 64;
-    const bool use_q6_decode_matvec =
-        rows == 1
-        && weight.descriptor().dtype == DType::q6_k
-        && shared % 256 == 0
-        && impl_->state->matvec_q6_k_pipeline.threadExecutionWidth == 32
-        && impl_->state->matvec_q6_k_pipeline.maxTotalThreadsPerThreadgroup >= 64;
-    id<MTLComputePipelineState> pipeline = matmul_pipeline(*impl_->state, weight.descriptor().dtype);
-    if (use_q4_decode_matvec) {
-        pipeline = impl_->state->matvec_q4_k_pipeline;
-    } else if (use_q6_decode_matvec) {
-        pipeline = impl_->state->matvec_q6_k_pipeline;
+    const bool quantized = weight.descriptor().dtype == DType::q4_k
+        || weight.descriptor().dtype == DType::q6_k;
+    QuantizedMatmulDispatch quantized_dispatch;
+    id<MTLComputePipelineState> pipeline = nil;
+    if (quantized) {
+        quantized_dispatch = select_quantized_matmul_dispatch(
+            *impl_->state, weight.descriptor().dtype, rows, shared, columns
+        );
+        pipeline = quantized_dispatch.pipeline;
+    } else {
+        pipeline = matmul_pipeline(*impl_->state, weight.descriptor().dtype);
     }
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
     [encoder setBuffer:storage(weight).buffer() offset:0 atIndex:1];
     [encoder setBuffer:storage(output).buffer() offset:static_cast<NSUInteger>(output_byte_offset) atIndex:2];
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
-    if (use_q4_decode_matvec || use_q6_decode_matvec) {
-        constexpr std::uint64_t outputs_per_threadgroup = 4;
-        [encoder dispatchThreadgroups:MTLSizeMake(
-                                          static_cast<NSUInteger>(
-                                              (columns + outputs_per_threadgroup - 1) / outputs_per_threadgroup
-                                          ),
-                                          1,
-                                          1
-                                      )
-                  threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    if (quantized) {
+        [encoder dispatchThreadgroups:quantized_dispatch.threadgroups
+                  threadsPerThreadgroup:quantized_dispatch.threads_per_threadgroup];
     } else {
         [encoder dispatchThreadgroups:MTLSizeMake(
                                           static_cast<NSUInteger>((columns + 15U) / 16U),

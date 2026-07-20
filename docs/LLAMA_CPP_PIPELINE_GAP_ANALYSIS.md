@@ -122,7 +122,7 @@ current three-pass operators remain live and tested.
 prefill projection strategy is fixed. Preserve alternating global/sliding
 attention semantics.
 
-### 3. Reduction kernels are serial and small ops are not fused
+### 3. commpleted: Reduction kernels are serial and small ops are not fused
 
 The local RMSNorm kernel assigns one GPU thread to a row. That thread loops over
 the entire hidden width to compute the sum, then loops over it again to write

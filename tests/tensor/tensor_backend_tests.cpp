@@ -946,22 +946,98 @@ void test_reuses_metal_f32_by_f16_gguf_weight_matmul_state() {
     }
 }
 
-void test_matches_cpu_f32_by_q4_k_gguf_weight_matmul_on_metal_backend() {
+void expect_f32_matrix_close_absolute_relative(
+    const TensorStorage& actual,
+    const TensorStorage& expected,
+    float absolute_tolerance,
+    float relative_tolerance,
+    std::string_view message
+) {
+    expect(actual.descriptor() == expected.descriptor(), std::string(message) + " descriptor mismatch");
+    const auto rows = actual.descriptor().shape.dimension(0);
+    const auto columns = actual.descriptor().shape.dimension(1);
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            const std::array<std::uint64_t, 2> index {row, column};
+            const auto actual_value = read_f32(actual, std::span<const std::uint64_t>(index));
+            const auto expected_value = read_f32(expected, std::span<const std::uint64_t>(index));
+            const auto tolerance = absolute_tolerance + relative_tolerance * std::fabs(expected_value);
+            expect_close(actual_value, expected_value, tolerance, message);
+        }
+    }
+}
+
+void test_matches_independent_q4_k_and_q6_k_multi_row_projection_on_metal() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
 
-    constexpr std::uint64_t rows = 2;
-    constexpr std::uint64_t shared = 512;
-    constexpr std::uint64_t columns = 256;
-    const auto left_values = tensor_f32_projection_values(rows, shared);
-    const auto left = tensor_f32_matrix(rows, shared, std::span<const float>(left_values));
-    const auto right = tensor_q4_k_gguf_weight_matrix(shared, columns);
+    struct ProjectionCase {
+        std::uint64_t rows;
+        std::uint64_t packed_blocks;
+        std::uint64_t columns;
+    };
+    // Pair the selector boundaries with every production K block count and
+    // tails around the four-column SIMD-group tile. Together the cases cover
+    // all row tiers without turning the independent scalar oracle into a
+    // combinatorial performance test.
+    constexpr std::array<ProjectionCase, 8> cases {{
+        {2, 1, 1},
+        {3, 14, 3},
+        {4, 16, 4},
+        {7, 56, 5},
+        {8, 1, 5},
+        {9, 14, 1},
+        {15, 16, 3},
+        {16, 56, 4},
+    }};
 
-    const auto cpu_output = matmul_f32_quantized_gguf_weight(left, right, BackendKind::cpu);
-    const auto metal_output = matmul_f32_quantized_gguf_weight(left, right, BackendKind::metal);
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        for (const auto& test_case : cases) {
+            const auto shared = test_case.packed_blocks * 256U;
+            auto left_values = tensor_f32_projection_values(test_case.rows, shared);
+            for (std::size_t index = 0; index < left_values.size(); ++index) {
+                if (index % 17U == 0U) {
+                    left_values[index] *= 16.0F;
+                } else if (index % 13U == 0U) {
+                    left_values[index] *= 0.03125F;
+                }
+            }
+            const auto left = tensor_f32_matrix(
+                test_case.rows, shared, std::span<const float>(left_values)
+            );
+            const auto right = dtype == DType::q4_k
+                ? tensor_q4_k_stress_gguf_weight_matrix(shared, test_case.columns, test_case.rows)
+                : tensor_q6_k_stress_gguf_weight_matrix(shared, test_case.columns, test_case.rows);
+            const auto expected = reference_f32_quantized_gguf_weight_matmul(left, right);
 
-    expect_f32_matrix_close(metal_output, cpu_output, 1.0e-3F, "Metal Q4_K GGUF matmul output");
+            const auto tensor_output = matmul_f32_quantized_gguf_weight(
+                left, right, BackendKind::metal
+            );
+            const auto backend_output = copy_tensor_from_backend(
+                matmul_f32_quantized_gguf_weight_to_backend(
+                    copy_tensor_to_backend(left, BackendKind::metal),
+                    copy_tensor_to_backend(right, BackendKind::metal)
+                )
+            );
+            const auto absolute_tolerance = dtype == DType::q4_k ? 0.05F : 0.1F;
+            constexpr float relative_tolerance = 1.0e-5F;
+            expect_f32_matrix_close_absolute_relative(
+                tensor_output,
+                expected,
+                absolute_tolerance,
+                relative_tolerance,
+                "Metal TensorStorage K-quant multi-row projection parity"
+            );
+            expect_f32_matrix_close_absolute_relative(
+                backend_output,
+                expected,
+                absolute_tolerance,
+                relative_tolerance,
+                "Metal backend-buffer K-quant multi-row projection parity"
+            );
+        }
+    }
 }
 
 void test_matches_cpu_q4_k_decode_matvec_for_packed_block_counts_and_output_tail_on_metal() {
@@ -990,50 +1066,6 @@ void test_matches_cpu_q4_k_decode_matvec_for_packed_block_counts_and_output_tail
         );
     }
 }
-void test_multiplies_backend_f32_by_backend_q4_k_gguf_weight_to_metal_backend_when_available() {
-    if (!tensor_backend_is_available(BackendKind::metal)) {
-        return;
-    }
-
-    constexpr std::uint64_t rows = 2;
-    constexpr std::uint64_t shared = 512;
-    constexpr std::uint64_t columns = 256;
-    const auto left_values = tensor_f32_projection_values(rows, shared);
-    const auto left = tensor_f32_matrix(rows, shared, std::span<const float>(left_values));
-    const auto right = tensor_q4_k_gguf_weight_matrix(shared, columns);
-    const auto left_buffer = copy_tensor_to_backend(left, BackendKind::metal);
-    const auto right_buffer = copy_tensor_to_backend(right, BackendKind::metal);
-
-    const auto output_buffer = matmul_f32_quantized_gguf_weight_to_backend(left_buffer, right_buffer);
-    const auto output = copy_tensor_from_backend(output_buffer);
-    const auto expected = matmul_f32_quantized_gguf_weight(left, right, BackendKind::cpu);
-
-    expect(output_buffer.backend() == BackendKind::metal, "Metal Q4_K backend-buffer matmul output backend mismatch");
-    expect_f32_matrix_close(output, expected, 1.0e-3F, "Metal backend-buffer Q4_K GGUF matmul output");
-}
-
-void test_multiplies_backend_f32_by_backend_q6_k_gguf_weight_to_metal_backend_when_available() {
-    if (!tensor_backend_is_available(BackendKind::metal)) {
-        return;
-    }
-
-    constexpr std::uint64_t rows = 2;
-    constexpr std::uint64_t shared = 512;
-    constexpr std::uint64_t columns = 256;
-    const auto left_values = tensor_f32_projection_values(rows, shared);
-    const auto left = tensor_f32_matrix(rows, shared, std::span<const float>(left_values));
-    const auto right = tensor_q6_k_gguf_weight_matrix(shared, columns);
-    const auto left_buffer = copy_tensor_to_backend(left, BackendKind::metal);
-    const auto right_buffer = copy_tensor_to_backend(right, BackendKind::metal);
-
-    const auto output_buffer = matmul_f32_quantized_gguf_weight_to_backend(left_buffer, right_buffer);
-    const auto output = copy_tensor_from_backend(output_buffer);
-    const auto expected = matmul_f32_quantized_gguf_weight(left, right, BackendKind::cpu);
-
-    expect(output_buffer.backend() == BackendKind::metal, "Metal Q6_K backend-buffer matmul output backend mismatch");
-    expect_f32_matrix_close(output, expected, 1.0e-3F, "Metal backend-buffer Q6_K GGUF matmul output");
-}
-
 void test_matches_cpu_q6_k_decode_matvec_for_packed_block_counts_and_output_tail_on_metal() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -2253,20 +2285,12 @@ const TestCase tensor_backend_tests[] {
     },
     {"reuses Metal F32 by F16 GGUF weight matmul state", test_reuses_metal_f32_by_f16_gguf_weight_matmul_state},
     {
-        "matches CPU F32 by Q4_K GGUF weight matmul on Metal backend",
-        test_matches_cpu_f32_by_q4_k_gguf_weight_matmul_on_metal_backend,
-    },
-    {
-        "multiplies backend F32 by backend Q4_K GGUF weight to Metal backend buffer when available",
-        test_multiplies_backend_f32_by_backend_q4_k_gguf_weight_to_metal_backend_when_available,
+        "matches independent Q4_K and Q6_K multi-row projection on Metal",
+        test_matches_independent_q4_k_and_q6_k_multi_row_projection_on_metal,
     },
     {
         "matches CPU Q4_K decode matvec for packed block counts and output tail on Metal",
         test_matches_cpu_q4_k_decode_matvec_for_packed_block_counts_and_output_tail_on_metal,
-    },
-    {
-        "multiplies backend F32 by backend Q6_K GGUF weight to Metal backend buffer when available",
-        test_multiplies_backend_f32_by_backend_q6_k_gguf_weight_to_metal_backend_when_available,
     },
     {
         "matches CPU Q6_K decode matvec for packed block counts and output tail on Metal",
