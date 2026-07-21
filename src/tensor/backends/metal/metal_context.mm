@@ -54,7 +54,8 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
-    id<MTLFunction> matmul_function = [library newFunctionWithName:@"matmul_f32_f16_gguf_weight_kernel"];
+    id<MTLFunction> matmul_function =
+        [library newFunctionWithName:@"matmul_f32_f16_gguf_weight_simd_kernel"];
     if (matmul_function == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
@@ -63,11 +64,19 @@ MatmulPipelineState::MatmulPipelineState() {
     }
 
     NSError* pipeline_error = nil;
-    matmul_pipeline = [device newComputePipelineStateWithFunction:matmul_function error:&pipeline_error];
-    if (matmul_pipeline == nil) {
+    matmul_f16_simd_pipeline =
+        [device newComputePipelineStateWithFunction:matmul_function error:&pipeline_error];
+    if (matmul_f16_simd_pipeline == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal matmul pipeline creation failed: " + ns_error_message(pipeline_error, "unknown error")
+        );
+    }
+    if (matmul_f16_simd_pipeline.threadExecutionWidth != 32
+        || matmul_f16_simd_pipeline.maxTotalThreadsPerThreadgroup < 64U) {
+        throw metal_error(
+            runtime::BackendErrorCode::metal_execution_failed,
+            "Metal F16 SIMD matmul requires two 32-lane SIMD groups"
         );
     }
 
@@ -122,7 +131,7 @@ MatmulPipelineState::MatmulPipelineState() {
         make_pipeline(@"matmul_f32_q4_k_rows_16_kernel", "Q4_K sixteen-row matmul");
 
     id<MTLFunction> matvec_q4_k_function =
-        [library newFunctionWithName:@"matvec_f32_q4_k_gguf_weight_kernel"];
+        [library newFunctionWithName:@"matvec_f32_q4_k_simd_2x2_kernel"];
     if (matvec_q4_k_function == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
@@ -131,9 +140,9 @@ MatmulPipelineState::MatmulPipelineState() {
     }
 
     NSError* matvec_q4_k_error = nil;
-    matvec_q4_k_pipeline =
+    matvec_q4_k_simd_2x2_pipeline =
         [device newComputePipelineStateWithFunction:matvec_q4_k_function error:&matvec_q4_k_error];
-    if (matvec_q4_k_pipeline == nil) {
+    if (matvec_q4_k_simd_2x2_pipeline == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal Q4_K decode matvec pipeline creation failed: "
@@ -151,7 +160,7 @@ MatmulPipelineState::MatmulPipelineState() {
         make_pipeline(@"matmul_f32_q6_k_rows_16_kernel", "Q6_K sixteen-row matmul");
 
     id<MTLFunction> matvec_q6_k_function =
-        [library newFunctionWithName:@"matvec_f32_q6_k_gguf_weight_kernel"];
+        [library newFunctionWithName:@"matvec_f32_q6_k_simd_2x2_kernel"];
     if (matvec_q6_k_function == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
@@ -160,9 +169,9 @@ MatmulPipelineState::MatmulPipelineState() {
     }
 
     NSError* matvec_q6_k_error = nil;
-    matvec_q6_k_pipeline =
+    matvec_q6_k_simd_2x2_pipeline =
         [device newComputePipelineStateWithFunction:matvec_q6_k_function error:&matvec_q6_k_error];
-    if (matvec_q6_k_pipeline == nil) {
+    if (matvec_q6_k_simd_2x2_pipeline == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal Q6_K decode matvec pipeline creation failed: "
@@ -522,6 +531,25 @@ MatmulPipelineState& shared_matmul_pipeline_state() {
     return state;
 }
 
+F16MatmulDispatch select_f16_matmul_dispatch(
+    MatmulPipelineState& state,
+    std::uint64_t rows,
+    std::uint64_t columns
+) {
+    if (rows == 0 || columns == 0) {
+        throw std::invalid_argument("Metal F16 matmul dimensions are unsupported");
+    }
+    return F16MatmulDispatch {
+        .pipeline = state.matmul_f16_simd_pipeline,
+        .threadgroups = MTLSizeMake(
+            static_cast<NSUInteger>((columns + 3U) / 4U),
+            static_cast<NSUInteger>(rows),
+            1
+        ),
+        .threads_per_threadgroup = MTLSizeMake(64, 1, 1),
+    };
+}
+
 QuantizedMatmulDispatch select_quantized_matmul_dispatch(
     MatmulPipelineState& state,
     DType dtype,
@@ -540,7 +568,9 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
     std::uint64_t row_tile = 1;
     std::uint64_t threads = 64;
     if (rows == 1) {
-        pipeline = dtype == DType::q4_k ? state.matvec_q4_k_pipeline : state.matvec_q6_k_pipeline;
+        pipeline = dtype == DType::q4_k
+            ? state.matvec_q4_k_simd_2x2_pipeline
+            : state.matvec_q6_k_simd_2x2_pipeline;
     } else {
         threads = 128;
         if (rows <= 2) {

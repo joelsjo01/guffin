@@ -624,17 +624,15 @@ TensorStorage matmul_f32_f16_gguf_weight_with_metal_right_buffer(
         );
     }
 
-    [encoder setComputePipelineState:state.matmul_pipeline];
+    const auto dispatch = select_f16_matmul_dispatch(state, rows, columns);
+    [encoder setComputePipelineState:dispatch.pipeline];
     [encoder setBuffer:left_buffer offset:0 atIndex:0];
     [encoder setBuffer:right.buffer() offset:0 atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
-    const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
-    const auto threadgroup_columns = static_cast<NSUInteger>((columns + 15U) / 16U);
-    const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
-    const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
-    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder dispatchThreadgroups:dispatch.threadgroups
+              threadsPerThreadgroup:dispatch.threads_per_threadgroup];
     [encoder endEncoding];
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
@@ -692,17 +690,15 @@ BackendBuffer matmul_f32_f16_gguf_weight_with_metal_buffers(
         );
     }
 
-    [encoder setComputePipelineState:state.matmul_pipeline];
+    const auto dispatch = select_f16_matmul_dispatch(state, rows, columns);
+    [encoder setComputePipelineState:dispatch.pipeline];
     [encoder setBuffer:left.buffer() offset:0 atIndex:0];
     [encoder setBuffer:right.buffer() offset:0 atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
-    const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
-    const auto threadgroup_columns = static_cast<NSUInteger>((columns + 15U) / 16U);
-    const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
-    const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
-    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    [encoder dispatchThreadgroups:dispatch.threadgroups
+              threadsPerThreadgroup:dispatch.threads_per_threadgroup];
     [encoder endEncoding];
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
@@ -1417,17 +1413,15 @@ ops::F32F16GGUFWeightTripleMatmulBackendBuffers matmul_f32_f16_gguf_weight_tripl
             );
         }
 
-        [encoder setComputePipelineState:state.matmul_pipeline];
+        const auto dispatch = select_f16_matmul_dispatch(state, rows, output_columns);
+        [encoder setComputePipelineState:dispatch.pipeline];
         [encoder setBuffer:left.buffer() offset:0 atIndex:0];
         [encoder setBuffer:right_buffer offset:0 atIndex:1];
         [encoder setBuffer:output_buffer offset:0 atIndex:2];
         [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
-        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
-        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns + 15U) / 16U);
-        const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
-        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
-        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder dispatchThreadgroups:dispatch.threadgroups
+                  threadsPerThreadgroup:dispatch.threads_per_threadgroup];
         [encoder endEncoding];
     };
 
@@ -1726,17 +1720,17 @@ BackendBuffer gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
             );
         }
 
-        [encoder setComputePipelineState:state.matmul_pipeline];
+        const auto dispatch = select_f16_matmul_dispatch(
+            state, output_rows, output_columns_for_dispatch
+        );
+        [encoder setComputePipelineState:dispatch.pipeline];
         [encoder setBuffer:left_buffer offset:0 atIndex:0];
         [encoder setBuffer:right_buffer offset:0 atIndex:1];
         [encoder setBuffer:matmul_output_buffer offset:0 atIndex:2];
         [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
-        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
-        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
-        const auto threadgroup_rows = static_cast<NSUInteger>((output_rows + 15U) / 16U);
-        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
-        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder dispatchThreadgroups:dispatch.threadgroups
+                  threadsPerThreadgroup:dispatch.threads_per_threadgroup];
         [encoder endEncoding];
     };
 
@@ -1904,17 +1898,17 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buff
             );
         }
 
-        [encoder setComputePipelineState:state.matmul_pipeline];
+        const auto dispatch = select_f16_matmul_dispatch(
+            state, output_rows, output_columns_for_dispatch
+        );
+        [encoder setComputePipelineState:dispatch.pipeline];
         [encoder setBuffer:left_buffer offset:0 atIndex:0];
         [encoder setBuffer:right_buffer offset:0 atIndex:1];
         [encoder setBuffer:matmul_output_buffer offset:0 atIndex:2];
         [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
-        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
-        const auto threadgroup_columns = static_cast<NSUInteger>((output_columns_for_dispatch + 15U) / 16U);
-        const auto threadgroup_rows = static_cast<NSUInteger>((output_rows + 15U) / 16U);
-        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
-        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder dispatchThreadgroups:dispatch.threadgroups
+                  threadsPerThreadgroup:dispatch.threads_per_threadgroup];
         [encoder endEncoding];
     };
 
@@ -2054,17 +2048,15 @@ TensorStorage matmul_f32_f16_gguf_weight(const TensorStorage& left, const Tensor
             );
         }
 
-        [encoder setComputePipelineState:state.matmul_pipeline];
+        const auto dispatch = select_f16_matmul_dispatch(state, rows, columns);
+        [encoder setComputePipelineState:dispatch.pipeline];
         [encoder setBuffer:left_buffer offset:0 atIndex:0];
         [encoder setBuffer:right_buffer offset:0 atIndex:1];
         [encoder setBuffer:output_buffer offset:0 atIndex:2];
         [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
-        const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
-        const auto threadgroup_columns = static_cast<NSUInteger>((columns + 15U) / 16U);
-        const auto threadgroup_rows = static_cast<NSUInteger>((rows + 15U) / 16U);
-        const MTLSize threadgroups = MTLSizeMake(threadgroup_columns, threadgroup_rows, 1);
-        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        [encoder dispatchThreadgroups:dispatch.threadgroups
+                  threadsPerThreadgroup:dispatch.threads_per_threadgroup];
         [encoder endEncoding];
         [command_buffer commit];
         [command_buffer waitUntilCompleted];

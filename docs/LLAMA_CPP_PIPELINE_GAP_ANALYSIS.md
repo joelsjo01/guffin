@@ -1,238 +1,319 @@
-# Gemma 2 Metal Pipeline Gaps Versus llama.cpp
+# Gemma 2 Metal Performance Gap Versus llama.cpp
 
-## Scope
+## Purpose
 
-This is a source-level comparison of the current Gemma 2 9B Q4 production path
-against `ggml-org/llama.cpp` commit
-`b15ca938ad00aa6b3ee6c2edda7363fd02826b18` (2026-07-16).
+This document explains the current performance difference between this engine
+and `llama.cpp` for the same Gemma 2 9B Q4 model on the base Apple M4. It
+replaces the earlier milestone-by-milestone pipeline analysis. Completed work
+and old implementation history do not belong here.
 
-It ranks structural differences that are likely to explain large inference
-gaps. It is not a measured profile, so the order below is a recommendation for
-what to measure first, not proof of exact milliseconds saved.
+The conclusion is based on controlled real-path measurements, inspection of
+the current engine, and source-level comparison with the Metal backend in
+`llama.cpp`. It is a diagnosis and optimization direction, not an active
+implementation baton. The active task remains owned by `docs/NEXT_TASK.md`.
 
-## Executive Summary
+## Executive Conclusion
 
-The main problem is not one slow kernel. The engine now has resident model
-state, resident prefill scratch, one command buffer per 16-token prefill chunk,
-and a one-command-buffer/one-compute-encoder decode path. The largest remaining
-gaps are:
+The performance gap is real. It is not principally caused by chat formatting,
+sampling, Flash Attention, KV placement, or CPU work. The dominant remaining
+problem is the quality of the Q4_K and Q6_K Metal projection kernels.
 
-1. attention is three materialized F32 passes rather than fused attention;
-2. RMSNorm and softmax reductions are serial within each row;
-3. multi-token quantized projection is a scalar inner loop, while only
-   single-token decode has a cooperative SIMD kernel;
-4. KV is a full-context F32 allocation for every layer;
-5. sampled generation copies and fully sorts all `256000` logits on the CPU.
+The engine's decode kernels now resemble `llama.cpp` at the outer dispatch
+level, but they do not yet resemble it internally. `llama.cpp` does much more
+packed, vectorized, compile-time-specialized work per activation load and per
+quantized block. The local kernels perform more scalar unpacking, indexing,
+scale/min extraction, and loop control. Consequently, the local engine obtains
+far less useful work from the M4's available memory bandwidth.
 
-`llama.cpp` instead treats inference as a reserved, reusable compute graph. Its
-Metal backend keeps one compute encoder open across many graph nodes, inserts
-memory barriers only for real dependencies, fuses supported node sequences,
-uses fused attention, selects different projection kernels by batch shape, and
-uses cooperative reductions.
+Prompt processing has an additional, larger problem: the local 16-row kernels
+reuse weights across rows but process the rows serially inside each lane. They
+are not true tiled matrix-matrix kernels. `llama.cpp` switches to direct-
+dequantizing SIMD-group matrix multiplication for this shape. That algorithmic
+difference explains why the prompt gap is much larger than the decode gap.
 
-The operation-at-a-time prefill gap and decode encoder fragmentation described
-in the original analysis have been removed. The next structural target is the
-largest measured fused kernel family, beginning with decode attention.
+## Controlled Measurements
 
-## Ranked Findings
+### Test environment
 
-### Completed: prefill used to synchronize hundreds of times
+- Hardware: base Apple M4 with Apple-family SIMD-group reduction and matrix
+  multiplication support.
+- Model: `models/gemma-2-9b-Q4.gguf`.
+- Reference executable: Homebrew `llama.cpp` build 9430, commit `d48a56eff`.
+- Local path: release `local-gguf-generate` resident Metal path.
+- Reference command family: `llama-bench`, five repetitions, full Metal
+  offload, with Flash Attention and microbatch size varied independently.
 
-Prefill now executes through `run_gemma2_metal_resident_prefill` with plan-owned
-scratch, a fixed 16-token chunk, one command buffer per chunk, no transient
-activation-buffer allocation, queue-ordered chunks, and one final synchronous
-wait. Greedy, sampled, chat append, context rebuild, and benchmark paths share
-this executor. The staged all-intermediate prefill shell and its coupled tests
-were deleted.
+### Decode
 
-The remaining prefill gap is kernel quality: the resident executor still uses
-separate encoders and scalar multi-row Q4_K/Q6_K projection kernels.
+| Engine | Controlled generation rate |
+|---|---:|
+| This engine | approximately 9.0 tokens/s |
+| `llama.cpp` | approximately 14.2 tokens/s |
 
-### 1. Completed: decode had one submission but extreme encoder fragmentation
+`llama.cpp` is approximately 58% faster. The local result is stable across
+greedy, sampled, and longer 32-token generation runs, so it is not a short-run
+sampling artifact.
 
-`run_gemma2_metal_resident_decode_step` now keeps one concurrent compute encoder
-open for the complete token, uses explicit fixed-schedule memory barriers, and
-writes K/V directly into their cache rows. The 42-layer top-logit path performs
-`719` compute dispatches through `1` compute encoder, `0` blit encoders, one
-command buffer, one commit, and one wait.
+### Prefill
 
-`llama.cpp` creates one Metal encoder for a command-buffer graph slice, encodes
-many nodes through it, and uses memory barriers plus tracked buffer ranges for
-dependencies. It can also encode independent graph regions concurrently and
-split a large graph across a small number of command buffers.
+| Prompt tokens | `llama.cpp`, microbatch 16 | `llama.cpp`, microbatch 512 |
+|---:|---:|---:|
+| 16 | 72.4 tokens/s | 70.1 tokens/s |
+| 32 | 74.9 tokens/s | 136.9 tokens/s |
+| 128 | 77.5 tokens/s | 153.3 tokens/s |
 
-The staged decode executor, its activation hierarchy and tests, schedule-owned
-resident buffer copies, and decode K/V scratch buffers were removed.
+The local canonical 16-token prompt runs at approximately 8.8 tokens/s. At the
+same 16-row scale, `llama.cpp` is therefore about 8.3 times faster. Prompt
+content is not byte-for-byte identical between the two benchmark drivers, but
+the projection shapes and amount of model work are comparable and the gap is
+far beyond measurement noise.
 
-**Measured impact:** Gemma 2 9B Q4 greedy decode improved by `11.4%` on warm
-first turns and `13.3%` on cached second turns in five-repetition release
-benchmarks. Seeded sampled decode improved by `4.4%`; warm prefill was unchanged
-within noise.
+Large microbatches make `llama.cpp` substantially faster at 32 and 128 tokens,
+but do not explain its 16-token advantage. Merely increasing the local chunk
+size cannot close the initial gap; the projection algorithm must change first.
 
-**Status:** complete and retained after independent nonzero CPU-reference tests,
-all `315` repository tests, structural count checks, and real-path benchmarks.
+### Flash Attention control
 
-### 2. Decode completed: fused online-softmax attention; prefill remains
+With a 512-token microbatch, `llama.cpp` measured approximately:
 
-Prefill still performs:
+| Workload | Flash Attention off | Flash Attention on |
+|---|---:|---:|
+| 16-token prefill | 70.1 tokens/s | 68.2 tokens/s |
+| 128-token prefill | 153.3 tokens/s | 151.3 tokens/s |
+| 32-token generation | 14.0 tokens/s | 14.2 tokens/s |
 
-1. an F32 QK score kernel;
-2. a separate F32 softmax kernel;
-3. a separate F32 probability-times-V kernel.
+Flash Attention improved short decode by only about 1.5% and slightly reduced
+short-prompt throughput. It is not the cause of the observed gap.
 
-Its scores and probabilities are written to full intermediate buffers. The value
-kernel then rereads probabilities and walks the KV sequence again. At longer
-contexts this creates substantial global-memory traffic.
+## Bandwidth Diagnosis
 
-`llama.cpp` enables flash attention automatically when supported. Its Metal
-path has dedicated single-query and multi-query variants that tile Q/K/V in
-threadgroup memory, compute softmax online, include logit softcapping, and emit
-the attention result without materializing the full score and probability
-matrices.
+The resident model payload is approximately 6.837 GB. A useful first-order
+decode estimate is therefore:
 
-Single-token decode no longer uses that sequence. One paired-query Metal
-workgroup owns each KV head and its two Gemma query heads, streams K/V in
-32-token blocks, and maintains two stable online-softmax states without writing
-scores or probabilities. Contexts through 256 tokens write the normalized
-result directly. Longer contexts use 2-32 persistent partials and one
-cooperative reduction dispatch. Sliding and global layers pass their existing
-contiguous attention windows unchanged.
+- local engine: `6.837 GB * 9.0 tokens/s = 61.5 GB/s`;
+- `llama.cpp`: `6.837 GB * 14.2 tokens/s = 97.1 GB/s`.
 
-Decode scratch now owns 516 KiB of reusable partial state instead of 1 MiB of
-score/probability buffers. The all-short 42-layer top-logit path is 719
-dispatches and 550 barriers; a layer using partitioned attention adds one
-dispatch and one barrier. It remains one compute encoder, one command buffer,
-one commit, and one wait.
+Apple specifies 120 GB/s unified-memory bandwidth for the base M4. Under this
+simplified weight-streaming measure, `llama.cpp` extracts about 81% of that
+limit while the local engine extracts about 51%.
 
-Exact 16-Q/8-KV/256-dimensional CPU parity covers token counts 1, 31, 32, 33,
-256, 257, 4096, and 8192. The production decode integration matches independent
-CPU logits, selected token, selected logit, and appended K/V state. All 316
-repository tests pass.
+These numbers are effective estimates, not literal DRAM counters. Cache hits,
+metadata, activation traffic, and the 1.835-GB tied F16 output matrix make the
+physical traffic more complicated. The comparison is nevertheless strong
+evidence: both engines execute the same model on the same memory system, while
+`llama.cpp` completes substantially more weight traversal per second. The
+remaining loss is primarily kernel instruction efficiency, occupancy, and
+scheduling around memory traffic.
 
-**Measured impact:** the canonical short greedy benchmark is neutral within
-noise: 4.94 versus 4.92 tok/s mean (+0.5%). That prompt never reaches the
-partitioned path, so medium/long-context speedup still needs a thermally
-controlled real-path measurement. Resident scratch fell by about 508 KiB.
+## Finding 1: Decode Projection Geometry Is Not Kernel Equivalence
 
-**Status:** decode structural work is complete. Batched fused prefill attention
-remains a separate task after competitive multi-token projection kernels; its
-current three-pass operators remain live and tested.
+The local Q4_K and Q6_K decode paths use two SIMD groups and compute two output
+rows cooperatively. This matches important outer parameters used by
+`llama.cpp`, but matching those numbers does not make the kernels equivalent.
 
-**Remaining structural change:** add batched fused prefill attention after the
-prefill projection strategy is fixed. Preserve alternating global/sliding
-attention semantics.
+The `llama.cpp` Q4_K and Q6_K kernels:
 
-### 3. commpleted: Reduction kernels are serial and small ops are not fused
+- partition packed block decoding carefully across SIMD lanes;
+- load activation values into registers and reuse them for adjacent output
+  rows;
+- use packed integer loads and masks instead of repeated scalar extraction;
+- accumulate several independent products in vector registers;
+- use compile-time-unrolled block loops;
+- walk adjacent weight rows with precomputed pointer strides;
+- extract packed quantization metadata with a lane-aware schedule;
+- specialize pipeline behavior through Metal function constants; and
+- reduce results cooperatively across the SIMD group.
 
-The local RMSNorm kernel assigns one GPU thread to a row. That thread loops over
-the entire hidden width to compute the sum, then loops over it again to write
-the result. Decode has only one row, so almost the entire dispatched threadgroup
-is idle. The local softmax similarly assigns one thread per attention row and
-serially makes three passes over the context.
+The local kernels still perform relatively scalar byte handling. Q4_K scale
+and minimum extraction is repeated inside the hot path, and each lane performs
+small scalar accumulation loops for both output columns. Q6_K has the same
+general issue around its packed bitplanes and scalar arithmetic schedule.
 
-`llama.cpp` uses all threads in a threadgroup for row reductions, combines
-SIMD-group partial sums through threadgroup memory, vectorizes aligned data, and
-can fuse RMSNorm with following multiply/add nodes. Its graph optimizer also
-fuses supported elementwise chains.
+This difference repeats across the model's quantized projections in all 42
+layers. Even modest wasted work inside one block becomes a large whole-token
+cost.
 
-This repo separately dispatches norm, residual add, GELU multiply, and final
-softcap operations. Even when each kernel has little arithmetic, each adds an
-encoder, launch, and full-buffer pass.
+### Required direction
 
-**Likely impact:** high in aggregate because these patterns repeat across all
-42 layers.
+Replace the current decode Q4_K and Q6_K inner loops with shape-specialized,
+packed cooperative kernels. The objective is not to copy a thread count. It is
+to minimize instructions, metadata decoding, and activation loads per useful
+multiply-accumulate while preserving direct operation on GGUF blocks.
 
-**Required structural change:** first make RMSNorm and softmax cooperative;
-then fuse measured chains such as post-projection norm plus residual, and
-gate/up activation work. Judge fusion by aggregate token time, not one launch.
+The first isolated benchmarks must cover the exact Gemma projection shapes and
+separate Q4_K from Q6_K. Whole-token retention remains mandatory because an
+isolated kernel gain can be lost through occupancy or scheduling interactions.
 
-### 4. completed: Quantized projection has no competitive multi-token execution strategy
+## Finding 2: Prefill Uses Serial Row Reuse, Not Tiled GEMM
 
-The local Q4_K/Q6_K single-row decode path uses cooperative SIMD matvec kernels.
-That is directionally correct. For more than one row, however, the fallback
-assigns one thread to one output and serially loops over the entire input width,
-repeatedly unpacking quantized blocks. It has no tiled activation reuse and does
-not use SIMD-group matrix operations.
+The production prefill chunk size is 16. The current multi-row Q4_K and Q6_K
+kernels assign a SIMD group to an output column, decode one weight per lane,
+and then loop over every activation row while retaining one scalar accumulator
+per row. For a 16-row tile, each lane owns an array of 16 sums and updates those
+sums serially for every decoded weight.
 
-`llama.cpp` selects among:
+This avoids decoding the same weight 16 separate times, but it has three major
+costs:
 
-- specialized matrix-vector kernels for one token;
-- small-batch kernels for roughly 2-8 rows;
-- SIMD-group matrix-matrix kernels for larger batches;
-- format- and shape-specialized pipelines using function constants.
+1. the token dimension is serialized inside each lane;
+2. the accumulator array creates substantial register pressure; and
+3. it does not use the M4's SIMD-group matrix-multiply instructions.
 
-Thus the largest projection difference is currently prefill, not proof that the
-decode matvec alone explains the decode gap.
+`llama.cpp` selects algorithms by row count. Its current Metal dispatcher uses
+specialized matrix-vector variants for small row counts and switches larger
+inputs to SIMD-group matrix-matrix kernels when supported. The Q4_K and Q6_K
+matrix-matrix paths dequantize blocks directly into tiled computation and use
+`simdgroup_half8x8` operations rather than materializing a complete temporary
+F16/F32 weight matrix.
 
-**Likely impact:** very high for prompt processing; uncertain but important for
-decode until aggregate Q4_K/Q6_K time is measured.
+At 16 prompt tokens, `llama.cpp` is already on a genuine matrix-matrix path,
+while the local engine is executing serial row loops inside a matvec-derived
+kernel. This is the best-supported explanation for the approximately 8.3-times
+prefill difference.
 
-**Required structural change:** add shape-specific small-batch and matrix-matrix
-Q4_K/Q6_K kernels after prefill becomes a single resident execution. Keep a
-separate decode path, but select its next rewrite only from whole-token
-projection totals.
+### Required direction
 
-### 5. completed: KV layout doubles bandwidth and over-allocates sliding layers
+Use a shape-dispatched projection family:
 
-The local plan allocates F32 K and V for all 8192 positions in all 42 layers:
-about `5.64 GB`. Sliding-window layers still reserve the full context even
-though only 4096 tokens are attended.
+- one row: packed cooperative Q4_K/Q6_K matrix-vector kernel;
+- approximately two to eight rows: a small-batch cooperative kernel that
+  amortizes block decoding without excessive row accumulators;
+- larger batches: direct-dequantizing tiled SIMD-group matrix multiplication;
+- exact Gemma shapes: function-constant or separately compiled specialization
+  for widths, strides, row tiles, and quantization format.
 
-`llama.cpp` defaults K/V to F16 and gives Gemma 2 separate global and
-sliding-window cache handling. Its sliding cache is sized near the window
-rather than the full context. F16 also halves KV read bandwidth for attention.
+After the tiled path is competitive, benchmark larger resident prefill chunks.
+A larger chunk should be retained only when its scratch requirements and real
+prompt latency are favorable.
 
-This is a startup, memory-pressure, and long-context bandwidth problem. It may
-not dominate very short decode, but it reduces the memory headroom available to
-the rest of the pipeline.
+## Finding 3: Fixed Dispatch and Barrier Cost Is Material but Secondary
 
-**Likely impact:** medium at short context, high at long context and startup.
+The current 42-layer decode top-logit path performs 635 compute dispatches and
+466 explicit buffer barriers per token in one compute encoder and one command
+buffer. Keeping one encoder and command buffer removed a major earlier cost,
+but the remaining schedule is still conservative.
 
-**Required structural change:** move to F16 KV with parity tests, then use a
-ring-buffered 4096-token allocation for sliding layers while retaining full
-history for global layers.
+`llama.cpp` tracks buffer ranges and inserts a barrier when a later operation
+actually conflicts with preceding writes. This permits independent projections
+such as Q/K/V and gate/up to be encoded without unnecessary synchronization.
 
-### 6. Sampled generation performs a full-vocabulary CPU round trip
+Hundreds of dispatches and barriers are material at a 70-111 millisecond token
+time. They are unlikely to explain the full gap while projection kernels stream
+several gigabytes per token, but their relative importance will grow after the
+quantized kernels improve.
 
-For non-greedy chat, the engine copies the entire F32 logits buffer from Metal
-to a new CPU tensor each token. `TokenSampler` builds 256000 candidates, applies
-repetition checks with linear history searches, and fully sorts the vocabulary
-before truncating to top-k.
+### Required direction
 
-`llama.cpp` has partial top-k selection, reusable sampler state, asynchronous
-output extraction, and an experimental backend-sampling graph. Its greedy path
-can execute argmax on the backend.
+First obtain per-operation GPU timings or exact-shape isolated projection
+timings. After projection optimization, replace fixed barriers with verified
+resource dependency tracking and fuse cheap neighboring operations only where
+whole-token measurements show a benefit.
 
-This does not explain a greedy Metal benchmark, but it can materially slow the
-actual sampled chat product and hide gains made in decode.
+## Finding 4: The F16 Output Head Is No Longer the Main Explanation
 
-**Likely impact:** high for sampled chat; negligible for the resident greedy
-top-logit path.
+The tied F16 output matrix is approximately 1.835 GB and is read once per
+generated token. Its old kernel severely underused the dispatched threads. The
+new cooperative implementation uses multiple SIMD groups, multiple output rows
+per group, vector loads, and SIMD reductions.
 
-**Required structural change:** at minimum, perform GPU top-k and read back only
-the retained candidates, or use an in-place CPU partial selection without
-copying/sorting the full vocabulary.
+That rewrite improved real decode by approximately 3.2-3.6%. The result proves
+that the head mattered, but also proves that it was not the majority of the
+remaining 58% gap. The quantized layer projections now have the stronger
+evidence and higher priority.
 
-## Recommended Order
+## Finding 5: Factors Ruled Out as Primary Causes
 
-1. Consolidate decode encoders and add dependency barriers.
-2. Implement fused single-query attention and cooperative RMSNorm/softmax.
-3. Add small-batch and matrix-matrix Q4_K/Q6_K projection kernels.
-4. Convert KV to F16 and compact sliding-window storage.
-5. Remove the sampled full-logit CPU round trip.
+### Flash Attention
 
-The stop rule for every item should remain end-to-end: retain a change only if
-the real `local-gguf-generate --bench` path improves beyond run-to-run noise.
+Controlled on/off measurements change short decode by approximately 1.5% and
+do not improve the tested short prefill shapes. It remains valuable at longer
+contexts but cannot explain this gap.
 
-## Primary Upstream References
+### Sampling and CPU logits work
 
-- `src/models/gemma2.cpp`
-- `src/llama-context.cpp`
-- `src/llama-graph.cpp`
-- `src/llama-kv-cache-iswa.cpp`
-- `src/llama-sampler.cpp`
-- `ggml/src/ggml-metal/ggml-metal-context.m`
-- `ggml/src/ggml-metal/ggml-metal-ops.cpp`
-- `ggml/src/ggml-metal/ggml-metal.metal`
+The local greedy, sampled, and 32-token decode measurements are all near 9.0
+tokens/s. Sampling work is therefore not responsible for the controlled decode
+difference. Chat sampling improvements can still matter independently.
 
-Upstream repository: <https://github.com/ggml-org/llama.cpp/tree/b15ca938ad00aa6b3ee6c2edda7363fd02826b18>
+### KV cache location and format
+
+The production path keeps its model and F16 KV cache resident in Metal-visible
+unified memory. At short context, KV traffic is small compared with streaming
+the projection weights. KV optimization matters increasingly at long context,
+but is not the present short-decode cause.
+
+### More threads by themselves
+
+Using every possible thread does not guarantee more throughput. Extra threads
+can duplicate weight traffic, increase reductions, consume more registers, and
+reduce occupancy. The correct target is maximum useful SIMD work per loaded
+block, not the largest legal threadgroup.
+
+### Metal repacking
+
+The `llama.cpp` command-line repack option is enabled by default, but its Metal
+backend does not appear to use the CPU-style repacking path as the source of
+this advantage. The relevant Metal kernels operate directly on supported
+quantized block layouts.
+
+### Chat token-rate presentation
+
+Rates printed for tiny interactive prompts are noisy. Tokenization, chat
+templates, cached-prefix length, synchronization boundaries, and fixed timing
+overhead can make later prompt rates appear dramatically higher. These factors
+explain why the displayed 20-90 tokens/s figures vary, but they do not invalidate
+the controlled benchmark gap.
+
+## Recommended Investigation and Implementation Order
+
+1. Add trustworthy GPU timing around the exact Q4_K and Q6_K projection shapes,
+   or build isolated commands that reproduce the production layouts and
+   dispatches exactly.
+2. Replace the Q4_K decode inner kernel with packed, vectorized, activation-
+   reusing cooperative SIMD work.
+3. Apply the proven structure to Q6_K, measuring it independently because its
+   bitplane unpacking and arithmetic balance differ.
+4. Implement small-batch kernels for roughly two to eight rows.
+5. Implement direct-dequantizing SIMD-group tiled matrix multiplication for
+   16-row and larger prefill shapes.
+6. Tune the resident prefill chunk size only after the tiled kernel exists.
+7. Re-measure whole-token dispatch and barrier cost, then introduce dependency-
+   driven barriers and targeted fusion.
+
+## Acceptance Criteria
+
+Every replacement must satisfy all of the following:
+
+- independent CPU or golden parity for exact Q4_K and Q6_K block decoding;
+- deterministic correctness at the exact Gemma projection shapes;
+- correct unavailable-Metal behavior;
+- real greedy and seeded sampled generation parity;
+- no fallback to a legacy production kernel for the target Gemma path;
+- an isolated improvement outside measurement noise;
+- a comparable end-to-end `local-gguf-generate --bench` improvement; and
+- no meaningful prefill regression while improving decode, or vice versa.
+
+Stop and reject a proposed kernel when it improves an artificial microbenchmark
+but does not improve the model's real production path.
+
+## Primary References
+
+- Apple M4 memory bandwidth:
+  <https://www.apple.com/newsroom/2024/10/apple-introduces-m4-pro-and-m4-max/>
+- `llama.cpp` Metal dispatcher and dependency handling:
+  <https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-metal/ggml-metal-ops.cpp>
+- `llama.cpp` Metal quantized matrix-vector and matrix-matrix kernels:
+  <https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-metal/ggml-metal.metal>
+- `llama.cpp` Metal quantization/kernel parameters:
+  <https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-metal/ggml-metal-impl.h>
+- GGUF quantized block layouts:
+  <https://github.com/ggml-org/llama.cpp/wiki/Tensor-Encoding-Schemes>
+
+Local implementation anchors:
+
+- `include/local_gguf_engine/engine/gemma2_metal_plan.hpp`
+- `src/engine/gemma2_runtime.cpp`
+- `src/tensor/backends/metal_backend.mm`
+- `src/tensor/backends/metal/metal_command_context.mm`
+- `src/tensor/backends/metal/metal_context.mm`
+- `tests/engine/gemma2_metal_plan_tests.cpp`

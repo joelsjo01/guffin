@@ -60,25 +60,64 @@ inline bool token_candidate_better(TokenCandidate left, TokenCandidate right) {
     return left.logit > right.logit || (left.logit == right.logit && left.token < right.token);
 }
 
-kernel void matmul_f32_f16_gguf_weight_kernel(
+// Two SIMD groups each own two output columns for one activation row. The
+// production 3584-wide path uses aligned vector loads; the scalar branch keeps
+// the public backend contract correct for arbitrary test and diagnostic shapes.
+kernel void matmul_f32_f16_gguf_weight_simd_kernel(
     const device float* left [[buffer(0)]],
     const device half* right [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant MatmulDimensions& dims [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]
+    uint2 threadgroup_index [[threadgroup_position_in_grid]],
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
 ) {
-    const uint column = gid.x;
-    const uint row = gid.y;
-    if (row >= dims.rows || column >= dims.columns) {
-        return;
+    const uint row = threadgroup_index.y;
+    const uint first_column = threadgroup_index.x * 4 + uint(simdgroup_index) * 2;
+    const uint second_column = first_column + 1;
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+
+    if (row < dims.rows && first_column < dims.columns) {
+        const device float* activation = left + row * dims.shared;
+        const device half* first_weight = right + first_column * dims.shared;
+        const device half* second_weight = second_column < dims.columns
+            ? right + second_column * dims.shared
+            : first_weight;
+
+        if ((dims.shared & 3U) == 0U) {
+            const device float4* activation4 = reinterpret_cast<const device float4*>(activation);
+            const device half4* first_weight4 = reinterpret_cast<const device half4*>(first_weight);
+            const device half4* second_weight4 = reinterpret_cast<const device half4*>(second_weight);
+            const uint vector_count = dims.shared / 4;
+            for (uint vector_index = uint(lane); vector_index < vector_count; vector_index += 32) {
+                const float4 values = activation4[vector_index];
+                first_sum += dot(values, float4(first_weight4[vector_index]));
+                if (second_column < dims.columns) {
+                    second_sum += dot(values, float4(second_weight4[vector_index]));
+                }
+            }
+        } else {
+            for (uint inner = uint(lane); inner < dims.shared; inner += 32) {
+                const float value = activation[inner];
+                first_sum += value * float(first_weight[inner]);
+                if (second_column < dims.columns) {
+                    second_sum += value * float(second_weight[inner]);
+                }
+            }
+        }
     }
 
-    float sum = 0.0f;
-    for (uint inner = 0; inner < dims.shared; ++inner) {
-        sum += left[row * dims.shared + inner] * float(right[column * dims.shared + inner]);
+    first_sum = simd_sum(first_sum);
+    second_sum = simd_sum(second_sum);
+    if (lane == 0 && row < dims.rows) {
+        if (first_column < dims.columns) {
+            output[row * dims.columns + first_column] = first_sum;
+        }
+        if (second_column < dims.columns) {
+            output[row * dims.columns + second_column] = second_sum;
+        }
     }
-
-    output[row * dims.columns + column] = sum;
 }
 
 kernel void embed_f16_gguf_weight_token_ids_kernel(
@@ -212,7 +251,7 @@ DEFINE_Q4_K_ROW_KERNEL(16)
 // packed blocks while the full SIMD group reduces their independent partial
 // sums. This keeps packed reads contiguous inside each subgroup and avoids
 // staging either activations or dequantized weights in threadgroup memory.
-kernel void matvec_f32_q4_k_gguf_weight_kernel(
+kernel void matvec_f32_q4_k_simd_2x2_kernel(
     const device float* left [[buffer(0)]],
     const device uchar* right [[buffer(1)]],
     device float* output [[buffer(2)]],
@@ -384,7 +423,7 @@ DEFINE_Q6_K_ROW_KERNEL(16)
 // blocks concurrently. Sixteen lanes cover one block while activations are
 // reused across two output columns; the full SIMD reduction combines all
 // block contributions without threadgroup memory.
-kernel void matvec_f32_q6_k_gguf_weight_kernel(
+kernel void matvec_f32_q6_k_simd_2x2_kernel(
     const device float* left [[buffer(0)]],
     const device uchar* right [[buffer(1)]],
     device float* output [[buffer(2)]],

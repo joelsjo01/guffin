@@ -856,75 +856,69 @@ void test_runs_residual_gated_silu_projection_to_cpu_backend_buffer() {
     expect_f32_matrix_close(output, expected, 0.0F, "CPU backend-buffer residual gated SiLU output");
 }
 
-void test_matches_cpu_f32_by_f16_gguf_weight_matmul_on_metal_backend() {
+void expect_f32_matrix_close_absolute_relative(
+    const TensorStorage& actual,
+    const TensorStorage& expected,
+    float absolute_tolerance,
+    float relative_tolerance,
+    std::string_view message
+);
+
+void test_matches_cpu_f16_simd_matmul_boundaries_on_metal_backend() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
 
-    const std::array<float, 12> left_values {
-        0.5F, -1.0F, 2.0F, 3.5F,
-        -2.0F, 0.25F, 1.5F, -0.75F,
-        4.0F, -3.0F, 0.125F, 2.25F,
-    };
-    const std::array<float, 20> right_values {
-        0.25F, -0.5F, 1.0F, 2.0F, -1.5F,
-        1.25F, 0.75F, -2.0F, 0.5F, 3.0F,
-        -0.25F, 1.5F, 0.125F, -1.0F, 2.25F,
-        2.5F, -1.25F, 0.625F, 1.75F, -0.875F,
-    };
-    const auto left = tensor_f32_matrix(3, 4, std::span<const float>(left_values));
-    const auto right = tensor_f16_gguf_matrix(4, 5, std::span<const float>(right_values));
-
-    const auto cpu_output = matmul_f32_f16_gguf_weight(left, right, BackendKind::cpu);
-    const auto metal_output = matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
-
-    expect(metal_output.descriptor() == cpu_output.descriptor(), "Metal GGUF matmul descriptor mismatch");
-    for (std::uint64_t row = 0; row < 3; ++row) {
-        for (std::uint64_t column = 0; column < 5; ++column) {
-            const std::array<std::uint64_t, 2> index {row, column};
-            expect_close(
-                read_f32(metal_output, std::span<const std::uint64_t>(index)),
-                read_f32(cpu_output, std::span<const std::uint64_t>(index)),
-                1.0e-3F,
-                "Metal GGUF matmul parity mismatch"
+    constexpr std::array<std::uint64_t, 8> shared_widths {4, 31, 32, 33, 255, 256, 257, 3584};
+    constexpr std::array<std::uint64_t, 6> output_counts {1, 2, 7, 8, 9, 257};
+    for (const auto shared : shared_widths) {
+        const auto left_values = tensor_f32_projection_values(1, shared);
+        const auto left = tensor_f32_matrix(1, shared, std::span<const float>(left_values));
+        for (const auto columns : output_counts) {
+            std::vector<float> weight_values(static_cast<std::size_t>(shared * columns));
+            for (std::size_t index = 0; index < weight_values.size(); ++index) {
+                const auto signed_pattern = static_cast<int>(index % 29U) - 14;
+                weight_values[index] = static_cast<float>(signed_pattern) * 0.03125F
+                    + static_cast<float>((index / 29U) % 7U) * 0.00390625F;
+            }
+            const auto right = tensor_f16_gguf_matrix(
+                shared, columns, std::span<const float>(weight_values)
+            );
+            const auto expected = matmul_f32_f16_gguf_weight(left, right, BackendKind::cpu);
+            const auto actual = matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
+            expect_f32_matrix_close_absolute_relative(
+                actual,
+                expected,
+                0.01F,
+                1.0e-5F,
+                "Metal F16 SIMD one-row boundary parity"
             );
         }
     }
 }
 
-void test_reuses_metal_f32_by_f16_gguf_weight_matmul_state() {
+void test_matches_cpu_f16_simd_multi_row_matmul_on_metal_backend() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
 
-    const std::array<float, 8> left_values {
-        1.0F, -2.0F, 0.5F, 3.0F,
-        -1.5F, 0.25F, 2.0F, -0.75F,
-    };
-    const std::array<float, 12> right_values {
-        0.5F, -1.0F, 2.0F,
-        1.5F, 0.25F, -0.5F,
-        -2.5F, 0.75F, 1.25F,
-        0.125F, -1.75F, 2.25F,
-    };
-    const auto left = tensor_f32_matrix(2, 4, std::span<const float>(left_values));
-    const auto right = tensor_f16_gguf_matrix(4, 3, std::span<const float>(right_values));
-
-    const auto first = matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
-    const auto second = matmul_f32_f16_gguf_weight(left, right, BackendKind::metal);
-
-    expect(second.descriptor() == first.descriptor(), "reused Metal GGUF matmul descriptor mismatch");
-    for (std::uint64_t row = 0; row < 2; ++row) {
-        for (std::uint64_t column = 0; column < 3; ++column) {
-            const std::array<std::uint64_t, 2> index {row, column};
-            expect_close(
-                read_f32(second, std::span<const std::uint64_t>(index)),
-                read_f32(first, std::span<const std::uint64_t>(index)),
-                0.0F,
-                "reused Metal GGUF matmul value mismatch"
-            );
-        }
+    constexpr std::uint64_t rows = 3;
+    constexpr std::uint64_t shared = 33;
+    constexpr std::uint64_t columns = 9;
+    const auto left_values = tensor_f32_projection_values(rows, shared);
+    std::vector<float> weight_values(static_cast<std::size_t>(shared * columns));
+    for (std::size_t index = 0; index < weight_values.size(); ++index) {
+        weight_values[index] = static_cast<float>(static_cast<int>(index % 19U) - 9) * 0.0625F;
     }
+    const auto left = tensor_f32_matrix(rows, shared, std::span<const float>(left_values));
+    const auto right = tensor_f16_gguf_matrix(shared, columns, std::span<const float>(weight_values));
+    expect_f32_matrix_close_absolute_relative(
+        matmul_f32_f16_gguf_weight(left, right, BackendKind::metal),
+        matmul_f32_f16_gguf_weight(left, right, BackendKind::cpu),
+        0.01F,
+        1.0e-5F,
+        "Metal F16 SIMD multi-row parity"
+    );
 }
 
 void expect_f32_matrix_close_absolute_relative(
@@ -1021,56 +1015,45 @@ void test_matches_independent_q4_k_and_q6_k_multi_row_projection_on_metal() {
     }
 }
 
-void test_matches_cpu_q4_k_decode_matvec_for_packed_block_counts_and_output_tail_on_metal() {
-    if (!tensor_backend_is_available(BackendKind::metal)) {
-        return;
-    }
-
-    constexpr std::array<std::uint64_t, 5> packed_block_counts {1, 4, 14, 16, 56};
-    constexpr std::uint64_t columns = 5;
-    for (const auto packed_block_count : packed_block_counts) {
-        const auto shared = packed_block_count * 256U;
-        const auto left_values = tensor_f32_projection_values(1, shared);
-        const auto left = tensor_f32_matrix(1, shared, std::span<const float>(left_values));
-        const auto right = tensor_q4_k_stress_gguf_weight_matrix(shared, columns, packed_block_count);
-        const auto expected = reference_f32_quantized_gguf_weight_matmul(left, right);
-        const auto output_buffer = matmul_f32_quantized_gguf_weight_to_backend(
-            copy_tensor_to_backend(left, BackendKind::metal),
-            copy_tensor_to_backend(right, BackendKind::metal)
-        );
-
-        expect_f32_matrix_close(
-            copy_tensor_from_backend(output_buffer),
-            expected,
-            0.1F,
-            "Metal Q4_K decode matvec packed-layout parity"
-        );
-    }
-}
-void test_matches_cpu_q6_k_decode_matvec_for_packed_block_counts_and_output_tail_on_metal() {
+void test_matches_cpu_k_quant_decode_simd_boundaries_on_metal() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
 
     constexpr std::array<std::uint64_t, 5> packed_block_counts {1, 2, 14, 16, 56};
-    constexpr std::uint64_t columns = 5;
-    for (const auto packed_block_count : packed_block_counts) {
-        const auto shared = packed_block_count * 256U;
-        const auto left_values = tensor_f32_projection_values(1, shared);
-        const auto left = tensor_f32_matrix(1, shared, std::span<const float>(left_values));
-        const auto right = tensor_q6_k_stress_gguf_weight_matrix(shared, columns, packed_block_count);
-        const auto expected = reference_f32_quantized_gguf_weight_matmul(left, right);
-        const auto output_buffer = matmul_f32_quantized_gguf_weight_to_backend(
-            copy_tensor_to_backend(left, BackendKind::metal),
-            copy_tensor_to_backend(right, BackendKind::metal)
-        );
-
-        expect_f32_matrix_close(
-            copy_tensor_from_backend(output_buffer),
-            expected,
-            0.25F,
-            "Metal Q6_K decode matvec packed-layout parity"
-        );
+    constexpr std::array<std::uint64_t, 6> output_counts {1, 2, 3, 4, 5, 7};
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        for (const auto packed_block_count : packed_block_counts) {
+            const auto shared = packed_block_count * 256U;
+            auto left_values = tensor_f32_projection_values(1, shared);
+            for (std::size_t index = 0; index < left_values.size(); ++index) {
+                if (index % 17U == 0U) {
+                    left_values[index] *= -8.0F;
+                } else if (index % 11U == 0U) {
+                    left_values[index] *= 0.125F;
+                }
+            }
+            const auto left = tensor_f32_matrix(1, shared, std::span<const float>(left_values));
+            for (const auto columns : output_counts) {
+                const auto right = dtype == DType::q4_k
+                    ? tensor_q4_k_stress_gguf_weight_matrix(shared, columns, packed_block_count)
+                    : tensor_q6_k_stress_gguf_weight_matrix(shared, columns, packed_block_count);
+                const auto expected = reference_f32_quantized_gguf_weight_matmul(left, right);
+                const auto actual = copy_tensor_from_backend(
+                    matmul_f32_quantized_gguf_weight_to_backend(
+                        copy_tensor_to_backend(left, BackendKind::metal),
+                        copy_tensor_to_backend(right, BackendKind::metal)
+                    )
+                );
+                expect_f32_matrix_close_absolute_relative(
+                    actual,
+                    expected,
+                    dtype == DType::q4_k ? 0.1F : 0.25F,
+                    1.0e-5F,
+                    "Metal K-quant decode SIMD boundary parity"
+                );
+            }
+        }
     }
 }
 
@@ -1885,21 +1868,20 @@ const TestCase tensor_backend_tests[] {
         test_runs_residual_gated_silu_projection_to_cpu_backend_buffer,
     },
     {
-        "matches CPU F32 by F16 GGUF weight matmul on Metal backend",
-        test_matches_cpu_f32_by_f16_gguf_weight_matmul_on_metal_backend,
+        "matches CPU F16 SIMD matmul boundaries on Metal backend",
+        test_matches_cpu_f16_simd_matmul_boundaries_on_metal_backend,
     },
-    {"reuses Metal F32 by F16 GGUF weight matmul state", test_reuses_metal_f32_by_f16_gguf_weight_matmul_state},
+    {
+        "matches CPU F16 SIMD multi-row matmul on Metal backend",
+        test_matches_cpu_f16_simd_multi_row_matmul_on_metal_backend,
+    },
     {
         "matches independent Q4_K and Q6_K multi-row projection on Metal",
         test_matches_independent_q4_k_and_q6_k_multi_row_projection_on_metal,
     },
     {
-        "matches CPU Q4_K decode matvec for packed block counts and output tail on Metal",
-        test_matches_cpu_q4_k_decode_matvec_for_packed_block_counts_and_output_tail_on_metal,
-    },
-    {
-        "matches CPU Q6_K decode matvec for packed block counts and output tail on Metal",
-        test_matches_cpu_q6_k_decode_matvec_for_packed_block_counts_and_output_tail_on_metal,
+        "matches CPU K-quant decode SIMD boundaries on Metal",
+        test_matches_cpu_k_quant_decode_simd_boundaries_on_metal,
     },
     {
         "copies tensor to and from Metal backend buffer when available",

@@ -149,13 +149,13 @@ void require_capacity(const BackendBuffer& buffer, std::uint64_t bytes, const ch
     }
 }
 
-[[nodiscard]] id<MTLComputePipelineState> matmul_pipeline(
+[[nodiscard]] id<MTLComputePipelineState> f16_matmul_pipeline(
     MatmulPipelineState& state,
     DType dtype
 ) {
     switch (dtype) {
         case DType::f16:
-            return state.matmul_pipeline;
+            return state.matmul_f16_simd_pipeline;
         default:
             throw std::invalid_argument("Metal resident execution matmul weight dtype is unsupported");
     }
@@ -319,6 +319,7 @@ void MetalCommandContext::encode_matmul(
     const bool quantized = weight.descriptor().dtype == DType::q4_k
         || weight.descriptor().dtype == DType::q6_k;
     QuantizedMatmulDispatch quantized_dispatch;
+    F16MatmulDispatch f16_dispatch;
     id<MTLComputePipelineState> pipeline = nil;
     if (quantized) {
         quantized_dispatch = select_quantized_matmul_dispatch(
@@ -326,7 +327,8 @@ void MetalCommandContext::encode_matmul(
         );
         pipeline = quantized_dispatch.pipeline;
     } else {
-        pipeline = matmul_pipeline(*impl_->state, weight.descriptor().dtype);
+        pipeline = f16_matmul_pipeline(*impl_->state, weight.descriptor().dtype);
+        f16_dispatch = select_f16_matmul_dispatch(*impl_->state, rows, columns);
     }
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
@@ -337,12 +339,8 @@ void MetalCommandContext::encode_matmul(
         [encoder dispatchThreadgroups:quantized_dispatch.threadgroups
                   threadsPerThreadgroup:quantized_dispatch.threads_per_threadgroup];
     } else {
-        [encoder dispatchThreadgroups:MTLSizeMake(
-                                          static_cast<NSUInteger>((columns + 15U) / 16U),
-                                          static_cast<NSUInteger>((rows + 15U) / 16U),
-                                          1
-                                      )
-                  threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+        [encoder dispatchThreadgroups:f16_dispatch.threadgroups
+                  threadsPerThreadgroup:f16_dispatch.threads_per_threadgroup];
     }
     ++impl_->stats.compute_dispatch_count;
 }
