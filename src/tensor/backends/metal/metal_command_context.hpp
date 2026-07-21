@@ -2,6 +2,7 @@
 
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/ops/reduction.hpp"
+#include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -169,9 +170,11 @@ public:
         float softcap,
         std::uint64_t element_count = 0
     );
-    void encode_top_logit(
+    [[nodiscard]] std::uint32_t encode_token_candidates(
         const BackendBuffer& logits,
-        const BackendBuffer& result
+        const engine::Gemma2MetalSelectionWorkspace& workspace,
+        const engine::TokenSelectionRequest& request,
+        float softcap
     );
     void encode_memory_barrier();
 
@@ -179,7 +182,9 @@ public:
     [[nodiscard]] MetalCommandStats wait_until_completed();
     [[nodiscard]] MetalCommandStats completion_stats() const;
     [[nodiscard]] MetalCommandStats commit_and_wait();
-    [[nodiscard]] ops::TopLogit read_top_logit(const BackendBuffer& result) const;
+    [[nodiscard]] engine::CompactTokenCandidates read_token_candidates(
+        const engine::Gemma2MetalSelectionWorkspace& workspace
+    ) const;
 
 private:
     struct Impl;

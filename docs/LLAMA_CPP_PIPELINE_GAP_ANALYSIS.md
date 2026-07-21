@@ -172,7 +172,7 @@ Q4_K/Q6_K kernels after prefill becomes a single resident execution. Keep a
 separate decode path, but select its next rewrite only from whole-token
 projection totals.
 
-### 5. KV layout doubles bandwidth and over-allocates sliding layers
+### 5. completed: KV layout doubles bandwidth and over-allocates sliding layers
 
 The local plan allocates F32 K and V for all 8192 positions in all 42 layers:
 about `5.64 GB`. Sliding-window layers still reserve the full context even

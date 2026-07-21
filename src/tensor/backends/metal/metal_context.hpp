@@ -43,7 +43,10 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> gemma2_decode_attention_pipeline = nil;
     id<MTLComputePipelineState> gemma2_decode_attention_reduce_pipeline = nil;
     id<MTLComputePipelineState> softmax_pipeline = nil;
-    id<MTLComputePipelineState> top_logit_pipeline = nil;
+    id<MTLComputePipelineState> token_candidate_tile_pipeline = nil;
+    id<MTLComputePipelineState> token_candidate_merge_pipeline = nil;
+    id<MTLComputePipelineState> token_candidate_finalize_pipeline = nil;
+    id<MTLComputePipelineState> token_candidate_top1_pipeline = nil;
     id<MTLCommandQueue> queue = nil;
 
     MatmulPipelineState();

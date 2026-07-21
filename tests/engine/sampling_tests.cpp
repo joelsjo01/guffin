@@ -1,274 +1,171 @@
 #include "sampling_tests.hpp"
-#include "tensor_test_support.hpp"
+#include "test_support.hpp"
 
 #include "local_gguf_engine/engine/sampling.hpp"
-#include "local_gguf_engine/tensor/shape.hpp"
-#include "local_gguf_engine/tensor/tensor.hpp"
-#include "local_gguf_engine/tensor/tensor_error.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <random>
 #include <limits>
 #include <span>
 #include <stdexcept>
-#include <string_view>
+#include <vector>
 
 namespace {
 
-using local_gguf_engine::engine::top_logit_tokens_f32;
+using local_gguf_engine::engine::TokenLogit;
 using local_gguf_engine::engine::TokenSampler;
 using local_gguf_engine::engine::TokenSamplerOptions;
-using local_gguf_engine::tensor::DType;
-using local_gguf_engine::tensor::Shape;
-using local_gguf_engine::tensor::TensorDescriptor;
-using local_gguf_engine::tensor::TensorError;
-using local_gguf_engine::tensor::TensorErrorCode;
-using local_gguf_engine::tensor::TensorStorage;
 using local_gguf_engine::tests::expect;
-using local_gguf_engine::tests::expect_close;
-using local_gguf_engine::tests::tensor_f32_matrix;
-using local_gguf_engine::tests::tensor_f32_vector;
 using local_gguf_engine::tests::TestCase;
-using local_gguf_engine::tests::TestFailure;
 
-void test_selects_top_logit_tokens_from_vector() {
-    const std::array<float, 4> logits_values {0.5F, 3.0F, 3.0F, 2.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-
-    const auto top_logits = top_logit_tokens_f32(logits, 2);
-
-    expect(top_logits.size() == 2, "top logits vector count mismatch");
-    expect(top_logits[0].token == 1, "top logits vector first token mismatch");
-    expect(top_logits[1].token == 2, "top logits vector tie token mismatch");
-    expect_close(top_logits[0].logit, 3.0F, 0.000001F, "top logits vector first value mismatch");
+[[nodiscard]] bool better(const TokenLogit& left, const TokenLogit& right) {
+    return left.logit > right.logit || (left.logit == right.logit && left.token < right.token);
 }
 
-void test_selects_top_logit_tokens_from_last_row() {
-    const std::array<float, 8> logits_values {
-        9.0F, 0.0F, 1.0F, 2.0F,
-        4.0F, 5.0F, 5.0F, 1.0F,
-    };
-    const auto logits = tensor_f32_matrix(2, 4, std::span<const float>(logits_values));
+void test_compact_sampler_stable_ties_and_repetition() {
+    const std::array<TokenLogit, 4> candidates {{{2, 3.0F}, {1, 3.0F}, {0, 2.9F}, {3, -1.0F}}};
+    TokenSampler tied(TokenSamplerOptions {.temperature = 0.0F, .top_k = 4});
+    expect(tied.sample(candidates) == 1U, "equal logits must prefer lower token id");
 
-    const auto top_logits = top_logit_tokens_f32(logits, 3);
+    TokenSampler penalized(TokenSamplerOptions {
+        .temperature = 0.0F, .top_k = 4, .repetition_penalty = 2.0F, .repetition_window = 2,
+    });
+    const std::array<std::uint32_t, 3> history {2U, 2U, 1U};
+    penalized.observe_tokens(history);
+    const auto request = penalized.selection_request();
+    expect(request.history_token_count == 2U, "selection request must deduplicate history");
+    expect(request.base_candidate_count == 3U, "greedy superset must be K plus unique history");
+    expect(penalized.sample(candidates) == 0U, "positive repeated logits must be divided");
 
-    expect(top_logits.size() == 3, "top logits matrix count mismatch");
-    expect(top_logits[0].token == 1, "top logits matrix first token mismatch");
-    expect(top_logits[1].token == 2, "top logits matrix tie should prefer lower token id");
-    expect(top_logits[2].token == 0, "top logits matrix third token mismatch");
-    expect_close(top_logits[0].logit, 5.0F, 0.000001F, "top logits matrix first value mismatch");
+    const std::array<TokenLogit, 3> negative {{{0, -1.0F}, {1, -1.1F}, {2, -2.0F}}};
+    TokenSampler negative_penalty(TokenSamplerOptions {
+        .temperature = 0.0F, .top_k = 3, .repetition_penalty = 2.0F, .repetition_window = 1,
+    });
+    const std::array<std::uint32_t, 1> repeated {0U};
+    negative_penalty.observe_tokens(repeated);
+    expect(negative_penalty.sample(negative) == 1U, "negative repeated logits must be multiplied");
 }
 
-void test_top_logit_tokens_allows_full_vocab_request() {
-    const std::array<float, 3> logits_values {0.0F, 2.0F, 1.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-
-    const auto top_logits = top_logit_tokens_f32(logits, 8);
-
-    expect(top_logits.size() == 3, "top logits full-vocab count mismatch");
-    expect(top_logits[0].token == 1, "top logits full-vocab first token mismatch");
-    expect(top_logits[1].token == 2, "top logits full-vocab second token mismatch");
-    expect(top_logits[2].token == 0, "top logits full-vocab third token mismatch");
-}
-
-void test_rejects_top_logit_tokens_dtype_mismatch() {
-    const auto logits = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 3}), DType::f16));
-
-    try {
-        (void)top_logit_tokens_f32(logits, 1);
-        throw TestFailure("top logits should reject F16 logits");
-    } catch (const TensorError& error) {
-        expect(error.code() == TensorErrorCode::unsupported_operator_dtype, "top logits dtype error mismatch");
-        expect(error.expected_value() == 0, "top logits expected dtype mismatch");
-        expect(error.actual_value() == 1, "top logits actual dtype mismatch");
-    }
-}
-
-void test_rejects_top_logit_tokens_rank_above_two() {
-    const auto logits = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1, 1, 2}), DType::f32));
-
-    try {
-        (void)top_logit_tokens_f32(logits, 1);
-        throw TestFailure("top logits should reject logits rank above two");
-    } catch (const TensorError& error) {
-        expect(error.code() == TensorErrorCode::invalid_shape_rank, "top logits rank error mismatch");
-        expect(error.expected_value() == 2, "top logits expected rank mismatch");
-        expect(error.actual_value() == 3, "top logits actual rank mismatch");
-    }
-}
-
-void test_rejects_top_logit_tokens_nonfinite_logit() {
-    const std::array<float, 3> logits_values {0.0F, 1.0F, std::numeric_limits<float>::infinity()};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-
-    try {
-        (void)top_logit_tokens_f32(logits, 1);
-        throw TestFailure("top logits should reject non-finite logits");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "sampling logit for token 2 must be finite",
-            "top logits non-finite error text mismatch"
-        );
-    }
-}
-
-void test_seeded_token_sampler_is_reproducible_and_respects_top_k() {
-    const std::array<float, 4> logits_values {1.0F, 1.0F, 1.0F, 1.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+void test_compact_sampler_seed_snapshot_and_filter_order() {
+    const std::array<TokenLogit, 4> candidates {{{0, 0.0F}, {1, -1.0F}, {2, -4.0F}, {3, -8.0F}}};
     const auto options = TokenSamplerOptions {
-        .temperature = 1.0F,
-        .top_k = 2,
-        .top_p = 1.0F,
-        .seed = 123,
+        .temperature = 2.0F, .top_k = 4, .top_p = 0.7F, .min_p = 0.05F,
+        .repetition_penalty = 1.1F, .seed = 123,
     };
-    auto first = TokenSampler(options);
-    auto second = TokenSampler(options);
-
-    for (std::size_t index = 0; index < 16U; ++index) {
-        const auto first_token = first.sample(logits);
-        const auto second_token = second.sample(logits);
-        expect(first_token == second_token, "seeded token sampler sequence mismatch");
-        expect(first_token < 2U, "top-k sampler selected filtered token");
-    }
-}
-
-void test_token_sampler_snapshot_replays_rng_and_history() {
-    const std::array<float, 3> logits_values {1.0F, 0.9F, 0.8F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    auto sampler = TokenSampler(TokenSamplerOptions {
-        .temperature = 0.8F,
-        .top_k = 3,
-        .top_p = 1.0F,
-        .repetition_penalty = 1.2F,
-        .seed = 9,
-    });
-    const std::array<std::uint32_t, 2> history {0U, 1U};
-    sampler.observe_tokens(std::span<const std::uint32_t>(history));
-    const auto snapshot = sampler;
-
-    const auto selected = sampler.sample(logits);
-    auto replay = snapshot;
-    expect(replay.sample(logits) == selected, "token sampler snapshot should replay selection");
-}
-
-void test_repetition_penalty_uses_only_recent_window() {
-    const std::array<float, 3> logits_values {1.0F, 0.75F, 0.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    auto sampler = TokenSampler(TokenSamplerOptions {
-        .temperature = 0.0F,
-        .top_k = 3,
-        .top_p = 1.0F,
-        .repetition_penalty = 2.0F,
-        .seed = 0,
-        .repetition_window = 2,
-    });
-
-    const std::array<std::uint32_t, 3> old_token_history {0U, 2U, 2U};
-    sampler.observe_tokens(std::span<const std::uint32_t>(old_token_history));
-    expect(sampler.sample(logits) == 0U, "token outside repetition window should not be penalized");
-
-    const std::array<std::uint32_t, 1> recent_token {0U};
-    sampler.observe_tokens(std::span<const std::uint32_t>(recent_token));
-    expect(sampler.sample(logits) == 1U, "token inside repetition window should be penalized");
-}
-
-void test_min_p_filters_low_probability_tail() {
-    const std::array<float, 3> logits_values {0.0F, -4.0F, -8.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    auto sampler = TokenSampler(TokenSamplerOptions {
-        .temperature = 1.0F,
-        .top_k = 3,
-        .top_p = 1.0F,
-        .min_p = 0.05F,
-        .seed = 17,
-    });
-
+    TokenSampler first(options);
+    const std::array<std::uint32_t, 2> history {3U, 3U};
+    first.observe_tokens(history);
+    auto second = first;
     for (std::size_t index = 0; index < 32U; ++index) {
-        expect(sampler.sample(logits) == 0U, "min-p sampler selected filtered token");
+        const auto a = first.sample(candidates);
+        const auto b = second.sample(candidates);
+        expect(a == b, "copied sampler must replay RNG and history");
+        expect(a == 0U, "top-p must filter before temperature and min-p");
     }
+    first.reset_history();
+    expect(first.selection_request().history_token_count == 0U, "reset must clear sampler history");
 }
 
-void test_top_p_filters_before_temperature() {
-    const std::array<float, 2> logits_values {0.0F, -1.0F};
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
+void test_repetition_window_eviction_and_promotion() {
+    const std::array<TokenLogit, 3> candidates {{{0, 1.0F}, {1, 0.75F}, {2, 0.5F}}};
+    TokenSampler sampler(TokenSamplerOptions {
+        .temperature = 0.0F, .top_k = 3, .repetition_penalty = 2.0F, .repetition_window = 2,
+    });
+    const std::array<std::uint32_t, 3> old {0U, 2U, 2U};
+    sampler.observe_tokens(old);
+    expect(sampler.sample(candidates) == 0U, "evicted token must not be penalized");
+    const std::array<std::uint32_t, 1> recent {0U};
+    sampler.observe_tokens(recent);
+    expect(sampler.sample(candidates) == 1U, "recent token must be penalized");
 
-    for (std::uint64_t seed = 0; seed < 64U; ++seed) {
-        auto sampler = TokenSampler(TokenSamplerOptions {
-            .temperature = 2.0F,
-            .top_k = 2,
-            .top_p = 0.7F,
-            .min_p = 0.0F,
-            .seed = seed,
-        });
-        expect(sampler.sample(logits) == 0U, "top-p should filter the untempered distribution");
-    }
+    TokenSampler promoting(TokenSamplerOptions {
+        .temperature = 0.0F, .top_k = 3, .repetition_penalty = 0.5F, .repetition_window = 1,
+    });
+    const std::array<std::uint32_t, 1> promote {1U};
+    promoting.observe_tokens(promote);
+    expect(promoting.sample(candidates) == 1U, "penalty below one must promote a positive history logit");
 }
 
-void test_top_p_filters_before_min_p() {
-    const std::array<float, 3> logits_values {
-        0.0F,
-        static_cast<float>(std::log(0.4)),
-        static_cast<float>(std::log(0.3)),
-    };
-    const auto logits = tensor_f32_vector(std::span<const float>(logits_values));
-    bool selected_second_token = false;
+void test_sparse_change_candidate_superset_property() {
+    std::mt19937 rng(77U);
+    std::uniform_real_distribution<float> values(-5.0F, 5.0F);
+    for (const std::size_t k : {1U, 40U, 256U}) {
+        const auto vocab = std::max<std::size_t>(320U, k + 64U);
+        for (const std::size_t history_count : {0U, 1U, 64U}) {
+            for (const float penalty : {0.5F, 1.0F, 1.7F}) {
+                std::vector<TokenLogit> base(vocab);
+                for (std::size_t token = 0; token < vocab; ++token) {
+                    base[token] = TokenLogit {
+                        .token = static_cast<std::uint32_t>(token),
+                        .logit = token % 17U == 0U ? 1.0F : values(rng),
+                    };
+                }
+                std::vector<std::uint32_t> history;
+                for (std::size_t index = 0; index < history_count; ++index) {
+                    history.push_back(static_cast<std::uint32_t>((index * 37U + vocab / 2U) % vocab));
+                }
+                auto base_sorted = base;
+                std::sort(base_sorted.begin(), base_sorted.end(), better);
+                std::vector<std::uint32_t> union_tokens;
+                for (std::size_t index = 0; index < std::min(vocab, k + history_count); ++index) {
+                    union_tokens.push_back(base_sorted[index].token);
+                }
+                union_tokens.insert(union_tokens.end(), history.begin(), history.end());
 
-    for (std::uint64_t seed = 0; seed < 128U; ++seed) {
-        auto sampler = TokenSampler(TokenSamplerOptions {
-            .temperature = 1.0F,
-            .top_k = 3,
-            .top_p = 0.65F,
-            .min_p = 0.35F,
-            .seed = seed,
-        });
-        const auto selected = sampler.sample(logits);
-        expect(selected != 2U, "min-p should remove the low-probability tail after top-p");
-        selected_second_token = selected_second_token || selected == 1U;
-    }
-    expect(selected_second_token, "top-p should retain the second token before min-p is applied");
-}
-
-void test_rejects_invalid_token_sampler_options() {
-    const std::array<TokenSamplerOptions, 4> invalid_options {{
-        TokenSamplerOptions {.temperature = -1.0F},
-        TokenSamplerOptions {.temperature = 1.0F, .top_p = 0.0F},
-        TokenSamplerOptions {.temperature = 1.0F, .min_p = 1.1F},
-        TokenSamplerOptions {.temperature = 1.0F, .repetition_penalty = 0.0F},
-    }};
-    for (const auto& options : invalid_options) {
-        bool rejected = false;
-        try {
-            static_cast<void>(TokenSampler(options));
-        } catch (const std::invalid_argument&) {
-            rejected = true;
+                auto adjusted = base;
+                for (auto& candidate : adjusted) {
+                    if (std::find(history.begin(), history.end(), candidate.token) != history.end()) {
+                        candidate.logit = candidate.logit < 0.0F
+                            ? candidate.logit * penalty : candidate.logit / penalty;
+                    }
+                }
+                std::sort(adjusted.begin(), adjusted.end(), better);
+                for (std::size_t index = 0; index < k; ++index) {
+                    expect(
+                        std::find(union_tokens.begin(), union_tokens.end(), adjusted[index].token)
+                            != union_tokens.end(),
+                        "sparse-change top-K escaped the K+U union"
+                    );
+                }
+            }
         }
-        expect(rejected, "invalid token sampler options should fail");
     }
+}
+
+void test_rejects_invalid_compact_sampler_inputs() {
+    for (const auto options : {
+        TokenSamplerOptions {.top_k = 0},
+        TokenSamplerOptions {.top_k = 257},
+        TokenSamplerOptions {.repetition_window = 65},
+        TokenSamplerOptions {.temperature = -1.0F},
+    }) {
+        bool rejected = false;
+        try { static_cast<void>(TokenSampler(options)); } catch (const std::invalid_argument&) { rejected = true; }
+        expect(rejected, "invalid sampler product bounds must fail");
+    }
+    TokenSampler sampler;
+    const std::array<TokenLogit, 1> invalid {{{0, std::numeric_limits<float>::quiet_NaN()}}};
+    bool rejected = false;
+    try { static_cast<void>(sampler.sample(invalid)); } catch (const std::invalid_argument&) { rejected = true; }
+    expect(rejected, "non-finite compact candidate must fail");
 }
 
 const TestCase kSamplingTests[] = {
-    {"selects top logit tokens from vector", test_selects_top_logit_tokens_from_vector},
-    {"selects top logit tokens from last row", test_selects_top_logit_tokens_from_last_row},
-    {"top logit tokens allows full vocab request", test_top_logit_tokens_allows_full_vocab_request},
-    {"rejects top logit tokens dtype mismatch", test_rejects_top_logit_tokens_dtype_mismatch},
-    {"rejects top logit tokens rank above two", test_rejects_top_logit_tokens_rank_above_two},
-    {"rejects top logit tokens nonfinite logit", test_rejects_top_logit_tokens_nonfinite_logit},
-    {"seeded token sampler is reproducible and respects top-k", test_seeded_token_sampler_is_reproducible_and_respects_top_k},
-    {"token sampler snapshot replays RNG and history", test_token_sampler_snapshot_replays_rng_and_history},
-    {"repetition penalty uses only recent window", test_repetition_penalty_uses_only_recent_window},
-    {"min-p filters low probability tail", test_min_p_filters_low_probability_tail},
-    {"top-p filters before temperature", test_top_p_filters_before_temperature},
-    {"top-p filters before min-p", test_top_p_filters_before_min_p},
-    {"rejects invalid token sampler options", test_rejects_invalid_token_sampler_options},
+    {"compact sampler stable ties and repetition", test_compact_sampler_stable_ties_and_repetition},
+    {"compact sampler seed snapshot and filter order", test_compact_sampler_seed_snapshot_and_filter_order},
+    {"repetition window eviction and promotion", test_repetition_window_eviction_and_promotion},
+    {"sparse-change candidate superset property", test_sparse_change_candidate_superset_property},
+    {"rejects invalid compact sampler inputs", test_rejects_invalid_compact_sampler_inputs},
 };
 
 }  // namespace
 
 namespace local_gguf_engine::tests {
 
-std::span<const TestCase> sampling_test_cases() {
-    return kSamplingTests;
-}
+std::span<const TestCase> sampling_test_cases() { return kSamplingTests; }
 
 }  // namespace local_gguf_engine::tests

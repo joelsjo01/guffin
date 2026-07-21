@@ -9,6 +9,8 @@
 #import <Metal/Metal.h>
 
 #include <cmath>
+#include <array>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -112,14 +114,22 @@ struct SoftmaxDimensions {
     std::uint32_t columns;
 };
 
-struct TopLogitDimensions {
-    std::uint32_t row_offset;
+struct TokenCandidateSelectionDimensions {
     std::uint32_t columns;
+    std::uint32_t retain_count;
+    std::uint32_t run_count;
+    std::uint32_t history_count;
+    float softcap;
 };
 
-struct TopLogitMetalResult {
-    std::uint32_t token;
-    float logit;
+struct TokenCandidateMergeDimensions {
+    std::uint32_t retain_count;
+    std::uint32_t input_run_count;
+};
+
+struct TokenCandidateResultHeader {
+    std::uint32_t status;
+    std::uint32_t count;
 };
 
 [[nodiscard]] const MetalBackendBufferStorage& storage(const BackendBuffer& buffer) {
@@ -853,25 +863,100 @@ void MetalCommandContext::encode_softcap(
     ++impl_->stats.compute_dispatch_count;
 }
 
-void MetalCommandContext::encode_top_logit(
+std::uint32_t MetalCommandContext::encode_token_candidates(
     const BackendBuffer& logits,
-    const BackendBuffer& result
+    const engine::Gemma2MetalSelectionWorkspace& workspace,
+    const engine::TokenSelectionRequest& request,
+    float softcap
 ) {
-    static_assert(sizeof(TopLogitMetalResult) == 8);
-    require_capacity(result, sizeof(TopLogitMetalResult), "top-logit result");
-    const auto columns = logits.descriptor().shape.dimension(logits.descriptor().shape.rank() - 1U);
-    const auto rows = logits.descriptor().element_count / columns;
-    const TopLogitDimensions dims {
-        .row_offset = u32((rows - 1U) * columns, "top-logit row offset"),
-        .columns = u32(columns, "top-logit columns"),
+    if (request.top_k == 0U || request.top_k > engine::token_sampler_max_top_k
+        || request.history_token_count > engine::token_sampler_max_repetition_window
+        || request.base_candidate_count != request.top_k + request.history_token_count) {
+        throw std::invalid_argument("Metal token-candidate request is outside product bounds");
+    }
+    if (!std::isfinite(softcap) || softcap <= 0.0F) {
+        throw std::invalid_argument("Metal token-candidate softcap must be finite and positive");
+    }
+    const auto columns64 = logits.descriptor().shape.dimension(logits.descriptor().shape.rank() - 1U);
+    const auto columns = u32(columns64, "token-candidate columns");
+    const auto retain_count = std::min(columns, request.base_candidate_count);
+    const auto run_count = (columns + engine::gemma2_metal_selection_tile_size - 1U)
+        / engine::gemma2_metal_selection_tile_size;
+    const TokenCandidateSelectionDimensions dims {
+        .columns = columns,
+        .retain_count = retain_count,
+        .run_count = run_count,
+        .history_count = request.history_token_count,
+        .softcap = softcap,
     };
-    auto encoder = impl_->compute_encoder("Gemma2 top logit");
-    [encoder setComputePipelineState:impl_->state->top_logit_pipeline];
+    const std::array<std::uint32_t, 2> empty_header {0U, 0U};
+    write_u32s(workspace.compact_result, 0U, empty_header);
+    if (request.history_token_count > 0U) {
+        write_u32s(
+            workspace.history_token_staging,
+            0U,
+            std::span<const std::uint32_t>(request.history_token_ids).first(request.history_token_count)
+        );
+    }
+
+    if (retain_count == 1U && request.history_token_count == 0U) {
+        auto encoder = impl_->compute_encoder("Gemma2 compact token top-1");
+        [encoder setComputePipelineState:impl_->state->token_candidate_top1_pipeline];
+        [encoder setBuffer:storage(logits).buffer() offset:0 atIndex:0];
+        [encoder setBuffer:storage(workspace.compact_result).buffer() offset:0 atIndex:1];
+        [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
+        [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
+        ++impl_->stats.compute_dispatch_count;
+        return 1U;
+    }
+
+    auto encoder = impl_->compute_encoder("Gemma2 compact token candidates");
+    [encoder setComputePipelineState:impl_->state->token_candidate_tile_pipeline];
     [encoder setBuffer:storage(logits).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(result).buffer() offset:0 atIndex:1];
-    [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
-    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [encoder setBuffer:storage(workspace.candidate_runs_a).buffer() offset:0 atIndex:1];
+    [encoder setBuffer:storage(workspace.compact_result).buffer() offset:0 atIndex:2];
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake(run_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
     ++impl_->stats.compute_dispatch_count;
+    std::uint32_t selector_dispatches = 1U;
+
+    auto input_is_a = true;
+    auto input_run_count = run_count;
+    while (input_run_count > 1U) {
+        encode_memory_barrier();
+        const auto output_run_count = (input_run_count + 1U) / 2U;
+        const TokenCandidateMergeDimensions merge_dims {
+            .retain_count = retain_count,
+            .input_run_count = input_run_count,
+        };
+        encoder = impl_->compute_encoder("Gemma2 compact token merge");
+        [encoder setComputePipelineState:impl_->state->token_candidate_merge_pipeline];
+        [encoder setBuffer:storage(input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b).buffer()
+                    offset:0 atIndex:0];
+        [encoder setBuffer:storage(input_is_a ? workspace.candidate_runs_b : workspace.candidate_runs_a).buffer()
+                    offset:0 atIndex:1];
+        [encoder setBytes:&merge_dims length:sizeof(merge_dims) atIndex:2];
+        [encoder dispatchThreadgroups:MTLSizeMake(output_run_count, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        ++impl_->stats.compute_dispatch_count;
+        ++selector_dispatches;
+        input_run_count = output_run_count;
+        input_is_a = !input_is_a;
+    }
+
+    encode_memory_barrier();
+    encoder = impl_->compute_encoder("Gemma2 compact token result");
+    [encoder setComputePipelineState:impl_->state->token_candidate_finalize_pipeline];
+    [encoder setBuffer:storage(logits).buffer() offset:0 atIndex:0];
+    [encoder setBuffer:storage(input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b).buffer()
+                offset:0 atIndex:1];
+    [encoder setBuffer:storage(workspace.history_token_staging).buffer() offset:0 atIndex:2];
+    [encoder setBuffer:storage(workspace.compact_result).buffer() offset:0 atIndex:3];
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(retain_count + request.history_token_count, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    ++impl_->stats.compute_dispatch_count;
+    return selector_dispatches + 1U;
 }
 
 void MetalCommandContext::encode_memory_barrier() {
@@ -930,13 +1015,30 @@ MetalCommandStats MetalCommandContext::commit_and_wait() {
     return wait_until_completed();
 }
 
-ops::TopLogit MetalCommandContext::read_top_logit(const BackendBuffer& result) const {
+engine::CompactTokenCandidates MetalCommandContext::read_token_candidates(
+    const engine::Gemma2MetalSelectionWorkspace& workspace
+) const {
     if (!impl_->submitted) {
-        throw std::logic_error("Metal top-logit result cannot be read before completion");
+        throw std::logic_error("Metal token-candidate result cannot be read before completion");
     }
-    TopLogitMetalResult raw {};
-    std::memcpy(&raw, [storage(result).buffer() contents], sizeof(raw));
-    return ops::TopLogit {.token = raw.token, .logit = raw.logit};
+    const auto* bytes = static_cast<const std::byte*>([storage(workspace.compact_result).buffer() contents]);
+    TokenCandidateResultHeader header {};
+    std::memcpy(&header, bytes, sizeof(header));
+    if (header.status != 0U) {
+        throw std::invalid_argument(
+            (header.status & 2U) != 0U
+                ? "Metal token-candidate history token is outside vocabulary"
+                : "Metal token-candidate logit must be finite after softcap"
+        );
+    }
+    if (header.count == 0U || header.count > engine::token_sampler_max_candidates) {
+        throw std::runtime_error("Metal token-candidate result count is invalid");
+    }
+    engine::CompactTokenCandidates result;
+    result.count = header.count;
+    result.readback_bytes = header.count * sizeof(engine::TokenLogit);
+    std::memcpy(result.values.data(), bytes + sizeof(header), result.readback_bytes);
+    return result;
 }
 
 }  // namespace local_gguf_engine::tensor::backends::metal

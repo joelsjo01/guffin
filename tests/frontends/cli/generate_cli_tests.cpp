@@ -1283,8 +1283,10 @@ void test_gemma2_chat_session_seeded_sampling_and_regen_are_reproducible_when_av
         "sampled turn deterministic prefill timing mismatch");
     expect(first.metrics.generation.runtime_ttft_ns == 30U,
         "sampled turn deterministic runtime TTFT mismatch");
-    expect(first.metrics.generation.decode_duration_ns == 50U,
-        "sampled turn deterministic selection/decode timing mismatch");
+    expect(first.metrics.generation.decode_duration_ns == 30U,
+        "sampled turn deterministic decode timing mismatch");
+    expect(first.metrics.generation.selection_duration_ns == 30U,
+        "sampled turn deterministic selection timing mismatch");
     expect(first.metrics.generation.decode_token_count == 3U,
         "sampled turn decode count mismatch");
     expect(first_session.message_count() == 2U, "sampled /regen should replace the previous response");

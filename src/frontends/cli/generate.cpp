@@ -855,6 +855,10 @@ void write_benchmark_human(std::ostream& output, const GenerationBenchmarkRunRes
                << " prompt_tps=" << json_optional_double(generation_benchmark_prompt_tokens_per_second(record))
                << " generated_tokens=" << record.turn.generation.generated_token_count
                << " generation_tps=" << json_optional_double(generation_benchmark_generation_tokens_per_second(record))
+               << " selection_ns=" << record.turn.generation.selection_duration_ns
+               << " compact_readback_bytes=" << record.turn.generation.compact_readback_bytes
+               << " selector_dispatches=" << record.turn.generation.selector_dispatch_count
+               << " max_candidates=" << record.turn.generation.max_candidate_count
                << " runtime_ttft_ns=" << record.turn.generation.runtime_ttft_ns
                << " e2e_ttft_ns=" << json_optional_u64(record.turn.end_to_end_ttft_ns)
                << " total_ns=" << record.turn.total_turn_duration_ns
@@ -914,6 +918,10 @@ void write_benchmark_jsonl(std::ostream& output, const GenerationBenchmarkRunRes
                << ",\"generated_tokens\":" << record.turn.generation.generated_token_count
                << ",\"decode_tokens\":" << record.turn.generation.decode_token_count
                << ",\"decode_ns\":" << record.turn.generation.decode_duration_ns
+               << ",\"selection_ns\":" << record.turn.generation.selection_duration_ns
+               << ",\"compact_readback_bytes\":" << record.turn.generation.compact_readback_bytes
+               << ",\"selector_dispatches\":" << record.turn.generation.selector_dispatch_count
+               << ",\"max_candidates\":" << record.turn.generation.max_candidate_count
                << ",\"generation_tps\":" << json_optional_double(generation_benchmark_generation_tokens_per_second(record))
                << ",\"runtime_ttft_ns\":" << record.turn.generation.runtime_ttft_ns
                << ",\"e2e_ttft_ns\":" << json_optional_u64(record.turn.end_to_end_ttft_ns)

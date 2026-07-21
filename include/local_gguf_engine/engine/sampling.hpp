@@ -1,7 +1,6 @@
 #pragma once
 
-#include "local_gguf_engine/tensor/tensor.hpp"
-
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -11,9 +10,29 @@
 
 namespace local_gguf_engine::engine {
 
+inline constexpr std::size_t token_sampler_max_top_k = 256;
+inline constexpr std::size_t token_sampler_max_repetition_window = 64;
+inline constexpr std::size_t token_sampler_max_base_candidates =
+    token_sampler_max_top_k + token_sampler_max_repetition_window;
+inline constexpr std::size_t token_sampler_max_candidates =
+    token_sampler_max_base_candidates + token_sampler_max_repetition_window;
+
 struct TokenLogit {
     std::uint32_t token = 0;
     float logit = 0.0F;
+};
+
+struct TokenSelectionRequest {
+    std::uint32_t top_k = 1;
+    std::uint32_t base_candidate_count = 1;
+    std::array<std::uint32_t, token_sampler_max_repetition_window> history_token_ids {};
+    std::uint32_t history_token_count = 0;
+};
+
+struct CompactTokenCandidates {
+    std::array<TokenLogit, token_sampler_max_candidates> values {};
+    std::uint32_t count = 0;
+    std::uint32_t readback_bytes = 0;
 };
 
 struct TokenSamplerOptions {
@@ -33,7 +52,8 @@ public:
     explicit TokenSampler(TokenSamplerOptions options = {});
 
     [[nodiscard]] bool is_greedy() const noexcept;
-    [[nodiscard]] std::uint32_t sample(const tensor::TensorStorage& logits);
+    [[nodiscard]] TokenSelectionRequest selection_request() const noexcept;
+    [[nodiscard]] std::uint32_t sample(std::span<const TokenLogit> compact_candidates);
     void observe_tokens(std::span<const std::uint32_t> token_ids);
     void reset_history(std::span<const std::uint32_t> token_ids = {});
 
@@ -42,10 +62,5 @@ private:
     std::mt19937_64 rng_;
     std::vector<std::uint32_t> token_history_;
 };
-
-[[nodiscard]] std::vector<TokenLogit> top_logit_tokens_f32(
-    const tensor::TensorStorage& logits,
-    std::size_t max_tokens
-);
 
 }  // namespace local_gguf_engine::engine

@@ -234,7 +234,6 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
             allocated_byte_count
         ),
         .logits = allocate_buffer(f32_descriptor({1, config.vocab_size}), allocated_byte_count),
-        .top_logit_staging = allocate_buffer(f32_descriptor({2}), allocated_byte_count),
     };
 }
 
@@ -281,7 +280,28 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
         .final_normalized_hidden =
             allocate_buffer(f32_descriptor({1, config.embedding_length}), allocated_byte_count),
         .logits = allocate_buffer(f32_descriptor({1, config.vocab_size}), allocated_byte_count),
-        .top_logit_staging = allocate_buffer(f32_descriptor({2}), allocated_byte_count),
+    };
+}
+
+[[nodiscard]] Gemma2MetalSelectionWorkspace allocate_selection_workspace(
+    const Gemma2ModelConfig& config,
+    std::size_t& allocated_byte_count
+) {
+    constexpr std::uint64_t candidate_f32_elements = sizeof(TokenLogit) / sizeof(float);
+    const auto tile_count = (
+        static_cast<std::uint64_t>(config.vocab_size) + gemma2_metal_selection_tile_size - 1U
+    ) / gemma2_metal_selection_tile_size;
+    const auto run_elements = tile_count * token_sampler_max_base_candidates * candidate_f32_elements;
+    constexpr auto result_header_f32_elements = std::uint64_t {2};
+    constexpr auto result_elements = result_header_f32_elements
+        + token_sampler_max_candidates * candidate_f32_elements;
+    return Gemma2MetalSelectionWorkspace {
+        .candidate_runs_a = allocate_buffer(f32_descriptor({run_elements}), allocated_byte_count),
+        .candidate_runs_b = allocate_buffer(f32_descriptor({run_elements}), allocated_byte_count),
+        .compact_result = allocate_buffer(f32_descriptor({result_elements}), allocated_byte_count),
+        .history_token_staging = allocate_buffer(
+            f32_descriptor({token_sampler_max_repetition_window}), allocated_byte_count
+        ),
     };
 }
 
@@ -360,6 +380,7 @@ Gemma2MetalModelPlan::Gemma2MetalModelPlan(
     std::vector<Gemma2MetalKVCacheLayer> kv_cache,
     Gemma2MetalPrefillScratch prefill_scratch,
     Gemma2MetalDecodeScratch decode_scratch,
+    Gemma2MetalSelectionWorkspace selection_workspace,
     std::vector<Gemma2MetalLayerState> layers,
     std::size_t uploaded_weight_byte_count,
     std::size_t kv_cache_byte_count,
@@ -370,6 +391,7 @@ Gemma2MetalModelPlan::Gemma2MetalModelPlan(
       kv_cache_(std::move(kv_cache)),
       prefill_scratch_(std::move(prefill_scratch)),
       decode_scratch_(std::move(decode_scratch)),
+      selection_workspace_(std::move(selection_workspace)),
       layers_(std::move(layers)),
       uploaded_weight_byte_count_(uploaded_weight_byte_count),
       kv_cache_byte_count_(kv_cache_byte_count),
@@ -401,6 +423,10 @@ const Gemma2MetalPrefillScratch& Gemma2MetalModelPlan::prefill_scratch() const n
 
 const Gemma2MetalDecodeScratch& Gemma2MetalModelPlan::decode_scratch() const noexcept {
     return decode_scratch_;
+}
+
+const Gemma2MetalSelectionWorkspace& Gemma2MetalModelPlan::selection_workspace() const noexcept {
+    return selection_workspace_;
 }
 
 const std::vector<Gemma2MetalLayerState>& Gemma2MetalModelPlan::layers() const noexcept {
@@ -482,6 +508,7 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     auto kv_cache = allocate_kv_cache(config, kv_cache_byte_count);
     auto prefill_scratch = allocate_prefill_scratch(config, scratch_byte_count);
     auto decode_scratch = allocate_decode_scratch(config, scratch_byte_count);
+    auto selection_workspace = allocate_selection_workspace(config, scratch_byte_count);
     auto layers = make_layer_states(config);
 
     return Gemma2MetalModelPlan(
@@ -490,6 +517,7 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
         std::move(kv_cache),
         std::move(prefill_scratch),
         std::move(decode_scratch),
+        std::move(selection_workspace),
         std::move(layers),
         uploaded_weight_byte_count,
         kv_cache_byte_count,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "local_gguf_engine/engine/gemma2_model.hpp"
+#include "local_gguf_engine/engine/sampling.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 
@@ -73,7 +74,6 @@ struct Gemma2MetalDecodeScratch {
     tensor::BackendBuffer projected_feed_forward_output;
     tensor::BackendBuffer feed_forward_residual;
     tensor::BackendBuffer logits;
-    tensor::BackendBuffer top_logit_staging;
 };
 
 inline constexpr std::uint32_t gemma2_metal_prefill_chunk_size = 16U;
@@ -100,7 +100,17 @@ struct Gemma2MetalPrefillScratch {
     tensor::BackendBuffer feed_forward_residual;
     tensor::BackendBuffer final_normalized_hidden;
     tensor::BackendBuffer logits;
-    tensor::BackendBuffer top_logit_staging;
+};
+
+inline constexpr std::uint32_t gemma2_metal_selection_tile_size = 512U;
+
+struct Gemma2MetalSelectionWorkspace {
+    // Candidate buffers store packed { uint32 token, float logit } pairs. They
+    // are shared by prefill and decode, which cannot select concurrently.
+    tensor::BackendBuffer candidate_runs_a;
+    tensor::BackendBuffer candidate_runs_b;
+    tensor::BackendBuffer compact_result;
+    tensor::BackendBuffer history_token_staging;
 };
 
 struct Gemma2MetalLayerState {
@@ -132,6 +142,7 @@ public:
         std::vector<Gemma2MetalKVCacheLayer> kv_cache,
         Gemma2MetalPrefillScratch prefill_scratch,
         Gemma2MetalDecodeScratch decode_scratch,
+        Gemma2MetalSelectionWorkspace selection_workspace,
         std::vector<Gemma2MetalLayerState> layers,
         std::size_t uploaded_weight_byte_count,
         std::size_t kv_cache_byte_count,
@@ -145,6 +156,7 @@ public:
     [[nodiscard]] const std::vector<Gemma2MetalKVCacheLayer>& kv_cache() const noexcept;
     [[nodiscard]] const Gemma2MetalPrefillScratch& prefill_scratch() const noexcept;
     [[nodiscard]] const Gemma2MetalDecodeScratch& decode_scratch() const noexcept;
+    [[nodiscard]] const Gemma2MetalSelectionWorkspace& selection_workspace() const noexcept;
     [[nodiscard]] const std::vector<Gemma2MetalLayerState>& layers() const noexcept;
     [[nodiscard]] std::size_t uploaded_weight_byte_count() const noexcept;
     [[nodiscard]] std::size_t kv_cache_byte_count() const noexcept;
@@ -156,6 +168,7 @@ private:
     std::vector<Gemma2MetalKVCacheLayer> kv_cache_;
     Gemma2MetalPrefillScratch prefill_scratch_;
     Gemma2MetalDecodeScratch decode_scratch_;
+    Gemma2MetalSelectionWorkspace selection_workspace_;
     std::vector<Gemma2MetalLayerState> layers_;
     std::size_t uploaded_weight_byte_count_ = 0;
     std::size_t kv_cache_byte_count_ = 0;

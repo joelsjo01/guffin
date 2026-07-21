@@ -17,6 +17,7 @@
 #include "local_gguf_engine/tensor/ops/embedding.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
 #include "local_gguf_engine/tensor/ops/normalization.hpp"
+#include "local_gguf_engine/tensor/ops/reduction.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/ops/softmax.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
@@ -57,7 +58,9 @@ using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens_with_plan;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::run_gemma2_metal_resident_prefill;
 using local_gguf_engine::engine::run_gemma2_metal_resident_decode_step;
-using local_gguf_engine::engine::top_logit_tokens_f32;
+using local_gguf_engine::engine::TokenSelectionRequest;
+using local_gguf_engine::engine::TokenLogit;
+using local_gguf_engine::engine::Gemma2MetalSelectionWorkspace;
 using local_gguf_engine::model_format::GGUFHeader;
 using local_gguf_engine::model_format::GGUFMetadataEntry;
 using local_gguf_engine::model_format::GGUFMetadataSection;
@@ -589,6 +592,7 @@ std::size_t expected_kv_cache_byte_count(const Gemma2ModelConfig& config) {
 std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
     const auto& prefill = plan.prefill_scratch();
     const auto& decode = plan.decode_scratch();
+    const auto& selection = plan.selection_workspace();
     return backend_buffer_byte_count(prefill.token_id_staging)
         + backend_buffer_byte_count(prefill.normalized_hidden)
         + backend_buffer_byte_count(prefill.raw_query)
@@ -608,7 +612,6 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(prefill.feed_forward_residual)
         + backend_buffer_byte_count(prefill.final_normalized_hidden)
         + backend_buffer_byte_count(prefill.logits)
-        + backend_buffer_byte_count(prefill.top_logit_staging)
         + backend_buffer_byte_count(decode.token_id_staging)
         + backend_buffer_byte_count(decode.normalized_hidden)
         + backend_buffer_byte_count(decode.raw_query)
@@ -628,7 +631,10 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(decode.projected_feed_forward_output)
         + backend_buffer_byte_count(decode.feed_forward_residual)
         + backend_buffer_byte_count(decode.logits)
-        + backend_buffer_byte_count(decode.top_logit_staging);
+        + backend_buffer_byte_count(selection.candidate_runs_a)
+        + backend_buffer_byte_count(selection.candidate_runs_b)
+        + backend_buffer_byte_count(selection.compact_result)
+        + backend_buffer_byte_count(selection.history_token_staging);
 }
 
 void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() {
@@ -1127,26 +1133,32 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
         schedule,
         token_id,
         std::sqrt(static_cast<float>(config.embedding_length)),
-        true
+        TokenSelectionRequest {}
     );
 
     expect(result.execution.command_buffer_count == 1U, "decode command-buffer count mismatch");
     expect(result.execution.commit_count == 1U, "decode commit count mismatch");
     expect(result.execution.synchronous_wait_count == 1U, "decode wait count mismatch");
     expect(result.execution.compute_encoder_count == 1U, "decode compute encoder count mismatch");
-    expect(result.execution.compute_dispatch_count == 35U, "decode dispatch count mismatch");
+    expect(result.execution.compute_dispatch_count == 34U, "decode dispatch count mismatch");
     expect(result.execution.blit_encoder_count == 0U, "decode blit encoder count mismatch");
-    expect(result.execution.memory_barrier_count == 26U, "decode barrier count mismatch");
+    expect(result.execution.memory_barrier_count == 25U, "decode barrier count mismatch");
     expect(result.execution.transient_buffer_allocation_count == 0U, "decode transient allocation mismatch");
     expect(1U + 15U * 42U + 4U == 635U, "real decode dispatch formula mismatch");
     expect(11U * 42U + 4U == 466U, "real decode barrier formula mismatch");
 
     const auto actual_logits = copy_tensor_from_backend(result.logits);
-    expect_f32_matrix_close(actual_logits, expected.logits, 3.0e-3F, "decode CPU-reference logits");
-    expect(result.next_token_selection.has_value(), "decode selected token missing");
-    const auto expected_top = top_logit_tokens_f32(expected.logits, 1).front();
-    expect(result.next_token_selection->token_id == expected_top.token, "decode selected token mismatch");
-    expect_close(result.next_token_selection->logit, expected_top.logit, 3.0e-3F, "decode selected logit mismatch");
+    expect_f32_matrix_close(
+        softcap_f32(actual_logits, config.final_logit_softcap),
+        expected.logits,
+        3.0e-3F,
+        "decode CPU-reference logits"
+    );
+    expect(result.candidates.has_value(), "decode candidates missing");
+    const auto expected_top = local_gguf_engine::tensor::ops::top_logit_f32(expected.logits);
+    expect(result.candidates->values[0].token == expected_top.token, "decode selected token mismatch");
+    expect_close(result.candidates->values[0].logit, expected_top.logit, 3.0e-3F, "decode selected logit mismatch");
+    expect(result.execution.compact_readback_bytes == 8U, "decode compact readback mismatch");
 
     for (std::size_t layer = 0; layer < key_cache.size(); ++layer) {
         const auto first_live_row = plan.layers()[layer].uses_sliding_window
@@ -1178,15 +1190,15 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
         no_selection_schedule,
         token_id,
         std::sqrt(static_cast<float>(config.embedding_length)),
-        false
+        std::nullopt
     );
-    expect(!no_selection.next_token_selection.has_value(), "decode should omit top-logit result");
+    expect(!no_selection.candidates.has_value(), "decode should omit candidates");
     expect(no_selection.execution.compute_encoder_count == 1U, "no-selection encoder count mismatch");
-    expect(no_selection.execution.compute_dispatch_count == 34U, "no-selection dispatch count mismatch");
+    expect(no_selection.execution.compute_dispatch_count == 33U, "no-selection dispatch count mismatch");
     expect(no_selection.execution.blit_encoder_count == 0U, "no-selection blit count mismatch");
     expect(no_selection.execution.memory_barrier_count == 25U, "no-selection barrier count mismatch");
     expect_f32_matrix_close(
-        copy_tensor_from_backend(no_selection.logits),
+        softcap_f32(copy_tensor_from_backend(no_selection.logits), config.final_logit_softcap),
         expected.logits,
         3.0e-3F,
         "no-selection decode logits"
@@ -1271,21 +1283,21 @@ void test_gemma2_metal_resident_prefill_splits_ring_boundaries_and_matches_incre
         std::span<const std::uint32_t>(prompt_token_ids),
         0,
         embedding_scale,
-        true
+        TokenSelectionRequest {}
     );
     const auto first = run_gemma2_metal_resident_prefill(
         incremental_plan,
         std::span<const std::uint32_t>(prompt_token_ids).first(16),
         0,
         embedding_scale,
-        false
+        std::nullopt
     );
     const auto last = run_gemma2_metal_resident_prefill(
         incremental_plan,
         std::span<const std::uint32_t>(prompt_token_ids).last(7),
         16,
         embedding_scale,
-        true
+        TokenSelectionRequest {}
     );
 
     expect(chunked.execution.chunk_count == 3U, "resident prefill ring-boundary chunk count mismatch");
@@ -1304,8 +1316,8 @@ void test_gemma2_metal_resident_prefill_splits_ring_boundaries_and_matches_incre
     expect(chunked.execution.blit_encoder_count == 0U, "resident prefill must not use KV blits");
     expect(first.execution.chunk_count == 2U, "prefill must split at the 8-row ring boundary");
     expect(first.execution.synchronous_wait_count == 1U, "exact-size resident prefill wait mismatch");
-    expect(chunked.next_token_selection.has_value(), "resident prefill selected token missing");
-    expect(last.next_token_selection.has_value(), "incremental resident prefill selected token missing");
+    expect(chunked.candidates.has_value(), "resident prefill candidates missing");
+    expect(last.candidates.has_value(), "incremental resident prefill candidates missing");
 
     const auto chunked_logits = copy_tensor_from_backend(chunked.logits);
     const auto incremental_logits = copy_tensor_from_backend(last.logits);
@@ -1316,12 +1328,12 @@ void test_gemma2_metal_resident_prefill_splits_ring_boundaries_and_matches_incre
         "resident prefill chunked logits parity"
     );
     expect(
-        chunked.next_token_selection->token_id == last.next_token_selection->token_id,
+        chunked.candidates->values[0].token == last.candidates->values[0].token,
         "resident prefill chunked selected token mismatch"
     );
     expect_close(
-        chunked.next_token_selection->logit,
-        last.next_token_selection->logit,
+        chunked.candidates->values[0].logit,
+        last.candidates->values[0].logit,
         1.0e-5F,
         "resident prefill chunked selected logit mismatch"
     );
@@ -1579,6 +1591,90 @@ void test_reports_gemma2_metal_plan_unavailable_when_metal_missing() {
     }
 }
 
+void test_gemma2_compact_metal_candidates_match_cpu_sort_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+    constexpr float softcap = 30.0F;
+    for (const std::uint32_t vocab : {1U, 31U, 33U, 511U, 512U, 513U, 4097U, 256000U}) {
+        std::vector<float> logits(vocab);
+        for (std::uint32_t token = 0; token < vocab; ++token) {
+            logits[token] = -static_cast<float>(token % 97U);
+        }
+        const auto top_k = std::min<std::uint32_t>(vocab, vocab > 128U ? 40U : 1U);
+        const auto history_count = vocab > 64U ? 3U : 0U;
+        TokenSelectionRequest request {
+            .top_k = top_k,
+            .base_candidate_count = top_k + history_count,
+            .history_token_count = history_count,
+        };
+        if (history_count != 0U) {
+            request.history_token_ids[0] = vocab - 1U;
+            request.history_token_ids[1] = vocab / 2U;
+            request.history_token_ids[2] = 0U;
+        }
+
+        const auto tile_count = (vocab + 511U) / 512U;
+        const auto allocate_f32 = [](std::uint64_t elements) {
+            return allocate_backend_buffer(
+                TensorDescriptor::from(Shape::from({elements}), DType::f32), BackendKind::metal
+            );
+        };
+        Gemma2MetalSelectionWorkspace workspace {
+            .candidate_runs_a = allocate_f32(static_cast<std::uint64_t>(tile_count) * 320U * 2U),
+            .candidate_runs_b = allocate_f32(static_cast<std::uint64_t>(tile_count) * 320U * 2U),
+            .compact_result = allocate_f32(2U + 384U * 2U),
+            .history_token_staging = allocate_f32(64U),
+        };
+        const auto input = copy_tensor_to_backend(
+            tensor_f32_vector(std::span<const float>(logits)), BackendKind::metal
+        );
+        MetalCommandContext command("compact candidate parity");
+        const auto dispatches = command.encode_token_candidates(input, workspace, request, softcap);
+        const auto stats = command.commit_and_wait();
+        const auto actual = command.read_token_candidates(workspace);
+
+        std::vector<TokenLogit> expected;
+        expected.reserve(vocab);
+        for (std::uint32_t token = 0; token < vocab; ++token) {
+            expected.push_back(TokenLogit {
+                .token = token,
+                .logit = local_gguf_engine::engine::gemma2_softcap_value(logits[token], softcap),
+            });
+        }
+        std::sort(expected.begin(), expected.end(), [](const TokenLogit& left, const TokenLogit& right) {
+            return left.logit > right.logit || (left.logit == right.logit && left.token < right.token);
+        });
+        const auto retained = std::min<std::uint32_t>(vocab, request.base_candidate_count);
+        expect(actual.count == retained + history_count, "compact candidate count mismatch");
+        expect(actual.readback_bytes == actual.count * 8U, "compact candidate byte count mismatch");
+        expect(stats.command_buffer_count == 1U && stats.commit_count == 1U
+            && stats.synchronous_wait_count == 1U, "compact candidates must use one submission and wait");
+        expect(stats.transient_buffer_allocation_count == 0U, "compact candidates allocated transient buffers");
+        expect(dispatches == stats.compute_dispatch_count, "compact selector dispatch accounting mismatch");
+        for (std::uint32_t index = 0; index < retained; ++index) {
+            expect(
+                actual.values[index].token == expected[index].token,
+                "compact candidate token mismatch at vocab " + std::to_string(vocab)
+                    + " index " + std::to_string(index)
+                    + ": expected " + std::to_string(expected[index].token)
+                    + ", got " + std::to_string(actual.values[index].token)
+            );
+            expect_close(actual.values[index].logit, expected[index].logit, 2.0e-5F, "compact candidate logit mismatch");
+        }
+        for (std::uint32_t index = 0; index < history_count; ++index) {
+            const auto token = request.history_token_ids[index];
+            expect(actual.values[retained + index].token == token, "compact history token mismatch");
+            expect_close(
+                actual.values[retained + index].logit,
+                local_gguf_engine::engine::gemma2_softcap_value(logits[token], softcap),
+                2.0e-5F,
+                "compact history logit mismatch"
+            );
+        }
+    }
+}
+
 const TestCase kGemma2MetalPlanTests[] = {
     {
         "creates Gemma2 Metal plan from borrowed weight views when available",
@@ -1627,6 +1723,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "rejects Gemma2 Metal plan missing required weight before upload",
         test_rejects_gemma2_metal_plan_missing_required_weight_before_upload,
+    },
+    {
+        "Gemma2 compact Metal candidates match CPU sort when available",
+        test_gemma2_compact_metal_candidates_match_cpu_sort_when_available,
     },
     {
         "reports Gemma2 Metal plan unavailable when Metal missing",

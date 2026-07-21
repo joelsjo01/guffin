@@ -81,7 +81,6 @@ void require_causal_grouped_attention_values_f32_operands(
 );
 void require_softmax_f32_operand(const TensorDescriptor& input);
 void require_softcap_f32_operand(const TensorDescriptor& input, float softcap);
-void require_top_logit_f32_operand(const TensorDescriptor& input);
 void require_positive_finite_scale(float scale);
 void require_positive_frequency_base(float frequency_base);
 void require_residual_gated_silu_projection_f32_f16_gguf_weight_operands(
@@ -161,9 +160,6 @@ void require_f32_f16_matmul_gguf_weight_triple_operands(
 [[nodiscard]] BackendBuffer softcap_f32_with_metal_buffer(
     const MetalBackendBufferStorage& input,
     float softcap
-);
-[[nodiscard]] ops::TopLogit top_logit_f32_with_metal_buffer(
-    const MetalBackendBufferStorage& input
 );
 [[nodiscard]] BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
     const MetalBackendBufferStorage& left,

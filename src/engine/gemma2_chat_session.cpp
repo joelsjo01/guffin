@@ -489,30 +489,15 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
                 return Gemma2MetalTokenStreamDecision::stop_generation;
             }
             return Gemma2MetalTokenStreamDecision::continue_generation;
-        };
+    };
     const auto run_generation = [&]() {
-        if (working_sampler.is_greedy()) {
-            return generate_gemma2_metal_argmax_tokens_with_plan(
-                plan_,
-                std::span<const std::uint32_t>(appended_token_ids),
-                cache_position,
-                generation_max_new_tokens,
-                std::span<const std::uint32_t>(stop_token_ids_),
-                on_generated_token,
-                clock_
-            );
-        }
         return generate_gemma2_metal_sampled_tokens_with_plan(
             plan_,
             std::span<const std::uint32_t>(appended_token_ids),
             cache_position,
             generation_max_new_tokens,
             std::span<const std::uint32_t>(stop_token_ids_),
-            [&](const tensor::BackendBuffer& logits) {
-                const auto token_id = working_sampler.sample(tensor::copy_tensor_from_backend(logits));
-                working_sampler.observe_tokens(std::span<const std::uint32_t>(&token_id, 1U));
-                return token_id;
-            },
+            working_sampler,
             on_generated_token,
             clock_
         );

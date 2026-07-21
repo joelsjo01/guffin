@@ -17,6 +17,5 @@ struct TopLogit {
 [[nodiscard]] float mean_square_f32(const TensorStorage& input);
 [[nodiscard]] float rms_f32(const TensorStorage& input);
 [[nodiscard]] TopLogit top_logit_f32(const TensorStorage& logits);
-[[nodiscard]] TopLogit top_logit_f32_from_backend(const BackendBuffer& logits);
 
 }  // namespace local_gguf_engine::tensor::ops

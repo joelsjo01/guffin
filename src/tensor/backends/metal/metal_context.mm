@@ -473,22 +473,38 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
-    id<MTLFunction> top_logit_function = [library newFunctionWithName:@"top_logit_f32_kernel"];
-    if (top_logit_function == nil) {
+    const auto make_candidate_pipeline = [&](NSString* function_name, const char* detail) {
+        id<MTLFunction> function = [library newFunctionWithName:function_name];
+        if (function == nil) {
+            throw metal_error(runtime::BackendErrorCode::metal_execution_failed, detail);
+        }
+        NSError* error = nil;
+        id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function error:&error];
+        if (pipeline == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string(detail) + ": " + ns_error_message(error, "unknown error")
+            );
+        }
+        return pipeline;
+    };
+    token_candidate_tile_pipeline = make_candidate_pipeline(
+        @"token_candidate_tile_f32_kernel", "Metal token-candidate tile pipeline creation failed"
+    );
+    token_candidate_merge_pipeline = make_candidate_pipeline(
+        @"token_candidate_merge_f32_kernel", "Metal token-candidate merge pipeline creation failed"
+    );
+    token_candidate_finalize_pipeline = make_candidate_pipeline(
+        @"token_candidate_finalize_f32_kernel", "Metal token-candidate finalization pipeline creation failed"
+    );
+    token_candidate_top1_pipeline = make_candidate_pipeline(
+        @"token_candidate_top1_f32_kernel", "Metal token-candidate top-1 pipeline creation failed"
+    );
+    if (token_candidate_tile_pipeline.maxTotalThreadsPerThreadgroup < 512U
+        || token_candidate_top1_pipeline.maxTotalThreadsPerThreadgroup < 512U) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
-            "Metal top-logit kernel function was not found"
-        );
-    }
-
-    NSError* top_logit_pipeline_error = nil;
-    top_logit_pipeline = [device newComputePipelineStateWithFunction:top_logit_function
-                                                               error:&top_logit_pipeline_error];
-    if (top_logit_pipeline == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal top-logit pipeline creation failed: "
-                + ns_error_message(top_logit_pipeline_error, "unknown error")
+            "Metal token-candidate selection requires 512 threads per threadgroup"
         );
     }
 
