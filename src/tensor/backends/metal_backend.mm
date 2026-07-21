@@ -567,6 +567,16 @@ struct RoPEByHeadsDimensions {
     float frequency_base;
 };
 
+struct Gemma2KVCacheStoreDimensions {
+    uint rows;
+    uint head_count;
+    uint head_dimension;
+    uint rope_dimension_count;
+    uint position_start;
+    uint cache_row_mask;
+    float frequency_base;
+};
+
 struct GroupedAttentionScoreDimensions {
     uint query_rows;
     uint key_rows;
@@ -575,6 +585,19 @@ struct GroupedAttentionScoreDimensions {
     uint key_length;
     uint attention_token_count;
     uint query_position_start;
+    float scale;
+    float logit_softcap;
+};
+
+struct Gemma2PrefillAttentionScoreDimensions {
+    uint query_rows;
+    uint key_rows;
+    uint head_count;
+    uint kv_head_count;
+    uint key_length;
+    uint attention_token_count;
+    uint query_position_start;
+    uint cache_row_mask;
     float scale;
     float logit_softcap;
 };
@@ -589,12 +612,23 @@ struct GroupedAttentionValueDimensions {
     uint query_position_start;
 };
 
+struct Gemma2PrefillAttentionValueDimensions {
+    uint query_rows;
+    uint value_rows;
+    uint head_count;
+    uint kv_head_count;
+    uint value_length;
+    uint attention_token_count;
+    uint query_position_start;
+    uint cache_row_mask;
+};
+
 // Keep this layout byte-for-byte aligned with Gemma2DecodeAttentionDimensions
 // in metal_command_context.mm. The production specialization deliberately
 // carries the fixed shape as arguments so host validation and device indexing
 // cannot silently disagree.
 struct Gemma2DecodeAttentionDimensions {
-    uint cache_rows;
+    uint cache_row_mask;
     uint first_position;
     uint attention_token_count;
     uint partition_count;
@@ -816,11 +850,87 @@ kernel void rope_neox_f32_by_heads_kernel(
         : first * angle_sin + second * angle_cos;
 }
 
+// K RoPE and both narrowing stores share a row mapping and one traversal. The
+// exact power-of-two ring avoids a modulo in every cache producer and reader.
+kernel void gemma2_kv_cache_store_f16_kernel(
+    const device float* raw_key [[buffer(0)]],
+    const device float* raw_value [[buffer(1)]],
+    device half* key_cache [[buffer(2)]],
+    device half* value_cache [[buffer(3)]],
+    constant Gemma2KVCacheStoreDimensions& dims [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint column = gid.x;
+    const uint row = gid.y;
+    const uint row_width = dims.head_count * dims.head_dimension;
+    if (row >= dims.rows || column >= row_width) return;
+
+    const uint head_column = column % dims.head_dimension;
+    const uint source_index = row * row_width + column;
+    float rotated = raw_key[source_index];
+    if (head_column < dims.rope_dimension_count) {
+        const uint half_dimension = dims.rope_dimension_count / 2;
+        const uint pair_column = head_column % half_dimension;
+        const uint head_first_column = column - head_column;
+        const uint first_index = row * row_width + head_first_column + pair_column;
+        const uint second_index = first_index + half_dimension;
+        const float first = raw_key[first_index];
+        const float second = raw_key[second_index];
+        const float angle = rope_angle(
+            dims.position_start + row,
+            pair_column * 2,
+            dims.rope_dimension_count,
+            dims.frequency_base
+        );
+        rotated = head_column < half_dimension
+            ? first * cos(angle) - second * sin(angle)
+            : first * sin(angle) + second * cos(angle);
+    }
+    const uint cache_row = (dims.position_start + row) & dims.cache_row_mask;
+    const uint destination_index = cache_row * row_width + column;
+    key_cache[destination_index] = half(rotated);
+    value_cache[destination_index] = half(raw_value[source_index]);
+}
+
 kernel void causal_grouped_attention_scores_f32_kernel(
     const device float* query [[buffer(0)]],
     const device float* key [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant GroupedAttentionScoreDimensions& dims [[buffer(3)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    const uint score_column = gid.x;
+    const uint head = gid.y;
+    const uint query_row = gid.z;
+    if (query_row >= dims.query_rows || head >= dims.head_count || score_column >= dims.attention_token_count) return;
+    const uint query_position = dims.query_position_start + query_row;
+    const uint first_key_position = query_position + 1 > dims.attention_token_count
+        ? query_position + 1 - dims.attention_token_count : 0;
+    const uint key_row = first_key_position + score_column;
+    const uint output_index = (query_row * dims.head_count + head) * dims.attention_token_count + score_column;
+    if (key_row > query_position || key_row >= dims.key_rows) {
+        output[output_index] = -INFINITY;
+        return;
+    }
+    const uint query_width = dims.head_count * dims.key_length;
+    const uint key_width = dims.kv_head_count * dims.key_length;
+    const uint kv_head = head / (dims.head_count / dims.kv_head_count);
+    const uint query_first_column = head * dims.key_length;
+    const uint key_first_column = kv_head * dims.key_length;
+    float dot = 0.0f;
+    for (uint column = 0; column < dims.key_length; ++column) {
+        dot += query[query_row * query_width + query_first_column + column]
+            * key[key_row * key_width + key_first_column + column];
+    }
+    const float scaled = dot * dims.scale;
+    output[output_index] = precise::tanh(scaled / dims.logit_softcap) * dims.logit_softcap;
+}
+
+kernel void causal_grouped_attention_scores_f16_cache_kernel(
+    const device float* query [[buffer(0)]],
+    const device half* key [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant Gemma2PrefillAttentionScoreDimensions& dims [[buffer(3)]],
     uint3 gid [[thread_position_in_grid]]
 ) {
     const uint score_column = gid.x;
@@ -834,14 +944,15 @@ kernel void causal_grouped_attention_scores_f32_kernel(
     const uint first_key_position = query_position + 1 > dims.attention_token_count
         ? query_position + 1 - dims.attention_token_count
         : 0;
-    const uint key_row = first_key_position + score_column;
+    const uint logical_key_row = first_key_position + score_column;
     const uint output_index =
         (query_row * dims.head_count + head) * dims.attention_token_count + score_column;
-    if (key_row > query_position || key_row >= dims.key_rows) {
+    if (logical_key_row > query_position) {
         output[output_index] = -INFINITY;
         return;
     }
 
+    const uint key_row = logical_key_row & dims.cache_row_mask;
     const uint query_width = dims.head_count * dims.key_length;
     const uint key_width = dims.kv_head_count * dims.key_length;
     const uint kv_group_size = dims.head_count / dims.kv_head_count;
@@ -852,7 +963,7 @@ kernel void causal_grouped_attention_scores_f32_kernel(
     float dot = 0.0f;
     for (uint column = 0; column < dims.key_length; ++column) {
         dot += query[query_row * query_width + query_first_column + column]
-            * key[key_row * key_width + key_first_column + column];
+            * float(key[key_row * key_width + key_first_column + column]);
     }
 
     const float scaled = dot * dims.scale;
@@ -863,10 +974,10 @@ kernel void causal_grouped_attention_scores_f32_kernel(
 // SIMD groups stream disjoint 32-token blocks; a lane owns eight adjacent head
 // elements as two float4 values. K/V therefore enter the shader once per
 // grouped pair, while both online-softmax states remain register resident.
-kernel void gemma2_decode_attention_f32_kernel(
+kernel void gemma2_decode_attention_f16_cache_kernel(
     const device float4* query [[buffer(0)]],
-    const device float4* key [[buffer(1)]],
-    const device float4* value [[buffer(2)]],
+    const device half4* key [[buffer(1)]],
+    const device half4* value [[buffer(2)]],
     device float4* output [[buffer(3)]],
     device float4* partial_output [[buffer(4)]],
     device float* partial_maxima [[buffer(5)]],
@@ -905,11 +1016,11 @@ kernel void gemma2_decode_attention_f32_kernel(
         const uint token_begin = block * 32;
         const uint token_end = min(token_begin + 32, dims.attention_token_count);
         for (uint token = token_begin; token < token_end; ++token) {
-            const uint cache_row = dims.first_position + token;
+            const uint cache_row = (dims.first_position + token) & dims.cache_row_mask;
             const uint cache_vector = cache_row * cache_vectors_per_row
                 + kv_head * query_vectors_per_head + vector_lane;
-            const float4 key_0 = key[cache_vector];
-            const float4 key_1 = key[cache_vector + 1];
+            const float4 key_0 = float4(key[cache_vector]);
+            const float4 key_1 = float4(key[cache_vector + 1]);
             float score_first = dot(query_first_0, key_0) + dot(query_first_1, key_1);
             float score_second = dot(query_second_0, key_0) + dot(query_second_1, key_1);
             score_first = simd_sum(score_first);
@@ -927,8 +1038,8 @@ kernel void gemma2_decode_attention_f32_kernel(
                 ? 0.0f : exp(maximum_second - new_maximum_second);
             const float new_scale_first = exp(score_first - new_maximum_first);
             const float new_scale_second = exp(score_second - new_maximum_second);
-            const float4 value_0 = value[cache_vector];
-            const float4 value_1 = value[cache_vector + 1];
+            const float4 value_0 = float4(value[cache_vector]);
+            const float4 value_1 = float4(value[cache_vector + 1]);
             accumulated_first_0 = accumulated_first_0 * old_scale_first + value_0 * new_scale_first;
             accumulated_first_1 = accumulated_first_1 * old_scale_first + value_1 * new_scale_first;
             accumulated_second_0 = accumulated_second_0 * old_scale_second + value_0 * new_scale_second;
@@ -1062,6 +1173,37 @@ kernel void causal_grouped_attention_values_f32_kernel(
     const uint value_column = gid.x;
     const uint head = gid.y;
     const uint query_row = gid.z;
+    if (query_row >= dims.query_rows || head >= dims.head_count || value_column >= dims.value_length) return;
+    const uint query_position = dims.query_position_start + query_row;
+    const uint first_value_position = query_position + 1 > dims.attention_token_count
+        ? query_position + 1 - dims.attention_token_count : 0;
+    const uint value_width = dims.kv_head_count * dims.value_length;
+    const uint kv_head = head / (dims.head_count / dims.kv_head_count);
+    const uint value_first_column = kv_head * dims.value_length;
+    const uint output_width = dims.head_count * dims.value_length;
+    const uint output_index = query_row * output_width + head * dims.value_length + value_column;
+    float sum = 0.0f;
+    for (uint score_column = 0; score_column < dims.attention_token_count; ++score_column) {
+        const uint value_row = first_value_position + score_column;
+        if (value_row > query_position || value_row >= dims.value_rows) continue;
+        const uint probability_index =
+            (query_row * dims.head_count + head) * dims.attention_token_count + score_column;
+        sum += probabilities[probability_index]
+            * value[value_row * value_width + value_first_column + value_column];
+    }
+    output[output_index] = sum;
+}
+
+kernel void causal_grouped_attention_values_f16_cache_kernel(
+    const device float* probabilities [[buffer(0)]],
+    const device half* value [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant Gemma2PrefillAttentionValueDimensions& dims [[buffer(3)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    const uint value_column = gid.x;
+    const uint head = gid.y;
+    const uint query_row = gid.z;
     if (query_row >= dims.query_rows || head >= dims.head_count || value_column >= dims.value_length) {
         return;
     }
@@ -1079,15 +1221,16 @@ kernel void causal_grouped_attention_values_f32_kernel(
 
     float sum = 0.0f;
     for (uint score_column = 0; score_column < dims.attention_token_count; ++score_column) {
-        const uint value_row = first_value_position + score_column;
-        if (value_row > query_position || value_row >= dims.value_rows) {
+        const uint logical_value_row = first_value_position + score_column;
+        if (logical_value_row > query_position) {
             continue;
         }
+        const uint value_row = logical_value_row & dims.cache_row_mask;
 
         const uint probability_index =
             (query_row * dims.head_count + head) * dims.attention_token_count + score_column;
         sum += probabilities[probability_index]
-            * value[value_row * value_width + value_first_column + value_column];
+            * float(value[value_row * value_width + value_first_column + value_column]);
     }
 
     output[output_index] = sum;

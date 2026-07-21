@@ -146,7 +146,7 @@ encoder, launch, and full-buffer pass.
 then fuse measured chains such as post-projection norm plus residual, and
 gate/up activation work. Judge fusion by aggregate token time, not one launch.
 
-### 4. Quantized projection has no competitive multi-token execution strategy
+### 4. completed: Quantized projection has no competitive multi-token execution strategy
 
 The local Q4_K/Q6_K single-row decode path uses cooperative SIMD matvec kernels.
 That is directionally correct. For more than one row, however, the fallback

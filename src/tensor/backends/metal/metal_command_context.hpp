@@ -86,12 +86,17 @@ public:
         std::uint32_t row_count = 0,
         std::uint64_t output_byte_offset = 0
     );
-    void encode_kv_cache_write(
-        const BackendBuffer& key,
-        const BackendBuffer& value,
+    void encode_gemma2_kv_cache_store(
+        const BackendBuffer& raw_key,
+        const BackendBuffer& raw_value,
         const BackendBuffer& cache_key,
         const BackendBuffer& cache_value,
-        std::uint32_t cache_position,
+        std::uint32_t position_start,
+        std::uint32_t head_count,
+        std::uint32_t head_dimension,
+        std::uint32_t rope_dimension_count,
+        float frequency_base,
+        std::uint32_t cache_row_mask,
         std::uint32_t token_count = 0
     );
     void encode_attention_scores(
@@ -105,6 +110,7 @@ public:
         std::uint32_t attention_token_count,
         float scale,
         float logit_softcap,
+        std::uint32_t cache_row_mask,
         std::uint32_t query_row_count = 0
     );
     void encode_softmax(
@@ -122,6 +128,7 @@ public:
         std::uint32_t kv_head_count,
         std::uint32_t value_length,
         std::uint32_t attention_token_count,
+        std::uint32_t cache_row_mask,
         std::uint32_t query_row_count = 0
     );
     void encode_gemma2_decode_attention(
@@ -135,7 +142,8 @@ public:
         std::uint32_t cache_position,
         std::uint32_t attention_token_count,
         float scale,
-        float logit_softcap
+        float logit_softcap,
+        std::uint32_t cache_row_mask
     );
     void encode_add(
         const BackendBuffer& left,

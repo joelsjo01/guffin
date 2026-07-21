@@ -2,6 +2,7 @@
 
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 #include "local_gguf_engine/engine/gemma2_model.hpp"
+#include "local_gguf_engine/engine/gemma2_reference.hpp"
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
@@ -10,6 +11,7 @@
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
+#include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/embedding.hpp"
@@ -75,6 +77,8 @@ using local_gguf_engine::tensor::allocate_backend_buffer;
 using local_gguf_engine::tensor::copy_tensor_to_backend;
 using local_gguf_engine::tensor::copy_tensor_view_to_backend;
 using local_gguf_engine::tensor::copy_tensor_from_backend;
+using local_gguf_engine::tensor::f16_bits_to_f32;
+using local_gguf_engine::tensor::f32_to_f16_bits;
 using local_gguf_engine::tensor::ops::add_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_values_f32;
@@ -87,7 +91,6 @@ using local_gguf_engine::tensor::ops::gelu_tanh_f32;
 using local_gguf_engine::tensor::ops::embed_f16_gguf_weight_token_ids_to_backend;
 using local_gguf_engine::tensor::ops::softcap_f32;
 using local_gguf_engine::tensor::ops::softmax_f32;
-using local_gguf_engine::tensor::ops::write_kv_cache_f32_to_backend;
 using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tensor::backends::metal::MetalCommandContext;
@@ -100,6 +103,7 @@ using local_gguf_engine::tests::metadata_f32;
 using local_gguf_engine::tests::metadata_string;
 using local_gguf_engine::tests::metadata_u32;
 using local_gguf_engine::tests::tensor_f32_matrix;
+using local_gguf_engine::tests::tensor_f16_matrix;
 using local_gguf_engine::tests::tensor_f16_gguf_matrix;
 using local_gguf_engine::tests::tensor_f32_vector;
 using local_gguf_engine::tests::tensor_q4_k_gguf_weight_matrix;
@@ -344,23 +348,6 @@ void expect_f32_matrix_close(
     }
 }
 
-void expect_f32_storage_close(
-    const TensorStorage& actual,
-    const TensorStorage& expected,
-    float tolerance,
-    std::string_view message
-) {
-    expect(actual.descriptor() == expected.descriptor(), std::string(message) + " descriptor mismatch");
-    for (std::uint64_t index = 0; index < actual.descriptor().element_count; ++index) {
-        float actual_value = 0.0F;
-        float expected_value = 0.0F;
-        const auto offset = static_cast<std::size_t>(index * sizeof(float));
-        std::memcpy(&actual_value, actual.bytes().data() + offset, sizeof(float));
-        std::memcpy(&expected_value, expected.bytes().data() + offset, sizeof(float));
-        expect_close(actual_value, expected_value, tolerance, message);
-    }
-}
-
 TensorStorage copy_tensor_view(const local_gguf_engine::tensor::TensorView& view) {
     return TensorStorage::from_bytes(view.descriptor(), view.bytes());
 }
@@ -381,6 +368,85 @@ void write_cache_row(TensorStorage& cache, const TensorStorage& row, std::uint32
     const auto offset = static_cast<std::size_t>(position) * row_bytes;
     expect(offset + row_bytes <= cache.mutable_bytes().size(), "reference KV row range mismatch");
     std::memcpy(cache.mutable_bytes().data() + offset, row.bytes().data(), row_bytes);
+}
+
+TensorStorage round_f32_storage_through_f16(const TensorStorage& input) {
+    auto rounded = TensorStorage::allocate(input.descriptor());
+    for (std::uint64_t index = 0; index < input.descriptor().element_count; ++index) {
+        float value = 0.0F;
+        const auto offset = static_cast<std::size_t>(index * sizeof(float));
+        std::memcpy(&value, input.bytes().data() + offset, sizeof(value));
+        value = f16_bits_to_f32(f32_to_f16_bits(value));
+        std::memcpy(rounded.mutable_bytes().data() + offset, &value, sizeof(value));
+    }
+    return rounded;
+}
+
+TensorStorage f16_ring_cache_from_f32(
+    const TensorStorage& logical_cache,
+    const TensorDescriptor& ring_descriptor,
+    std::uint32_t populated_rows,
+    std::uint32_t row_mask
+) {
+    auto ring = TensorStorage::allocate(ring_descriptor);
+    const auto width = logical_cache.descriptor().shape.dimension(1);
+    for (std::uint32_t logical_row = 0; logical_row < populated_rows; ++logical_row) {
+        const auto physical_row = logical_row & row_mask;
+        for (std::uint64_t column = 0; column < width; ++column) {
+            float value = 0.0F;
+            const auto source_offset = static_cast<std::size_t>(
+                (static_cast<std::uint64_t>(logical_row) * width + column) * sizeof(float)
+            );
+            std::memcpy(&value, logical_cache.bytes().data() + source_offset, sizeof(value));
+            const auto bits = f32_to_f16_bits(value);
+            const auto destination_offset = static_cast<std::size_t>(
+                (static_cast<std::uint64_t>(physical_row) * width + column) * sizeof(std::uint16_t)
+            );
+            std::memcpy(ring.mutable_bytes().data() + destination_offset, &bits, sizeof(bits));
+        }
+    }
+    return ring;
+}
+
+void expect_f16_ring_matches_f32(
+    const TensorStorage& actual_ring,
+    const TensorStorage& expected_logical,
+    std::uint32_t first_logical_row,
+    std::uint32_t logical_row_end,
+    std::uint32_t row_mask,
+    float tolerance,
+    std::string_view message
+) {
+    const auto width = expected_logical.descriptor().shape.dimension(1);
+    for (std::uint32_t logical_row = first_logical_row; logical_row < logical_row_end; ++logical_row) {
+        const auto physical_row = logical_row & row_mask;
+        for (std::uint64_t column = 0; column < width; ++column) {
+            float expected_value = 0.0F;
+            const auto expected_offset = static_cast<std::size_t>(
+                (static_cast<std::uint64_t>(logical_row) * width + column) * sizeof(float)
+            );
+            std::memcpy(&expected_value, expected_logical.bytes().data() + expected_offset, sizeof(expected_value));
+            const auto expected_bits = f32_to_f16_bits(expected_value);
+            std::uint16_t actual_bits = 0;
+            const auto actual_offset = static_cast<std::size_t>(
+                (static_cast<std::uint64_t>(physical_row) * width + column) * sizeof(std::uint16_t)
+            );
+            std::memcpy(&actual_bits, actual_ring.bytes().data() + actual_offset, sizeof(actual_bits));
+            if (tolerance == 0.0F) {
+                expect(actual_bits == expected_bits, message);
+            } else {
+                expect_close(
+                    f16_bits_to_f32(actual_bits),
+                    f16_bits_to_f32(expected_bits),
+                    std::max(
+                        tolerance,
+                        std::abs(f16_bits_to_f32(expected_bits)) * 0.001F
+                    ),
+                    message
+                );
+            }
+        }
+    }
 }
 
 struct ReferenceDecodeResult {
@@ -428,16 +494,17 @@ ReferenceDecodeResult reference_decode(
             head_dimension,
             10000.0F
         );
-        const auto key = rope_neox_f32_by_heads_with_position_start(
+        const auto key = round_f32_storage_through_f16(rope_neox_f32_by_heads_with_position_start(
             raw_key,
             cache_position,
             config.attention_head_count_kv,
             head_dimension,
             head_dimension,
             10000.0F
-        );
+        ));
+        const auto rounded_value = round_f32_storage_through_f16(value);
         write_cache_row(key_cache[layer], key, cache_position);
-        write_cache_row(value_cache[layer], value, cache_position);
+        write_cache_row(value_cache[layer], rounded_value, cache_position);
 
         const auto total_tokens = cache_position + 1U;
         const auto attention_tokens = layer % 2U == 0U
@@ -509,16 +576,14 @@ ReferenceDecodeResult reference_decode(
 
 
 std::size_t expected_kv_cache_byte_count(const Gemma2ModelConfig& config) {
-    const auto key_descriptor = TensorDescriptor::from(
-        Shape::from({config.context_length, config.attention_head_count_kv, config.attention_key_length}),
-        DType::f32
-    );
-    const auto value_descriptor = TensorDescriptor::from(
-        Shape::from({config.context_length, config.attention_head_count_kv, config.attention_value_length}),
-        DType::f32
-    );
-
-    return static_cast<std::size_t>(config.block_count) * (key_descriptor.byte_count + value_descriptor.byte_count);
+    std::size_t bytes = 0;
+    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        const auto rows = local_gguf_engine::engine::gemma2_layer_uses_sliding_window(layer)
+            ? config.sliding_window : config.context_length;
+        bytes += static_cast<std::size_t>(rows) * config.attention_head_count_kv
+            * (config.attention_key_length + config.attention_value_length) * sizeof(std::uint16_t);
+    }
+    return bytes;
 }
 
 std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
@@ -529,7 +594,6 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(prefill.raw_query)
         + backend_buffer_byte_count(prefill.raw_key)
         + backend_buffer_byte_count(prefill.query)
-        + backend_buffer_byte_count(prefill.key)
         + backend_buffer_byte_count(prefill.value)
         + backend_buffer_byte_count(prefill.attention_scores)
         + backend_buffer_byte_count(prefill.attention_probabilities)
@@ -549,6 +613,7 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(decode.normalized_hidden)
         + backend_buffer_byte_count(decode.raw_query)
         + backend_buffer_byte_count(decode.raw_key)
+        + backend_buffer_byte_count(decode.raw_value)
         + backend_buffer_byte_count(decode.query)
         + backend_buffer_byte_count(decode.attention_partial_output)
         + backend_buffer_byte_count(decode.attention_partial_maxima)
@@ -582,6 +647,9 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
     expect(plan.config() == model.gemma2_config(), "Gemma2 Metal plan config mismatch");
     expect(plan.uploaded_weight_byte_count() == expected_weight_bytes, "Gemma2 Metal uploaded byte count mismatch");
     expect(plan.kv_cache_byte_count() == expected_kv_cache_byte_count(plan.config()), "Gemma2 Metal KV byte count mismatch");
+    constexpr std::size_t target_kv_bytes =
+        (21ULL * 8192ULL + 21ULL * 4096ULL) * 8ULL * 256ULL * 2ULL * sizeof(std::uint16_t);
+    expect(target_kv_bytes == 2'113'929'216ULL, "Gemma2 target KV byte formula mismatch");
     expect(plan.scratch_byte_count() == expected_scratch_byte_count(plan), "Gemma2 Metal scratch byte count mismatch");
 
     expect(plan.weights().blocks.size() == 1, "Gemma2 Metal block weight count mismatch");
@@ -603,8 +671,13 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
         "Gemma2 Metal down weight dtype mismatch"
     );
     expect(
-        plan.kv_cache()[0].key.descriptor().shape == Shape::from({16, 1, 256}),
+        plan.kv_cache()[0].key.descriptor().shape == Shape::from({8, 1, 256}),
         "Gemma2 Metal KV key shape mismatch"
+    );
+    expect(plan.kv_cache()[0].key.descriptor().dtype == DType::f16, "Gemma2 Metal KV dtype mismatch");
+    expect(
+        plan.kv_cache()[0].row_capacity == 8U && plan.kv_cache()[0].row_mask == 7U,
+        "Gemma2 Metal KV ring layout mismatch"
     );
     expect(
         plan.decode_scratch().logits.descriptor().shape == Shape::from({1, 4}),
@@ -678,6 +751,95 @@ void test_creates_gemma2_metal_schedules_when_available() {
     expect(decode.layers().size() == 2U, "decode layer count mismatch");
     expect(decode.layers()[0].attention_token_count == 8U, "sliding attention count mismatch");
     expect(decode.layers()[1].attention_token_count == 10U, "global attention count mismatch");
+    expect(
+        plan.kv_cache()[0].row_capacity == 8U && plan.kv_cache()[0].row_mask == 7U,
+        "sliding KV ring layout mismatch"
+    );
+    expect(
+        plan.kv_cache()[1].row_capacity == 16U && plan.kv_cache()[1].row_mask == 15U,
+        "global KV layout mismatch"
+    );
+}
+
+void test_gemma2_f16_kv_store_rounds_values_and_wraps_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    constexpr std::uint32_t rows = 2U;
+    constexpr std::uint32_t heads = 1U;
+    constexpr std::uint32_t dimension = 256U;
+    constexpr std::uint32_t cache_rows = 8U;
+    std::vector<float> raw_key(rows * dimension);
+    std::vector<float> raw_value(rows * dimension);
+    for (std::uint32_t row = 0; row < rows; ++row) {
+        for (std::uint32_t column = 0; column < dimension; ++column) {
+            const auto index = row * dimension + column;
+            raw_key[index] = static_cast<float>(static_cast<int>(column % 19U) - 9) * 0.03125F
+                + static_cast<float>(row) * 0.0078125F;
+            raw_value[index] = static_cast<float>(static_cast<int>(column % 23U) - 11) * 0.015625F
+                - static_cast<float>(row) * 0.00390625F;
+        }
+    }
+    raw_value[0] = 65504.0F;
+    raw_value[1] = -65504.0F;
+    raw_value[2] = 0.00006103515625F;
+
+    const auto raw_key_cpu = tensor_f32_matrix(rows, dimension, raw_key);
+    const auto raw_value_cpu = tensor_f32_matrix(rows, dimension, raw_value);
+    const auto expected_key = rope_neox_f32_by_heads_with_position_start(
+        raw_key_cpu, 7U, heads, dimension, dimension, 10000.0F
+    );
+    const auto cache_descriptor = TensorDescriptor::from(
+        Shape::from({cache_rows, heads, dimension}), DType::f16
+    );
+    const auto key_cache = allocate_backend_buffer(cache_descriptor, BackendKind::metal);
+    const auto value_cache = allocate_backend_buffer(cache_descriptor, BackendKind::metal);
+
+    MetalCommandContext command("Gemma2 exact F16 KV store");
+    command.encode_gemma2_kv_cache_store(
+        copy_tensor_to_backend(raw_key_cpu, BackendKind::metal),
+        copy_tensor_to_backend(raw_value_cpu, BackendKind::metal),
+        key_cache,
+        value_cache,
+        7U,
+        heads,
+        dimension,
+        dimension,
+        10000.0F,
+        cache_rows - 1U,
+        rows
+    );
+    const auto stats = command.commit_and_wait();
+    expect(stats.compute_dispatch_count == 1U, "F16 KV store dispatch count mismatch");
+    expect(stats.blit_encoder_count == 0U, "F16 KV store must not use a blit encoder");
+
+    const auto actual_key = copy_tensor_from_backend(key_cache);
+    const auto actual_value = copy_tensor_from_backend(value_cache);
+    for (std::uint32_t row = 0; row < rows; ++row) {
+        const auto physical_row = (7U + row) & (cache_rows - 1U);
+        for (std::uint32_t column = 0; column < dimension; ++column) {
+            const std::array<std::uint64_t, 2> source_index {row, column};
+            const auto key_bits = f32_to_f16_bits(read_f32(expected_key, source_index));
+            const auto value_bits = f32_to_f16_bits(raw_value[row * dimension + column]);
+            const auto byte_offset = static_cast<std::size_t>(physical_row * dimension + column)
+                * sizeof(std::uint16_t);
+            std::uint16_t actual_key_bits = 0;
+            std::uint16_t actual_value_bits = 0;
+            std::memcpy(&actual_key_bits, actual_key.bytes().data() + byte_offset, sizeof(actual_key_bits));
+            std::memcpy(&actual_value_bits, actual_value.bytes().data() + byte_offset, sizeof(actual_value_bits));
+            // Metal and host transcendental implementations may land on
+            // opposite sides of one F16 boundary; the narrowing itself is
+            // proved bit-exact by V, which has no transcendental operation.
+            expect_close(
+                f16_bits_to_f32(actual_key_bits),
+                f16_bits_to_f32(key_bits),
+                5.0e-4F,
+                "F16 KV store rotated key mismatch"
+            );
+            expect(actual_value_bits == value_bits, "F16 KV store value bits mismatch");
+        }
+    }
 }
 
 void test_gemma2_fused_decode_attention_matches_exact_shape_cpu_reference_when_available() {
@@ -717,21 +879,26 @@ void test_gemma2_fused_decode_attention_matches_exact_shape_cpu_reference_when_a
         }
     }
 
+    for (auto& value : key_values) value = f16_bits_to_f32(f32_to_f16_bits(value));
+    for (auto& value : value_values) value = f16_bits_to_f32(f32_to_f16_bits(value));
+
     const auto query_cpu = tensor_f32_matrix(1, query_heads * dimension, query_values);
     const auto key_cpu = tensor_f32_matrix(cache_rows, kv_heads * dimension, key_values);
     const auto value_cpu = tensor_f32_matrix(cache_rows, kv_heads * dimension, value_values);
     const auto query = copy_tensor_to_backend(query_cpu, BackendKind::metal);
+    const auto key_f16 = tensor_f16_matrix(cache_rows, kv_heads * dimension, key_values);
+    const auto value_f16 = tensor_f16_matrix(cache_rows, kv_heads * dimension, value_values);
     const auto key = copy_tensor_to_backend(
         TensorStorage::from_bytes(
-            TensorDescriptor::from(Shape::from({cache_rows, kv_heads, dimension}), DType::f32),
-            key_cpu.bytes()
+            TensorDescriptor::from(Shape::from({cache_rows, kv_heads, dimension}), DType::f16),
+            key_f16.bytes()
         ),
         BackendKind::metal
     );
     const auto value = copy_tensor_to_backend(
         TensorStorage::from_bytes(
-            TensorDescriptor::from(Shape::from({cache_rows, kv_heads, dimension}), DType::f32),
-            value_cpu.bytes()
+            TensorDescriptor::from(Shape::from({cache_rows, kv_heads, dimension}), DType::f16),
+            value_f16.bytes()
         ),
         BackendKind::metal
     );
@@ -766,7 +933,8 @@ void test_gemma2_fused_decode_attention_matches_exact_shape_cpu_reference_when_a
             cache_rows - 1U,
             token_count,
             scale,
-            softcap
+            softcap,
+            cache_rows - 1U
         );
         const auto stats = command.commit_and_wait();
         const auto partitions = gemma2_decode_attention_partition_count(token_count);
@@ -816,7 +984,8 @@ void test_gemma2_fused_decode_attention_matches_exact_shape_cpu_reference_when_a
             0U,
             0U,
             scale,
-            softcap
+            softcap,
+            cache_rows - 1U
         );
         throw TestFailure("fused attention should reject an empty window");
     } catch (const std::invalid_argument& error) {
@@ -827,17 +996,17 @@ void test_gemma2_fused_decode_attention_matches_exact_shape_cpu_reference_when_a
     }
 
     try {
-        MetalCommandContext command("Gemma2 fused-attention invalid cache position", true);
+        MetalCommandContext command("Gemma2 fused-attention invalid cache mask", true);
         command.encode_gemma2_decode_attention(
             query, key, value, output, partial_output, partial_maxima, partial_denominators,
-            cache_rows, 1U, scale, softcap
+            cache_rows, 1U, scale, softcap, cache_rows
         );
-        throw TestFailure("fused attention should reject a cache position outside capacity");
+        throw TestFailure("fused attention should reject an invalid cache mask");
     } catch (const std::invalid_argument& error) {
         expect(
             std::string_view(error.what())
-                == "Metal Gemma 2 decode attention cache position is outside capacity",
-            "fused attention cache-position error mismatch"
+                == "Metal Gemma 2 decode attention cache mask is invalid",
+            "fused attention cache-mask error mismatch"
         );
     }
 
@@ -849,7 +1018,7 @@ void test_gemma2_fused_decode_attention_matches_exact_shape_cpu_reference_when_a
         MetalCommandContext command("Gemma2 fused-attention undersized partials", true);
         command.encode_gemma2_decode_attention(
             query, key, value, output, undersized_partials, partial_maxima, partial_denominators,
-            0U, 1U, scale, softcap
+            0U, 1U, scale, softcap, cache_rows - 1U
         );
         throw TestFailure("fused attention should reject undersized partial output");
     } catch (const std::invalid_argument& error) {
@@ -899,21 +1068,37 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
                 value_row[column] = static_cast<float>((layer + 2U) * (position + 1U))
                     * static_cast<float>(static_cast<int>(column % 5U) - 2) * 0.0015F;
             }
-            write_cache_row(keys, tensor_f32_matrix(1, config.attention_key_length, key_row), position);
-            write_cache_row(values, tensor_f32_matrix(1, config.attention_value_length, value_row), position);
+            write_cache_row(
+                keys,
+                round_f32_storage_through_f16(
+                    tensor_f32_matrix(1, config.attention_key_length, key_row)
+                ),
+                position
+            );
+            write_cache_row(
+                values,
+                round_f32_storage_through_f16(
+                    tensor_f32_matrix(1, config.attention_value_length, value_row)
+                ),
+                position
+            );
         }
         key_cache.push_back(std::move(keys));
         value_cache.push_back(std::move(values));
     }
 
     for (std::size_t layer = 0; layer < key_cache.size(); ++layer) {
-        const auto metal_keys = TensorStorage::from_bytes(
+        const auto metal_keys = f16_ring_cache_from_f32(
+            key_cache[layer],
             plan.kv_cache()[layer].key.descriptor(),
-            key_cache[layer].bytes()
+            cache_position,
+            plan.kv_cache()[layer].row_mask
         );
-        const auto metal_values = TensorStorage::from_bytes(
+        const auto metal_values = f16_ring_cache_from_f32(
+            value_cache[layer],
             plan.kv_cache()[layer].value.descriptor(),
-            value_cache[layer].bytes()
+            cache_position,
+            plan.kv_cache()[layer].row_mask
         );
         plan.kv_cache()[layer].key = copy_tensor_to_backend(metal_keys, BackendKind::metal);
         plan.kv_cache()[layer].value = copy_tensor_to_backend(metal_values, BackendKind::metal);
@@ -964,22 +1149,25 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
     expect_close(result.next_token_selection->logit, expected_top.logit, 3.0e-3F, "decode selected logit mismatch");
 
     for (std::size_t layer = 0; layer < key_cache.size(); ++layer) {
-        expect_f32_storage_close(
+        const auto first_live_row = plan.layers()[layer].uses_sliding_window
+            ? cache_position + 1U - std::min(cache_position + 1U, config.sliding_window)
+            : 0U;
+        expect_f16_ring_matches_f32(
             copy_tensor_from_backend(plan.kv_cache()[layer].key),
-            TensorStorage::from_bytes(
-                plan.kv_cache()[layer].key.descriptor(),
-                expected.key_cache[layer].bytes()
-            ),
-            5.0e-3F,
+            expected.key_cache[layer],
+            first_live_row,
+            cache_position + 1U,
+            plan.kv_cache()[layer].row_mask,
+            5.0e-4F,
             "decode direct key-cache write"
         );
-        expect_f32_storage_close(
+        expect_f16_ring_matches_f32(
             copy_tensor_from_backend(plan.kv_cache()[layer].value),
-            TensorStorage::from_bytes(
-                plan.kv_cache()[layer].value.descriptor(),
-                expected.value_cache[layer].bytes()
-            ),
-            3.0e-3F,
+            expected.value_cache[layer],
+            first_live_row,
+            cache_position + 1U,
+            plan.kv_cache()[layer].row_mask,
+            5.0e-4F,
             "decode direct value-cache write"
         );
     }
@@ -1055,7 +1243,7 @@ void test_gemma2_fused_rms_norm_add_matches_decode_width_when_available() {
     expect_f32_matrix_close(copy_tensor_from_backend(output), expected, 2.0e-5F, "fused RMSNorm-add parity");
 }
 
-void test_gemma2_metal_resident_prefill_chunks_once_waits_once_and_matches_incremental_when_available() {
+void test_gemma2_metal_resident_prefill_splits_ring_boundaries_and_matches_incremental_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
@@ -1068,9 +1256,8 @@ void test_gemma2_metal_resident_prefill_chunks_once_waits_once_and_matches_incre
     const auto model = load_engine_model_from_gguf(view);
     auto chunked_plan = create_gemma2_metal_model_plan(model);
     auto incremental_plan = create_gemma2_metal_model_plan(model);
-    // A full 16-row chunk followed by seven rows crosses the matrix and
-    // small-batch projection tiers. The separate decode parity test covers the
-    // retained one-row cooperative matvec.
+    // The tiny eight-row ring forces boundaries at 8 and 16 while the same
+    // 23-token call still covers the small-batch projection tiers.
     std::vector<std::uint32_t> prompt_token_ids(23);
     for (std::size_t index = 0; index < prompt_token_ids.size(); ++index) {
         prompt_token_ids[index] = static_cast<std::uint32_t>(index % 4U);
@@ -1101,20 +1288,21 @@ void test_gemma2_metal_resident_prefill_chunks_once_waits_once_and_matches_incre
         true
     );
 
-    expect(chunked.execution.chunk_count == 2U, "resident prefill chunk count mismatch");
-    expect(chunked.execution.command_buffer_count == 2U, "resident prefill command-buffer count mismatch");
-    expect(chunked.execution.commit_count == 2U, "resident prefill commit count mismatch");
+    expect(chunked.execution.chunk_count == 3U, "resident prefill ring-boundary chunk count mismatch");
+    expect(chunked.execution.command_buffer_count == 3U, "resident prefill command-buffer count mismatch");
+    expect(chunked.execution.commit_count == 3U, "resident prefill commit count mismatch");
     expect(chunked.execution.synchronous_wait_count == 1U, "resident prefill wait count mismatch");
     expect(
         chunked.execution.transient_buffer_allocation_count == 0U,
         "resident prefill transient allocation count mismatch"
     );
     expect(
-        chunked.execution.scheduled_layer_execution_count == 4U,
+        chunked.execution.scheduled_layer_execution_count == 6U,
         "resident prefill scheduled layer execution count mismatch"
     );
-    expect(chunked.execution.kv_write_count == 4U, "resident prefill KV write count mismatch");
-    expect(first.execution.chunk_count == 1U, "exact-size resident prefill should use one chunk");
+    expect(chunked.execution.kv_write_count == 6U, "resident prefill KV write count mismatch");
+    expect(chunked.execution.blit_encoder_count == 0U, "resident prefill must not use KV blits");
+    expect(first.execution.chunk_count == 2U, "prefill must split at the 8-row ring boundary");
     expect(first.execution.synchronous_wait_count == 1U, "exact-size resident prefill wait mismatch");
     expect(chunked.next_token_selection.has_value(), "resident prefill selected token missing");
     expect(last.next_token_selection.has_value(), "incremental resident prefill selected token missing");
@@ -1405,6 +1593,10 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_creates_gemma2_metal_schedules_when_available,
     },
     {
+        "Gemma2 F16 KV store rounds values and wraps when available",
+        test_gemma2_f16_kv_store_rounds_values_and_wraps_when_available,
+    },
+    {
         "Gemma2 fused decode attention matches exact-shape CPU reference when available",
         test_gemma2_fused_decode_attention_matches_exact_shape_cpu_reference_when_available,
     },
@@ -1417,8 +1609,8 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available,
     },
     {
-        "Gemma2 Metal resident prefill chunks once waits once and matches incremental when available",
-        test_gemma2_metal_resident_prefill_chunks_once_waits_once_and_matches_incremental_when_available,
+        "Gemma2 Metal resident prefill splits ring boundaries and matches incremental when available",
+        test_gemma2_metal_resident_prefill_splits_ring_boundaries_and_matches_incremental_when_available,
     },
     {
         "Gemma2 Metal plan generation append matches full replay when available",

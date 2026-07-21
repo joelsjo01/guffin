@@ -64,6 +64,22 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     return TensorDescriptor::from(Shape::from(dimensions), DType::f32);
 }
 
+[[nodiscard]] TensorDescriptor f16_descriptor(std::initializer_list<std::uint64_t> dimensions) {
+    return TensorDescriptor::from(Shape::from(dimensions), DType::f16);
+}
+
+[[nodiscard]] bool is_power_of_two(std::uint32_t value) noexcept {
+    return value != 0U && (value & (value - 1U)) == 0U;
+}
+
+void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
+    if (!is_power_of_two(config.context_length) || !is_power_of_two(config.sliding_window)) {
+        throw std::invalid_argument(
+            "Gemma2 Metal KV cache requires power-of-two context and sliding-window lengths"
+        );
+    }
+}
+
 [[nodiscard]] std::uint64_t attention_query_width(const Gemma2ModelConfig& config) {
     return static_cast<std::uint64_t>(config.attention_head_count) * config.attention_key_length;
 }
@@ -145,23 +161,21 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     const Gemma2ModelConfig& config,
     std::size_t& allocated_byte_count
 ) {
-    const auto key_descriptor = f32_descriptor({
-        config.context_length,
-        config.attention_head_count_kv,
-        config.attention_key_length,
-    });
-    const auto value_descriptor = f32_descriptor({
-        config.context_length,
-        config.attention_head_count_kv,
-        config.attention_value_length,
-    });
-
     std::vector<Gemma2MetalKVCacheLayer> layers;
     layers.reserve(config.block_count);
     for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        const auto rows = gemma2_layer_uses_sliding_window(layer)
+            ? config.sliding_window
+            : config.context_length;
         layers.push_back(Gemma2MetalKVCacheLayer {
-            .key = allocate_buffer(key_descriptor, allocated_byte_count),
-            .value = allocate_buffer(value_descriptor, allocated_byte_count),
+            .key = allocate_buffer(f16_descriptor({
+                rows, config.attention_head_count_kv, config.attention_key_length,
+            }), allocated_byte_count),
+            .value = allocate_buffer(f16_descriptor({
+                rows, config.attention_head_count_kv, config.attention_value_length,
+            }), allocated_byte_count),
+            .row_capacity = rows,
+            .row_mask = rows - 1U,
         });
     }
 
@@ -177,6 +191,7 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
         .normalized_hidden = allocate_buffer(f32_descriptor({1, config.embedding_length}), allocated_byte_count),
         .raw_query = allocate_buffer(f32_descriptor({1, attention_query_width(config)}), allocated_byte_count),
         .raw_key = allocate_buffer(f32_descriptor({1, attention_key_width(config)}), allocated_byte_count),
+        .raw_value = allocate_buffer(f32_descriptor({1, attention_value_width(config)}), allocated_byte_count),
         .query = allocate_buffer(f32_descriptor({1, attention_query_width(config)}), allocated_byte_count),
         .attention_partial_output = allocate_buffer(
             f32_descriptor({
@@ -234,7 +249,6 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
         .raw_query = allocate_buffer(f32_descriptor({tokens, attention_query_width(config)}), allocated_byte_count),
         .raw_key = allocate_buffer(f32_descriptor({tokens, attention_key_width(config)}), allocated_byte_count),
         .query = allocate_buffer(f32_descriptor({tokens, attention_query_width(config)}), allocated_byte_count),
-        .key = allocate_buffer(f32_descriptor({tokens, attention_key_width(config)}), allocated_byte_count),
         .value = allocate_buffer(f32_descriptor({tokens, attention_value_width(config)}), allocated_byte_count),
         .attention_scores = allocate_buffer(
             f32_descriptor({tokens, config.attention_head_count, config.context_length}),
@@ -458,6 +472,7 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const Gemma2ModelWeights& weights
 ) {
     require_metal_available();
+    require_power_of_two_cache_layout(config);
 
     std::size_t uploaded_weight_byte_count = 0;
     std::size_t kv_cache_byte_count = 0;

@@ -167,13 +167,6 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
         const auto& attention = block.attention;
         const auto& feed_forward = block.feed_forward;
         const auto& cache = plan.kv_cache()[scheduled_layer.layer_index];
-        const auto key_row_bytes = static_cast<std::uint64_t>(config.attention_head_count_kv)
-            * config.attention_key_length * sizeof(float);
-        const auto value_row_bytes = static_cast<std::uint64_t>(config.attention_head_count_kv)
-            * config.attention_value_length * sizeof(float);
-        const auto key_cache_offset = static_cast<std::uint64_t>(decode.cache_position()) * key_row_bytes;
-        const auto value_cache_offset = static_cast<std::uint64_t>(decode.cache_position()) * value_row_bytes;
-
         command.encode_rms_norm(
             scratch.feed_forward_residual,
             attention.attention_norm_weight,
@@ -186,9 +179,7 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
         command.encode_matmul(
             scratch.normalized_hidden,
             attention.value_weight,
-            cache.value,
-            0,
-            value_cache_offset
+            scratch.raw_value
         );
         command.encode_memory_barrier();
         command.encode_rope(
@@ -200,16 +191,17 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             head_dimension,
             gemma2_rope_frequency_base
         );
-        command.encode_rope(
+        command.encode_gemma2_kv_cache_store(
             scratch.raw_key,
+            scratch.raw_value,
             cache.key,
+            cache.value,
             decode.cache_position(),
             config.attention_head_count_kv,
             head_dimension,
             head_dimension,
             gemma2_rope_frequency_base,
-            0,
-            key_cache_offset
+            cache.row_mask
         );
         command.encode_memory_barrier();
         command.encode_gemma2_decode_attention(
@@ -223,7 +215,8 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             decode.cache_position(),
             scheduled_layer.attention_token_count,
             attention_scale,
-            config.attention_logit_softcap
+            config.attention_logit_softcap,
+            cache.row_mask
         );
         command.encode_memory_barrier();
         command.encode_matmul(
@@ -356,21 +349,24 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
     const auto hidden_elements_per_token = static_cast<std::uint64_t>(config.embedding_length);
     const auto feed_forward_elements_per_token =
         static_cast<std::uint64_t>(config.feed_forward_length);
-    const auto chunk_count = static_cast<std::uint32_t>(
-        (prompt_token_ids.size() + gemma2_metal_prefill_chunk_size - 1U)
-        / gemma2_metal_prefill_chunk_size
-    );
-
     std::vector<metal::MetalCommandContext> commands;
-    commands.reserve(chunk_count);
+    commands.reserve(
+        (prompt_token_ids.size() + gemma2_metal_prefill_chunk_size - 1U)
+        / gemma2_metal_prefill_chunk_size + 1U
+    );
     std::size_t token_offset = 0;
     while (token_offset < prompt_token_ids.size()) {
-        const auto chunk_token_count = static_cast<std::uint32_t>(std::min<std::size_t>(
-            gemma2_metal_prefill_chunk_size,
-            prompt_token_ids.size() - token_offset
-        ));
         const auto chunk_cache_position =
             cache_position + static_cast<std::uint32_t>(token_offset);
+        // A submitted chunk may not wrap the exact sliding ring: later writes
+        // would otherwise overwrite old rows still needed by its early queries.
+        const auto rows_until_ring_boundary =
+            config.sliding_window - (chunk_cache_position & (config.sliding_window - 1U));
+        const auto chunk_token_count = static_cast<std::uint32_t>(std::min<std::size_t>({
+            gemma2_metal_prefill_chunk_size,
+            prompt_token_ids.size() - token_offset,
+            rows_until_ring_boundary,
+        }));
         const auto chunk_tokens = prompt_token_ids.subspan(token_offset, chunk_token_count);
         const auto schedule = create_gemma2_metal_prefill_schedule(
             plan,
@@ -432,22 +428,17 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
                 gemma2_rope_frequency_base,
                 chunk_token_count
             );
-            command.encode_rope(
+            command.encode_gemma2_kv_cache_store(
                 scratch.raw_key,
-                scratch.key,
+                scratch.value,
+                cache.key,
+                cache.value,
                 chunk_cache_position,
                 config.attention_head_count_kv,
                 head_dimension,
                 head_dimension,
                 gemma2_rope_frequency_base,
-                chunk_token_count
-            );
-            command.encode_kv_cache_write(
-                scratch.key,
-                scratch.value,
-                cache.key,
-                cache.value,
-                chunk_cache_position,
+                cache.row_mask,
                 chunk_token_count
             );
             command.encode_attention_scores(
@@ -461,6 +452,7 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
                 scheduled_layer.attention_token_count,
                 attention_scale,
                 config.attention_logit_softcap,
+                cache.row_mask,
                 chunk_token_count
             );
             command.encode_softmax(
@@ -478,6 +470,7 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
                 config.attention_head_count_kv,
                 config.attention_value_length,
                 scheduled_layer.attention_token_count,
+                cache.row_mask,
                 chunk_token_count
             );
             command.encode_matmul(
@@ -577,6 +570,7 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
     }
 
     static_cast<void>(commands.back().wait_until_completed());
+    const auto chunk_count = static_cast<std::uint32_t>(commands.size());
     Gemma2MetalPrefillExecutionStats execution {
         .chunk_count = chunk_count,
         .scheduled_layer_execution_count =

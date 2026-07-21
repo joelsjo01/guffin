@@ -42,6 +42,8 @@ struct Gemma2MetalModelWeightBuffers {
 struct Gemma2MetalKVCacheLayer {
     tensor::BackendBuffer key;
     tensor::BackendBuffer value;
+    std::uint32_t row_capacity = 0;
+    std::uint32_t row_mask = 0;
 };
 
 inline constexpr std::uint32_t gemma2_decode_attention_max_partitions = 32U;
@@ -56,6 +58,7 @@ struct Gemma2MetalDecodeScratch {
     tensor::BackendBuffer normalized_hidden;
     tensor::BackendBuffer raw_query;
     tensor::BackendBuffer raw_key;
+    tensor::BackendBuffer raw_value;
     tensor::BackendBuffer query;
     tensor::BackendBuffer attention_partial_output;
     tensor::BackendBuffer attention_partial_maxima;
@@ -83,7 +86,6 @@ struct Gemma2MetalPrefillScratch {
     tensor::BackendBuffer raw_query;
     tensor::BackendBuffer raw_key;
     tensor::BackendBuffer query;
-    tensor::BackendBuffer key;
     tensor::BackendBuffer value;
     tensor::BackendBuffer attention_scores;
     tensor::BackendBuffer attention_probabilities;

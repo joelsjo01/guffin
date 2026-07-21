@@ -358,6 +358,11 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    gemma2_kv_cache_store_pipeline = make_pipeline(
+        @"gemma2_kv_cache_store_f16_kernel",
+        "Gemma 2 F16 KV-cache store"
+    );
+
     id<MTLFunction> causal_grouped_attention_scores_function =
         [library newFunctionWithName:@"causal_grouped_attention_scores_f32_kernel"];
     if (causal_grouped_attention_scores_function == nil) {
@@ -400,8 +405,17 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    gemma2_prefill_attention_scores_pipeline = make_pipeline(
+        @"causal_grouped_attention_scores_f16_cache_kernel",
+        "Gemma 2 F16-cache prefill attention scores"
+    );
+    gemma2_prefill_attention_values_pipeline = make_pipeline(
+        @"causal_grouped_attention_values_f16_cache_kernel",
+        "Gemma 2 F16-cache prefill attention values"
+    );
+
     id<MTLFunction> gemma2_decode_attention_function =
-        [library newFunctionWithName:@"gemma2_decode_attention_f32_kernel"];
+        [library newFunctionWithName:@"gemma2_decode_attention_f16_cache_kernel"];
     if (gemma2_decode_attention_function == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,

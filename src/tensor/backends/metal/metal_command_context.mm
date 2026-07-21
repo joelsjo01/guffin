@@ -58,6 +58,16 @@ struct RoPEByHeadsDimensions {
     float frequency_base;
 };
 
+struct Gemma2KVCacheStoreDimensions {
+    std::uint32_t rows;
+    std::uint32_t head_count;
+    std::uint32_t head_dimension;
+    std::uint32_t rope_dimension_count;
+    std::uint32_t position_start;
+    std::uint32_t cache_row_mask;
+    float frequency_base;
+};
+
 struct GroupedAttentionScoreDimensions {
     std::uint32_t query_rows;
     std::uint32_t key_rows;
@@ -66,6 +76,7 @@ struct GroupedAttentionScoreDimensions {
     std::uint32_t key_length;
     std::uint32_t attention_token_count;
     std::uint32_t query_position_start;
+    std::uint32_t cache_row_mask;
     float scale;
     float logit_softcap;
 };
@@ -78,10 +89,11 @@ struct GroupedAttentionValueDimensions {
     std::uint32_t value_length;
     std::uint32_t attention_token_count;
     std::uint32_t query_position_start;
+    std::uint32_t cache_row_mask;
 };
 
 struct Gemma2DecodeAttentionDimensions {
-    std::uint32_t cache_rows;
+    std::uint32_t cache_row_mask;
     std::uint32_t first_position;
     std::uint32_t attention_token_count;
     std::uint32_t partition_count;
@@ -191,23 +203,6 @@ struct MetalCommandContext::Impl {
         active_compute_encoder.label = [NSString stringWithUTF8String:label];
         ++stats.compute_encoder_count;
         return active_compute_encoder;
-    }
-
-    [[nodiscard]] id<MTLBlitCommandEncoder> blit_encoder(const char* label) {
-        if (submitted) {
-            throw std::logic_error("Metal resident execution command buffer was already submitted");
-        }
-        end_compute_encoding();
-        id<MTLBlitCommandEncoder> encoder = [command_buffer blitCommandEncoder];
-        if (encoder == nil) {
-            throw metal_error(
-                runtime::BackendErrorCode::metal_execution_failed,
-                std::string("Metal resident execution blit encoder creation failed: ") + label
-            );
-        }
-        encoder.label = [NSString stringWithUTF8String:label];
-        ++stats.blit_encoder_count;
-        return encoder;
     }
 
     ~Impl() {
@@ -445,35 +440,71 @@ void MetalCommandContext::encode_rope(
     ++impl_->stats.compute_dispatch_count;
 }
 
-void MetalCommandContext::encode_kv_cache_write(
-    const BackendBuffer& key,
-    const BackendBuffer& value,
+void MetalCommandContext::encode_gemma2_kv_cache_store(
+    const BackendBuffer& raw_key,
+    const BackendBuffer& raw_value,
     const BackendBuffer& cache_key,
     const BackendBuffer& cache_value,
-    std::uint32_t cache_position,
+    std::uint32_t position_start,
+    std::uint32_t head_count,
+    std::uint32_t head_dimension,
+    std::uint32_t rope_dimension_count,
+    float frequency_base,
+    std::uint32_t cache_row_mask,
     std::uint32_t token_count
 ) {
-    const auto rows = token_count == 0U ? key.descriptor().shape.dimension(0) : token_count;
-    const auto key_row_bytes = key.descriptor().shape.dimension(1) * sizeof(float);
-    const auto value_row_bytes = value.descriptor().shape.dimension(1) * sizeof(float);
-    const auto key_bytes = rows * key_row_bytes;
-    const auto value_bytes = rows * value_row_bytes;
-    const auto key_offset = static_cast<std::uint64_t>(cache_position) * key_row_bytes;
-    const auto value_offset = static_cast<std::uint64_t>(cache_position) * value_row_bytes;
-    require_capacity(cache_key, key_offset + key_bytes, "key cache");
-    require_capacity(cache_value, value_offset + value_bytes, "value cache");
-    auto encoder = impl_->blit_encoder("Gemma2 KV write");
-    [encoder copyFromBuffer:storage(key).buffer()
-               sourceOffset:0
-                   toBuffer:storage(cache_key).buffer()
-          destinationOffset:static_cast<NSUInteger>(key_offset)
-                       size:static_cast<NSUInteger>(key_bytes)];
-    [encoder copyFromBuffer:storage(value).buffer()
-               sourceOffset:0
-                   toBuffer:storage(cache_value).buffer()
-          destinationOffset:static_cast<NSUInteger>(value_offset)
-                       size:static_cast<NSUInteger>(value_bytes)];
-    [encoder endEncoding];
+    const auto rows = token_count == 0U ? raw_key.descriptor().shape.dimension(0) : token_count;
+    const auto width = static_cast<std::uint64_t>(head_count) * head_dimension;
+    const auto require_raw = [&](const BackendBuffer& buffer, const char* name) {
+        const auto& descriptor = buffer.descriptor();
+        if (descriptor.dtype != DType::f32 || descriptor.shape.rank() != 2U
+            || descriptor.shape.dimension(0) < rows || descriptor.shape.dimension(1) != width) {
+            throw std::invalid_argument(std::string("Metal Gemma 2 KV store ") + name + " layout is invalid");
+        }
+        (void)storage(buffer);
+    };
+    const auto require_cache = [&](const BackendBuffer& buffer, const char* name) {
+        const auto& descriptor = buffer.descriptor();
+        if (descriptor.dtype != DType::f16 || descriptor.shape.rank() != 3U
+            || descriptor.shape.dimension(0) != static_cast<std::uint64_t>(cache_row_mask) + 1U
+            || descriptor.shape.dimension(1) != head_count
+            || descriptor.shape.dimension(2) != head_dimension) {
+            throw std::invalid_argument(std::string("Metal Gemma 2 KV store ") + name + " layout is invalid");
+        }
+        (void)storage(buffer);
+    };
+    require_raw(raw_key, "raw-key");
+    require_raw(raw_value, "raw-value");
+    require_cache(cache_key, "key-cache");
+    require_cache(cache_value, "value-cache");
+    if (rows == 0U || (cache_row_mask & (cache_row_mask + 1U)) != 0U
+        || rope_dimension_count == 0U || rope_dimension_count > head_dimension
+        || (rope_dimension_count & 1U) != 0U || !std::isfinite(frequency_base) || frequency_base <= 0.0F) {
+        throw std::invalid_argument("Metal Gemma 2 KV store dimensions are invalid");
+    }
+    const Gemma2KVCacheStoreDimensions dims {
+        .rows = u32(rows, "KV store rows"),
+        .head_count = head_count,
+        .head_dimension = head_dimension,
+        .rope_dimension_count = rope_dimension_count,
+        .position_start = position_start,
+        .cache_row_mask = cache_row_mask,
+        .frequency_base = frequency_base,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 F16 KV store");
+    [encoder setComputePipelineState:impl_->state->gemma2_kv_cache_store_pipeline];
+    [encoder setBuffer:storage(raw_key).buffer() offset:0 atIndex:0];
+    [encoder setBuffer:storage(raw_value).buffer() offset:0 atIndex:1];
+    [encoder setBuffer:storage(cache_key).buffer() offset:0 atIndex:2];
+    [encoder setBuffer:storage(cache_value).buffer() offset:0 atIndex:3];
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(
+                                      static_cast<NSUInteger>((width + 255U) / 256U),
+                                      static_cast<NSUInteger>(rows),
+                                      1
+                                  )
+              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    ++impl_->stats.compute_dispatch_count;
 }
 
 void MetalCommandContext::encode_attention_scores(
@@ -487,11 +518,18 @@ void MetalCommandContext::encode_attention_scores(
     std::uint32_t attention_token_count,
     float scale,
     float logit_softcap,
+    std::uint32_t cache_row_mask,
     std::uint32_t query_row_count
 ) {
     const auto query_rows =
         query_row_count == 0U ? query.descriptor().shape.dimension(0) : query_row_count;
     const auto key_rows = key_cache.descriptor().shape.dimension(0);
+    if (key_cache.descriptor().dtype != DType::f16
+        || key_cache.descriptor().shape.rank() != 3U
+        || key_rows != static_cast<std::uint64_t>(cache_row_mask) + 1U) {
+        throw std::invalid_argument("Metal Gemma 2 attention key-cache layout is invalid");
+    }
+    (void)storage(key_cache);
     const auto output_elements = query_rows * head_count * attention_token_count;
     require_capacity(output, output_elements * sizeof(float), "attention score output");
     const GroupedAttentionScoreDimensions dims {
@@ -502,11 +540,12 @@ void MetalCommandContext::encode_attention_scores(
         .key_length = key_length,
         .attention_token_count = attention_token_count,
         .query_position_start = query_position_start,
+        .cache_row_mask = cache_row_mask,
         .scale = scale,
         .logit_softcap = logit_softcap,
     };
     auto encoder = impl_->compute_encoder("Gemma2 attention scores");
-    [encoder setComputePipelineState:impl_->state->causal_grouped_attention_scores_pipeline];
+    [encoder setComputePipelineState:impl_->state->gemma2_prefill_attention_scores_pipeline];
     [encoder setBuffer:storage(query).buffer() offset:0 atIndex:0];
     [encoder setBuffer:storage(key_cache).buffer() offset:0 atIndex:1];
     [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
@@ -548,12 +587,19 @@ void MetalCommandContext::encode_attention_values(
     std::uint32_t kv_head_count,
     std::uint32_t value_length,
     std::uint32_t attention_token_count,
+    std::uint32_t cache_row_mask,
     std::uint32_t query_row_count
 ) {
     const auto query_rows = query_row_count == 0U
         ? probabilities.descriptor().shape.dimension(0)
         : query_row_count;
     const auto value_rows = value_cache.descriptor().shape.dimension(0);
+    if (value_cache.descriptor().dtype != DType::f16
+        || value_cache.descriptor().shape.rank() != 3U
+        || value_rows != static_cast<std::uint64_t>(cache_row_mask) + 1U) {
+        throw std::invalid_argument("Metal Gemma 2 attention value-cache layout is invalid");
+    }
+    (void)storage(value_cache);
     require_capacity(
         output,
         static_cast<std::uint64_t>(query_rows) * head_count * value_length * sizeof(float),
@@ -567,9 +613,10 @@ void MetalCommandContext::encode_attention_values(
         .value_length = value_length,
         .attention_token_count = attention_token_count,
         .query_position_start = query_position_start,
+        .cache_row_mask = cache_row_mask,
     };
     auto encoder = impl_->compute_encoder("Gemma2 attention values");
-    [encoder setComputePipelineState:impl_->state->causal_grouped_attention_values_pipeline];
+    [encoder setComputePipelineState:impl_->state->gemma2_prefill_attention_values_pipeline];
     [encoder setBuffer:storage(probabilities).buffer() offset:0 atIndex:0];
     [encoder setBuffer:storage(value_cache).buffer() offset:0 atIndex:1];
     [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
@@ -594,7 +641,8 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     std::uint32_t cache_position,
     std::uint32_t attention_token_count,
     float scale,
-    float logit_softcap
+    float logit_softcap,
+    std::uint32_t cache_row_mask
 ) {
     constexpr std::uint32_t dimension = 256U;
     constexpr std::uint32_t max_partitions = 32U;
@@ -627,7 +675,7 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     );
     const auto& key_descriptor = key_cache.descriptor();
     const auto& value_descriptor = value_cache.descriptor();
-    if (key_descriptor.dtype != DType::f32
+    if (key_descriptor.dtype != DType::f16
         || key_descriptor.shape.rank() != 3U
         || key_descriptor.shape.dimension(2) != dimension) {
         throw std::invalid_argument("Metal Gemma 2 decode attention key-cache layout is invalid");
@@ -636,7 +684,7 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     if (query_heads == 0U || query_heads > 16U || kv_heads == 0U || query_heads != kv_heads * 2U) {
         throw std::invalid_argument("Metal Gemma 2 decode attention requires paired-query GQA");
     }
-    if (value_descriptor.dtype != DType::f32
+    if (value_descriptor.dtype != DType::f16
         || value_descriptor.shape.rank() != 3U
         || value_descriptor.shape.dimension(0) != key_descriptor.shape.dimension(0)
         || value_descriptor.shape.dimension(1) != kv_heads
@@ -669,8 +717,10 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     if (attention_token_count == 0U) {
         throw std::invalid_argument("Metal Gemma 2 decode attention token count must not be zero");
     }
-    if (cache_position >= cache_rows) {
-        throw std::invalid_argument("Metal Gemma 2 decode attention cache position is outside capacity");
+    if (cache_rows != cache_row_mask + 1U
+        || (cache_row_mask & (cache_row_mask + 1U)) != 0U
+        || attention_token_count > cache_rows) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention cache mask is invalid");
     }
     if (attention_token_count > cache_position + 1U) {
         throw std::invalid_argument("Metal Gemma 2 decode attention window exceeds populated cache");
@@ -681,7 +731,7 @@ void MetalCommandContext::encode_gemma2_decode_attention(
 
     const auto partitions = gemma2_decode_attention_partition_count(attention_token_count);
     const Gemma2DecodeAttentionDimensions dims {
-        .cache_rows = cache_rows,
+        .cache_row_mask = cache_row_mask,
         .first_position = cache_position + 1U - attention_token_count,
         .attention_token_count = attention_token_count,
         .partition_count = partitions,

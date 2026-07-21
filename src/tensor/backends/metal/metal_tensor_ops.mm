@@ -104,18 +104,6 @@ struct TopLogitMetalResult {
     float logit = 0.0F;
 };
 
-void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float value) {
-    const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
-    std::memcpy(storage.mutable_bytes().data() + byte_offset, &value, sizeof(float));
-}
-
-[[nodiscard]] float read_f32_linear(const TensorStorage& storage, std::uint64_t linear_index) {
-    float value = 0.0F;
-    const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(float));
-    std::memcpy(&value, storage.bytes().data() + byte_offset, sizeof(float));
-    return value;
-}
-
 void require_matmul_inner_dimensions(const TensorDescriptor& left, const TensorDescriptor& right) {
     const auto left_columns = left.shape.dimension(1);
     const auto right_rows = right.shape.dimension(0);
@@ -479,8 +467,6 @@ void require_positive_finite_logit_softcap(float logit_softcap) {
     }
 }
 
-void require_rank3_descriptor(const TensorDescriptor& descriptor);
-
 void require_causal_grouped_attention_scores_f32_operands(
     const TensorDescriptor& query,
     const TensorDescriptor& key,
@@ -498,40 +484,6 @@ void require_causal_grouped_attention_scores_f32_operands(
     require_matrix_descriptor(key);
     require_grouped_attention_layout(query, key, head_count, kv_head_count, key_length, attention_token_count);
     require_causal_position_window(query.shape.dimension(0), key.shape.dimension(0), query_position_start);
-    require_positive_finite_scale(scale);
-    require_positive_finite_logit_softcap(logit_softcap);
-}
-
-void require_causal_grouped_attention_scores_f32_kv_cache_operands(
-    const TensorDescriptor& query,
-    const TensorDescriptor& cache_key,
-    std::uint64_t query_position_start,
-    std::uint64_t head_count,
-    std::uint64_t kv_head_count,
-    std::uint64_t key_length,
-    std::uint64_t attention_token_count,
-    float scale,
-    float logit_softcap
-) {
-    ops::require_f32_descriptor(query);
-    ops::require_f32_descriptor(cache_key);
-    require_matrix_descriptor(query);
-    require_rank3_descriptor(cache_key);
-    if (kv_head_count > std::numeric_limits<std::uint64_t>::max() / key_length) {
-        throw TensorError(TensorErrorCode::element_count_overflow, kv_head_count, key_length);
-    }
-    const auto flat_key = TensorDescriptor::from(
-        Shape::from({cache_key.shape.dimension(0), kv_head_count * key_length}),
-        DType::f32
-    );
-    require_grouped_attention_layout(query, flat_key, head_count, kv_head_count, key_length, attention_token_count);
-    if (cache_key.shape.dimension(1) != kv_head_count) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, kv_head_count, cache_key.shape.dimension(1));
-    }
-    if (cache_key.shape.dimension(2) != key_length) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_length, cache_key.shape.dimension(2));
-    }
-    require_causal_position_window(query.shape.dimension(0), cache_key.shape.dimension(0), query_position_start);
     require_positive_finite_scale(scale);
     require_positive_finite_logit_softcap(logit_softcap);
 }
@@ -556,46 +508,6 @@ void require_causal_grouped_attention_values_f32_operands(
         attention_token_count
     );
     require_causal_position_window(probabilities.shape.dimension(0), value.shape.dimension(0), query_position_start);
-}
-
-void require_causal_grouped_attention_values_f32_kv_cache_operands(
-    const TensorDescriptor& probabilities,
-    const TensorDescriptor& cache_value,
-    std::uint64_t query_position_start,
-    std::uint64_t head_count,
-    std::uint64_t kv_head_count,
-    std::uint64_t value_length,
-    std::uint64_t attention_token_count
-) {
-    ops::require_f32_descriptor(probabilities);
-    ops::require_f32_descriptor(cache_value);
-    require_rank3_descriptor(cache_value);
-    if (kv_head_count > std::numeric_limits<std::uint64_t>::max() / value_length) {
-        throw TensorError(TensorErrorCode::element_count_overflow, kv_head_count, value_length);
-    }
-    const auto flat_value = TensorDescriptor::from(
-        Shape::from({cache_value.shape.dimension(0), kv_head_count * value_length}),
-        DType::f32
-    );
-    require_grouped_attention_value_layout(
-        probabilities,
-        flat_value,
-        head_count,
-        kv_head_count,
-        value_length,
-        attention_token_count
-    );
-    if (cache_value.shape.dimension(1) != kv_head_count) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, kv_head_count, cache_value.shape.dimension(1));
-    }
-    if (cache_value.shape.dimension(2) != value_length) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, value_length, cache_value.shape.dimension(2));
-    }
-    require_causal_position_window(
-        probabilities.shape.dimension(0),
-        cache_value.shape.dimension(0),
-        query_position_start
-    );
 }
 
 void require_softmax_f32_operand(const TensorDescriptor& input) {
@@ -629,94 +541,6 @@ void require_top_logit_f32_operand(const TensorDescriptor& input) {
     }
     if (input.shape.dimension(rank - 1U) > std::numeric_limits<std::uint32_t>::max()) {
         throw std::invalid_argument("F32 top-logit vocabulary is too large for uint32 token ids");
-    }
-}
-
-void require_rank3_descriptor(const TensorDescriptor& descriptor) {
-    constexpr std::size_t rank3 = 3;
-    if (descriptor.shape.rank() != rank3) {
-        throw TensorError(
-            TensorErrorCode::invalid_shape_rank,
-            static_cast<std::uint64_t>(rank3),
-            static_cast<std::uint64_t>(descriptor.shape.rank())
-        );
-    }
-}
-
-void require_prefill_kv_cache_f32_operands(
-    const TensorDescriptor& key,
-    const TensorDescriptor& value,
-    const TensorDescriptor& cache_key,
-    const TensorDescriptor& cache_value,
-    std::uint64_t cache_position,
-    std::uint64_t kv_head_count,
-    std::uint64_t key_length,
-    std::uint64_t value_length
-) {
-    ops::require_f32_descriptor(key);
-    ops::require_f32_descriptor(value);
-    ops::require_f32_descriptor(cache_key);
-    ops::require_f32_descriptor(cache_value);
-    require_matrix_descriptor(key);
-    require_matrix_descriptor(value);
-    require_rank3_descriptor(cache_key);
-    require_rank3_descriptor(cache_value);
-
-    if (kv_head_count == 0 || key_length == 0 || value_length == 0) {
-        throw std::invalid_argument("prefill KV cache dimensions must be positive");
-    }
-    if (
-        kv_head_count > std::numeric_limits<std::uint64_t>::max() / key_length
-        || kv_head_count > std::numeric_limits<std::uint64_t>::max() / value_length
-    ) {
-        throw TensorError(TensorErrorCode::element_count_overflow, kv_head_count, key_length);
-    }
-
-    const auto token_count = key.shape.dimension(0);
-    if (token_count == 0) {
-        throw std::invalid_argument("prefill KV cache write token count must be positive");
-    }
-    if (value.shape.dimension(0) != token_count) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, token_count, value.shape.dimension(0));
-    }
-
-    const auto key_width = kv_head_count * key_length;
-    const auto value_width = kv_head_count * value_length;
-    if (key.shape.dimension(1) != key_width) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_width, key.shape.dimension(1));
-    }
-    if (value.shape.dimension(1) != value_width) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, value_width, value.shape.dimension(1));
-    }
-
-    if (cache_key.shape.dimension(1) != kv_head_count) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, kv_head_count, cache_key.shape.dimension(1));
-    }
-    if (cache_key.shape.dimension(2) != key_length) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, key_length, cache_key.shape.dimension(2));
-    }
-    if (cache_value.shape.dimension(1) != kv_head_count) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, kv_head_count, cache_value.shape.dimension(1));
-    }
-    if (cache_value.shape.dimension(2) != value_length) {
-        throw TensorError(TensorErrorCode::tensor_shape_mismatch, value_length, cache_value.shape.dimension(2));
-    }
-    if (cache_key.shape.dimension(0) != cache_value.shape.dimension(0)) {
-        throw TensorError(
-            TensorErrorCode::tensor_shape_mismatch,
-            cache_key.shape.dimension(0),
-            cache_value.shape.dimension(0)
-        );
-    }
-    if (
-        cache_position > cache_key.shape.dimension(0)
-        || token_count > cache_key.shape.dimension(0) - cache_position
-    ) {
-        throw TensorError(
-            TensorErrorCode::tensor_shape_mismatch,
-            cache_key.shape.dimension(0),
-            cache_position + token_count
-        );
     }
 }
 
@@ -2369,156 +2193,9 @@ TensorStorage matmul_f32_quantized_gguf_weight(const TensorStorage& left, const 
     }
 }
 
-void write_prefill_kv_cache_f32_with_metal_buffers(
-    const MetalBackendBufferStorage& key,
-    const MetalBackendBufferStorage& value,
-    const MetalBackendBufferStorage& cache_key,
-    const MetalBackendBufferStorage& cache_value,
-    std::uint64_t cache_position
-) {
-    auto& state = shared_matmul_pipeline_state();
-    const auto token_count = key.descriptor().shape.dimension(0);
-    const auto key_row_bytes = key.descriptor().shape.dimension(1) * sizeof(float);
-    const auto value_row_bytes = value.descriptor().shape.dimension(1) * sizeof(float);
-
-    id<MTLCommandBuffer> command_buffer = [state.queue commandBuffer];
-    id<MTLBlitCommandEncoder> encoder = [command_buffer blitCommandEncoder];
-    if (command_buffer == nil || encoder == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal prefill KV cache write command encoding failed"
-        );
-    }
-
-    // Produced K/V tensors and cache rows share the same head-major contiguous
-    // row layout, so the write boundary can stay as narrow row blits.
-    for (std::uint64_t row = 0; row < token_count; ++row) {
-        [encoder copyFromBuffer:key.buffer()
-                   sourceOffset:static_cast<NSUInteger>(row * key_row_bytes)
-                       toBuffer:cache_key.buffer()
-              destinationOffset:static_cast<NSUInteger>((cache_position + row) * key_row_bytes)
-                           size:static_cast<NSUInteger>(key_row_bytes)];
-        [encoder copyFromBuffer:value.buffer()
-                   sourceOffset:static_cast<NSUInteger>(row * value_row_bytes)
-                       toBuffer:cache_value.buffer()
-              destinationOffset:static_cast<NSUInteger>((cache_position + row) * value_row_bytes)
-                           size:static_cast<NSUInteger>(value_row_bytes)];
-    }
-
-    [encoder endEncoding];
-    [command_buffer commit];
-    [command_buffer waitUntilCompleted];
-
-    if ([command_buffer status] == MTLCommandBufferStatusError) {
-        NSError* execution_error = [command_buffer error];
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal prefill KV cache write command failed: " + ns_error_message(execution_error, "unknown error")
-        );
-    }
-}
-
 }  // namespace local_gguf_engine::tensor::backends::metal
 
 namespace local_gguf_engine::tensor::ops {
-
-void write_kv_cache_f32_to_backend(
-    const BackendBuffer& key,
-    const BackendBuffer& value,
-    BackendBuffer& cache_key,
-    BackendBuffer& cache_value,
-    std::uint64_t cache_position,
-    std::uint64_t kv_head_count,
-    std::uint64_t key_length,
-    std::uint64_t value_length
-) {
-    backends::metal::require_prefill_kv_cache_f32_operands(
-        key.descriptor(),
-        value.descriptor(),
-        cache_key.descriptor(),
-        cache_value.descriptor(),
-        cache_position,
-        kv_head_count,
-        key_length,
-        value_length
-    );
-    backends::metal::require_same_backend(key.backend(), value.backend(), "prefill KV cache write");
-    backends::metal::require_same_backend(key.backend(), cache_key.backend(), "prefill KV cache write");
-    backends::metal::require_same_backend(key.backend(), cache_value.backend(), "prefill KV cache write");
-
-    switch (key.backend()) {
-        case runtime::BackendKind::cpu: {
-            const auto key_storage = copy_tensor_from_backend(key);
-            const auto value_storage = copy_tensor_from_backend(value);
-            auto cache_key_storage = copy_tensor_from_backend(cache_key);
-            auto cache_value_storage = copy_tensor_from_backend(cache_value);
-            const auto token_count = key_storage.descriptor().shape.dimension(0);
-            const auto key_width = kv_head_count * key_length;
-            const auto value_width = kv_head_count * value_length;
-
-            for (std::uint64_t row = 0; row < token_count; ++row) {
-                const auto cache_row = cache_position + row;
-                for (std::uint64_t column = 0; column < key_width; ++column) {
-                    backends::metal::write_f32_linear(
-                        cache_key_storage,
-                        cache_row * key_width + column,
-                        backends::metal::read_f32_linear(key_storage, row * key_width + column)
-                    );
-                }
-                for (std::uint64_t column = 0; column < value_width; ++column) {
-                    backends::metal::write_f32_linear(
-                        cache_value_storage,
-                        cache_row * value_width + column,
-                        backends::metal::read_f32_linear(value_storage, row * value_width + column)
-                    );
-                }
-            }
-
-            cache_key = copy_tensor_to_backend(cache_key_storage, runtime::BackendKind::cpu);
-            cache_value = copy_tensor_to_backend(cache_value_storage, runtime::BackendKind::cpu);
-            return;
-        }
-        case runtime::BackendKind::metal:
-            @autoreleasepool {
-                backends::metal::write_prefill_kv_cache_f32_with_metal_buffers(
-                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(key)),
-                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(value)),
-                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(cache_key)),
-                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(cache_value)),
-                    cache_position
-                );
-            }
-            return;
-    }
-
-    throw runtime::BackendError(
-        runtime::BackendErrorCode::unsupported_backend,
-        key.backend(),
-        "unsupported backend buffers for prefill KV cache write"
-    );
-}
-
-void write_prefill_kv_cache_f32_to_backend(
-    const BackendBuffer& key,
-    const BackendBuffer& value,
-    BackendBuffer& cache_key,
-    BackendBuffer& cache_value,
-    std::uint64_t cache_position,
-    std::uint64_t kv_head_count,
-    std::uint64_t key_length,
-    std::uint64_t value_length
-) {
-    write_kv_cache_f32_to_backend(
-        key,
-        value,
-        cache_key,
-        cache_value,
-        cache_position,
-        kv_head_count,
-        key_length,
-        value_length
-    );
-}
 
 namespace {
 
@@ -2847,77 +2524,6 @@ BackendBuffer causal_grouped_attention_scores_f32_to_backend(
     );
 }
 
-BackendBuffer causal_grouped_attention_scores_f32_with_kv_cache_to_backend(
-    const BackendBuffer& query,
-    const BackendBuffer& cache_key,
-    std::uint64_t query_position_start,
-    std::uint64_t head_count,
-    std::uint64_t kv_head_count,
-    std::uint64_t key_length,
-    std::uint64_t attention_token_count,
-    float scale,
-    float logit_softcap
-) {
-    backends::metal::require_causal_grouped_attention_scores_f32_kv_cache_operands(
-        query.descriptor(),
-        cache_key.descriptor(),
-        query_position_start,
-        head_count,
-        kv_head_count,
-        key_length,
-        attention_token_count,
-        scale,
-        logit_softcap
-    );
-    backends::metal::require_same_backend(query.backend(), cache_key.backend(), "causal grouped cache attention scores");
-
-    switch (query.backend()) {
-        case runtime::BackendKind::cpu: {
-            const auto query_storage = copy_tensor_from_backend(query);
-            const auto cache_storage = copy_tensor_from_backend(cache_key);
-            const auto flat_cache_descriptor = TensorDescriptor::from(
-                Shape::from({cache_key.descriptor().shape.dimension(0), kv_head_count * key_length}),
-                DType::f32
-            );
-            const auto flat_cache = TensorStorage::from_bytes(flat_cache_descriptor, cache_storage.bytes());
-            return copy_tensor_to_backend(
-                ops::causal_grouped_attention_scores_f32(
-                    query_storage,
-                    flat_cache,
-                    query_position_start,
-                    head_count,
-                    kv_head_count,
-                    key_length,
-                    attention_token_count,
-                    scale,
-                    logit_softcap
-                ),
-                runtime::BackendKind::cpu
-            );
-        }
-        case runtime::BackendKind::metal:
-            @autoreleasepool {
-                return backends::metal::causal_grouped_attention_scores_f32_with_metal_buffers(
-                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(query)),
-                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(cache_key)),
-                    query_position_start,
-                    head_count,
-                    kv_head_count,
-                    key_length,
-                    attention_token_count,
-                    scale,
-                    logit_softcap
-                );
-            }
-    }
-
-    throw runtime::BackendError(
-        runtime::BackendErrorCode::unsupported_backend,
-        query.backend(),
-        "unsupported backend buffers for causal grouped cache attention scores"
-    );
-}
-
 BackendBuffer causal_grouped_attention_values_f32_to_backend(
     const BackendBuffer& probabilities,
     const BackendBuffer& value,
@@ -2967,73 +2573,6 @@ BackendBuffer causal_grouped_attention_values_f32_to_backend(
         runtime::BackendErrorCode::unsupported_backend,
         probabilities.backend(),
         "unsupported backend buffers for causal grouped attention values"
-    );
-}
-
-BackendBuffer causal_grouped_attention_values_f32_with_kv_cache_to_backend(
-    const BackendBuffer& probabilities,
-    const BackendBuffer& cache_value,
-    std::uint64_t query_position_start,
-    std::uint64_t head_count,
-    std::uint64_t kv_head_count,
-    std::uint64_t value_length,
-    std::uint64_t attention_token_count
-) {
-    backends::metal::require_causal_grouped_attention_values_f32_kv_cache_operands(
-        probabilities.descriptor(),
-        cache_value.descriptor(),
-        query_position_start,
-        head_count,
-        kv_head_count,
-        value_length,
-        attention_token_count
-    );
-    backends::metal::require_same_backend(
-        probabilities.backend(),
-        cache_value.backend(),
-        "causal grouped cache attention values"
-    );
-
-    switch (probabilities.backend()) {
-        case runtime::BackendKind::cpu: {
-            const auto probabilities_storage = copy_tensor_from_backend(probabilities);
-            const auto cache_storage = copy_tensor_from_backend(cache_value);
-            const auto flat_cache_descriptor = TensorDescriptor::from(
-                Shape::from({cache_value.descriptor().shape.dimension(0), kv_head_count * value_length}),
-                DType::f32
-            );
-            const auto flat_cache = TensorStorage::from_bytes(flat_cache_descriptor, cache_storage.bytes());
-            return copy_tensor_to_backend(
-                ops::causal_grouped_attention_values_f32(
-                    probabilities_storage,
-                    flat_cache,
-                    query_position_start,
-                    head_count,
-                    kv_head_count,
-                    value_length,
-                    attention_token_count
-                ),
-                runtime::BackendKind::cpu
-            );
-        }
-        case runtime::BackendKind::metal:
-            @autoreleasepool {
-                return backends::metal::causal_grouped_attention_values_f32_with_metal_buffers(
-                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(probabilities)),
-                    backends::metal::require_metal_backend_buffer(backend_buffer_storage(cache_value)),
-                    query_position_start,
-                    head_count,
-                    kv_head_count,
-                    value_length,
-                    attention_token_count
-                );
-            }
-    }
-
-    throw runtime::BackendError(
-        runtime::BackendErrorCode::unsupported_backend,
-        probabilities.backend(),
-        "unsupported backend buffers for causal grouped cache attention values"
     );
 }
 
