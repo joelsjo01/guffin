@@ -56,6 +56,9 @@ struct TokenCandidateResult {
     TokenCandidate candidates[token_candidate_max_count];
 };
 
+constant ushort q4_k_decode_block_count [[function_constant(0)]];
+constant ushort q6_k_decode_block_count [[function_constant(1)]];
+
 inline bool token_candidate_better(TokenCandidate left, TokenCandidate right) {
     return left.logit > right.logit || (left.logit == right.logit && left.token < right.token);
 }
@@ -247,11 +250,12 @@ DEFINE_Q4_K_ROW_KERNEL(4)
 DEFINE_Q4_K_ROW_KERNEL(8)
 DEFINE_Q4_K_ROW_KERNEL(16)
 
-// Decode has a single activation row. Four 8-lane subgroups divide four
-// packed blocks while the full SIMD group reduces their independent partial
-// sums. This keeps packed reads contiguous inside each subgroup and avoids
-// staging either activations or dequantized weights in threadgroup memory.
-kernel void matvec_f32_q4_k_simd_2x2_kernel(
+// Decode has one activation row. Four 8-lane workers cover four blocks while
+// each SIMD group reuses its activation registers for two adjacent columns.
+// The function constant is nonzero for production Gemma widths, allowing Metal
+// to specialize the block loop while the zero variant preserves arbitrary
+// valid backend shapes.
+kernel void matvec_f32_q4_k_packed_kernel(
     const device float* left [[buffer(0)]],
     const device uchar* right [[buffer(1)]],
     device float* output [[buffer(2)]],
@@ -262,75 +266,102 @@ kernel void matvec_f32_q4_k_simd_2x2_kernel(
 ) {
     const uint first_column = (threadgroup_index * 4) + uint(simdgroup_index) * 2;
     const uint second_column = first_column + 1;
-    const uint subgroup = uint(lane) >> 3;
-    const uint subgroup_lane = uint(lane) & 7;
-    const uint blocks_per_column = dims.shared / 256;
-    float first_sum = 0.0f;
-    float second_sum = 0.0f;
+    const ushort block_worker = lane / 8;
+    const ushort worker_lane = lane % 8;
+    const ushort quant_half = worker_lane / 4;
+    const ushort pair_index = worker_lane % 4;
+    const uint blocks_per_column = q4_k_decode_block_count == 0
+        ? dims.shared / 256
+        : uint(q4_k_decode_block_count);
+    const uint column_stride = blocks_per_column * 144;
+    const uint adjacent_stride = second_column < dims.columns ? column_stride : 0;
+    float sums[2] = {0.0f, 0.0f};
 
     if (first_column < dims.columns) {
-        for (uint column_block = subgroup; column_block < blocks_per_column; column_block += 4) {
-            const device uchar* first_block =
-                right + (first_column * blocks_per_column + column_block) * 144;
-            const device uchar* second_block = second_column < dims.columns
-                ? right + (second_column * blocks_per_column + column_block) * 144
-                : first_block;
-            const float first_d = f16_bits_to_float(read_little_endian_u16(first_block, 0));
-            const float first_dmin = f16_bits_to_float(read_little_endian_u16(first_block, 2));
-            const device uchar* first_scale_min = first_block + 4;
-            const device uchar* first_quantized = first_block + 16;
-            const float second_d = second_column < dims.columns
-                ? f16_bits_to_float(read_little_endian_u16(second_block, 0))
-                : 0.0f;
-            const float second_dmin = second_column < dims.columns
-                ? f16_bits_to_float(read_little_endian_u16(second_block, 2))
-                : 0.0f;
-            const device uchar* second_scale_min = second_block + 4;
-            const device uchar* second_quantized = second_block + 16;
+        const device uchar* first_column_bytes = right + first_column * column_stride;
+        const device float* activation = left
+            + uint(block_worker) * 256 + 64 * uint(quant_half) + 8 * uint(pair_index);
+        float activation_low[16];
+        float activation_high[16];
+        ushort packed_scales[4];
+        thread const uchar* scales = reinterpret_cast<thread const uchar*>(packed_scales);
 
-            for (uint group = 0; group < 8; ++group) {
-                const uint element_base = group * 32 + subgroup_lane * 4;
-                const uint quantized_base = (group >> 1) * 32 + subgroup_lane * 4;
-                const uint shift = (group & 1) * 4;
-                float activation_sum = 0.0f;
-                float first_quantized_dot = 0.0f;
-                float second_quantized_dot = 0.0f;
-                for (uint item = 0; item < 4; ++item) {
-                    const float activation = left[column_block * 256 + element_base + item];
-                    activation_sum += activation;
-                    first_quantized_dot += activation
-                        * float((first_quantized[quantized_base + item] >> shift) & 0x0f);
-                    if (second_column < dims.columns) {
-                        second_quantized_dot += activation
-                            * float((second_quantized[quantized_base + item] >> shift) & 0x0f);
-                    }
-                }
-                first_sum += first_d
-                        * float(q4_k_scale_min_value(first_scale_min, group, false))
-                        * first_quantized_dot
-                    - first_dmin
-                        * float(q4_k_scale_min_value(first_scale_min, group, true))
-                        * activation_sum;
-                if (second_column < dims.columns) {
-                    second_sum += second_d
-                            * float(q4_k_scale_min_value(second_scale_min, group, false))
-                            * second_quantized_dot
-                        - second_dmin
-                            * float(q4_k_scale_min_value(second_scale_min, group, true))
-                            * activation_sum;
-                }
+        for (uint block = uint(block_worker); block < blocks_per_column; block += 4) {
+            float4 activation_sums = float4(0.0f);
+#pragma clang loop unroll(full)
+            for (ushort item = 0; item < 8; ++item) {
+                activation_low[item] = activation[item];
+                activation_sums[0] += activation_low[item];
+                activation_low[item + 8] = activation[item + 32];
+                activation_sums[1] += activation_low[item + 8];
+                activation_high[item] = activation[item + 128];
+                activation_sums[2] += activation_high[item];
+                activation_high[item + 8] = activation[item + 160];
+                activation_sums[3] += activation_high[item + 8];
             }
+
+            const device uchar* block_bytes = first_column_bytes + block * 144;
+            const device ushort* scale_words =
+                reinterpret_cast<const device ushort*>(block_bytes + 4) + quant_half;
+            const device ushort* quants =
+                reinterpret_cast<const device ushort*>(block_bytes + 16)
+                + 16 * quant_half + 4 * pair_index;
+            const device half* factors = reinterpret_cast<const device half*>(block_bytes);
+
+#pragma clang loop unroll(full)
+            for (ushort output_index = 0; output_index < 2; ++output_index) {
+                packed_scales[0] = scale_words[0] & 0x3f3f;
+                packed_scales[1] = scale_words[2] & 0x3f3f;
+                packed_scales[2] = ((scale_words[4] >> 0) & 0x0f0f)
+                    | ((scale_words[0] & 0xc0c0) >> 2);
+                packed_scales[3] = ((scale_words[4] >> 4) & 0x0f0f)
+                    | ((scale_words[2] & 0xc0c0) >> 2);
+
+                const device ushort* high_quants = quants + 32;
+                float4 low_accumulator = float4(0.0f);
+                float4 high_accumulator = float4(0.0f);
+#pragma clang loop unroll(full)
+                for (ushort item = 0; item < 4; ++item) {
+                    low_accumulator[0] += activation_low[2 * item] * (quants[item] & 0x000f);
+                    low_accumulator[1] += activation_low[2 * item + 1] * (quants[item] & 0x0f00);
+                    low_accumulator[2] += activation_low[2 * item + 8] * (quants[item] & 0x00f0);
+                    low_accumulator[3] += activation_low[2 * item + 9] * (quants[item] & 0xf000);
+                    high_accumulator[0] += activation_high[2 * item] * (high_quants[item] & 0x000f);
+                    high_accumulator[1] += activation_high[2 * item + 1] * (high_quants[item] & 0x0f00);
+                    high_accumulator[2] += activation_high[2 * item + 8] * (high_quants[item] & 0x00f0);
+                    high_accumulator[3] += activation_high[2 * item + 9] * (high_quants[item] & 0xf000);
+                }
+
+                sums[output_index] += float(factors[0]) * (
+                        (low_accumulator[0] + low_accumulator[1] / 256.0f) * scales[0]
+                        + (low_accumulator[2] + low_accumulator[3] / 256.0f) * scales[1] / 16.0f
+                        + (high_accumulator[0] + high_accumulator[1] / 256.0f) * scales[4]
+                        + (high_accumulator[2] + high_accumulator[3] / 256.0f) * scales[5] / 16.0f
+                    ) - float(factors[1]) * (
+                        activation_sums[0] * scales[2]
+                        + activation_sums[1] * scales[3]
+                        + activation_sums[2] * scales[6]
+                        + activation_sums[3] * scales[7]
+                    );
+
+                quants += adjacent_stride / 2;
+                scale_words += adjacent_stride / 2;
+                factors += adjacent_stride / 2;
+            }
+            activation += 4 * 256;
         }
     }
 
-    first_sum = simd_sum(first_sum);
-    second_sum = simd_sum(second_sum);
+#pragma clang loop unroll(full)
+    for (ushort output_index = 0; output_index < 2; ++output_index) {
+        sums[output_index] = simd_sum(sums[output_index]);
+    }
     if (lane == 0) {
         if (first_column < dims.columns) {
-            output[first_column] = first_sum;
+            output[first_column] = sums[0];
         }
         if (second_column < dims.columns) {
-            output[second_column] = second_sum;
+            output[second_column] = sums[1];
         }
     }
 }
@@ -419,11 +450,10 @@ DEFINE_Q6_K_ROW_KERNEL(4)
 DEFINE_Q6_K_ROW_KERNEL(8)
 DEFINE_Q6_K_ROW_KERNEL(16)
 
-// Q6_K uses two interleaved bit planes, so pairs of SIMD lanes walk two
-// blocks concurrently. Sixteen lanes cover one block while activations are
-// reused across two output columns; the full SIMD reduction combines all
-// block contributions without threadgroup memory.
-kernel void matvec_f32_q6_k_simd_2x2_kernel(
+// Lane pairs walk two Q6_K blocks concurrently. Each lane caches the sixteen
+// activation values needed for four quantization regions, then advances the
+// packed block pointers by one complete column for the adjacent output.
+kernel void matvec_f32_q6_k_packed_kernel(
     const device float* left [[buffer(0)]],
     const device uchar* right [[buffer(1)]],
     device float* output [[buffer(2)]],
@@ -434,91 +464,80 @@ kernel void matvec_f32_q6_k_simd_2x2_kernel(
 ) {
     const uint first_column = (threadgroup_index * 4) + uint(simdgroup_index) * 2;
     const uint second_column = first_column + 1;
-    const uint block_parity = uint(lane) & 1;
-    const uint block_lane = uint(lane) >> 1;
-    const uint half_block = block_lane >> 3;
-    const uint lane_in_half = block_lane & 7;
-    const uint lane_offset = lane_in_half * 4;
-    const uint activation_base = half_block * 128 + lane_offset;
-    const uint low_base = half_block * 64 + lane_offset;
-    const uint high_base = half_block * 32 + lane_offset;
-    const uint scale_base = half_block * 8 + lane_offset / 16;
-    const uint blocks_per_column = dims.shared / 256;
-    float first_sum = 0.0f;
-    float second_sum = 0.0f;
+    const ushort block_parity = lane % 2;
+    const ushort block_lane = lane / 2;
+    const ushort half_block = block_lane / 8;
+    const ushort lane_in_half = block_lane % 8;
+    const ushort lane_offset = 4 * lane_in_half;
+    const ushort scale_offset = 8 * half_block + lane_offset / 16;
+    const uint blocks_per_column = q6_k_decode_block_count == 0
+        ? dims.shared / 256
+        : uint(q6_k_decode_block_count);
+    const uint column_stride = blocks_per_column * 210;
+    const uint adjacent_stride = second_column < dims.columns ? column_stride : 0;
+    float sums[2] = {0.0f, 0.0f};
 
     if (first_column < dims.columns) {
-        for (uint column_block = block_parity; column_block < blocks_per_column; column_block += 2) {
-            const device uchar* first_block =
-                right + (first_column * blocks_per_column + column_block) * 210;
-            const device uchar* second_block = second_column < dims.columns
-                ? right + (second_column * blocks_per_column + column_block) * 210
-                : first_block;
-            const device uchar* first_low = first_block;
-            const device uchar* first_high = first_block + 128;
-            const device uchar* first_scales = first_block + 192;
-            const device uchar* second_low = second_block;
-            const device uchar* second_high = second_block + 128;
-            const device uchar* second_scales = second_block + 192;
-            float first_block_sum = 0.0f;
-            float second_block_sum = 0.0f;
-
-            for (uint item = 0; item < 4; ++item) {
-                const float activation0 = left[column_block * 256 + activation_base + item];
-                const float activation1 = left[column_block * 256 + activation_base + 32 + item];
-                const float activation2 = left[column_block * 256 + activation_base + 64 + item];
-                const float activation3 = left[column_block * 256 + activation_base + 96 + item];
-
-                const uchar first_low0 = first_low[low_base + item];
-                const uchar first_low1 = first_low[low_base + 32 + item];
-                const uchar first_high_value = first_high[high_base + item];
-                const int first_q0 = int((first_low0 & 0x0f) | ((first_high_value & 0x03) << 4)) - 32;
-                const int first_q1 = int((first_low1 & 0x0f) | ((first_high_value & 0x0c) << 2)) - 32;
-                const int first_q2 = int((first_low0 >> 4) | (first_high_value & 0x30)) - 32;
-                const int first_q3 = int((first_low1 >> 4) | ((first_high_value & 0xc0) >> 2)) - 32;
-                first_block_sum += activation0 * float(first_q0 * signed_i8(first_scales[scale_base]))
-                    + activation1 * float(first_q1 * signed_i8(first_scales[scale_base + 2]))
-                    + activation2 * float(first_q2 * signed_i8(first_scales[scale_base + 4]))
-                    + activation3 * float(first_q3 * signed_i8(first_scales[scale_base + 6]));
-
-                if (second_column < dims.columns) {
-                    const uchar second_low0 = second_low[low_base + item];
-                    const uchar second_low1 = second_low[low_base + 32 + item];
-                    const uchar second_high_value = second_high[high_base + item];
-                    const int second_q0 = int(
-                        (second_low0 & 0x0f) | ((second_high_value & 0x03) << 4)
-                    ) - 32;
-                    const int second_q1 = int(
-                        (second_low1 & 0x0f) | ((second_high_value & 0x0c) << 2)
-                    ) - 32;
-                    const int second_q2 = int((second_low0 >> 4) | (second_high_value & 0x30)) - 32;
-                    const int second_q3 = int(
-                        (second_low1 >> 4) | ((second_high_value & 0xc0) >> 2)
-                    ) - 32;
-                    second_block_sum +=
-                        activation0 * float(second_q0 * signed_i8(second_scales[scale_base]))
-                        + activation1 * float(second_q1 * signed_i8(second_scales[scale_base + 2]))
-                        + activation2 * float(second_q2 * signed_i8(second_scales[scale_base + 4]))
-                        + activation3 * float(second_q3 * signed_i8(second_scales[scale_base + 6]));
-                }
+        const device uchar* first_column_bytes = right + first_column * column_stride;
+        for (uint block = uint(block_parity); block < blocks_per_column; block += 2) {
+            const device uchar* block_bytes = first_column_bytes + block * 210;
+            const device uchar* low0 = block_bytes + 64 * half_block + lane_offset;
+            const device uchar* low1 = low0 + 32;
+            const device uchar* high = block_bytes + 128 + 32 * half_block + lane_offset;
+            const device int8_t* scales =
+                reinterpret_cast<const device int8_t*>(block_bytes + 192) + scale_offset;
+            const device half* factor = reinterpret_cast<const device half*>(block_bytes + 208);
+            const device float* activation = left + block * 256 + 128 * half_block + lane_offset;
+            float activation_values[16];
+#pragma clang loop unroll(full)
+            for (ushort item = 0; item < 4; ++item) {
+                activation_values[4 * item] = activation[item];
+                activation_values[4 * item + 1] = activation[item + 32];
+                activation_values[4 * item + 2] = activation[item + 64];
+                activation_values[4 * item + 3] = activation[item + 96];
             }
 
-            first_sum += f16_bits_to_float(read_little_endian_u16(first_block, 208)) * first_block_sum;
-            if (second_column < dims.columns) {
-                second_sum += f16_bits_to_float(read_little_endian_u16(second_block, 208))
-                    * second_block_sum;
+#pragma clang loop unroll(full)
+            for (ushort output_index = 0; output_index < 2; ++output_index) {
+                float4 accumulator = float4(0.0f);
+#pragma clang loop unroll(full)
+                for (ushort item = 0; item < 4; ++item) {
+                    const uchar high_value = high[item];
+                    accumulator[0] += activation_values[4 * item]
+                        * (int((low0[item] & 0x0f) | ((high_value & 0x03) << 4)) - 32);
+                    accumulator[1] += activation_values[4 * item + 1]
+                        * (int((low1[item] & 0x0f) | ((high_value & 0x0c) << 2)) - 32);
+                    accumulator[2] += activation_values[4 * item + 2]
+                        * (int((low0[item] >> 4) | (high_value & 0x30)) - 32);
+                    accumulator[3] += activation_values[4 * item + 3]
+                        * (int((low1[item] >> 4) | ((high_value & 0xc0) >> 2)) - 32);
+                }
+                sums[output_index] += float(factor[0]) * (
+                    accumulator[0] * float(scales[0])
+                    + accumulator[1] * float(scales[2])
+                    + accumulator[2] * float(scales[4])
+                    + accumulator[3] * float(scales[6])
+                );
+
+                low0 += adjacent_stride;
+                low1 += adjacent_stride;
+                high += adjacent_stride;
+                scales += adjacent_stride;
+                factor += adjacent_stride / 2;
             }
         }
     }
 
-    first_sum = simd_sum(first_sum);
-    second_sum = simd_sum(second_sum);
+#pragma clang loop unroll(full)
+    for (ushort output_index = 0; output_index < 2; ++output_index) {
+        sums[output_index] = simd_sum(sums[output_index]);
+    }
     if (lane == 0) {
         if (first_column < dims.columns) {
-            output[first_column] = first_sum;
+            output[first_column] = sums[0];
         }
         if (second_column < dims.columns) {
-            output[second_column] = second_sum;
+            output[second_column] = sums[1];
         }
     }
 }
@@ -1475,19 +1494,15 @@ const char* metal_kernel_source() noexcept {
 }
 
 bool is_available() noexcept {
-    @autoreleasepool {
-        return MTLCreateSystemDefaultDevice() != nil;
-    }
+    return system_metal_device() != nil;
 }
 
 std::string unavailable_reason() {
-    @autoreleasepool {
-        if (MTLCreateSystemDefaultDevice() != nil) {
-            return {};
-        }
-
-        return "Metal backend unavailable: no system default Metal device";
+    if (system_metal_device() != nil) {
+        return {};
     }
+
+    return "Metal backend unavailable: no system default Metal device";
 }
 
 }  // namespace local_gguf_engine::tensor::backends::metal

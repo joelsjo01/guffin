@@ -15,12 +15,16 @@ struct MatmulPipelineState {
     id<MTLDevice> device = nil;
     id<MTLComputePipelineState> matmul_f16_simd_pipeline = nil;
     id<MTLComputePipelineState> embedding_pipeline = nil;
-    id<MTLComputePipelineState> matvec_q4_k_simd_2x2_pipeline = nil;
+    id<MTLComputePipelineState> matvec_q4_k_packed_pipeline = nil;
+    id<MTLComputePipelineState> matvec_q4_k_packed_14_pipeline = nil;
+    id<MTLComputePipelineState> matvec_q4_k_packed_16_pipeline = nil;
     id<MTLComputePipelineState> matmul_q4_k_rows_2_pipeline = nil;
     id<MTLComputePipelineState> matmul_q4_k_rows_4_pipeline = nil;
     id<MTLComputePipelineState> matmul_q4_k_rows_8_pipeline = nil;
     id<MTLComputePipelineState> matmul_q4_k_rows_16_pipeline = nil;
-    id<MTLComputePipelineState> matvec_q6_k_simd_2x2_pipeline = nil;
+    id<MTLComputePipelineState> matvec_q6_k_packed_pipeline = nil;
+    id<MTLComputePipelineState> matvec_q6_k_packed_14_pipeline = nil;
+    id<MTLComputePipelineState> matvec_q6_k_packed_56_pipeline = nil;
     id<MTLComputePipelineState> matmul_q6_k_rows_2_pipeline = nil;
     id<MTLComputePipelineState> matmul_q6_k_rows_4_pipeline = nil;
     id<MTLComputePipelineState> matmul_q6_k_rows_8_pipeline = nil;
@@ -70,6 +74,9 @@ struct F16MatmulDispatch {
     runtime::BackendErrorCode code,
     const std::string& detail
 );
+// Retain one device for the process lifetime. Repeatedly creating temporary
+// MTLDevice objects can flood the IOKit termination queue during large suites.
+[[nodiscard]] id<MTLDevice> system_metal_device() noexcept;
 [[nodiscard]] id<MTLDevice> metal_device_or_throw();
 [[nodiscard]] MatmulPipelineState& shared_matmul_pipeline_state();
 [[nodiscard]] F16MatmulDispatch select_f16_matmul_dispatch(

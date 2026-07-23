@@ -1,5 +1,82 @@
 # Next Task: Replace the Decode Q4_K/Q6_K Inner Kernels
 
+## Completed Result (2026-07-21)
+
+The packed Q4_K/Q6_K kernels are implemented, verified, and retained. The
+source has one packed decode kernel per dtype, function-constant variants for
+Q4_K block counts 14/16 and Q6_K block counts 14/56, and a zero-constant generic
+path for every other valid block count. The old `simd_2x2` kernel and pipeline
+identities are deleted. Multi-row kernels and behavioral tests are unchanged.
+
+During the first real-Metal full-suite attempt, macOS panicked with an IOKit
+busy timeout and a termination queue containing hundreds of
+`RootDomainUserClient` entries. That attempt used an initial template-expanded
+version of the candidate and repeatedly exercised the existing backend
+availability check. The template-expanded entry points were removed in favor
+of function constants, and Metal device discovery now retains and reuses one
+process-wide `MTLDevice` instead of calling `MTLCreateSystemDefaultDevice()` on
+every availability query. This is safety hardening based on the panic signature,
+not proof of a single root cause.
+
+Correctness and safety evidence after that change:
+
+- the targeted real-device boundary test passed all Q4_K/Q6_K generic and
+  specialized block counts and output tails against the independent CPU
+  decoder;
+- the targeted resident Gemma decode test matched its independent nonzero CPU
+  reference;
+- exact greedy and seed-42 sampled token IDs matched the clean baseline for
+  both 8-token and 32-token runs;
+- `bash scripts/ci.sh` passes all 302 tests, including unavailable-device
+  behavior;
+- `git diff --check` passes; and
+- no legacy `simd_2x2` kernel or pipeline identity remains in production code.
+
+A temporary exact-production-shape probe timed one layer's five Q4_K
+projections and two Q6_K projections separately. It used the public synchronous
+backend operation for every projection, so its absolute totals include command
+submission and output-allocation overhead and must not be multiplied by 42 as
+a production estimate. Its controlled before/after medians were:
+
+| Family | Legacy median | Packed median | Change |
+| --- | ---: | ---: | ---: |
+| five Q4_K projections | 7.320 ms | 4.015 ms | -45.2% |
+| two Q6_K projections | 1.639 ms | 1.329 ms | -18.9% |
+
+The probe, its Makefile target, and the temporary test-name filter were deleted
+after measurement.
+
+End-to-end release results used the required model, prompt, one warmup, and five
+measured repetitions. The clean baseline was built from commit
+`60ded6d2fb80f50ad32ce108571773a15e86eb9f` in a separate temporary source tree.
+
+| Run | Legacy median | Packed median | Legacy decode | Packed decode |
+| --- | ---: | ---: | ---: | ---: |
+| 8-token warm greedy | 8.908 tok/s | 14.129 tok/s | 898.119 ms | 566.193 ms |
+| 8-token seed-42 sampled | 9.026 tok/s | 14.154 tok/s | 886.347 ms | 565.227 ms |
+| 32-token warm greedy | 9.000 tok/s | 13.433 tok/s | 3,555.690 ms | 2,382.197 ms |
+| 32-token seed-42 sampled | 6.494 tok/s | 13.786 tok/s | 4,927.301 ms | 2,321.121 ms |
+
+The long 32-token baseline throttled substantially during its later cached and
+sampled cases; the packed candidate ran afterward under the less favorable
+thermal ordering and still won decisively. The stable 8-token comparison shows
+the same result without that late-run drift: warm greedy throughput improved
+58.6% and decode time fell 37.0%; seeded throughput improved 56.8% and decode
+time fell 36.2%. The 32-token warm-greedy confirmation improved throughput
+49.3% and reduced decode time 33.0%.
+
+Resident memory was identical before and after: 6,837,368,832 weight bytes,
+2,113,929,216 KV bytes, and 27,464,972 scratch bytes. Greedy compact readback
+remained 8 bytes per token with one selector dispatch per token; sampled
+readback remained 320 bytes per token with 11 selector dispatches per token.
+The kernel-only change leaves the resident command-buffer, commit, wait,
+encoder, dispatch, barrier, and transient-allocation structure unchanged; the
+resident decode tests continue to assert one command buffer, one commit, one
+wait, one compute encoder, and zero transient allocations.
+
+This baton is complete. The next bottleneck should be selected from a fresh
+profile rather than extending this kernel family speculatively.
+
 ## Objective
 
 Replace the one-row Metal Q4_K and Q6_K projection kernels with packed,

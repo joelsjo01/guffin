@@ -29,8 +29,13 @@ runtime::BackendError metal_error(
     return runtime::BackendError(code, runtime::BackendKind::metal, detail);
 }
 
+id<MTLDevice> system_metal_device() noexcept {
+    static id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    return device;
+}
+
 id<MTLDevice> metal_device_or_throw() {
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    id<MTLDevice> device = system_metal_device();
     if (device == nil) {
         throw metal_error(
             runtime::BackendErrorCode::unavailable_metal_device,
@@ -121,6 +126,38 @@ MatmulPipelineState::MatmulPipelineState() {
         return pipeline;
     };
 
+    auto make_specialized_pipeline = [library, this](
+        NSString* function_name,
+        NSUInteger constant_index,
+        std::uint16_t constant_value,
+        const char* description
+    ) {
+        MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
+        [constants setConstantValue:&constant_value type:MTLDataTypeUShort atIndex:constant_index];
+        NSError* function_error = nil;
+        id<MTLFunction> function = [library newFunctionWithName:function_name
+                                                 constantValues:constants
+                                                          error:&function_error];
+        if (function == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + description + " specialized function creation failed: "
+                    + ns_error_message(function_error, "unknown error")
+            );
+        }
+        NSError* pipeline_error = nil;
+        id<MTLComputePipelineState> pipeline =
+            [device newComputePipelineStateWithFunction:function error:&pipeline_error];
+        if (pipeline == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + description + " pipeline creation failed: "
+                    + ns_error_message(pipeline_error, "unknown error")
+            );
+        }
+        return pipeline;
+    };
+
     matmul_q4_k_rows_2_pipeline =
         make_pipeline(@"matmul_f32_q4_k_rows_2_kernel", "Q4_K two-row matmul");
     matmul_q4_k_rows_4_pipeline =
@@ -130,25 +167,14 @@ MatmulPipelineState::MatmulPipelineState() {
     matmul_q4_k_rows_16_pipeline =
         make_pipeline(@"matmul_f32_q4_k_rows_16_kernel", "Q4_K sixteen-row matmul");
 
-    id<MTLFunction> matvec_q4_k_function =
-        [library newFunctionWithName:@"matvec_f32_q4_k_simd_2x2_kernel"];
-    if (matvec_q4_k_function == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal Q4_K decode matvec kernel function was not found"
-        );
-    }
-
-    NSError* matvec_q4_k_error = nil;
-    matvec_q4_k_simd_2x2_pipeline =
-        [device newComputePipelineStateWithFunction:matvec_q4_k_function error:&matvec_q4_k_error];
-    if (matvec_q4_k_simd_2x2_pipeline == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal Q4_K decode matvec pipeline creation failed: "
-                + ns_error_message(matvec_q4_k_error, "unknown error")
-        );
-    }
+    matvec_q4_k_packed_pipeline =
+        make_specialized_pipeline(@"matvec_f32_q4_k_packed_kernel", 0, 0, "Q4_K packed decode matvec");
+    matvec_q4_k_packed_14_pipeline = make_specialized_pipeline(
+        @"matvec_f32_q4_k_packed_kernel", 0, 14, "Q4_K 14-block packed decode matvec"
+    );
+    matvec_q4_k_packed_16_pipeline = make_specialized_pipeline(
+        @"matvec_f32_q4_k_packed_kernel", 0, 16, "Q4_K 16-block packed decode matvec"
+    );
 
     matmul_q6_k_rows_2_pipeline =
         make_pipeline(@"matmul_f32_q6_k_rows_2_kernel", "Q6_K two-row matmul");
@@ -159,25 +185,14 @@ MatmulPipelineState::MatmulPipelineState() {
     matmul_q6_k_rows_16_pipeline =
         make_pipeline(@"matmul_f32_q6_k_rows_16_kernel", "Q6_K sixteen-row matmul");
 
-    id<MTLFunction> matvec_q6_k_function =
-        [library newFunctionWithName:@"matvec_f32_q6_k_simd_2x2_kernel"];
-    if (matvec_q6_k_function == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal Q6_K decode matvec kernel function was not found"
-        );
-    }
-
-    NSError* matvec_q6_k_error = nil;
-    matvec_q6_k_simd_2x2_pipeline =
-        [device newComputePipelineStateWithFunction:matvec_q6_k_function error:&matvec_q6_k_error];
-    if (matvec_q6_k_simd_2x2_pipeline == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal Q6_K decode matvec pipeline creation failed: "
-                + ns_error_message(matvec_q6_k_error, "unknown error")
-        );
-    }
+    matvec_q6_k_packed_pipeline =
+        make_specialized_pipeline(@"matvec_f32_q6_k_packed_kernel", 1, 0, "Q6_K packed decode matvec");
+    matvec_q6_k_packed_14_pipeline = make_specialized_pipeline(
+        @"matvec_f32_q6_k_packed_kernel", 1, 14, "Q6_K 14-block packed decode matvec"
+    );
+    matvec_q6_k_packed_56_pipeline = make_specialized_pipeline(
+        @"matvec_f32_q6_k_packed_kernel", 1, 56, "Q6_K 56-block packed decode matvec"
+    );
 
     id<MTLFunction> matmul_add_function =
         [library newFunctionWithName:@"matmul_f32_f16_gguf_weight_add_kernel"];
@@ -568,9 +583,20 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
     std::uint64_t row_tile = 1;
     std::uint64_t threads = 64;
     if (rows == 1) {
-        pipeline = dtype == DType::q4_k
-            ? state.matvec_q4_k_simd_2x2_pipeline
-            : state.matvec_q6_k_simd_2x2_pipeline;
+        const auto blocks = shared / 256;
+        if (dtype == DType::q4_k) {
+            pipeline = blocks == 14
+                ? state.matvec_q4_k_packed_14_pipeline
+                : blocks == 16
+                    ? state.matvec_q4_k_packed_16_pipeline
+                    : state.matvec_q4_k_packed_pipeline;
+        } else {
+            pipeline = blocks == 14
+                ? state.matvec_q6_k_packed_14_pipeline
+                : blocks == 56
+                    ? state.matvec_q6_k_packed_56_pipeline
+                    : state.matvec_q6_k_packed_pipeline;
+        }
     } else {
         threads = 128;
         if (rows <= 2) {
