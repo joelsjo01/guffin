@@ -76,7 +76,7 @@ struct Gemma2MetalDecodeScratch {
     tensor::BackendBuffer logits;
 };
 
-inline constexpr std::uint32_t gemma2_metal_prefill_chunk_size = 16U;
+inline constexpr std::uint32_t gemma2_metal_prefill_chunk_size = 128U;
 
 struct Gemma2MetalPrefillScratch {
     // Token IDs are staged by absolute cache position so consecutive command

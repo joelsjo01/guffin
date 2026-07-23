@@ -79,6 +79,7 @@ using local_gguf_engine::tensor::ops::top_logit_f32;
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::expect_close;
 using local_gguf_engine::tests::reference_f32_quantized_gguf_weight_matmul;
+using local_gguf_engine::tests::reference_f16_staged_quantized_gguf_weight_matmul;
 using local_gguf_engine::tests::tensor_f16_gguf_matrix;
 using local_gguf_engine::tests::tensor_f16_matrix;
 using local_gguf_engine::tests::tensor_f32_projection_values;
@@ -942,7 +943,7 @@ void expect_f32_matrix_close_absolute_relative(
     }
 }
 
-void test_matches_independent_q4_k_and_q6_k_multi_row_projection_on_metal() {
+void test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_metal() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
@@ -952,19 +953,13 @@ void test_matches_independent_q4_k_and_q6_k_multi_row_projection_on_metal() {
         std::uint64_t packed_blocks;
         std::uint64_t columns;
     };
-    // Pair the selector boundaries with every production K block count and
-    // tails around the four-column SIMD-group tile. Together the cases cover
-    // all row tiers without turning the independent scalar oracle into a
-    // combinatorial performance test.
-    constexpr std::array<ProjectionCase, 8> cases {{
-        {2, 1, 1},
-        {3, 14, 3},
-        {4, 16, 4},
-        {7, 56, 5},
-        {8, 1, 5},
-        {9, 14, 1},
-        {15, 16, 3},
-        {16, 56, 4},
+    // Distribute the small-batch/tile boundaries, production K-block counts,
+    // and the 64-column output boundary without a combinatorial suite.
+    constexpr std::array<ProjectionCase, 14> cases {{
+        {2, 1, 1}, {3, 2, 2}, {4, 14, 3}, {5, 16, 4},
+        {6, 56, 5}, {7, 1, 63}, {8, 2, 64},
+        {9, 14, 65}, {15, 16, 5}, {16, 56, 4},
+        {17, 1, 3}, {31, 2, 2}, {32, 14, 1}, {33, 16, 5},
     }};
 
     for (const auto dtype : {DType::q4_k, DType::q6_k}) {
@@ -985,6 +980,9 @@ void test_matches_independent_q4_k_and_q6_k_multi_row_projection_on_metal() {
                 ? tensor_q4_k_stress_gguf_weight_matrix(shared, test_case.columns, test_case.rows)
                 : tensor_q6_k_stress_gguf_weight_matrix(shared, test_case.columns, test_case.rows);
             const auto expected = reference_f32_quantized_gguf_weight_matmul(left, right);
+            const auto staged_expected = reference_f16_staged_quantized_gguf_weight_matmul(
+                left, right
+            );
 
             const auto tensor_output = matmul_f32_quantized_gguf_weight(
                 left, right, BackendKind::metal
@@ -995,8 +993,13 @@ void test_matches_independent_q4_k_and_q6_k_multi_row_projection_on_metal() {
                     copy_tensor_to_backend(right, BackendKind::metal)
                 )
             );
-            const auto absolute_tolerance = dtype == DType::q4_k ? 0.05F : 0.1F;
-            constexpr float relative_tolerance = 1.0e-5F;
+            const bool small_batch = test_case.rows <= 8;
+            const auto absolute_tolerance = small_batch
+                ? (dtype == DType::q4_k ? 0.05F : 0.1F)
+                : (dtype == DType::q4_k ? 2.0F : 0.01F);
+            const auto relative_tolerance = small_batch || dtype == DType::q6_k
+                ? 1.0e-5F
+                : 2.0e-2F;
             expect_f32_matrix_close_absolute_relative(
                 tensor_output,
                 expected,
@@ -1006,10 +1009,10 @@ void test_matches_independent_q4_k_and_q6_k_multi_row_projection_on_metal() {
             );
             expect_f32_matrix_close_absolute_relative(
                 backend_output,
-                expected,
+                small_batch ? expected : staged_expected,
                 absolute_tolerance,
                 relative_tolerance,
-                "Metal backend-buffer K-quant multi-row projection parity"
+                "Metal backend-buffer K-quant selected numerical-contract parity"
             );
         }
     }
@@ -1876,8 +1879,8 @@ const TestCase tensor_backend_tests[] {
         test_matches_cpu_f16_simd_multi_row_matmul_on_metal_backend,
     },
     {
-        "matches independent Q4_K and Q6_K multi-row projection on Metal",
-        test_matches_independent_q4_k_and_q6_k_multi_row_projection_on_metal,
+        "matches independent Q4_K and Q6_K small-batch and tiled projection on Metal",
+        test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_metal,
     },
     {
         "matches CPU K-quant decode SIMD boundaries on Metal",

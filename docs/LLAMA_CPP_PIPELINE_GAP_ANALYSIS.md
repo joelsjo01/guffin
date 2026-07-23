@@ -9,27 +9,21 @@ and old implementation history do not belong here.
 
 The conclusion is based on controlled real-path measurements, inspection of
 the current engine, and source-level comparison with the Metal backend in
-`llama.cpp`. It is a diagnosis and optimization direction, not an active
-implementation baton. The active task remains owned by `docs/NEXT_TASK.md`.
+`llama.cpp`. Findings 1 and 2 are complete. The active task remains owned by
+`docs/NEXT_TASK.md`.
 
 ## Executive Conclusion
 
-The performance gap is real. It is not principally caused by chat formatting,
-sampling, Flash Attention, KV placement, or CPU work. The dominant remaining
-problem is the quality of the Q4_K and Q6_K Metal projection kernels.
+The projection-kernel gap has been closed for the selected Gemma 2 path. Decode
+uses packed cooperative matvec kernels, rows 2-8 use bounded packed-vector
+kernels, and larger prefill uses direct-dequantizing SIMD-group matrix
+multiplication. The exact 16-row specialization now exceeds the controlled
+`llama.cpp` reference at that shape.
 
-The engine's decode kernels now resemble `llama.cpp` at the outer dispatch
-level, but they do not yet resemble it internally. `llama.cpp` does much more
-packed, vectorized, compile-time-specialized work per activation load and per
-quantized block. The local kernels perform more scalar unpacking, indexing,
-scale/min extraction, and loop control. Consequently, the local engine obtains
-far less useful work from the M4's available memory bandwidth.
-
-Prompt processing has an additional, larger problem: the local 16-row kernels
-reuse weights across rows but process the rows serially inside each lane. They
-are not true tiled matrix-matrix kernels. `llama.cpp` switches to direct-
-dequantizing SIMD-group matrix multiplication for this shape. That algorithmic
-difference explains why the prompt gap is much larger than the decode gap.
+The next measured structural cost is the conservative schedule: 635 compute
+dispatches and 466 explicit buffer barriers per decoded token. Projection work
+still dominates, but fixed dispatch and synchronization are now a materially
+larger fraction of end-to-end latency.
 
 ## Controlled Measurements
 
@@ -47,12 +41,10 @@ difference explains why the prompt gap is much larger than the decode gap.
 
 | Engine | Controlled generation rate |
 |---|---:|
-| This engine | approximately 9.0 tokens/s |
+| This engine | approximately 14.2 tokens/s |
 | `llama.cpp` | approximately 14.2 tokens/s |
 
-`llama.cpp` is approximately 58% faster. The local result is stable across
-greedy, sampled, and longer 32-token generation runs, so it is not a short-run
-sampling artifact.
+Decode is now approximately at parity for this controlled short-context case.
 
 ### Prefill
 
@@ -62,15 +54,10 @@ sampling artifact.
 | 32 | 74.9 tokens/s | 136.9 tokens/s |
 | 128 | 77.5 tokens/s | 153.3 tokens/s |
 
-The local canonical 16-token prompt runs at approximately 8.8 tokens/s. At the
-same 16-row scale, `llama.cpp` is therefore about 8.3 times faster. Prompt
-content is not byte-for-byte identical between the two benchmark drivers, but
-the projection shapes and amount of model work are comparable and the gap is
-far beyond measurement noise.
-
-Large microbatches make `llama.cpp` substantially faster at 32 and 128 tokens,
-but do not explain its 16-token advantage. Merely increasing the local chunk
-size cannot close the initial gap; the projection algorithm must change first.
+After the tiled rewrite, the local warm path measures 91.5 tokens/s at 16
+tokens, 130.2 tokens/s at exactly 32 tokens, and 142.1 tokens/s at 121 tokens.
+The retained resident chunk is 128 rows. Its measured scratch allocation is
+181,146,892 bytes, versus 27,464,972 bytes for the old 16-row plan.
 
 ### Flash Attention control
 
@@ -105,7 +92,7 @@ evidence: both engines execute the same model on the same memory system, while
 remaining loss is primarily kernel instruction efficiency, occupancy, and
 scheduling around memory traffic.
 
-## Finding 1: Decode Projection Geometry Is Not Kernel Equivalence
+## Completed: Finding 1: Decode Projection Geometry Is Not Kernel Equivalence
 
 The local Q4_K and Q6_K decode paths use two SIMD groups and compute two output
 rows cooperatively. This matches important outer parameters used by
@@ -144,47 +131,29 @@ The first isolated benchmarks must cover the exact Gemma projection shapes and
 separate Q4_K from Q6_K. Whole-token retention remains mandatory because an
 isolated kernel gain can be lost through occupancy or scheduling interactions.
 
-## Finding 2: Prefill Uses Serial Row Reuse, Not Tiled GEMM
+## Completed: Finding 2: Prefill Uses Direct-Dequantizing Tiled GEMM
 
-The production prefill chunk size is 16. The current multi-row Q4_K and Q6_K
-kernels assign a SIMD group to an output column, decode one weight per lane,
-and then loop over every activation row while retaining one scalar accumulator
-per row. For a 16-row tile, each lane owns an array of 16 sums and updates those
-sums serially for every decoded weight.
+The legacy 2/4/8/16 row-serial kernels and their eight pipeline identities are
+gone. The retained path has:
 
-This avoids decoding the same weight 16 separate times, but it has three major
-costs:
+- one shared packed-16 small-batch family, specialized once per dtype, for
+  rows 2-8; each lane holds at most four row accumulators;
+- one shared 64-column by 32-row by K=32 direct-dequantizing SIMD-group family,
+  specialized once per dtype, for generic rows and tails; and
+- an exact 64-column by 16-row specialization using two SIMD groups for the
+  aligned Gemma tile.
 
-1. the token dimension is serialized inside each lane;
-2. the accumulator array creates substantial register pressure; and
-3. it does not use the M4's SIMD-group matrix-multiply instructions.
+Both tiled variants stage F16 matrix operands and retain F32 accumulators. They
+read native Q4_K/Q6_K blocks directly and allocate no dequantized weight copy.
+The exact 16-row candidate beat the general upstream-style tile: median warm
+prefill improved from 234.7 ms to 174.8 ms. Chunk screening retained 128 rows:
+chunk 64 beat chunk 32 at 37 tokens (428.4 versus 477.0 ms), and chunk 128 beat
+chunk 64 at 121 tokens (851.4 versus 880.3 ms).
 
-`llama.cpp` selects algorithms by row count. Its current Metal dispatcher uses
-specialized matrix-vector variants for small row counts and switches larger
-inputs to SIMD-group matrix-matrix kernels when supported. The Q4_K and Q6_K
-matrix-matrix paths dequantize blocks directly into tiled computation and use
-`simdgroup_half8x8` operations rather than materializing a complete temporary
-F16/F32 weight matrix.
-
-At 16 prompt tokens, `llama.cpp` is already on a genuine matrix-matrix path,
-while the local engine is executing serial row loops inside a matvec-derived
-kernel. This is the best-supported explanation for the approximately 8.3-times
-prefill difference.
-
-### Required direction
-
-Use a shape-dispatched projection family:
-
-- one row: packed cooperative Q4_K/Q6_K matrix-vector kernel;
-- approximately two to eight rows: a small-batch cooperative kernel that
-  amortizes block decoding without excessive row accumulators;
-- larger batches: direct-dequantizing tiled SIMD-group matrix multiplication;
-- exact Gemma shapes: function-constant or separately compiled specialization
-  for widths, strides, row tiles, and quantization format.
-
-After the tiled path is competitive, benchmark larger resident prefill chunks.
-A larger chunk should be retained only when its scratch requirements and real
-prompt latency are favorable.
+The independent stress suite covers rows 2-8 and 9/15/16/17/31/32/33, packed
+block counts 1/2/14/16/56, and output boundaries through 65 columns. It checks
+both full-F32 decoded and F16-staged CPU oracles across TensorStorage and
+resident backend-buffer paths.
 
 ## Finding 3: Fixed Dispatch and Barrier Cost Is Material but Secondary
 

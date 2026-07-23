@@ -1,428 +1,162 @@
-# Next Task: Replace the Decode Q4_K/Q6_K Inner Kernels
+# Next Task: Attribute and Remove Redundant Metal Synchronization
 
-## Completed Result (2026-07-21)
+## Verified Current State (2026-07-23)
 
-The packed Q4_K/Q6_K kernels are implemented, verified, and retained. The
-source has one packed decode kernel per dtype, function-constant variants for
-Q4_K block counts 14/16 and Q6_K block counts 14/56, and a zero-constant generic
-path for every other valid block count. The old `simd_2x2` kernel and pipeline
-identities are deleted. Multi-row kernels and behavioral tests are unchanged.
+The direct-dequantizing prefill rewrite is complete. Q4_K and Q6_K now each
+have one packed small-batch family for rows 2-8 and one direct-dequantizing
+SIMD-group tiled family for rows 9 and above. The tiled family has a generic
+64x32x32/four-SIMD schedule and an exact 64x16x32/two-SIMD specialization of
+the same algorithm. All legacy 2/4/8/16 row-serial kernels, selectors, pipeline
+identities, helpers, and implementation-coupled tests are deleted. One-row
+packed decode is unchanged.
 
-During the first real-Metal full-suite attempt, macOS panicked with an IOKit
-busy timeout and a termination queue containing hundreds of
-`RootDomainUserClient` entries. That attempt used an initial template-expanded
-version of the candidate and repeatedly exercised the existing backend
-availability check. The template-expanded entry points were removed in favor
-of function constants, and Metal device discovery now retains and reuses one
-process-wide `MTLDevice` instead of calling `MTLCreateSystemDefaultDevice()` on
-every availability query. This is safety hardening based on the panic signature,
-not proof of a single root cause.
+The resident prefill chunk is now 128. Measured resident allocation is:
 
-Correctness and safety evidence after that change:
+| Resource | Bytes |
+| --- | ---: |
+| weights | 6,837,368,832 |
+| F16 KV cache | 2,113,929,216 |
+| scratch | 181,146,892 |
 
-- the targeted real-device boundary test passed all Q4_K/Q6_K generic and
-  specialized block counts and output tails against the independent CPU
-  decoder;
-- the targeted resident Gemma decode test matched its independent nonzero CPU
-  reference;
-- exact greedy and seed-42 sampled token IDs matched the clean baseline for
-  both 8-token and 32-token runs;
-- `bash scripts/ci.sh` passes all 302 tests, including unavailable-device
-  behavior;
-- `git diff --check` passes; and
-- no legacy `simd_2x2` kernel or pipeline identity remains in production code.
+Warm release measurements on the base M4, with five repetitions where noted:
 
-A temporary exact-production-shape probe timed one layer's five Q4_K
-projections and two Q6_K projections separately. It used the public synchronous
-backend operation for every projection, so its absolute totals include command
-submission and output-allocation overhead and must not be multiplied by 42 as
-a production estimate. Its controlled before/after medians were:
+| Prompt tokens | Median prefill | Prompt rate | Spread / note |
+| ---: | ---: | ---: | --- |
+| 16 | 174.834 ms | 91.515 tok/s | 174.619-175.275 ms, 5 reps |
+| 32 | 245.811 ms | 130.182 tok/s | 245.440-246.209 ms, 5 reps |
+| 121 | 851.431 ms | 142.114 tok/s | 848.944-854.214 ms, 3 reps |
 
-| Family | Legacy median | Packed median | Change |
-| --- | ---: | ---: | ---: |
-| five Q4_K projections | 7.320 ms | 4.015 ms | -45.2% |
-| two Q6_K projections | 1.639 ms | 1.329 ms | -18.9% |
+Decode remains approximately 14.2 tok/s. Plan creation measured 11.3-11.8
+seconds with the retained pipelines. The standard greedy eight-token output
+matches the preserved row-serial binary exactly: `The sky appears blue due to
+a phenomenon`.
 
-The probe, its Makefile target, and the temporary test-name filter were deleted
-after measurement.
+The numerical stress distribution that selected the permanent tolerances was:
 
-End-to-end release results used the required model, prompt, one warmup, and five
-measured repetitions. The clean baseline was built from commit
-`60ded6d2fb80f50ad32ce108571773a15e86eb9f` in a separate temporary source tree.
+| Dtype | Full-F32 max / RMS | F16-staged max / RMS |
+| --- | ---: | ---: |
+| Q4_K | 2.383 / 0.399 | 3.256 / 0.744 |
+| Q6_K | 0.000977 / 0.000047 | 0.001465 / 0.000140 |
 
-| Run | Legacy median | Packed median | Legacy decode | Packed decode |
-| --- | ---: | ---: | ---: | ---: |
-| 8-token warm greedy | 8.908 tok/s | 14.129 tok/s | 898.119 ms | 566.193 ms |
-| 8-token seed-42 sampled | 9.026 tok/s | 14.154 tok/s | 886.347 ms | 565.227 ms |
-| 32-token warm greedy | 9.000 tok/s | 13.433 tok/s | 3,555.690 ms | 2,382.197 ms |
-| 32-token seed-42 sampled | 6.494 tok/s | 13.786 tok/s | 4,927.301 ms | 2,321.121 ms |
+The Q4_K distribution reflects large stress magnitudes plus F16 operand
+rounding and SIMD-group accumulation order. Small-batch kernels retain the
+tighter full-F32 contract. Permanent tests use dtype- and family-specific
+combined absolute/relative tolerances rather than the old shared thresholds.
 
-The long 32-token baseline throttled substantially during its later cached and
-sampled cases; the packed candidate ran afterward under the less favorable
-thermal ordering and still won decisively. The stable 8-token comparison shows
-the same result without that late-run drift: warm greedy throughput improved
-58.6% and decode time fell 37.0%; seeded throughput improved 56.8% and decode
-time fell 36.2%. The 32-token warm-greedy confirmation improved throughput
-49.3% and reduced decode time 33.0%.
+## Active Finding
 
-Resident memory was identical before and after: 6,837,368,832 weight bytes,
-2,113,929,216 KV bytes, and 27,464,972 scratch bytes. Greedy compact readback
-remained 8 bytes per token with one selector dispatch per token; sampled
-readback remained 320 bytes per token with 11 selector dispatches per token.
-The kernel-only change leaves the resident command-buffer, commit, wait,
-encoder, dispatch, barrier, and transient-allocation structure unchanged; the
-resident decode tests continue to assert one command buffer, one commit, one
-wait, one compute encoder, and zero transient allocations.
+Finding 3 in `docs/LLAMA_CPP_PIPELINE_GAP_ANALYSIS.md` is now the first
+unfinished finding. One decoded token currently uses 635 compute dispatches
+and 466 explicit buffer barriers in a single compute encoder and command
+buffer. The resident schedule inserts barriers conservatively around operation
+boundaries even when adjacent projections only read the same activation and
+write disjoint buffers.
 
-This baton is complete. The next bottleneck should be selected from a fresh
-profile rather than extending this kernel family speculatively.
+Projection kernels are no longer the dominant unexplained difference at the
+controlled shapes. The next task is to measure how much GPU and CPU time is
+spent in dispatch/barrier structure, then remove only barriers proven
+unnecessary by exact resource-range dependencies.
 
 ## Objective
 
-Replace the one-row Metal Q4_K and Q6_K projection kernels with packed,
-compile-time-specialized cooperative kernels for the exact Gemma 2 9B shapes.
-Prove Q4_K and Q6_K independently, delete the superseded decode kernels and
-their pipeline identities, and retain the work only if the real resident decode
-path improves beyond noise without changing generated tokens.
+Implement engine-owned Metal resource dependency tracking for the resident
+Gemma schedule, replacing fixed barriers with barriers derived from read/write
+hazards. Preserve one command buffer and one compute encoder per chunk/token.
+Retain the change only if whole decode or prefill improves beyond noise without
+changing logits, selected tokens, KV contents, cache position, or unavailable-
+device behavior.
 
-This is Finding 1 from `docs/LLAMA_CPP_PIPELINE_GAP_ANALYSIS.md`. It is a decode
-kernel task, not a prefill, fusion, scheduling, repacking, or quantization-format
-task.
+Do not fuse operations in the first slice. Dependency tracking and fusion must
+remain separately attributable.
 
-## Why This Is the Active Bottleneck
+## Required Investigation
 
-The controlled local result is approximately 9.0 tokens/s for Gemma 2 9B Q4
-decode; `llama.cpp` reaches approximately 14.2 tokens/s on the same base M4 and
-model. The resident model payload gives a useful first-order effective bandwidth
-comparison of approximately 61.5 GB/s locally versus 97.1 GB/s in `llama.cpp`.
-The local runtime already has one compute encoder, one command buffer, one
-commit, one wait, resident weights, an F16 ring KV cache, and compact token
-selection. The tied F16 head rewrite improved decode by only about 3.2-3.6%.
-The repeated quantized projections therefore have the strongest remaining
-decode evidence.
+1. Enumerate every `MetalCommandContext` encode operation's buffer ranges and
+   access mode, including aliased scratch views and nonzero output offsets.
+2. Map every explicit barrier in resident prefill and decode to the actual
+   RAW, WAR, or WAW dependency it protects.
+3. Add temporary GPU timing around representative layer regions if Metal
+   counter sampling is supported; otherwise use command-buffer GPU timestamps
+   with controlled schedule variants.
+4. Establish the maximum possible gain by timing a temporary barrier-minimized
+   schedule only after proving its hazards manually. Do not retain an unsafe
+   no-barrier mode.
+5. Choose the smallest dependency representation that handles exact buffer
+   byte ranges. Whole-buffer identity is insufficient where scratch views or
+   output offsets alias.
 
-The current source contains a misleading near-match. Both local decode kernels
-dispatch 64 threads as two 32-lane SIMD groups, and each SIMD group produces two
-adjacent output columns. Those are also the current `llama.cpp` outer constants.
-The inner work is not equivalent:
+## Selected Design Boundary
 
-- local Q4_K loops over eight quantization groups and then four scalar items,
-  repeatedly calls scalar scale/min extraction, and indexes bytes separately;
-- local Q6_K has the right lane/block partition in outline but still expresses
-  the hot arithmetic as scalar loads, scalar unpacking, and scalar accumulation;
-- the upstream kernels cache activation fragments in registers, use packed
-  integer loads and masks, keep several independent `float4` accumulators, fully
-  unroll the fixed block work, and advance precomputed row strides for the
-  adjacent output row;
-- those extra instructions occur in seven projections in every one of 42
-  layers: five Q4_K projections and two Q6_K projections per decoded token.
+Dependency state belongs to `MetalCommandContext`, which owns command encoding
+and barriers. Engine scheduling may describe buffer access but must not own
+Metal hazard mechanics.
 
-The old `NEXT_TASK.md` conclusion that the decode kernels already embodied the
-upstream winner was based on dispatch geometry and is superseded by the source-
-level inner-loop comparison below.
+The first retained design should:
 
-## Exact Local Production Workload
+- record reads and writes as backend-buffer identity plus byte range;
+- insert a barrier before an operation only when its accesses overlap an
+  unresolved prior write or when a write overlaps an unresolved prior read;
+- clear or advance dependency state after an inserted barrier;
+- treat unknown or overflowed ranges conservatively;
+- preserve explicit lifecycle barriers that protect command-buffer/CPU
+  visibility rather than intra-encoder tensor hazards; and
+- expose no benchmark switch or public dependency API.
 
-The resident decode call graph is:
+Do not add a general graph compiler, runtime autotuner, external dependency,
+or second execution path.
 
-`run_gemma2_metal_resident_decode_step`
--> `MetalCommandContext::encode_matmul`
--> `select_quantized_matmul_dispatch`
--> the dtype-specific one-row pipeline.
+## Correctness Evidence
 
-For the target model, all production decode inputs have one F32 activation row,
-all quantized inner dimensions are native 256-value block multiples, and all
-output counts are multiples of four. The important projection families are:
+Add deterministic tests for:
 
-| Projection | Dtype | K | N | Blocks per output |
-| --- | --- | ---: | ---: | ---: |
-| query | Q4_K | 3,584 | 4,096 | 14 |
-| key | Q4_K | 3,584 | 2,048 | 14 |
-| value | Q6_K | 3,584 | 2,048 | 14 |
-| attention output | Q4_K | 4,096 | 3,584 | 16 |
-| FFN gate/up | Q4_K | 3,584 | 14,336 | 14 |
-| FFN down | Q6_K | 14,336 | 3,584 | 56 |
-
-Q4_K is the first implementation and measurement target because it owns five
-of the seven quantized projections per layer and most of the quantized weight
-traffic. Q6_K follows only after the Q4_K result is understood.
-
-## Upstream Research
-
-Research was refreshed on 2026-07-21 against current source, not inferred from
-thread counts or documentation summaries.
-
-### `llama.cpp`: the primary same-format oracle
-
-Current `llama.cpp` commit `846e991ec3c7ccec49112ff2c5b00b710e5f551d`
-defines `N_R0_Q4_K = 2`, `N_SG_Q4_K = 2`, `N_R0_Q6_K = 2`, and
-`N_SG_Q6_K = 2`. Its dispatcher compiles shape-specialized pipeline variants
-with Metal function constants and records the output-row and SIMD-group tile in
-the selected pipeline.
-
-Its Q4_K decode kernel maps a lane as four 8-lane block workers. Each lane:
-
-- caches 32 activation values covering four 64-value quantization regions;
-- computes four activation sums once for the Q4_K minimum terms;
-- reads packed quant values as `uint16_t`, not four independent bytes;
-- reconstructs the eight 6-bit scale/min values with four packed masks;
-- accumulates quant products in two `float4` values;
-- reuses the activation cache for two adjacent output rows by advancing weight,
-  scale, and half-scale pointers by a precomputed row stride; and
-- performs one SIMD reduction per output row.
-
-Its Q6_K kernel assigns lane pairs to two blocks, caches 16 activation values,
-uses one `float4` for the four low/high-bitplane products, advances directly to
-the second output row, and performs a SIMD reduction per row. Both kernels
-operate directly on native GGUF blocks; neither materializes dequantized weights
-nor requantizes the activation row.
-
-Primary source:
-
-- [Q4_K/Q6_K Metal kernels](https://github.com/ggml-org/llama.cpp/blob/846e991ec3c7ccec49112ff2c5b00b710e5f551d/ggml/src/ggml-metal/ggml-metal.metal#L8300-L8656)
-- [decode tile constants](https://github.com/ggml-org/llama.cpp/blob/846e991ec3c7ccec49112ff2c5b00b710e5f551d/ggml/src/ggml-metal/ggml-metal-impl.h#L54-L61)
-- [pipeline specialization and dispatch selection](https://github.com/ggml-org/llama.cpp/blob/846e991ec3c7ccec49112ff2c5b00b710e5f551d/ggml/src/ggml-metal/ggml-metal-device.cpp#L820-L950)
-
-### MLX: independent Apple-GPU scheduling evidence
-
-Current MLX commit `30a19f7234abfb4d136af58623eaac289e63f5d2` uses a
-different affine/FP quantization representation, so its arithmetic cannot be
-copied into a GGUF K-quant kernel. Its scheduling decisions are still useful:
-
-- it selects distinct vector, small-batch-wide, matrix, and split-K families by
-  M, N, K, quantization mode, and Apple GPU generation;
-- its ordinary one-row quantized vector path also uses two SIMD groups;
-- its small-batch path reuses weights across a bounded number of input vectors;
-  it does not grow an unbounded row-accumulator array; and
-- split-K is used when the orientation/shape lacks enough parallelism, while
-  tiled quantized matrix kernels are used once M crosses a shape-dependent
-  threshold.
-
-This supports compile-time shape specialization and separate decode/prefill
-families. It does not support adding split-K to the present Gemma decode: these
-projections already expose thousands of output columns, and split-K would add
-an intermediate buffer and reduction.
-
-Primary source:
-
-- [MLX quantized Metal dispatch and vector kernels](https://github.com/ml-explore/mlx/blob/30a19f7234abfb4d136af58623eaac289e63f5d2/mlx/backend/metal/quantized.cpp#L183-L552)
-- [MLX shape-family selection](https://github.com/ml-explore/mlx/blob/30a19f7234abfb4d136af58623eaac289e63f5d2/mlx/backend/metal/quantized.cpp#L1463-L1552)
-
-### Candle: a useful older GGUF comparison, not the target
-
-Current Candle commit `31f35b147389700ed2a178ee66a91c3cc25cc80d`
-contains GGUF Q4_K/Q6_K Metal kernels derived from an older ggml design. It
-confirms the value of packed masks, vector accumulators, and direct GGUF-block
-operation. Its host geometry differs: Q4_K uses four outputs in one SIMD group,
-while Q6_K uses one output per SIMD group. This is a plausible tuning comparison
-but not stronger evidence than the newer same-model `llama.cpp` result. Do not
-make it the initial design or retain a second production implementation merely
-for compatibility.
-
-Primary source:
-
-- [Candle GGUF Metal host dispatch](https://github.com/huggingface/candle/blob/31f35b147389700ed2a178ee66a91c3cc25cc80d/candle-metal-kernels/src/kernels/quantized.rs#L28-L160)
-- [Candle packed Q4_K/Q6_K Metal kernels](https://github.com/huggingface/candle/blob/31f35b147389700ed2a178ee66a91c3cc25cc80d/candle-metal-kernels/src/metal_src/quantized.metal#L4887-L5293)
-
-### Metal facilities
-
-Use Metal function constants, or equivalently separately instantiated kernel
-templates, so the compiler sees the production block count and tail contract.
-Apple documents function constants as compile-time specialization inputs.
-For temporary profiling, first check whether this M4 supports timestamp counter
-sampling at dispatch boundaries; Apple documents counter sample buffers and
-explicit compute-encoder sampling for this purpose.
-
-- [Metal function constants](https://developer.apple.com/documentation/metal/mtlfunctionconstantvalues)
-- [Metal GPU counters and counter sample buffers](https://developer.apple.com/documentation/metal/gpu-counters-and-counter-sample-buffers)
-- [Sampling counters at command boundaries](https://developer.apple.com/documentation/metal/sampling-gpu-data-into-counter-sample-buffers)
-
-## Selected Design
-
-Implement a new packed one-row kernel family in
-`src/tensor/backends/metal_backend.mm` with one shared ownership contract:
-
-- 64 threads per threadgroup;
-- two 32-lane SIMD groups;
-- two adjacent output columns per SIMD group;
-- four output columns per threadgroup;
-- direct reads from native 144-byte Q4_K and 210-byte Q6_K blocks;
-- one activation load schedule reused for both output columns;
-- F32 accumulators and `simd_sum` reduction;
-- no threadgroup-memory staging; and
-- exact output-tail handling for the public backend contract.
-
-Create specialized pipeline variants for the production block counts:
-
-- Q4_K: 14 and 16 blocks per output column;
-- Q6_K: 14 and 56 blocks per output column.
-
-The compiler must see the block count as a constant so it can unroll the block
-loop and fold address arithmetic. Keep one generic packed variant for valid
-public/test shapes not in that set; it must use the same new inner algorithm,
-not the legacy kernel. The production selector chooses only by dtype and shared
-width. There is no runtime autotuner.
-
-The Q4_K inner loop should follow the proven packed schedule, expressed in this
-engine's row-major GGUF weight convention:
-
-1. derive the two output-column base pointers once;
-2. map lanes to `block_mod_4`, quantization half, and packed-pair index;
-3. cache the fixed activation fragment in thread-local arrays/registers;
-4. compute the four activation sums once;
-5. load Q4 nibbles and scale/min metadata through aligned packed integer views;
-6. accumulate four independent regions in `float4` values with explicitly
-   unrolled fixed loops;
-7. advance each weight pointer by one full column stride for the second output;
-8. apply `d` and `dmin` after the packed dot products; and
-9. reduce and write only valid columns.
-
-The Q6_K loop should similarly preserve the lane-pair/two-block partition while
-replacing scalar item arithmetic with a register-cached, unrolled `float4`
-schedule and precomputed adjacent-column strides.
-
-Do not blindly transliterate upstream tensor indexing or argument structures.
-The local weight descriptor is logically `[K, N]` but stored as consecutive
-native blocks per output column. Preserve that local invariant and use the
-independent local CPU decoder as the oracle.
-
-## Alternatives Rejected for This Baton
-
-- **Activation Q8 requantization:** current Metal `llama.cpp` K-quant matvec
-  consumes F32 activations directly. Adding a quantization pass changes the
-  numerical contract and adds traffic before evidence says it is needed.
-- **Weight repacking:** the same-format reference reaches 14.2 tokens/s directly
-  from supported K-quant blocks. A second resident layout increases startup,
-  memory, and ownership complexity and is not the first missing mechanism.
-- **Split-K decode:** output parallelism is already abundant; partial outputs
-  and a reduction add work. MLX's split-K decision applies to different tensor
-  orientation, quantization, and shape conditions.
-- **Four outputs per SIMD group as the initial kernel:** Candle shows this older
-  alternative, but it increases simultaneous weight-row and accumulator state.
-  Screen it only after the packed two-output kernel works, and only in temporary
-  code, if GPU timing shows the retained kernel is occupancy-limited.
-- **Prefill row kernels or tiled GEMM:** those are Finding 2 and remain untouched
-  so decode attribution stays clean.
-- **Barrier or fusion changes:** dispatch dependency work is Finding 3 and would
-  confound the kernel A/B.
-
-## Implementation Sequence
-
-1. Preserve the current release binary as the end-to-end baseline. Record the
-   current commit and dirty-tree state without altering unrelated changes.
-2. Build a temporary, non-production timing probe around model-resident exact
-   projection shapes. Prefer Metal timestamp counter samples when dispatch-
-   boundary sampling is supported. Otherwise measure repeated format-specific
-   command buffers with GPU start/end timestamps. Keep Q4_K and Q6_K totals
-   separate, warm pipelines first, repeat enough times to report median and
-   spread, and remove the probe before completion.
-3. Implement and validate Q4_K specialized and generic packed kernels. Compare
-   isolated Q4_K totals and the full resident decode before touching Q6_K.
-4. If Q4_K improves the real path beyond noise, implement Q6_K with the same
-   ownership but its own packed bitplane schedule. Measure it independently.
-5. Only if the packed two-output kernel remains demonstrably occupancy-limited,
-   temporarily screen the one-SIMD/four-output Q4_K geometry or one-output Q6_K
-   geometry. Retain exactly one winner per dtype and delete every rejected
-   variant.
-6. Delete legacy production code and implementation-coupled tests as specified
-   below, run the complete correctness suite, then run interleaved baseline and
-   candidate real-model benchmarks.
-
-## Legacy Deletion Boundary
-
-After a replacement is retained, delete rather than alias:
-
-- `matvec_f32_q4_k_simd_2x2_kernel` and
-  `matvec_f32_q6_k_simd_2x2_kernel`;
-- `matvec_q4_k_simd_2x2_pipeline` and
-  `matvec_q6_k_simd_2x2_pipeline`;
-- their old function lookup, pipeline construction, comments, and dispatch
-  identities;
-- any temporary tuning pipelines, counter instrumentation, diagnostic entry
-  points, benchmark-only engine APIs, and generated benchmark output; and
-- any test that exists only to assert an old kernel name, pipeline identity,
-  thread geometry, implementation reuse, or compatibility alias.
-
-Do not delete behavioral evidence. Keep and adapt the independent CPU parity
-coverage, the combined packed-block/output-tail decode test, full resident
-decode parity, unavailable-Metal behavior, and real generation checks. The
-current multi-row Q4_K/Q6_K kernels and their tests are not legacy in this baton;
-they are the live prefill path and must remain unchanged.
-
-## Correctness Verification
-
-Required deterministic coverage:
-
-- Q4_K and Q6_K one-row parity against
-  `reference_f32_quantized_gguf_weight_matmul`;
-- block counts `1, 2, 14, 16, 56` and output tails `1, 2, 3, 4, 5, 7`, ensuring
-  generic and every specialized block-count path execute;
-- mixed-sign, nonuniform activations and nonzero scale/min metadata;
-- exact production shapes for all six projection families in the table above,
-  using compact deterministic fixtures where full real weights are unsuitable
-  for a unit test;
-- unchanged multi-row Q4_K/Q6_K parity, proving prefill dispatch did not move;
-- resident Gemma decode parity against the independent CPU reference, including
-  logits within the justified reduction-order tolerance, selected token, and KV
-  state;
-- unavailable-Metal error behavior; and
-- exact greedy and seed-42 sampled token IDs against the preserved baseline.
-
-Choose tolerances from F32 accumulation-order error. Do not loosen the existing
-Q4_K `0.1` or Q6_K `0.25` absolute tolerance merely to accept a failure; first
-compare error distributions and locate the arithmetic discrepancy.
+- disjoint read/read, read/write, and write/write ranges;
+- overlapping RAW, WAR, and WAW ranges;
+- exact-touching non-overlapping boundaries;
+- subviews and nonzero output offsets;
+- overflow/unknown ranges taking the conservative path;
+- unchanged resident prefill logits, selected token, F16 KV bytes, cache
+  position, chunk/ring boundaries, and submission statistics;
+- unchanged decode logits/tokens and one-row projection parity; and
+- graceful unavailable-Metal behavior.
 
 Run `bash scripts/ci.sh` after implementation changes.
 
-## Performance Verification
+## Performance Evidence
 
-Use `models/gemma-2-9b-Q4.gguf`, release builds, prompt
-`Explain why the sky is blue.`, one warmup, and at least five measured
-repetitions. Preserve the established greedy and sampled configurations. Use a
-32-token run to confirm decode rather than prompt setup owns the change.
+Use release builds, warm pipelines, controlled thermals, and at least five
+measured repetitions. Report before/after:
 
-Report:
-
-- isolated aggregate Q4_K GPU time before/after and its spread;
-- isolated aggregate Q6_K GPU time before/after and its spread;
-- warm greedy generation tokens/s and decode milliseconds for 8 and 32 tokens;
-- seeded sampled generation tokens/s and decode milliseconds;
-- exact token IDs for every compared run;
-- resident weight, KV, and scratch byte counts; and
+- decode latency and tok/s for the standard prompt and a longer context;
+- 16-, 32-, and approximately 128-token prefill latency and tok/s;
 - dispatch, barrier, encoder, command-buffer, commit, wait, allocation, and
-  compact-readback counts, which must remain structurally unchanged.
+  readback counts;
+- GPU duration when available, runtime TTFT, and end-to-end TTFT;
+- plan creation time and resident bytes; and
+- exact greedy and seed-42 sampled outputs.
 
-Interleave baseline and candidate runs when possible to reduce thermal drift.
-An isolated kernel gain is necessary but not sufficient. Retain a dtype rewrite
-only when the full production decode improves beyond run-to-run noise and no
-meaningful prefill regression appears.
+Interleave baseline and candidate when thermal drift could bias the result.
+The candidate must reduce actual barriers and improve a whole production path;
+a counter-only change with no measurable latency benefit is not enough.
 
 ## Constraints
 
-- Keep inference engine-owned and offline; upstream code is a research oracle,
-  not a runtime dependency.
-- Preserve direct GGUF block operation and model residency.
-- Preserve the current F16 output-head winner, F16 ring KV cache, compact token
-  selection, one-submit resident decode, and zero full-vocabulary CPU readback.
-- Preserve the separate multi-row prefill pipelines exactly.
-- Add no runtime autotuning, benchmark switches, fallback to deleted kernels,
-  compatibility aliases, or benchmark-only public APIs.
-- Do not mix in prefill tiled GEMM, attention, fusion, barriers, sampling, or
-  unrelated cleanup.
-- Do not commit models, binaries, temporary probes, Metal captures, or benchmark
-  result files.
-- Preserve unrelated user changes in the current dirty worktree.
+- Preserve engine-owned, offline, Metal-first, model-resident inference.
+- Preserve native GGUF weights, the new projection families, the 128-row
+  chunk, F32 outputs, F16 ring KV, compact selection, and decode behavior.
+- Do not mix fusion, Flash Attention, quantization, kernel geometry, sampling,
+  tokenizer, CLI, server, or unrelated cleanup into this task.
+- Add no compatibility alias, silent backend fallback, benchmark-only public
+  API, or generated benchmark artifact.
+- Preserve unrelated user changes.
 
 ## Stop Condition
 
-Stop after both dtype decisions are evidence-backed and the retained code has
-exactly one generic/new packed implementation family plus the required exact-
-shape pipeline variants per dtype. Update this document with measured
-correctness and performance evidence, deleted legacy surfaces, changed files,
-and any rejected candidate result.
+Stop when dependency tracking is correct for every resident operation, all
+superseded fixed intra-encoder barriers are deleted, deterministic parity and
+CI pass, and real decode or prefill improves beyond noise. Delete all timing
+probes and rejected schedule variants.
 
-If Q4_K does not improve whole-token decode beyond noise, delete the candidate
-and stop before Q6_K. Record the negative result and select a new bottleneck;
-do not keep speculative kernel complexity. If Q4_K wins but Q6_K does not,
-retain Q4_K, restore no old aliases, leave the proven existing Q6_K kernel as
-the only Q6_K implementation, and record that bounded result explicitly.
+If a safe barrier-minimized candidate does not improve a whole production
+path, delete it, retain the current explicit schedule, record the negative
+result in this file, and choose a fresh measured bottleneck. Do not retain
+dependency machinery solely because it is architecturally attractive.

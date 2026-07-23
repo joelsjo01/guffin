@@ -54,5 +54,9 @@ local_gguf_engine::tensor::TensorStorage reference_f32_quantized_gguf_weight_mat
     const local_gguf_engine::tensor::TensorStorage& left,
     const local_gguf_engine::tensor::TensorStorage& right
 );
+local_gguf_engine::tensor::TensorStorage reference_f16_staged_quantized_gguf_weight_matmul(
+    const local_gguf_engine::tensor::TensorStorage& left,
+    const local_gguf_engine::tensor::TensorStorage& right
+);
 
 }  // namespace local_gguf_engine::tests

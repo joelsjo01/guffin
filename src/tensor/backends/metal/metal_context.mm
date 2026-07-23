@@ -158,14 +158,44 @@ MatmulPipelineState::MatmulPipelineState() {
         return pipeline;
     };
 
-    matmul_q4_k_rows_2_pipeline =
-        make_pipeline(@"matmul_f32_q4_k_rows_2_kernel", "Q4_K two-row matmul");
-    matmul_q4_k_rows_4_pipeline =
-        make_pipeline(@"matmul_f32_q4_k_rows_4_kernel", "Q4_K four-row matmul");
-    matmul_q4_k_rows_8_pipeline =
-        make_pipeline(@"matmul_f32_q4_k_rows_8_kernel", "Q4_K eight-row matmul");
-    matmul_q4_k_rows_16_pipeline =
-        make_pipeline(@"matmul_f32_q4_k_rows_16_kernel", "Q4_K sixteen-row matmul");
+    auto make_tiled_pipeline = [library, this](
+        std::uint16_t dtype,
+        bool exact_16,
+        const char* description
+    ) {
+        MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
+        [constants setConstantValue:&dtype type:MTLDataTypeUShort atIndex:2];
+        [constants setConstantValue:&exact_16 type:MTLDataTypeBool atIndex:3];
+        NSError* function_error = nil;
+        id<MTLFunction> function = [library newFunctionWithName:@"matmul_f32_kquant_tiled_kernel"
+                                                 constantValues:constants
+                                                          error:&function_error];
+        if (function == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + description + " specialized function creation failed: "
+                    + ns_error_message(function_error, "unknown error")
+            );
+        }
+        NSError* pipeline_error = nil;
+        id<MTLComputePipelineState> pipeline =
+            [device newComputePipelineStateWithFunction:function error:&pipeline_error];
+        if (pipeline == nil) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                std::string("Metal ") + description + " pipeline creation failed: "
+                    + ns_error_message(pipeline_error, "unknown error")
+            );
+        }
+        return pipeline;
+    };
+
+    matmul_q4_k_tiled_pipeline = make_tiled_pipeline(0, false, "Q4_K tiled matmul");
+    matmul_q4_k_tiled_exact_16_pipeline =
+        make_tiled_pipeline(0, true, "Q4_K exact 16-row tiled matmul");
+    matmul_q4_k_small_batch_pipeline = make_specialized_pipeline(
+        @"matmul_f32_kquant_small_batch_kernel", 2, 0, "Q4_K packed small-batch matmul"
+    );
 
     matvec_q4_k_packed_pipeline =
         make_specialized_pipeline(@"matvec_f32_q4_k_packed_kernel", 0, 0, "Q4_K packed decode matvec");
@@ -176,14 +206,12 @@ MatmulPipelineState::MatmulPipelineState() {
         @"matvec_f32_q4_k_packed_kernel", 0, 16, "Q4_K 16-block packed decode matvec"
     );
 
-    matmul_q6_k_rows_2_pipeline =
-        make_pipeline(@"matmul_f32_q6_k_rows_2_kernel", "Q6_K two-row matmul");
-    matmul_q6_k_rows_4_pipeline =
-        make_pipeline(@"matmul_f32_q6_k_rows_4_kernel", "Q6_K four-row matmul");
-    matmul_q6_k_rows_8_pipeline =
-        make_pipeline(@"matmul_f32_q6_k_rows_8_kernel", "Q6_K eight-row matmul");
-    matmul_q6_k_rows_16_pipeline =
-        make_pipeline(@"matmul_f32_q6_k_rows_16_kernel", "Q6_K sixteen-row matmul");
+    matmul_q6_k_tiled_pipeline = make_tiled_pipeline(1, false, "Q6_K tiled matmul");
+    matmul_q6_k_tiled_exact_16_pipeline =
+        make_tiled_pipeline(1, true, "Q6_K exact 16-row tiled matmul");
+    matmul_q6_k_small_batch_pipeline = make_specialized_pipeline(
+        @"matmul_f32_kquant_small_batch_kernel", 2, 1, "Q6_K packed small-batch matmul"
+    );
 
     matvec_q6_k_packed_pipeline =
         make_specialized_pipeline(@"matvec_f32_q6_k_packed_kernel", 1, 0, "Q6_K packed decode matvec");
@@ -597,29 +625,19 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
                     ? state.matvec_q6_k_packed_56_pipeline
                     : state.matvec_q6_k_packed_pipeline;
         }
+    } else if (rows <= 8) {
+        row_tile = 4;
+        threads = 64;
+        pipeline = dtype == DType::q4_k
+            ? state.matmul_q4_k_small_batch_pipeline
+            : state.matmul_q6_k_small_batch_pipeline;
     } else {
-        threads = 128;
-        if (rows <= 2) {
-            row_tile = 2;
-            pipeline = dtype == DType::q4_k
-                ? state.matmul_q4_k_rows_2_pipeline
-                : state.matmul_q6_k_rows_2_pipeline;
-        } else if (rows <= 4) {
-            row_tile = 4;
-            pipeline = dtype == DType::q4_k
-                ? state.matmul_q4_k_rows_4_pipeline
-                : state.matmul_q6_k_rows_4_pipeline;
-        } else if (rows <= 8) {
-            row_tile = 8;
-            pipeline = dtype == DType::q4_k
-                ? state.matmul_q4_k_rows_8_pipeline
-                : state.matmul_q6_k_rows_8_pipeline;
-        } else {
-            row_tile = 16;
-            pipeline = dtype == DType::q4_k
-                ? state.matmul_q4_k_rows_16_pipeline
-                : state.matmul_q6_k_rows_16_pipeline;
-        }
+        const bool exact_16 = rows == 16 && columns % 64 == 0;
+        row_tile = exact_16 ? 16 : 32;
+        threads = exact_16 ? 64 : 128;
+        pipeline = dtype == DType::q4_k
+            ? (exact_16 ? state.matmul_q4_k_tiled_exact_16_pipeline : state.matmul_q4_k_tiled_pipeline)
+            : (exact_16 ? state.matmul_q6_k_tiled_exact_16_pipeline : state.matmul_q6_k_tiled_pipeline);
     }
 
     if (pipeline == nil || pipeline.threadExecutionWidth != 32
@@ -633,7 +651,11 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
     return QuantizedMatmulDispatch {
         .pipeline = pipeline,
         .threadgroups = MTLSizeMake(
-            static_cast<NSUInteger>((columns + 3) / 4),
+            static_cast<NSUInteger>(
+                rows == 1 ? (columns + 3) / 4
+                : rows <= 8 ? (columns + 1) / 2
+                : (columns + 63) / 64
+            ),
             static_cast<NSUInteger>((rows + row_tile - 1) / row_tile),
             1
         ),

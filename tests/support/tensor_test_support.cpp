@@ -19,6 +19,7 @@
 namespace local_gguf_engine::tests {
 
 using local_gguf_engine::tensor::DType;
+using local_gguf_engine::tensor::f16_bits_to_f32;
 using local_gguf_engine::tensor::f32_to_f16_bits;
 using local_gguf_engine::tensor::q4_k_block_view;
 using local_gguf_engine::tensor::q6_k_block_view;
@@ -433,6 +434,46 @@ TensorStorage reference_f32_quantized_gguf_weight_matmul(
                 const std::array<std::uint64_t, 2> left_index {row, inner};
                 sum += read_f32(left, std::span<const std::uint64_t>(left_index))
                     * read_quantized_gguf_weight_value(right, column, inner);
+            }
+
+            const std::array<std::uint64_t, 2> output_index {row, column};
+            write_f32(output, std::span<const std::uint64_t>(output_index), sum);
+        }
+    }
+
+    return output;
+}
+
+TensorStorage reference_f16_staged_quantized_gguf_weight_matmul(
+    const TensorStorage& left,
+    const TensorStorage& right
+) {
+    const auto rows = left.descriptor().shape.dimension(0);
+    const auto shared = left.descriptor().shape.dimension(1);
+    const auto columns = right.descriptor().shape.dimension(1);
+    auto output = TensorStorage::allocate(TensorDescriptor::from(Shape::from({rows, columns}), DType::f32));
+
+    // The Metal matrix path stages 32 K values at a time as F16 and retains an
+    // F32 accumulator. This oracle deliberately uses the independent CPU block
+    // decoder, not the shader's packed masks, then models the operand rounding
+    // and fixed K-tile order without sharing optimized implementation logic.
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t column = 0; column < columns; ++column) {
+            float sum = 0.0F;
+            for (std::uint64_t tile = 0; tile < shared; tile += 32U) {
+                float tile_sum = 0.0F;
+                for (std::uint64_t offset = 0; offset < 32U; ++offset) {
+                    const auto inner = tile + offset;
+                    const std::array<std::uint64_t, 2> left_index {row, inner};
+                    const auto activation = f16_bits_to_f32(f32_to_f16_bits(
+                        read_f32(left, std::span<const std::uint64_t>(left_index))
+                    ));
+                    const auto weight = f16_bits_to_f32(f32_to_f16_bits(
+                        read_quantized_gguf_weight_value(right, column, inner)
+                    ));
+                    tile_sum += activation * weight;
+                }
+                sum += tile_sum;
             }
 
             const std::array<std::uint64_t, 2> output_index {row, column};

@@ -11,7 +11,7 @@ namespace local_gguf_engine::tensor::backends::metal {
 
 namespace {
 
-constexpr const char* matmul_f32_f16_gguf_weight_source = R"metal(
+constexpr const char* metal_kernel_source_head = R"metal(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -58,6 +58,8 @@ struct TokenCandidateResult {
 
 constant ushort q4_k_decode_block_count [[function_constant(0)]];
 constant ushort q6_k_decode_block_count [[function_constant(1)]];
+constant ushort kquant_tiled_dtype [[function_constant(2)]];
+constant bool kquant_tiled_exact_16 [[function_constant(3)]];
 
 inline bool token_candidate_better(TokenCandidate left, TokenCandidate right) {
     return left.logit > right.logit || (left.logit == right.logit && left.token < right.token);
@@ -153,102 +155,301 @@ inline float f16_bits_to_float(ushort bits) {
     return float(as_type<half>(bits));
 }
 
-inline uint q4_k_scale_min_value(
-    const device uchar* scale_min,
-    uint group_index,
-    bool min_value
-) {
-    if (group_index < 4) {
-        return uint(scale_min[group_index + (min_value ? 4 : 0)] & 0x3f);
-    }
+struct block_q4_k {
+    half d;
+    half dmin;
+    uchar scales[12];
+    uchar qs[128];
+};
 
-    const uchar low_source = scale_min[group_index + 4];
-    if (min_value) {
-        const uint high_bits = uint((scale_min[group_index] & 0xc0) >> 2);
-        return uint(low_source >> 4) | high_bits;
-    }
+struct block_q6_k {
+    uchar low[128];
+    uchar high[64];
+    char scales[16];
+    half d;
+};
 
-    const uint high_bits = uint((scale_min[group_index - 4] & 0xc0) >> 2);
-    return uint(low_source & 0x0f) | high_bits;
+inline uchar2 q4_k_scale_min_pair(int group, int half_group, const device uchar* scales) {
+    return group < 4
+        ? uchar2(scales[group + half_group] & 63, scales[group + half_group + 4] & 63)
+        : uchar2(
+            (scales[group + half_group + 4] & 0x0f)
+                | ((scales[group + half_group - 4] & 0xc0) >> 2),
+            (scales[group + half_group + 4] >> 4)
+                | ((scales[group + half_group] & 0xc0) >> 2)
+        );
 }
 
-// One SIMD group owns one output column. Each lane decodes eight values from a
-// native 256-value block once, then reuses them across a compile-time row tile.
-// Four SIMD groups provide enough independent columns for occupancy without
-// duplicating packed-weight reads between activation rows.
-template <ushort row_tile>
-inline void matmul_f32_q4_k_rows(
+// Decode one consecutive 16-weight fragment. Keeping this layout identical to
+// the native GGUF block lets the matrix path reuse resident weights directly.
+template <typename matrix4x4>
+inline void dequantize_q4_k_16(
+    const device block_q4_k* block,
+    short fragment_index,
+    thread matrix4x4& values
+) {
+    const device uchar* quants = block->qs
+        + (fragment_index / 4) * 32 + 16 * (fragment_index & 1);
+    const short scale_group = (fragment_index / 4) * 2;
+    fragment_index &= 3;
+    const uchar2 scale_min = q4_k_scale_min_pair(
+        scale_group, fragment_index / 2, block->scales
+    );
+    const float d = fragment_index < 2 ? float(block->d) : float(block->d) / 16.0f;
+    const float scale = d * float(scale_min[0]);
+    const float minimum = float(block->dmin) * float(scale_min[1]);
+    const ushort mask = fragment_index < 2 ? 0x0f : 0xf0;
+#pragma clang loop unroll(full)
+    for (short item = 0; item < 16; ++item) {
+        values[item / 4][item % 4] = scale * float(quants[item] & mask) - minimum;
+    }
+}
+
+template <typename matrix4x4>
+inline void dequantize_q6_k_16(
+    const device block_q6_k* block,
+    short fragment_index,
+    thread matrix4x4& values
+) {
+    const device ushort* low = reinterpret_cast<const device ushort*>(block->low)
+        + 32 * (fragment_index / 8) + 16 * ((fragment_index / 2) & 1)
+        + 8 * (fragment_index & 1);
+    const device ushort* high = reinterpret_cast<const device ushort*>(block->high)
+        + 16 * (fragment_index / 8) + 8 * (fragment_index & 1);
+    const float scale = float(block->scales[(fragment_index & 1) + 2 * (fragment_index / 2)]);
+    fragment_index = (fragment_index / 2) & 3;
+    const uint mask_high = fragment_index > 1
+        ? (fragment_index > 2 ? 0xc0c0c0c0 : 0x30303030)
+        : (fragment_index > 0 ? 0x0c0c0c0c : 0x03030303);
+    const uint mask_low = fragment_index > 1 ? 0xf0f0f0f0 : 0x0f0f0f0f;
+    const uint shift_high_right = fragment_index > 2 ? 2 : 0;
+    const uint shift_high_left = fragment_index > 1 ? 0 : (fragment_index > 0 ? 2 : 4);
+    const uint shift_low_right = fragment_index > 1 ? 4 : 0;
+    const float factor = float(block->d) * scale;
+    const float minimum = factor * 32.0f;
+#pragma clang loop unroll(full)
+    for (short item = 0; item < 4; ++item) {
+        const uint packed_low = (uint(low[2 * item]) | (uint(low[2 * item + 1]) << 16)) & mask_low;
+        const uint packed_high = (uint(high[2 * item]) | (uint(high[2 * item + 1]) << 16)) & mask_high;
+        const uint quants = ((packed_high << shift_high_left) >> shift_high_right)
+            | (packed_low >> shift_low_right);
+        values[item][0] = factor * float(quants & 0xff) - minimum;
+        values[item][1] = (factor / 256.0f) * float(quants & 0xff00) - minimum;
+        values[item][2] = (factor / 65536.0f) * float(quants & 0xff0000) - minimum;
+        values[item][3] = (factor / 16777216.0f) * float(quants & 0xff000000) - minimum;
+    }
+}
+
+// Each SIMD group owns one output column and each lane decodes a packed
+// 16-value fragment. Four activation rows share that fragment through vector
+// dots; rows 5-8 form a second threadgroup row tile, keeping register use
+// bounded instead of growing a per-lane row array.
+kernel void matmul_f32_kquant_small_batch_kernel(
     const device float* left [[buffer(0)]],
     const device uchar* right [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant MatmulDimensions& dims [[buffer(3)]],
-    uint2 threadgroup_index,
-    ushort simdgroup_index,
-    ushort lane
+    uint2 threadgroup_index [[threadgroup_position_in_grid]],
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
 ) {
-    const uint column = threadgroup_index.x * 4 + uint(simdgroup_index);
-    const uint first_row = threadgroup_index.y * uint(row_tile);
+    const uint column = threadgroup_index.x * 2 + uint(simdgroup_index);
+    const uint first_row = threadgroup_index.y * 4;
     const uint blocks_per_column = dims.shared / 256;
-    float sums[row_tile];
-    for (ushort row = 0; row < row_tile; ++row) {
-        sums[row] = 0.0f;
-    }
+    float sums[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     if (column < dims.columns) {
-        for (uint column_block = 0; column_block < blocks_per_column; ++column_block) {
-            const device uchar* block = right + (column * blocks_per_column + column_block) * 144;
-            const float d = f16_bits_to_float(read_little_endian_u16(block, 0));
-            const float dmin = f16_bits_to_float(read_little_endian_u16(block, 2));
-            const device uchar* scale_min = block + 4;
-            const device uchar* quantized = block + 16;
+        const uint fragment_count = blocks_per_column * 16;
+        for (uint fragment_index = uint(lane); fragment_index < fragment_count; fragment_index += 32) {
+            float4x4 weights;
+            if (kquant_tiled_dtype == 0) {
+                const device block_q4_k* blocks = reinterpret_cast<const device block_q4_k*>(right)
+                    + column * blocks_per_column;
+                dequantize_q4_k_16(
+                    blocks + fragment_index / 16, short(fragment_index & 15), weights
+                );
+            } else {
+                const device block_q6_k* blocks = reinterpret_cast<const device block_q6_k*>(right)
+                    + column * blocks_per_column;
+                dequantize_q6_k_16(
+                    blocks + fragment_index / 16, short(fragment_index & 15), weights
+                );
+            }
 
-            for (uint group = 0; group < 8; ++group) {
-                const uint inner = column_block * 256 + group * 32 + uint(lane);
-                const uint packed_index = (group >> 1) * 32 + uint(lane);
-                const uint shift = (group & 1) * 4;
-                const float quantized_value = float((quantized[packed_index] >> shift) & 0x0f);
-                const float weight = d
-                        * float(q4_k_scale_min_value(scale_min, group, false))
-                        * quantized_value
-                    - dmin * float(q4_k_scale_min_value(scale_min, group, true));
-                for (ushort row = 0; row < row_tile; ++row) {
-                    const uint output_row = first_row + uint(row);
-                    if (output_row < dims.rows) {
-                        sums[row] += left[output_row * dims.shared + inner] * weight;
-                    }
+#pragma clang loop unroll(full)
+            for (short row_offset = 0; row_offset < 4; ++row_offset) {
+                const uint row = first_row + uint(row_offset);
+                if (row < dims.rows) {
+                    const device float4x4* activation =
+                        reinterpret_cast<const device float4x4*>(left + row * dims.shared);
+                    const float4x4 values = activation[fragment_index];
+                    sums[row_offset] += dot(weights[0], values[0])
+                        + dot(weights[1], values[1])
+                        + dot(weights[2], values[2])
+                        + dot(weights[3], values[3]);
                 }
             }
         }
     }
 
-    for (ushort row = 0; row < row_tile; ++row) {
-        sums[row] = simd_sum(sums[row]);
-        const uint output_row = first_row + uint(row);
-        if (lane == 0 && column < dims.columns && output_row < dims.rows) {
-            output[output_row * dims.columns + column] = sums[row];
+#pragma clang loop unroll(full)
+    for (short row_offset = 0; row_offset < 4; ++row_offset) {
+        sums[row_offset] = simd_sum(sums[row_offset]);
+        const uint row = first_row + uint(row_offset);
+        if (lane == 0 && column < dims.columns && row < dims.rows) {
+            output[row * dims.columns + column] = sums[row_offset];
         }
     }
 }
 
-#define DEFINE_Q4_K_ROW_KERNEL(rows) \
-kernel void matmul_f32_q4_k_rows_##rows##_kernel( \
-    const device float* left [[buffer(0)]], \
-    const device uchar* right [[buffer(1)]], \
-    device float* output [[buffer(2)]], \
-    constant MatmulDimensions& dims [[buffer(3)]], \
-    uint2 threadgroup_index [[threadgroup_position_in_grid]], \
-    ushort simdgroup_index [[simdgroup_index_in_threadgroup]], \
-    ushort lane [[thread_index_in_simdgroup]] \
-) { \
-    matmul_f32_q4_k_rows<rows>( \
-        left, right, output, dims, threadgroup_index, simdgroup_index, lane \
-    ); \
-}
+// A threadgroup forms a 64-column by 32-row output tile. Packed weights are
+// dequantized once into an on-chip half tile and reused by four SIMD groups;
+// F32 activations are rounded only when staged and all matrix accumulators are
+// F32. The 8 KiB scratch also serves boundary stores for the public tail path.
+kernel void matmul_f32_kquant_tiled_kernel(
+    const device float* left [[buffer(0)]],
+    const device uchar* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulDimensions& dims [[buffer(3)]],
+    uint2 threadgroup_index [[threadgroup_position_in_grid]],
+    ushort thread_index [[thread_index_in_threadgroup]],
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]]
+) {
+    constexpr short output_tile = 64;
+    const short row_tile = kquant_tiled_exact_16 ? 16 : 32;
+    constexpr short inner_tile = 32;
+    threadgroup uchar scratch[8192];
+    threadgroup half* weights = reinterpret_cast<threadgroup half*>(scratch);
+    threadgroup half* activations = weights + output_tile * inner_tile;
 
-DEFINE_Q4_K_ROW_KERNEL(2)
-DEFINE_Q4_K_ROW_KERNEL(4)
-DEFINE_Q4_K_ROW_KERNEL(8)
-DEFINE_Q4_K_ROW_KERNEL(16)
+    const uint first_column = threadgroup_index.x * output_tile;
+    const uint first_row = threadgroup_index.y * row_tile;
+    const short valid_columns = short(min(uint(output_tile), dims.columns - first_column));
+    const short valid_rows = short(min(uint(row_tile), dims.rows - first_row));
+    const short activation_row = min(short(thread_index / 4), short(valid_rows - 1));
+    const short activation_inner = 8 * (thread_index & 3);
+    const uint blocks_per_column = dims.shared / 256;
+
+    simdgroup_half8x8 weight_matrices[4];
+    simdgroup_half8x8 activation_matrices[2];
+    simdgroup_float8x8 accumulators[8];
+#pragma clang loop unroll(full)
+    for (short index = 0; index < 8; ++index) {
+        accumulators[index] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint inner = 0; inner < dims.shared; inner += inner_tile) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const short loader_count = kquant_tiled_exact_16 ? 64 : 128;
+        for (short load_index = thread_index; load_index < 128; load_index += loader_count) {
+            const short weight_column = min(short(load_index / 2), short(valid_columns - 1));
+            const short weight_fragment = load_index & 1;
+            const uint fragment_index = inner / 16 + uint(weight_fragment);
+            half4x4 decoded;
+            if (kquant_tiled_dtype == 0) {
+                const device block_q4_k* blocks = reinterpret_cast<const device block_q4_k*>(right);
+                const device block_q4_k* block = blocks
+                    + (first_column + uint(weight_column)) * blocks_per_column
+                    + fragment_index / 16;
+                dequantize_q4_k_16(block, short(fragment_index & 15), decoded);
+            } else {
+                const device block_q6_k* blocks = reinterpret_cast<const device block_q6_k*>(right);
+                const device block_q6_k* block = blocks
+                    + (first_column + uint(weight_column)) * blocks_per_column
+                    + fragment_index / 16;
+                dequantize_q6_k_16(block, short(fragment_index & 15), decoded);
+            }
+#pragma clang loop unroll(full)
+            for (short item = 0; item < 16; ++item) {
+                const short sx = 2 * weight_fragment + item / 8;
+                const short sy = (load_index / 2) / 8;
+                const short lx = (load_index / 2) & 7;
+                const short ly = item & 7;
+                weights[64 * (8 * sx + sy) + 8 * ly + lx] = decoded[item / 4][item % 4];
+            }
+        }
+
+        const device float* activation = left
+            + (first_row + uint(activation_row)) * dims.shared + inner + activation_inner;
+        const short sx = thread_index & 3;
+        const short sy = (thread_index / 4) / 8;
+        const short ly = (thread_index / 4) & 7;
+        const short activation_block = 4 * sx + sy;
+#pragma clang loop unroll(full)
+        for (short item = 0; item < 8; ++item) {
+            activations[64 * activation_block + 8 * ly + item] = half(activation[item]);
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup const half* weight_tile = weights + 4 * 64 * (simdgroup_index & 1);
+        threadgroup const half* activation_tile = activations
+            + 2 * 64 * (kquant_tiled_exact_16 ? 0 : (simdgroup_index >> 1));
+#pragma clang loop unroll(full)
+        for (short inner_matrix = 0; inner_matrix < 4; ++inner_matrix) {
+            simdgroup_barrier(mem_flags::mem_none);
+#pragma clang loop unroll(full)
+            for (short index = 0; index < 4; ++index) {
+                simdgroup_load(weight_matrices[index], weight_tile + 64 * index, 8, 0, false);
+            }
+#pragma clang loop unroll(full)
+            for (short index = 0; index < 2; ++index) {
+                simdgroup_load(activation_matrices[index], activation_tile + 64 * index, 8, 0, false);
+            }
+#pragma clang loop unroll(full)
+            for (short index = 0; index < 8; ++index) {
+                simdgroup_multiply_accumulate(
+                    accumulators[index],
+                    activation_matrices[index / 4],
+                    weight_matrices[index % 4],
+                    accumulators[index]
+                );
+            }
+            weight_tile += 8 * 64;
+            activation_tile += 4 * 64;
+        }
+    }
+
+    const bool complete_tile = valid_columns == output_tile && valid_rows == row_tile;
+    if (complete_tile) {
+        device float* destination = output + first_row * dims.columns + first_column
+            + 32 * (simdgroup_index & 1)
+            + 16 * (kquant_tiled_exact_16 ? 0 : (simdgroup_index >> 1)) * dims.columns;
+#pragma clang loop unroll(full)
+        for (short index = 0; index < 8; ++index) {
+            simdgroup_store(
+                accumulators[index],
+                destination + 8 * (index % 4) + 8 * dims.columns * (index / 4),
+                dims.columns,
+                0,
+                false
+            );
+        }
+        return;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float* tile = reinterpret_cast<threadgroup float*>(scratch)
+        + 32 * (simdgroup_index & 1) + 16 * (simdgroup_index >> 1) * output_tile;
+#pragma clang loop unroll(full)
+    for (short index = 0; index < 8; ++index) {
+        simdgroup_store(
+            accumulators[index],
+            tile + 8 * (index % 4) + 8 * output_tile * (index / 4),
+            output_tile,
+            0,
+            false
+        );
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simdgroup_index == 0) {
+        for (short row = thread_index; row < valid_rows; row += row_tile) {
+            for (short column = 0; column < valid_columns; ++column) {
+                output[(first_row + uint(row)) * dims.columns + first_column + uint(column)] =
+                    reinterpret_cast<threadgroup float*>(scratch)[row * output_tile + column];
+            }
+        }
+    }
+}
 
 // Decode has one activation row. Four 8-lane workers cover four blocks while
 // each SIMD group reuses its activation registers for two adjacent columns.
@@ -366,89 +567,8 @@ kernel void matvec_f32_q4_k_packed_kernel(
     }
 }
 
-inline int signed_i8(uchar value) {
-    return value >= 128 ? int(value) - 256 : int(value);
-}
-
-// Q6_K uses the same row-reuse ownership as Q4_K but retains its native
-// interleaved low/high bit planes and signed per-16-value scales.
-template <ushort row_tile>
-inline void matmul_f32_q6_k_rows(
-    const device float* left [[buffer(0)]],
-    const device uchar* right [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant MatmulDimensions& dims [[buffer(3)]],
-    uint2 threadgroup_index,
-    ushort simdgroup_index,
-    ushort lane
-) {
-    const uint column = threadgroup_index.x * 4 + uint(simdgroup_index);
-    const uint first_row = threadgroup_index.y * uint(row_tile);
-    const uint blocks_per_column = dims.shared / 256;
-    float sums[row_tile];
-    for (ushort row = 0; row < row_tile; ++row) {
-        sums[row] = 0.0f;
-    }
-
-    if (column < dims.columns) {
-        for (uint column_block = 0; column_block < blocks_per_column; ++column_block) {
-            const device uchar* block = right + (column * blocks_per_column + column_block) * 210;
-            const device uchar* low_bits = block;
-            const device uchar* high_bits = block + 128;
-            const device uchar* scales = block + 192;
-            const float d = f16_bits_to_float(read_little_endian_u16(block, 208));
-
-            for (uint group = 0; group < 8; ++group) {
-                const uint half_block = group >> 2;
-                const uint group_in_half = group & 3;
-                const uint low_index = half_block * 64 + (group_in_half & 1) * 32 + uint(lane);
-                const uint low_shift = group_in_half < 2 ? 0 : 4;
-                const uint low = uint((low_bits[low_index] >> low_shift) & 0x0f);
-                const uint high_index = half_block * 32 + uint(lane);
-                const uint high_shift = group_in_half * 2;
-                const uint high = uint((high_bits[high_index] >> high_shift) & 0x03);
-                const int quantized = int(low | (high << 4)) - 32;
-                const int scale = signed_i8(scales[group * 2 + uint(lane) / 16]);
-                const float weight = d * float(scale * quantized);
-                const uint inner = column_block * 256 + group * 32 + uint(lane);
-                for (ushort row = 0; row < row_tile; ++row) {
-                    const uint output_row = first_row + uint(row);
-                    if (output_row < dims.rows) {
-                        sums[row] += left[output_row * dims.shared + inner] * weight;
-                    }
-                }
-            }
-        }
-    }
-
-    for (ushort row = 0; row < row_tile; ++row) {
-        sums[row] = simd_sum(sums[row]);
-        const uint output_row = first_row + uint(row);
-        if (lane == 0 && column < dims.columns && output_row < dims.rows) {
-            output[output_row * dims.columns + column] = sums[row];
-        }
-    }
-}
-
-#define DEFINE_Q6_K_ROW_KERNEL(rows) \
-kernel void matmul_f32_q6_k_rows_##rows##_kernel( \
-    const device float* left [[buffer(0)]], \
-    const device uchar* right [[buffer(1)]], \
-    device float* output [[buffer(2)]], \
-    constant MatmulDimensions& dims [[buffer(3)]], \
-    uint2 threadgroup_index [[threadgroup_position_in_grid]], \
-    ushort simdgroup_index [[simdgroup_index_in_threadgroup]], \
-    ushort lane [[thread_index_in_simdgroup]] \
-) { \
-    matmul_f32_q6_k_rows<rows>( \
-        left, right, output, dims, threadgroup_index, simdgroup_index, lane \
-    ); \
-}
-
-DEFINE_Q6_K_ROW_KERNEL(2)
-DEFINE_Q6_K_ROW_KERNEL(4)
-DEFINE_Q6_K_ROW_KERNEL(8)
-DEFINE_Q6_K_ROW_KERNEL(16)
+)metal";
+constexpr const char* metal_kernel_source_tail = R"metal(
 
 // Lane pairs walk two Q6_K blocks concurrently. Each lane caches the sixteen
 // activation values needed for four quantization regions, then advances the
@@ -1490,7 +1610,8 @@ kernel void token_candidate_top1_f32_kernel(
 }  // namespace
 
 const char* metal_kernel_source() noexcept {
-    return matmul_f32_f16_gguf_weight_source;
+    static const std::string source = std::string(metal_kernel_source_head) + metal_kernel_source_tail;
+    return source.c_str();
 }
 
 bool is_available() noexcept {
