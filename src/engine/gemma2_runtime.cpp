@@ -308,6 +308,17 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             .compact_readback_bytes = candidates.has_value() ? candidates->readback_bytes : 0U,
             .candidate_count = candidates.has_value() ? candidates->count : 0U,
             .gpu_duration_ns = metal_stats.gpu_duration_ns,
+            .q4_decode_projection_count = metal_stats.q4_decode_projection_count,
+            .q4_small_batch_projection_count = metal_stats.q4_small_batch_projection_count,
+            .q4_exact_16_projection_count = metal_stats.q4_exact_16_projection_count,
+            .q4_generic_tiled_projection_count = metal_stats.q4_generic_tiled_projection_count,
+            .q6_decode_projection_count = metal_stats.q6_decode_projection_count,
+            .q6_small_batch_projection_count = metal_stats.q6_small_batch_projection_count,
+            .q6_exact_16_projection_count = metal_stats.q6_exact_16_projection_count,
+            .q6_generic_tiled_projection_count = metal_stats.q6_generic_tiled_projection_count,
+            .f16_projection_count = metal_stats.f16_projection_count,
+            .decode_attention_dispatch_count = metal_stats.decode_attention_dispatch_count,
+            .decode_attention_partition_count = metal_stats.decode_attention_partition_count,
         },
     };
 }
@@ -579,6 +590,17 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
         execution.memory_barrier_count += stats.memory_barrier_count;
         execution.transient_buffer_allocation_count += stats.transient_buffer_allocation_count;
         execution.gpu_duration_ns += stats.gpu_duration_ns;
+        execution.q4_decode_projection_count += stats.q4_decode_projection_count;
+        execution.q4_small_batch_projection_count += stats.q4_small_batch_projection_count;
+        execution.q4_exact_16_projection_count += stats.q4_exact_16_projection_count;
+        execution.q4_generic_tiled_projection_count += stats.q4_generic_tiled_projection_count;
+        execution.q6_decode_projection_count += stats.q6_decode_projection_count;
+        execution.q6_small_batch_projection_count += stats.q6_small_batch_projection_count;
+        execution.q6_exact_16_projection_count += stats.q6_exact_16_projection_count;
+        execution.q6_generic_tiled_projection_count += stats.q6_generic_tiled_projection_count;
+        execution.f16_projection_count += stats.f16_projection_count;
+        execution.decode_attention_dispatch_count += stats.decode_attention_dispatch_count;
+        execution.decode_attention_partition_count += stats.decode_attention_partition_count;
     }
 
     auto candidates = selection_request.has_value()
@@ -650,6 +672,9 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         sampler.selection_request()
     );
     metrics.prefill_completed_ns = monotonic_now_ns(clock);
+    metrics.prompt_evaluation_duration_ns = elapsed_ns(
+        metrics.prefill_started_ns, metrics.prefill_completed_ns
+    );
     if (!prefill_result.candidates.has_value()) {
         throw std::runtime_error("Gemma2 Metal prefill omitted compact token candidates");
     }
@@ -660,6 +685,9 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
 
     std::vector<std::uint32_t> generated_token_ids;
     generated_token_ids.reserve(max_new_tokens);
+    std::vector<std::uint32_t> selected_token_ids;
+    selected_token_ids.reserve(max_new_tokens);
+    Gemma2MetalDecodeExecutionStats decode_execution;
     auto cached_token_count = cache_position + prompt_token_count;
     std::optional<std::uint32_t> stop_token_id;
     bool selected_first_token = false;
@@ -677,9 +705,11 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         if (!selected_first_token) {
             selected_first_token = true;
             metrics.first_token_selected_ns = selection_completed_ns;
-            metrics.prefill_duration_ns = elapsed_ns(metrics.prefill_started_ns, selection_completed_ns);
-            metrics.runtime_ttft_ns = metrics.prefill_duration_ns;
+            metrics.runtime_first_token_selected_ns = elapsed_ns(
+                metrics.prefill_started_ns, selection_completed_ns
+            );
         }
+        selected_token_ids.push_back(selected_token_id);
         sampler.observe_tokens(std::span<const std::uint32_t>(&selected_token_id, 1U));
         const auto decode = create_gemma2_metal_decode_schedule(plan, cached_token_count);
         const auto decode_started_ns = monotonic_now_ns(clock);
@@ -701,6 +731,32 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         metrics.decode_completed_ns = decode_completed_ns;
         metrics.decode_duration_ns += elapsed_ns(decode_started_ns, decode_completed_ns);
         ++metrics.decode_token_count;
+        decode_execution.command_buffer_count += decode_step.execution.command_buffer_count;
+        decode_execution.commit_count += decode_step.execution.commit_count;
+        decode_execution.synchronous_wait_count += decode_step.execution.synchronous_wait_count;
+        decode_execution.compute_encoder_count += decode_step.execution.compute_encoder_count;
+        decode_execution.compute_dispatch_count += decode_step.execution.compute_dispatch_count;
+        decode_execution.blit_encoder_count += decode_step.execution.blit_encoder_count;
+        decode_execution.memory_barrier_count += decode_step.execution.memory_barrier_count;
+        decode_execution.transient_buffer_allocation_count +=
+            decode_step.execution.transient_buffer_allocation_count;
+        decode_execution.selector_dispatch_count += decode_step.execution.selector_dispatch_count;
+        decode_execution.compact_readback_bytes += decode_step.execution.compact_readback_bytes;
+        decode_execution.candidate_count = std::max(
+            decode_execution.candidate_count, decode_step.execution.candidate_count
+        );
+        decode_execution.gpu_duration_ns += decode_step.execution.gpu_duration_ns;
+        decode_execution.q4_decode_projection_count += decode_step.execution.q4_decode_projection_count;
+        decode_execution.q4_small_batch_projection_count += decode_step.execution.q4_small_batch_projection_count;
+        decode_execution.q4_exact_16_projection_count += decode_step.execution.q4_exact_16_projection_count;
+        decode_execution.q4_generic_tiled_projection_count += decode_step.execution.q4_generic_tiled_projection_count;
+        decode_execution.q6_decode_projection_count += decode_step.execution.q6_decode_projection_count;
+        decode_execution.q6_small_batch_projection_count += decode_step.execution.q6_small_batch_projection_count;
+        decode_execution.q6_exact_16_projection_count += decode_step.execution.q6_exact_16_projection_count;
+        decode_execution.q6_generic_tiled_projection_count += decode_step.execution.q6_generic_tiled_projection_count;
+        decode_execution.f16_projection_count += decode_step.execution.f16_projection_count;
+        decode_execution.decode_attention_dispatch_count += decode_step.execution.decode_attention_dispatch_count;
+        decode_execution.decode_attention_partition_count += decode_step.execution.decode_attention_partition_count;
         cached_token_count = decode.total_kv_token_count();
         if (decode_step.candidates.has_value()) {
             candidates = *decode_step.candidates;
@@ -744,11 +800,14 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
 
     return Gemma2MetalPlanGeneratedTokens {
         .generated_token_ids = std::move(generated_token_ids),
+        .selected_token_ids = std::move(selected_token_ids),
         .stop_token_id = stop_token_id,
         .prefill_cache_position = cache_position,
         .prefill_token_count = prompt_token_count,
         .cached_token_count = cached_token_count,
         .metrics = metrics,
+        .prefill_execution = prefill_result.execution,
+        .decode_execution = decode_execution,
     };
 }
 

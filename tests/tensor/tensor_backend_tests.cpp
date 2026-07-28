@@ -1199,7 +1199,9 @@ void test_matches_f16_gguf_token_embedding_to_metal_backend_buffer_when_availabl
         -0.25F, 1.5F, 0.125F, -1.0F,
         2.5F, -1.25F, 0.625F, 1.75F,
     };
-    const std::array<std::uint32_t, 3> token_ids {2, 0, 3};
+    const std::array<std::uint32_t, 17> token_ids {
+        2, 0, 3, 1, 2, 0, 3, 1, 2, 0, 3, 1, 2, 0, 3, 1, 2,
+    };
     const auto embedding = tensor_f16_gguf_matrix(4, 4, std::span<const float>(embedding_values));
     const auto cpu_embedding_buffer = copy_tensor_to_backend(embedding, BackendKind::cpu);
     const auto metal_embedding_buffer = copy_tensor_to_backend(embedding, BackendKind::metal);

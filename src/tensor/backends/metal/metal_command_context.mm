@@ -287,7 +287,11 @@ void MetalCommandContext::encode_embedding(
     [encoder setBuffer:weight_storage.buffer() offset:0 atIndex:1];
     [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
-    [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((hidden + 15U) / 16U), 1, 1)
+    [encoder dispatchThreadgroups:MTLSizeMake(
+                                      static_cast<NSUInteger>((hidden + 15U) / 16U),
+                                      static_cast<NSUInteger>((tokens + 15U) / 16U),
+                                      1
+                                  )
               threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     ++impl_->stats.compute_dispatch_count;
 }
@@ -326,9 +330,22 @@ void MetalCommandContext::encode_matmul(
             *impl_->state, weight.descriptor().dtype, rows, shared, columns
         );
         pipeline = quantized_dispatch.pipeline;
+        auto* decode = weight.descriptor().dtype == DType::q4_k
+            ? &impl_->stats.q4_decode_projection_count : &impl_->stats.q6_decode_projection_count;
+        auto* small = weight.descriptor().dtype == DType::q4_k
+            ? &impl_->stats.q4_small_batch_projection_count : &impl_->stats.q6_small_batch_projection_count;
+        auto* exact_16 = weight.descriptor().dtype == DType::q4_k
+            ? &impl_->stats.q4_exact_16_projection_count : &impl_->stats.q6_exact_16_projection_count;
+        auto* generic = weight.descriptor().dtype == DType::q4_k
+            ? &impl_->stats.q4_generic_tiled_projection_count : &impl_->stats.q6_generic_tiled_projection_count;
+        if (rows == 1U) ++*decode;
+        else if (rows <= 8U) ++*small;
+        else if (rows == 16U && columns % 64U == 0U) ++*exact_16;
+        else ++*generic;
     } else {
         pipeline = f16_matmul_pipeline(*impl_->state, weight.descriptor().dtype);
         f16_dispatch = select_f16_matmul_dispatch(*impl_->state, rows, columns);
+        ++impl_->stats.f16_projection_count;
     }
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
@@ -738,6 +755,8 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     }
 
     const auto partitions = gemma2_decode_attention_partition_count(attention_token_count);
+    ++impl_->stats.decode_attention_dispatch_count;
+    impl_->stats.decode_attention_partition_count += partitions;
     const Gemma2DecodeAttentionDimensions dims {
         .cache_row_mask = cache_row_mask,
         .first_position = cache_position + 1U - attention_token_count,

@@ -1626,4 +1626,12 @@ std::string unavailable_reason() {
     return "Metal backend unavailable: no system default Metal device";
 }
 
+std::optional<std::uint64_t> current_allocated_size_bytes() noexcept {
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (device == nil) return std::nullopt;
+        return static_cast<std::uint64_t>(device.currentAllocatedSize);
+    }
+}
+
 }  // namespace local_gguf_engine::tensor::backends::metal

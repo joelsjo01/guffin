@@ -5,6 +5,8 @@
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 
+
+
 #include <algorithm>
 #include <initializer_list>
 #include <limits>
@@ -443,6 +445,16 @@ std::size_t Gemma2MetalModelPlan::kv_cache_byte_count() const noexcept {
 
 std::size_t Gemma2MetalModelPlan::scratch_byte_count() const noexcept {
     return scratch_byte_count_;
+}
+
+std::array<std::uintptr_t, 4> Gemma2MetalModelPlan::allocation_identities() const noexcept {
+    return {
+        reinterpret_cast<std::uintptr_t>(&tensor::backend_buffer_storage(weights_.token_embedding_weight)),
+        kv_cache_.empty() ? 0U : reinterpret_cast<std::uintptr_t>(
+            &tensor::backend_buffer_storage(kv_cache_.front().key)),
+        reinterpret_cast<std::uintptr_t>(&tensor::backend_buffer_storage(prefill_scratch_.normalized_hidden)),
+        reinterpret_cast<std::uintptr_t>(&tensor::backend_buffer_storage(decode_scratch_.normalized_hidden)),
+    };
 }
 
 Gemma2MetalSchedule::Gemma2MetalSchedule(

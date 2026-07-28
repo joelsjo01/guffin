@@ -1,5 +1,6 @@
 CXX ?= c++
 MODE ?= debug
+ENGINE_BUILD := $(shell git rev-parse --short HEAD 2>/dev/null)$(shell test -z "$$(git status --porcelain 2>/dev/null)" || printf '%s' '-dirty')
 
 BUILD_DIR := build/$(MODE)
 TEST_BINARY := $(BUILD_DIR)/local_gguf_engine_tests
@@ -7,7 +8,7 @@ GGUF_INSPECT_BINARY := $(BUILD_DIR)/gguf-inspect
 GENERATE_BINARY := $(BUILD_DIR)/local-gguf-generate
 
 ENGINE_SOURCES := \
-	src/benchmarks/generation_benchmark.cpp \
+	src/benchmarks/conversation_benchmark.cpp \
 	src/engine/gemma2_chat_session.cpp \
 	src/engine/gemma2_model.cpp \
 	src/engine/gemma2_metal_plan.cpp \
@@ -63,7 +64,7 @@ TEST_INCLUDE_FLAGS := \
 	-Itests/tokenizer
 
 TEST_SOURCES := \
-	tests/benchmarks/generation_benchmark_tests.cpp \
+	tests/benchmarks/conversation_benchmark_tests.cpp \
 	tests/engine/gemma2_metal_plan_tests.cpp \
 	tests/engine/engine_model_tests.cpp \
 	tests/engine/gemma2_reference_tests.cpp \
@@ -79,7 +80,8 @@ TEST_SOURCES := \
 	tests/tokenizer/tokenizer_tests.cpp \
 	tests/test_main.cpp
 
-COMMON_FLAGS := -std=c++20 -Iinclude -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fobjc-arc
+COMMON_FLAGS := -std=c++20 -Iinclude -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fobjc-arc \
+	-DLOCAL_GGUF_ENGINE_BUILD=\"$(ENGINE_BUILD)\"
 METAL_LDFLAGS := -framework Foundation -framework Metal
 DEBUG_FLAGS := -O0 -g
 RELEASE_FLAGS ?= -O3 -DNDEBUG -mcpu=apple-m4

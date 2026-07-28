@@ -438,17 +438,26 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
     std::size_t emitted_text_size = 0;
     std::optional<std::string> reverse_stop_string;
     bool interrupted = false;
-    std::optional<std::uint64_t> first_visible_output_ns;
+    std::optional<std::uint64_t> first_visible_ready_ns;
+    std::optional<std::uint64_t> first_visible_callback_completed_ns;
+    std::optional<std::uint64_t> last_visible_callback_completed_ns;
+    std::uint32_t visible_emission_count = 0;
     const Gemma2ChatStreamCallback measured_text_delta = [&](std::string_view text_delta) {
         if (text_delta.empty()) {
             return;
         }
-        if (!first_visible_output_ns.has_value()) {
-            first_visible_output_ns = monotonic_now_ns(clock_);
+        if (!first_visible_ready_ns.has_value()) {
+            first_visible_ready_ns = monotonic_now_ns(clock_);
         }
         if (turn_options.on_text_delta) {
             turn_options.on_text_delta(text_delta);
         }
+        const auto callback_completed_ns = monotonic_now_ns(clock_);
+        if (!first_visible_callback_completed_ns.has_value()) {
+            first_visible_callback_completed_ns = callback_completed_ns;
+        }
+        last_visible_callback_completed_ns = callback_completed_ns;
+        ++visible_emission_count;
     };
 
     const auto on_generated_token = [&](const Gemma2MetalGeneratedTokenEvent& event) {
@@ -536,7 +545,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
     // KV contains every selected token, including non-visible control tokens
     // and tokens hidden by reverse-stop handling. Cache identity must follow
     // those exact IDs rather than a decoded/re-tokenized display string.
-    cached_token_ids_ = std::move(rendered_token_ids);
+    cached_token_ids_ = rendered_token_ids;
     cached_token_ids_.insert(
         cached_token_ids_.end(),
         generation.generated_token_ids.begin(),
@@ -557,8 +566,19 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
         generation_metrics.stop_reason = Gemma2GenerationStopReason::reverse_stop;
     }
     const auto turn_completed_ns = monotonic_now_ns(clock_);
-    const auto end_to_end_ttft_ns = first_visible_output_ns.has_value()
-        ? std::optional<std::uint64_t>(elapsed_ns(turn_accepted_ns, *first_visible_output_ns))
+    const auto text_ready_ttft_ns = first_visible_ready_ns.has_value()
+        ? std::optional<std::uint64_t>(elapsed_ns(turn_accepted_ns, *first_visible_ready_ns))
+        : std::nullopt;
+    const auto frontend_complete_ttft_ns = first_visible_callback_completed_ns.has_value()
+        ? std::optional<std::uint64_t>(elapsed_ns(turn_accepted_ns, *first_visible_callback_completed_ns))
+        : std::nullopt;
+    const auto visible_stream_interval_ns =
+        first_visible_callback_completed_ns.has_value()
+        && last_visible_callback_completed_ns.has_value()
+        && visible_emission_count >= 2U
+        ? std::optional<std::uint64_t>(elapsed_ns(
+            *first_visible_callback_completed_ns, *last_visible_callback_completed_ns
+        ))
         : std::nullopt;
 
     return Gemma2ChatTurnResult {
@@ -566,7 +586,11 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
         .cache_position = cache_position,
         .appended_token_count = checked_cached_token_count(appended_token_ids.size()),
         .cached_token_count = checked_cached_token_count(cached_token_ids_.size()),
-        .generated_token_ids = std::move(cached_visible_token_ids),
+        .generated_token_ids = cached_visible_token_ids,
+        .rendered_prompt_token_ids = std::move(rendered_token_ids),
+        .evaluated_suffix_token_ids = appended_token_ids,
+        .selected_token_ids = std::move(generation.selected_token_ids),
+        .visible_token_ids = std::move(cached_visible_token_ids),
         .stop_token_id = generation.stop_token_id,
         .reverse_stop_string = std::move(reverse_stop_string),
         .interrupted = interrupted,
@@ -575,9 +599,14 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
         .metrics = Gemma2ChatTurnMetrics {
             .generation = generation_metrics,
             .turn_accepted_ns = turn_accepted_ns,
-            .first_visible_output_ns = first_visible_output_ns,
+            .first_visible_ready_ns = first_visible_ready_ns,
+            .first_visible_callback_completed_ns = first_visible_callback_completed_ns,
+            .last_visible_callback_completed_ns = last_visible_callback_completed_ns,
             .turn_completed_ns = turn_completed_ns,
-            .end_to_end_ttft_ns = end_to_end_ttft_ns,
+            .text_ready_ttft_ns = text_ready_ttft_ns,
+            .frontend_complete_ttft_ns = frontend_complete_ttft_ns,
+            .visible_stream_interval_ns = visible_stream_interval_ns,
+            .visible_emission_count = visible_emission_count,
             .total_turn_duration_ns = elapsed_ns(turn_accepted_ns, turn_completed_ns),
             .initial_cache_position = cache_position,
             .reused_cached_token_count = cache_position,
@@ -589,6 +618,8 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             .resident_weight_byte_count = plan_.uploaded_weight_byte_count(),
             .resident_kv_cache_byte_count = plan_.kv_cache_byte_count(),
             .resident_scratch_byte_count = plan_.scratch_byte_count(),
+            .prefill_execution = generation.prefill_execution,
+            .decode_execution = generation.decode_execution,
         },
     };
 }
@@ -637,6 +668,10 @@ void Gemma2ChatSession::set_sampler_options(TokenSamplerOptions options) {
     clear();
 }
 
+void Gemma2ChatSession::set_max_new_tokens(std::size_t max_new_tokens) noexcept {
+    max_new_tokens_ = max_new_tokens;
+}
+
 std::uint32_t Gemma2ChatSession::cached_token_count() const noexcept {
     return static_cast<std::uint32_t>(cached_token_ids_.size());
 }
@@ -659,6 +694,18 @@ std::size_t Gemma2ChatSession::message_count() const noexcept {
 
 std::size_t Gemma2ChatSession::plan_revision() const noexcept {
     return plan_revision_;
+}
+
+std::span<const std::uint32_t> Gemma2ChatSession::stop_token_ids() const noexcept {
+    return stop_token_ids_;
+}
+
+std::span<const std::string> Gemma2ChatSession::reverse_stop_strings() const noexcept {
+    return reverse_stop_strings_;
+}
+
+std::array<std::uintptr_t, 4> Gemma2ChatSession::plan_allocation_identities() const noexcept {
+    return plan_.allocation_identities();
 }
 
 }  // namespace local_gguf_engine::engine

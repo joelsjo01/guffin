@@ -63,7 +63,7 @@ benchmark harness is not a live source route.
 | `src/model_format` | GGUF headers, metadata, tensor directories, payload views, payload-size validation | tokenizer logic, inference |
 | `src/tokenizer` | tokenizer metadata, encode/decode, Gemma prompt/chat formatting | model execution |
 | `src/runtime` | backend enum/error types shared across runtime layers | backend execution |
-| `src/benchmarks` | generation benchmark cases, runner, records, derived metrics, and statistics | inference execution, CLI formatting |
+| `src/benchmarks` | versioned product-conversation scenario, runner, records, derived metrics, and statistics | inference execution, CLI formatting |
 | `src/engine/model.cpp` | engine model loading from GGUF model views, architecture boundary | raw GGUF parsing internals |
 | `src/engine/gemma2_model.*` | Gemma 2 config parsing and weight binding | backend upload/execution |
 | `src/engine/gemma2_metal_plan.*` | Metal resident weight upload, KV cache buffers, prefill/decode schedules | tokenization, CLI formatting |
@@ -206,11 +206,15 @@ Generation and interactive CLI:
 - `src/frontends/cli/generate_main.cpp`
 - `tests/frontends/cli/generate_cli_tests.cpp`
 
-Generation benchmark runner, records, and statistics:
+Conversation benchmark runner, records, and statistics:
 
-- `include/local_gguf_engine/benchmarks/generation_benchmark.hpp`
-- `src/benchmarks/generation_benchmark.cpp`
-- `tests/benchmarks/generation_benchmark_tests.cpp`
+- `include/local_gguf_engine/benchmarks/conversation_benchmark.hpp`
+- `src/benchmarks/conversation_benchmark.cpp`
+- `tests/benchmarks/conversation_benchmark_tests.cpp`
+- `scripts/compare_llama_conversation.py`
+- `scripts/compare_local_conversation.py`
+- `scripts/calibrate_local_chat_ttft.py`
+- `tests/scripts/benchmark_script_tests.py`
 
 GGUF inspection CLI:
 
@@ -245,7 +249,7 @@ Project docs:
 | Gemma chat session, KV reuse, stops, streaming, context, regeneration | `tests/frontends/cli/generate_cli_tests.cpp` |
 | Gemma reference numerics | `tests/engine/gemma2_reference_tests.cpp` |
 | Token sampling and top-logit helpers | `tests/engine/sampling_tests.cpp`, `tests/tensor/tensor_backend_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp` |
-| Generation benchmark records, runner, and statistics | `tests/benchmarks/generation_benchmark_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp` |
+| Conversation benchmark records, runner, and statistics | `tests/benchmarks/conversation_benchmark_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp` |
 | Tokenizer/chat template | `tests/tokenizer/tokenizer_tests.cpp`, plus CLI tests when prompt rendering changes |
 | Generate CLI | `tests/frontends/cli/generate_cli_tests.cpp` |
 | Inspect CLI | `tests/frontends/cli/gguf_inspect_tests.cpp` |

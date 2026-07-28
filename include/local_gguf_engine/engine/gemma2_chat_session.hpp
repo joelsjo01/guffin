@@ -43,9 +43,14 @@ enum class Gemma2TokenSelectionMode {
 struct Gemma2ChatTurnMetrics {
     Gemma2GenerationMetrics generation;
     std::uint64_t turn_accepted_ns = 0;
-    std::optional<std::uint64_t> first_visible_output_ns;
+    std::optional<std::uint64_t> first_visible_ready_ns;
+    std::optional<std::uint64_t> first_visible_callback_completed_ns;
+    std::optional<std::uint64_t> last_visible_callback_completed_ns;
     std::uint64_t turn_completed_ns = 0;
-    std::optional<std::uint64_t> end_to_end_ttft_ns;
+    std::optional<std::uint64_t> text_ready_ttft_ns;
+    std::optional<std::uint64_t> frontend_complete_ttft_ns;
+    std::optional<std::uint64_t> visible_stream_interval_ns;
+    std::uint32_t visible_emission_count = 0;
     std::uint64_t total_turn_duration_ns = 0;
     std::uint32_t initial_cache_position = 0;
     std::uint32_t reused_cached_token_count = 0;
@@ -55,6 +60,8 @@ struct Gemma2ChatTurnMetrics {
     std::size_t resident_weight_byte_count = 0;
     std::size_t resident_kv_cache_byte_count = 0;
     std::size_t resident_scratch_byte_count = 0;
+    Gemma2MetalPrefillExecutionStats prefill_execution;
+    Gemma2MetalDecodeExecutionStats decode_execution;
 };
 
 struct Gemma2ChatTurnResult {
@@ -63,6 +70,10 @@ struct Gemma2ChatTurnResult {
     std::uint32_t appended_token_count = 0;
     std::uint32_t cached_token_count = 0;
     std::vector<std::uint32_t> generated_token_ids;
+    std::vector<std::uint32_t> rendered_prompt_token_ids;
+    std::vector<std::uint32_t> evaluated_suffix_token_ids;
+    std::vector<std::uint32_t> selected_token_ids;
+    std::vector<std::uint32_t> visible_token_ids;
     std::optional<std::uint32_t> stop_token_id;
     std::optional<std::string> reverse_stop_string;
     bool interrupted = false;
@@ -113,12 +124,16 @@ public:
     void clear();
     void reset();
     void set_sampler_options(TokenSamplerOptions options);
+    void set_max_new_tokens(std::size_t max_new_tokens) noexcept;
     [[nodiscard]] std::uint32_t cached_token_count() const noexcept;
     [[nodiscard]] std::uint32_t context_length() const noexcept;
     [[nodiscard]] std::uint32_t remaining_context_tokens() const noexcept;
     [[nodiscard]] std::size_t max_new_tokens() const noexcept;
     [[nodiscard]] std::size_t message_count() const noexcept;
     [[nodiscard]] std::size_t plan_revision() const noexcept;
+    [[nodiscard]] std::span<const std::uint32_t> stop_token_ids() const noexcept;
+    [[nodiscard]] std::span<const std::string> reverse_stop_strings() const noexcept;
+    [[nodiscard]] std::array<std::uintptr_t, 4> plan_allocation_identities() const noexcept;
 
 private:
     struct OwnedChatMessage {

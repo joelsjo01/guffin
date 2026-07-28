@@ -1,162 +1,202 @@
-# Next Task: Attribute and Remove Redundant Metal Synchronization
-
-## Verified Current State (2026-07-23)
-
-The direct-dequantizing prefill rewrite is complete. Q4_K and Q6_K now each
-have one packed small-batch family for rows 2-8 and one direct-dequantizing
-SIMD-group tiled family for rows 9 and above. The tiled family has a generic
-64x32x32/four-SIMD schedule and an exact 64x16x32/two-SIMD specialization of
-the same algorithm. All legacy 2/4/8/16 row-serial kernels, selectors, pipeline
-identities, helpers, and implementation-coupled tests are deleted. One-row
-packed decode is unchanged.
-
-The resident prefill chunk is now 128. Measured resident allocation is:
-
-| Resource | Bytes |
-| --- | ---: |
-| weights | 6,837,368,832 |
-| F16 KV cache | 2,113,929,216 |
-| scratch | 181,146,892 |
-
-Warm release measurements on the base M4, with five repetitions where noted:
-
-| Prompt tokens | Median prefill | Prompt rate | Spread / note |
-| ---: | ---: | ---: | --- |
-| 16 | 174.834 ms | 91.515 tok/s | 174.619-175.275 ms, 5 reps |
-| 32 | 245.811 ms | 130.182 tok/s | 245.440-246.209 ms, 5 reps |
-| 121 | 851.431 ms | 142.114 tok/s | 848.944-854.214 ms, 3 reps |
-
-Decode remains approximately 14.2 tok/s. Plan creation measured 11.3-11.8
-seconds with the retained pipelines. The standard greedy eight-token output
-matches the preserved row-serial binary exactly: `The sky appears blue due to
-a phenomenon`.
-
-The numerical stress distribution that selected the permanent tolerances was:
-
-| Dtype | Full-F32 max / RMS | F16-staged max / RMS |
-| --- | ---: | ---: |
-| Q4_K | 2.383 / 0.399 | 3.256 / 0.744 |
-| Q6_K | 0.000977 / 0.000047 | 0.001465 / 0.000140 |
-
-The Q4_K distribution reflects large stress magnitudes plus F16 operand
-rounding and SIMD-group accumulation order. Small-batch kernels retain the
-tighter full-F32 contract. Permanent tests use dtype- and family-specific
-combined absolute/relative tolerances rather than the old shared thresholds.
-
-## Active Finding
-
-Finding 3 in `docs/LLAMA_CPP_PIPELINE_GAP_ANALYSIS.md` is now the first
-unfinished finding. One decoded token currently uses 635 compute dispatches
-and 466 explicit buffer barriers in a single compute encoder and command
-buffer. The resident schedule inserts barriers conservatively around operation
-boundaries even when adjacent projections only read the same activation and
-write disjoint buffers.
-
-Projection kernels are no longer the dominant unexplained difference at the
-controlled shapes. The next task is to measure how much GPU and CPU time is
-spent in dispatch/barrier structure, then remove only barriers proven
-unnecessary by exact resource-range dependencies.
+# Next Task: Prove and Reduce Decode Barrier Cost
 
 ## Objective
 
-Implement engine-owned Metal resource dependency tracking for the resident
-Gemma schedule, replacing fixed barriers with barriers derived from read/write
-hazards. Preserve one command buffer and one compute encoder per chunk/token.
-Retain the change only if whole decode or prefill improves beyond noise without
-changing logits, selected tokens, KV contents, cache position, or unavailable-
-device behavior.
+Replace the decode path's whole-buffer-scope Metal barriers with the smallest
+verified dependency-aware synchronization candidate, then retain it only if the
+fixed product conversation improves beyond its measured noise without changing
+any output, cache, memory, or lifecycle fact.
 
-Do not fuse operations in the first slice. Dependency tracking and fusion must
-remain separately attributable.
+This is Finding 3 from `docs/LLAMA_CPP_PIPELINE_GAP_ANALYSIS.md`. Do not combine
+it with kernel fusion, projection math changes, prefill scheduling, generation
+ordering, or a new command-buffer lifecycle.
 
-## Required Investigation
+## Verified Starting State (2026-07-25)
 
-1. Enumerate every `MetalCommandContext` encode operation's buffer ranges and
-   access mode, including aliased scratch views and nonzero output offsets.
-2. Map every explicit barrier in resident prefill and decode to the actual
-   RAW, WAR, or WAW dependency it protects.
-3. Add temporary GPU timing around representative layer regions if Metal
-   counter sampling is supported; otherwise use command-buffer GPU timestamps
-   with controlled schedule variants.
-4. Establish the maximum possible gain by timing a temporary barrier-minimized
-   schedule only after proving its hazards manually. Do not retain an unsafe
-   no-barrier mode.
-5. Choose the smallest dependency representation that handles exact buffer
-   byte ranges. Whole-buffer identity is insufficient where scratch views or
-   output offsets alias.
+The product-level benchmark task is complete:
 
-## Selected Design Boundary
+- schema 3 scenario 1 runs the four-turn conversation through the production
+  `Gemma2ChatSession`, resident plan, runtime, Metal backend, sampler, stop
+  handling, synchronous stream callback, and session history;
+- one warmup and every measured repetition are retained as raw JSONL records;
+- exact rendered prompt IDs and selected IDs must remain stable or validation
+  fails and affected summaries are suppressed;
+- primary timing excludes per-turn memory sampling, with one separate labelled
+  memory-audit conversation;
+- a PTY calibration showed callback-complete TTFT differs from externally read
+  first assistant bytes by only 28-68 microseconds in three probes;
+- the baseline/candidate gate checks exact workload and state, requires at least
+  five paired conversations and four wins, rejects material per-turn or memory
+  regressions, and requires improvement beyond
+  `max(2%, 2 * baseline_MAD / baseline_median)`; and
+- the old independent four-case generation benchmark is removed.
 
-Dependency state belongs to `MetalCommandContext`, which owns command encoding
-and barriers. Engine scheduling may describe buffer access but must not own
-Metal hazard mechanics.
+The prior long-generation nondeterminism was a real engine bug, not benchmark
+noise. `MetalCommandContext::encode_embedding` dispatched only one 16-row
+threadgroup in the token dimension, so prefills longer than 16 tokens left
+later rows of the resident scratch buffer stale. The dispatch now covers
+`ceil(tokens / 16)` threadgroups. A 17-token Metal embedding parity test guards
+the boundary. With that fix, all five measured conversations have identical
+rendered prompts and selected lengths of 32, 23, 97, and 128 tokens.
 
-The first retained design should:
+### Local release baseline
 
-- record reads and writes as backend-buffer identity plus byte range;
-- insert a barrier before an operation only when its accesses overlap an
-  unresolved prior write or when a write overlaps an unresolved prior read;
-- clear or advance dependency state after an inserted barrier;
-- treat unknown or overflowed ranges conservatively;
-- preserve explicit lifecycle barriers that protect command-buffer/CPU
-  visibility rather than intra-encoder tensor hazards; and
-- expose no benchmark switch or public dependency API.
+Model identity:
+`models/gemma-2-9b-Q4.gguf`, 6,843,425,696 bytes, mtime
+`1780675613669034390`, on Apple M4 / macOS Darwin 25.5.0. Build identity was
+`bf6a82d-dirty`; generated result files remain ignored local artifacts.
 
-Do not add a general graph compiler, runtime autotuner, external dependency,
-or second execution path.
+One warmup plus five measured conversations produced:
 
-## Correctness Evidence
+| Turn | Median frontend-complete TTFT | MAD | Median complete turn |
+| --- | ---: | ---: | ---: |
+| 1 | 331.988 ms | 19.218 ms | 2.524 s |
+| 2 | 261.612 ms | 9.764 ms | 1.831 s |
+| 3 | 344.751 ms | 19.877 ms | 7.193 s |
+| 4 | 372.853 ms | 31.954 ms | 9.546 s |
 
-Add deterministic tests for:
+The median complete conversation was 21.094 seconds with MAD 0.346 seconds.
+The primary aggregate (sum of the four frontend-complete TTFTs per
+conversation) had median 1.300 seconds and MAD 68.955 ms, so the current
+retention threshold is 10.605%. Late samples slowed materially from thermal
+drift; do not weaken this threshold or discard the tail.
 
-- disjoint read/read, read/write, and write/write ranges;
-- overlapping RAW, WAR, and WAW ranges;
-- exact-touching non-overlapping boundaries;
-- subviews and nonzero output offsets;
-- overflow/unknown ranges taking the conservative path;
-- unchanged resident prefill logits, selected token, F16 KV bytes, cache
-  position, chunk/ring boundaries, and submission statistics;
-- unchanged decode logits/tokens and one-row projection parity; and
-- graceful unavailable-Metal behavior.
+Plan creation was 12.599 seconds. Logical resident bytes were 6,837,368,832
+weights, 2,113,929,216 KV, and 181,146,892 scratch. Metal current allocation
+was 9,133,539,328 bytes. The separate memory audit remained stable across all
+turns.
+
+### Pinned reference
+
+The verified reference is Homebrew `llama.cpp` build 9430 at commit
+`d48a56effbba99944a677938d4beb63a0065ecdf`. Both required views ran one warmup
+plus five measured conversations with the same model and passed reference
+validation.
+
+Reference median external-observed TTFT was 431.429, 642.707, 895.380, and
+2,025.191 ms for turns 1-4. Median complete conversation was 24.193 seconds.
+Exact selected IDs matched the local engine on all four turns in all five
+measured repetitions when the exact paired prompt IDs were submitted.
+
+The paired-workload view produced the reference medians above and matched exact
+selected IDs on every turn in every repetition. The independent product view
+matched local prompt and selected IDs through turns 1-3. Before turn 4,
+`llama.cpp`'s template trims trailing whitespace from the prior assistant text,
+producing 227 prompt IDs instead of the local token-native session's 229; it
+then selects 122 tokens instead of the local limit of 128. The product-view run
+occurred immediately after sustained benchmark load and was severely thermally
+throttled, so its latency is retained in raw output but is not a controlled
+speed baseline.
+
+The paired comparator records the template mismatch while submitting the 229
+exact local IDs for the fair compute-work view. The pinned server also reports
+only 10 cached tokens on follow-ups versus the local engine's 47, 86, and 204;
+this is a measured reference product-path difference, not a validation failure.
+Slot erase is a hard prerequisite between repetitions and the launched server
+uses an isolated temporary `--slot-save-path` because this pinned build
+otherwise disables the erase endpoint.
+
+## Finding 3 Hypothesis
+
+A one-token 42-layer decode currently encodes approximately 635 compute
+dispatches and 466 explicit buffer barriers in one compute encoder and one
+command buffer. The benchmark observes 465 barriers per resident decode call
+in the current selected-token path (the historical 466 count included a
+slightly different endpoint). Every barrier currently uses
+`MTLBarrierScopeBuffers`, even though each dependency involves a known, small
+set of producer and consumer buffers.
+
+The first candidate is resource-scoped synchronization for the existing decode
+schedule. It may reduce GPU synchronization cost even when the number of true
+dependency boundaries is unchanged. If it does not improve the real path
+beyond noise, remove it rather than retaining a generalized dependency layer.
+Only after that measurement may a follow-up task consider eliminating a proven
+redundant boundary or fusing neighboring cheap operations.
+
+## Implementation Boundary
+
+1. Add a narrow Metal command-context operation that encodes a memory barrier
+   for explicit backend buffers using `memoryBarrierWithResources:count:`.
+   Validate non-null Metal-owned resources and preserve unavailable-device
+   behavior.
+2. In resident one-token decode only, replace each whole-buffer-scope barrier
+   with the exact written resources required by the next dependent operation.
+   Keep independent Q/K/V projections and gate/up projections together as they
+   are now; do not insert synchronization between independent writes.
+3. Keep the existing global-scope operation for call sites outside this slice.
+   Do not introduce a graph scheduler, general hazard tracker, or public tensor
+   API unless repeated concrete cases prove that abstraction necessary.
+4. Propagate barrier kind/count through existing execution statistics so raw
+   benchmark records can distinguish global-scope from resource-scoped
+   barriers. Measurement must add no command buffer, encoder, wait, allocation,
+   or readback.
+5. If resource-scoped barriers are unsupported on the target API/device, fail
+   the candidate clearly and leave the production path unchanged; do not
+   silently omit synchronization.
+
+Likely anchors:
+
+- `src/tensor/backends/metal/metal_command_context.hpp`
+- `src/tensor/backends/metal/metal_command_context.mm`
+- `src/engine/gemma2_runtime.cpp`
+- `include/local_gguf_engine/engine/gemma2_runtime.hpp`
+- benchmark JSON serialization and focused Metal/runtime tests
+
+## Correctness Proof
+
+Add deterministic coverage that:
+
+- validates the exact resource list and rejects invalid/non-Metal buffers;
+- records resource-scoped and global barrier counts separately;
+- preserves one command buffer, one compute encoder, one commit, one wait, zero
+  transient allocations, and the existing selector/readback behavior per
+  decode;
+- covers unavailable Metal behavior;
+- passes existing tensor, runtime, chat-session, CLI, and benchmark tests; and
+- preserves exact selected IDs, visible IDs/text, stop reason, rendered prompts,
+  suffixes, cache lengths, plan allocation identities, and memory facts in a
+  real generation run.
 
 Run `bash scripts/ci.sh` after implementation changes.
 
-## Performance Evidence
+## Performance Verification
 
-Use release builds, warm pipelines, controlled thermals, and at least five
-measured repetitions. Report before/after:
+Build a release baseline binary before changing synchronization and preserve it
+outside the build tree. Run baseline and candidate with the same model, backend,
+scenario, warmup, repetitions, sampler, machine power state, and synchronous
+frontend. Interleave binaries when practical to reduce thermal-order bias.
 
-- decode latency and tok/s for the standard prompt and a longer context;
-- 16-, 32-, and approximately 128-token prefill latency and tok/s;
-- dispatch, barrier, encoder, command-buffer, commit, wait, allocation, and
-  readback counts;
-- GPU duration when available, runtime TTFT, and end-to-end TTFT;
-- plan creation time and resident bytes; and
-- exact greedy and seed-42 sampled outputs.
+Use `scripts/compare_local_conversation.py` for the verdict. A candidate passes
+only when:
 
-Interleave baseline and candidate when thermal drift could bias the result.
-The candidate must reduce actual barriers and improve a whole production path;
-a counter-only change with no measurable latency benefit is not enough.
+- both JSONL validation records are true;
+- every exact workload, output, stop, cache, memory, and plan fact matches;
+- at least five measured conversations are paired and at least four improve;
+- primary aggregate improvement exceeds the baseline-derived threshold; and
+- no individual turn's TTFT or complete latency, nor memory audit fact, has a
+  material regression.
+
+Also report per-decode global/resource barrier counts, GPU duration, command
+buffers, encoders, dispatches, waits, compact readback, and decode throughput to
+test the claimed mechanism. These diagnostics explain the result; they do not
+override the product gate.
 
 ## Constraints
 
 - Preserve engine-owned, offline, Metal-first, model-resident inference.
-- Preserve native GGUF weights, the new projection families, the 128-row
-  chunk, F32 outputs, F16 ring KV, compact selection, and decode behavior.
-- Do not mix fusion, Flash Attention, quantization, kernel geometry, sampling,
-  tokenizer, CLI, server, or unrelated cleanup into this task.
-- Add no compatibility alias, silent backend fallback, benchmark-only public
-  API, or generated benchmark artifact.
-- Preserve unrelated user changes.
+- Do not call or link `llama.cpp` from production code.
+- Do not change kernel math, tensor layout, cache semantics, prompt formatting,
+  sampler/stop semantics, generation order, or callback order.
+- Do not remove a barrier without an explicit producer/consumer dependency
+  proof and parity evidence.
+- Do not add per-kernel waits, timers, allocations, or polling to primary
+  timing.
+- Preserve unrelated user changes and do not commit generated benchmark output.
 
 ## Stop Condition
 
-Stop when dependency tracking is correct for every resident operation, all
-superseded fixed intra-encoder barriers are deleted, deterministic parity and
-CI pass, and real decode or prefill improves beyond noise. Delete all timing
-probes and rejected schedule variants.
-
-If a safe barrier-minimized candidate does not improve a whole production
-path, delete it, retain the current explicit schedule, record the negative
-result in this file, and choose a fresh measured bottleneck. Do not retain
-dependency machinery solely because it is architecturally attractive.
+Stop after one coherent resource-scoped decode-barrier candidate is fully
+tested and measured. Retain it only if the product gate passes and diagnostics
+support the synchronization-cost hypothesis. Otherwise remove the candidate,
+record the negative result here, and choose the next measured bottleneck rather
+than broadening this task into fusion or scheduler work.

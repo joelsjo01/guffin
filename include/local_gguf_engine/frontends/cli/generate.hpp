@@ -41,6 +41,13 @@ int run_generate(int argc, const char* const* argv, std::ostream& output, std::o
 int run_generate(
     int argc,
     const char* const* argv,
+    std::ostream& output,
+    std::ostream& error,
+    std::uint64_t process_started_ns
+);
+int run_generate(
+    int argc,
+    const char* const* argv,
     std::istream& input,
     std::ostream& output,
     std::ostream& error

@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <vector>
 
 namespace local_gguf_engine::engine {
@@ -161,6 +162,7 @@ public:
     [[nodiscard]] std::size_t uploaded_weight_byte_count() const noexcept;
     [[nodiscard]] std::size_t kv_cache_byte_count() const noexcept;
     [[nodiscard]] std::size_t scratch_byte_count() const noexcept;
+    [[nodiscard]] std::array<std::uintptr_t, 4> allocation_identities() const noexcept;
 
 private:
     Gemma2ModelConfig config_;

@@ -1144,6 +1144,11 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
     expect(result.execution.blit_encoder_count == 0U, "decode blit encoder count mismatch");
     expect(result.execution.memory_barrier_count == 25U, "decode barrier count mismatch");
     expect(result.execution.transient_buffer_allocation_count == 0U, "decode transient allocation mismatch");
+    expect(result.execution.f16_projection_count > 0U, "decode F16 projection family missing");
+    expect(result.execution.decode_attention_dispatch_count == 2U,
+        "decode attention family count mismatch");
+    expect(result.execution.decode_attention_partition_count == 2U,
+        "decode attention partition count mismatch");
     expect(1U + 15U * 42U + 4U == 635U, "real decode dispatch formula mismatch");
     expect(11U * 42U + 4U == 466U, "real decode barrier formula mismatch");
 
@@ -1314,6 +1319,9 @@ void test_gemma2_metal_resident_prefill_splits_ring_boundaries_and_matches_incre
     );
     expect(chunked.execution.kv_write_count == 6U, "resident prefill KV write count mismatch");
     expect(chunked.execution.blit_encoder_count == 0U, "resident prefill must not use KV blits");
+    expect(chunked.execution.f16_projection_count > 0U, "prefill F16 projection family missing");
+    expect(chunked.execution.decode_attention_dispatch_count == 0U,
+        "prefill should not count decode-attention families");
     expect(first.execution.chunk_count == 2U, "prefill must split at the 8-row ring boundary");
     expect(first.execution.synchronous_wait_count == 1U, "exact-size resident prefill wait mismatch");
     expect(chunked.candidates.has_value(), "resident prefill candidates missing");

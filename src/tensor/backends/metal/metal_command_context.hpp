@@ -21,6 +21,17 @@ struct MetalCommandStats {
     std::uint32_t memory_barrier_count = 0;
     std::uint32_t transient_buffer_allocation_count = 0;
     std::uint64_t gpu_duration_ns = 0;
+    std::uint32_t q4_decode_projection_count = 0;
+    std::uint32_t q4_small_batch_projection_count = 0;
+    std::uint32_t q4_exact_16_projection_count = 0;
+    std::uint32_t q4_generic_tiled_projection_count = 0;
+    std::uint32_t q6_decode_projection_count = 0;
+    std::uint32_t q6_small_batch_projection_count = 0;
+    std::uint32_t q6_exact_16_projection_count = 0;
+    std::uint32_t q6_generic_tiled_projection_count = 0;
+    std::uint32_t f16_projection_count = 0;
+    std::uint32_t decode_attention_dispatch_count = 0;
+    std::uint32_t decode_attention_partition_count = 0;
 };
 
 [[nodiscard]] std::uint32_t gemma2_decode_attention_partition_count(

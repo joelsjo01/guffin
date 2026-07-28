@@ -1,6 +1,6 @@
 #include "local_gguf_engine/frontends/cli/generate.hpp"
 
-#include "local_gguf_engine/benchmarks/generation_benchmark.hpp"
+#include "local_gguf_engine/benchmarks/conversation_benchmark.hpp"
 #include "local_gguf_engine/engine/gemma2_chat_session.hpp"
 #include "local_gguf_engine/engine/gemma2_model.hpp"
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
@@ -44,13 +44,11 @@ using engine::generate_gemma2_metal_argmax_tokens;
 using engine::load_engine_model_from_gguf;
 using engine::ModelArchitecture;
 using engine::model_architecture_name;
-using benchmarks::GenerationBenchmarkRunResult;
-using benchmarks::GenerationBenchmarkRunnerOptions;
-using benchmarks::GenerationBenchmarkStatistics;
-using benchmarks::generation_benchmark_case_name;
-using benchmarks::generation_benchmark_generation_tokens_per_second;
-using benchmarks::generation_benchmark_prompt_tokens_per_second;
-using benchmarks::run_generation_benchmark;
+using benchmarks::ConversationBenchmarkRunResult;
+using benchmarks::ConversationBenchmarkRunnerOptions;
+using benchmarks::ConversationBenchmarkStatistics;
+using benchmarks::benchmark_rate;
+using benchmarks::run_conversation_benchmark;
 using model_format::GGUFReadError;
 using model_format::read_file_backed_gguf_model;
 using model_format::read_gguf_model_view;
@@ -121,7 +119,9 @@ private:
 void write_generate_usage(std::ostream& error) {
     error << "usage: local-gguf-generate <model.gguf> <prompt> <max-new-tokens>"
           << " [--greedy] [--backend cpu|metal]"
-          << " [--bench --warmup N --repetitions N --output human|jsonl]"
+          << '\n'
+          << "       local-gguf-generate <model.gguf> --bench"
+          << " [--warmup N] [--repetitions N] [--output human|jsonl] [--backend metal]"
           << '\n'
           << "       local-gguf-generate <model.gguf> --chat [--max-new-tokens N]"
           << " [--greedy | --temperature T [--top-k K] [--top-p P] [--min-p P]"
@@ -253,6 +253,7 @@ struct ParsedGenerateCommand {
     GenerateOptions options;
     bool benchmark = false;
     bool benchmark_option_seen = false;
+    bool benchmark_sampling_option_seen = false;
     std::size_t warmup_count = 1U;
     std::size_t repetition_count = 5U;
     BenchmarkOutputFormat output_format = BenchmarkOutputFormat::human;
@@ -331,6 +332,7 @@ struct ParsedGenerateCommand {
             || option == "--repeat-penalty"
         ) {
             command.benchmark_option_seen = true;
+            command.benchmark_sampling_option_seen = true;
             if (index + 1 >= argc) {
                 error << "error: " << option << " requires a value\n";
                 return false;
@@ -346,6 +348,7 @@ struct ParsedGenerateCommand {
             else command.sampled_sampler.repetition_penalty = value;
         } else if (option == "--top-k") {
             command.benchmark_option_seen = true;
+            command.benchmark_sampling_option_seen = true;
             if (index + 1 >= argc || !parse_positive_size(argv[index + 1], command.sampled_sampler.top_k)) {
                 error << "error: --top-k requires a positive integer\n";
                 return false;
@@ -353,6 +356,7 @@ struct ParsedGenerateCommand {
             ++index;
         } else if (option == "--seed") {
             command.benchmark_option_seen = true;
+            command.benchmark_sampling_option_seen = true;
             if (index + 1 >= argc || !parse_u64(argv[index + 1], command.sampled_sampler.seed)) {
                 error << "error: --seed requires an unsigned integer\n";
                 return false;
@@ -366,6 +370,10 @@ struct ParsedGenerateCommand {
     }
     if (!command.benchmark && command.benchmark_option_seen) {
         error << "error: benchmark options require --bench\n";
+        return false;
+    }
+    if (command.benchmark && command.benchmark_sampling_option_seen) {
+        error << "error: primary conversation benchmark is greedy; sampling options are unsupported\n";
         return false;
     }
     return true;
@@ -821,6 +829,14 @@ int run_generate_chat(
     return value.has_value() ? std::to_string(*value) : "null";
 }
 
+[[nodiscard]] std::uint64_t benchmark_duration_between(
+    std::uint64_t start,
+    std::uint64_t finish
+) {
+    if (finish < start) throw std::runtime_error("benchmark event times are not monotonic");
+    return finish - start;
+}
+
 [[nodiscard]] std::string json_optional_double(std::optional<double> value) {
     if (!value.has_value() || !std::isfinite(*value)) return "null";
     std::ostringstream out;
@@ -828,134 +844,277 @@ int run_generate_chat(
     return out.str();
 }
 
-void write_json_statistics(std::ostream& output, const GenerationBenchmarkStatistics& stats) {
+void write_json_statistics(std::ostream& output, const ConversationBenchmarkStatistics& stats) {
     output << "{\"count\":" << stats.sample_count
-           << ",\"mean\":" << json_optional_double(stats.mean)
            << ",\"median\":" << json_optional_double(stats.median)
            << ",\"min\":" << json_optional_double(stats.minimum)
            << ",\"max\":" << json_optional_double(stats.maximum)
-           << ",\"stddev\":" << json_optional_double(stats.sample_standard_deviation) << '}';
+           << ",\"stddev\":" << json_optional_double(stats.sample_standard_deviation)
+           << ",\"mad\":" << json_optional_double(stats.median_absolute_deviation) << '}';
 }
 
-void write_benchmark_human(std::ostream& output, const GenerationBenchmarkRunResult& result) {
-    output << "benchmark schema=" << result.setup.schema_version
-           << " model=" << result.setup.model_label << " backend=" << backend_name(result.setup.backend) << '\n';
+void write_benchmark_human(std::ostream& output, const ConversationBenchmarkRunResult& result) {
+    output << "conversation benchmark schema=" << result.setup.identity.schema_version
+           << " scenario=" << result.setup.identity.scenario_version
+           << " model=" << result.setup.identity.model_label
+           << " backend=" << backend_name(result.setup.identity.backend) << '\n';
     output << "setup load_ns=" << json_optional_u64(result.setup.model_load_duration_ns)
            << " plan_ns=" << json_optional_u64(result.setup.plan_creation_duration_ns)
+           << " process_start_to_ready_ns="
+           << json_optional_u64(result.setup.process_start_to_ready_duration_ns)
            << " weights_bytes=" << result.setup.resident_weight_byte_count
            << " kv_bytes=" << result.setup.resident_kv_cache_byte_count
-           << " scratch_bytes=" << result.setup.resident_scratch_byte_count << '\n';
-    for (const auto& record : result.repetitions) {
+           << " scratch_bytes=" << result.setup.resident_scratch_byte_count
+           << " metal_allocated_bytes=" << json_optional_u64(result.setup.metal_current_allocated_bytes)
+           << " footprint_bytes=" << json_optional_u64(result.setup.process_physical_footprint_bytes) << '\n';
+    for (const auto& record : result.turns) {
+        const auto& turn = record.result;
         output << (record.warmup ? "warmup" : "repetition")
-               << " case=" << generation_benchmark_case_name(record.benchmark_case)
                << " index=" << record.repetition_index
-               << " mode=" << selection_mode_name(record.turn.selection_mode)
+               << " turn=" << record.turn_index
+               << " mode=" << selection_mode_name(turn.metrics.selection_mode)
                << " seed=" << record.sampler.seed
-               << " prompt_tokens=" << record.turn.generation.newly_evaluated_prompt_token_count
-               << " prompt_tps=" << json_optional_double(generation_benchmark_prompt_tokens_per_second(record))
-               << " generated_tokens=" << record.turn.generation.generated_token_count
-               << " generation_tps=" << json_optional_double(generation_benchmark_generation_tokens_per_second(record))
-               << " selection_ns=" << record.turn.generation.selection_duration_ns
-               << " compact_readback_bytes=" << record.turn.generation.compact_readback_bytes
-               << " selector_dispatches=" << record.turn.generation.selector_dispatch_count
-               << " max_candidates=" << record.turn.generation.max_candidate_count
-               << " runtime_ttft_ns=" << record.turn.generation.runtime_ttft_ns
-               << " e2e_ttft_ns=" << json_optional_u64(record.turn.end_to_end_ttft_ns)
-               << " total_ns=" << record.turn.total_turn_duration_ns
-               << " stop=" << stop_reason_name(record.turn.generation.stop_reason)
-               << " cache=" << record.turn.initial_cache_position
-               << " reused=" << record.turn.reused_cached_token_count
-               << " rebuilt=" << (record.turn.rebuilt_context ? "true" : "false") << '\n';
+               << " prompt_tokens=" << turn.metrics.generation.newly_evaluated_prompt_token_count
+               << " prompt_tps=" << json_optional_double(benchmark_rate(
+                    turn.metrics.generation.newly_evaluated_prompt_token_count,
+                    turn.metrics.generation.prompt_evaluation_duration_ns))
+               << " decode_tokens=" << turn.metrics.generation.decode_token_count
+               << " decode_tps=" << json_optional_double(benchmark_rate(
+                    turn.metrics.generation.decode_token_count, turn.metrics.generation.decode_duration_ns))
+               << " frontend_ttft_ns=" << json_optional_u64(turn.metrics.frontend_complete_ttft_ns)
+               << " total_ns=" << turn.metrics.total_turn_duration_ns
+               << " stop=" << stop_reason_name(turn.metrics.generation.stop_reason)
+               << " reused=" << turn.metrics.reused_cached_token_count
+               << " dispatches=" << turn.metrics.prefill_execution.compute_dispatch_count
+                    + turn.metrics.decode_execution.compute_dispatch_count
+               << " barriers=" << turn.metrics.prefill_execution.memory_barrier_count
+                    + turn.metrics.decode_execution.memory_barrier_count << '\n';
     }
-    const auto write_stat = [&](std::string_view case_name, std::string_view metric, const auto& stats) {
-        output << "summary case=" << case_name << " metric=" << metric
+    const auto write_stat = [&](std::string_view scope, std::string_view metric, const auto& stats) {
+        output << "summary scope=" << scope << " metric=" << metric
                << " count=" << stats.sample_count
-               << " mean=" << json_optional_double(stats.mean)
                << " median=" << json_optional_double(stats.median)
                << " min=" << json_optional_double(stats.minimum)
                << " max=" << json_optional_double(stats.maximum)
-               << " stddev=" << json_optional_double(stats.sample_standard_deviation) << '\n';
+               << " stddev=" << json_optional_double(stats.sample_standard_deviation)
+               << " mad=" << json_optional_double(stats.median_absolute_deviation) << '\n';
     };
     for (const auto& summary : result.summaries) {
-        const auto name = generation_benchmark_case_name(summary.benchmark_case);
-        write_stat(name, "prefill_ns", summary.prefill_duration_ns);
-        write_stat(name, "prompt_tps", summary.prompt_tokens_per_second);
-        write_stat(name, "decode_ns", summary.decode_duration_ns);
-        write_stat(name, "generation_tps", summary.generation_tokens_per_second);
-        write_stat(name, "runtime_ttft_ns", summary.runtime_ttft_ns);
-        write_stat(name, "e2e_ttft_ns", summary.end_to_end_ttft_ns);
-        write_stat(name, "total_ns", summary.total_turn_duration_ns);
+        const auto scope = summary.turn_index.has_value()
+            ? "turn_" + std::to_string(*summary.turn_index)
+            : std::string("conversation");
+        output << "summary scope=" << scope << " exact_selected_tokens_stable="
+               << (summary.exact_selected_tokens_stable ? "true" : "false") << '\n';
+        write_stat(scope, "frontend_complete_ttft_ns", summary.frontend_complete_ttft_ns);
+        write_stat(scope, "complete_duration_ns", summary.complete_duration_ns);
+        write_stat(scope, "prompt_tps", summary.prompt_tokens_per_second);
+        write_stat(scope, "decode_tps", summary.decode_tokens_per_second);
+        write_stat(scope, "visible_tps", summary.visible_tokens_per_second);
     }
 }
 
-void write_benchmark_jsonl(std::ostream& output, const GenerationBenchmarkRunResult& result) {
+void write_benchmark_jsonl(std::ostream& output, const ConversationBenchmarkRunResult& result) {
     const auto units = "\"units\":{\"duration\":\"ns\",\"throughput\":\"tokens_per_second\",\"memory\":\"bytes\"}";
-    output << "{\"schema_version\":" << result.setup.schema_version
-           << ",\"record_kind\":\"setup\",\"model\":" << json_string(result.setup.model_label)
-           << ",\"backend\":" << json_string(backend_name(result.setup.backend))
-           << ",\"model_load_ns\":" << json_optional_u64(result.setup.model_load_duration_ns)
+    const auto& identity = result.setup.identity;
+    const auto write_identity = [&](const auto& value) {
+        output << ",\"engine\":" << json_string(value.engine)
+               << ",\"engine_build\":" << json_string(value.engine_build)
+               << ",\"model\":" << json_string(value.model_label)
+               << ",\"model_identity\":" << json_string(value.model_identity)
+               << ",\"backend\":" << json_string(backend_name(value.backend))
+               << ",\"os\":" << json_string(value.operating_system)
+               << ",\"hardware\":" << json_string(value.hardware)
+               << ",\"frontend\":" << json_string(value.frontend);
+    };
+    const auto write_sampler = [&](const auto& sampler) {
+        output << ",\"mode\":" << json_string(engine::TokenSampler(sampler).is_greedy() ? "greedy" : "sampled")
+               << ",\"seed\":" << sampler.seed
+               << ",\"temperature\":" << sampler.temperature
+               << ",\"top_k\":" << sampler.top_k
+               << ",\"top_p\":" << sampler.top_p
+               << ",\"min_p\":" << sampler.min_p
+               << ",\"repeat_penalty\":" << sampler.repetition_penalty;
+    };
+    output << "{\"schema_version\":" << identity.schema_version
+           << ",\"scenario_version\":" << identity.scenario_version
+           << ",\"record_kind\":\"setup\"";
+    write_identity(identity);
+    write_sampler(result.turns.front().sampler);
+    output << ",\"model_load_ns\":" << json_optional_u64(result.setup.model_load_duration_ns)
            << ",\"plan_creation_ns\":" << json_optional_u64(result.setup.plan_creation_duration_ns)
+           << ",\"process_start_to_ready_ns\":"
+           << json_optional_u64(result.setup.process_start_to_ready_duration_ns)
            << ",\"resident_weight_bytes\":" << result.setup.resident_weight_byte_count
            << ",\"resident_kv_bytes\":" << result.setup.resident_kv_cache_byte_count
            << ",\"resident_scratch_bytes\":" << result.setup.resident_scratch_byte_count
+           << ",\"metal_current_allocated_bytes\":" << json_optional_u64(result.setup.metal_current_allocated_bytes)
+           << ",\"process_physical_footprint_bytes\":" << json_optional_u64(result.setup.process_physical_footprint_bytes)
+           << ",\"process_physical_footprint_peak_bytes\":" << json_optional_u64(result.setup.process_physical_footprint_peak_bytes)
            << ',' << units << "}\n";
-    for (const auto& record : result.repetitions) {
-        output << "{\"schema_version\":" << record.schema_version
-               << ",\"record_kind\":\"repetition\",\"case\":" << json_string(generation_benchmark_case_name(record.benchmark_case))
-               << ",\"warmup\":" << (record.warmup ? "true" : "false")
-               << ",\"index\":" << record.repetition_index
-               << ",\"model\":" << json_string(record.setup.model_label)
-               << ",\"backend\":" << json_string(backend_name(record.setup.backend))
-               << ",\"mode\":" << json_string(selection_mode_name(record.turn.selection_mode))
-               << ",\"seed\":" << record.sampler.seed << ",\"temperature\":" << record.sampler.temperature
-               << ",\"top_k\":" << record.sampler.top_k << ",\"top_p\":" << record.sampler.top_p
-               << ",\"min_p\":" << record.sampler.min_p
-               << ",\"repeat_penalty\":" << record.sampler.repetition_penalty
-               << ",\"prompt_tokens\":" << record.turn.generation.newly_evaluated_prompt_token_count
-               << ",\"reused_tokens\":" << record.turn.reused_cached_token_count
-               << ",\"prefill_ns\":" << record.turn.generation.prefill_duration_ns
-               << ",\"prompt_tps\":" << json_optional_double(generation_benchmark_prompt_tokens_per_second(record))
-               << ",\"generated_tokens\":" << record.turn.generation.generated_token_count
-               << ",\"decode_tokens\":" << record.turn.generation.decode_token_count
-               << ",\"decode_ns\":" << record.turn.generation.decode_duration_ns
-               << ",\"selection_ns\":" << record.turn.generation.selection_duration_ns
-               << ",\"compact_readback_bytes\":" << record.turn.generation.compact_readback_bytes
-               << ",\"selector_dispatches\":" << record.turn.generation.selector_dispatch_count
-               << ",\"max_candidates\":" << record.turn.generation.max_candidate_count
-               << ",\"generation_tps\":" << json_optional_double(generation_benchmark_generation_tokens_per_second(record))
-               << ",\"runtime_ttft_ns\":" << record.turn.generation.runtime_ttft_ns
-               << ",\"e2e_ttft_ns\":" << json_optional_u64(record.turn.end_to_end_ttft_ns)
-               << ",\"total_ns\":" << record.turn.total_turn_duration_ns
-               << ",\"stop_reason\":" << json_string(stop_reason_name(record.turn.generation.stop_reason))
-               << ",\"initial_cache_position\":" << record.turn.initial_cache_position
-               << ",\"trimmed_turns\":" << record.turn.trimmed_turn_count
-               << ",\"rebuilt_context\":" << (record.turn.rebuilt_context ? "true" : "false")
-               << ",\"resident_weight_bytes\":" << record.turn.resident_weight_byte_count
-               << ",\"resident_kv_bytes\":" << record.turn.resident_kv_cache_byte_count
-               << ",\"resident_scratch_bytes\":" << record.turn.resident_scratch_byte_count
-               << ",\"stop_token_id\":" << json_optional_u64(record.stop_token_id)
-               << ",\"generated_token_ids\":[";
-        for (std::size_t index = 0; index < record.generated_token_ids.size(); ++index) {
+    const auto write_ids = [&](std::span<const std::uint32_t> ids) {
+        output << '[';
+        for (std::size_t index = 0; index < ids.size(); ++index) {
             if (index != 0U) output << ',';
-            output << record.generated_token_ids[index];
+            output << ids[index];
+        }
+        output << ']';
+    };
+    const auto write_execution = [&](const auto& stats) {
+        output << "{\"command_buffers\":" << stats.command_buffer_count
+               << ",\"commits\":" << stats.commit_count
+               << ",\"waits\":" << stats.synchronous_wait_count
+               << ",\"compute_encoders\":" << stats.compute_encoder_count
+               << ",\"compute_dispatches\":" << stats.compute_dispatch_count
+               << ",\"blit_encoders\":" << stats.blit_encoder_count
+               << ",\"barriers\":" << stats.memory_barrier_count
+               << ",\"transient_allocations\":" << stats.transient_buffer_allocation_count
+               << ",\"selector_dispatches\":" << stats.selector_dispatch_count
+               << ",\"compact_readback_bytes\":" << stats.compact_readback_bytes
+               << ",\"gpu_duration_ns\":" << stats.gpu_duration_ns
+               << ",\"q4_decode\":" << stats.q4_decode_projection_count
+               << ",\"q4_small_batch\":" << stats.q4_small_batch_projection_count
+               << ",\"q4_exact_16\":" << stats.q4_exact_16_projection_count
+               << ",\"q4_generic_tiled\":" << stats.q4_generic_tiled_projection_count
+               << ",\"q6_decode\":" << stats.q6_decode_projection_count
+               << ",\"q6_small_batch\":" << stats.q6_small_batch_projection_count
+               << ",\"q6_exact_16\":" << stats.q6_exact_16_projection_count
+               << ",\"q6_generic_tiled\":" << stats.q6_generic_tiled_projection_count
+               << ",\"f16_projection\":" << stats.f16_projection_count
+               << ",\"decode_attention_dispatches\":" << stats.decode_attention_dispatch_count
+               << ",\"decode_attention_partitions\":" << stats.decode_attention_partition_count << '}';
+    };
+    for (const auto& record : result.turns) {
+        const auto& turn = record.result;
+        const auto& metrics = turn.metrics;
+        output << "{\"schema_version\":" << record.identity.schema_version
+               << ",\"scenario_version\":" << record.identity.scenario_version
+               << ",\"record_kind\":\"turn\"";
+        write_identity(record.identity);
+        output
+               << ",\"warmup\":" << (record.warmup ? "true" : "false")
+               << ",\"repetition_index\":" << record.repetition_index
+               << ",\"turn_index\":" << record.turn_index
+               << ",\"timing_eligible\":" << (record.timing_eligible ? "true" : "false")
+               << ",\"memory_audit\":" << (record.memory_audit ? "true" : "false")
+               << ",\"user_text\":" << json_string(record.user_text)
+               << ",\"generated_token_limit\":" << record.generated_token_limit
+               << ",\"selection_mode\":" << json_string(selection_mode_name(metrics.selection_mode));
+        write_sampler(record.sampler);
+        output << ",\"initial_context_length\":" << metrics.initial_cache_position
+               << ",\"final_context_length\":" << turn.cached_token_count
+               << ",\"reused_tokens\":" << metrics.reused_cached_token_count
+               << ",\"trimmed_turns\":" << metrics.trimmed_turn_count
+               << ",\"rebuilt_context\":" << (metrics.rebuilt_context ? "true" : "false")
+               << ",\"session_preparation_ns\":" << benchmark_duration_between(
+                    metrics.turn_accepted_ns, metrics.generation.prefill_started_ns)
+               << ",\"prompt_evaluation_ns\":" << metrics.generation.prompt_evaluation_duration_ns
+               << ",\"selection_ns\":" << metrics.generation.selection_duration_ns
+               << ",\"first_token_selection_ns\":"
+               << benchmark_duration_between(
+                    metrics.generation.prefill_completed_ns, metrics.generation.first_token_selected_ns)
+               << ",\"runtime_first_token_selected_ns\":" << metrics.generation.runtime_first_token_selected_ns
+               << ",\"text_ready_ttft_ns\":" << json_optional_u64(metrics.text_ready_ttft_ns)
+               << ",\"first_selected_to_visible_ready_ns\":";
+        if (metrics.first_visible_ready_ns.has_value()) {
+            output << benchmark_duration_between(
+                metrics.generation.first_token_selected_ns, *metrics.first_visible_ready_ns);
+        } else {
+            output << "null";
+        }
+        output
+               << ",\"frontend_complete_ttft_ns\":" << json_optional_u64(metrics.frontend_complete_ttft_ns)
+               << ",\"visible_stream_interval_ns\":" << json_optional_u64(metrics.visible_stream_interval_ns)
+               << ",\"total_ns\":" << metrics.total_turn_duration_ns
+               << ",\"prompt_tps\":" << json_optional_double(benchmark_rate(
+                    metrics.generation.newly_evaluated_prompt_token_count,
+                    metrics.generation.prompt_evaluation_duration_ns))
+               << ",\"decode_tps\":" << json_optional_double(benchmark_rate(
+                    metrics.generation.decode_token_count, metrics.generation.decode_duration_ns))
+               << ",\"visible_emissions\":" << metrics.visible_emission_count
+               << ",\"stop_reason\":" << json_string(stop_reason_name(metrics.generation.stop_reason))
+               << ",\"stop_token_id\":" << json_optional_u64(turn.stop_token_id)
+               << ",\"interrupted\":" << (turn.interrupted ? "true" : "false")
+               << ",\"final_text\":" << json_string(turn.text)
+               << ",\"plan_revision\":" << record.plan_revision
+               << ",\"plan_allocation_identities\":[";
+        for (std::size_t index = 0; index < record.plan_allocation_identities.size(); ++index) {
+            if (index != 0U) output << ',';
+            output << record.plan_allocation_identities[index];
+        }
+        output << ']'
+               << ",\"metal_current_allocated_bytes\":" << json_optional_u64(record.metal_current_allocated_bytes)
+               << ",\"process_physical_footprint_bytes\":" << json_optional_u64(record.process_physical_footprint_bytes)
+               << ",\"process_physical_footprint_peak_bytes\":" << json_optional_u64(record.process_physical_footprint_peak_bytes)
+               << ",\"resident_weight_bytes\":" << metrics.resident_weight_byte_count
+               << ",\"resident_kv_bytes\":" << metrics.resident_kv_cache_byte_count
+               << ",\"resident_scratch_bytes\":" << metrics.resident_scratch_byte_count
+               << ",\"configured_stop_token_ids\":"; write_ids(record.configured_stop_token_ids);
+        output << ",\"configured_reverse_stop_strings\":[";
+        for (std::size_t index = 0; index < record.configured_reverse_stop_strings.size(); ++index) {
+            if (index != 0U) output << ',';
+            output << json_string(record.configured_reverse_stop_strings[index]);
+        }
+        output << "]";
+        output << ",\"prefill_execution\":"; write_execution(metrics.prefill_execution);
+        output << ",\"decode_execution\":"; write_execution(metrics.decode_execution);
+        output << ",\"rendered_prompt_token_ids\":"; write_ids(turn.rendered_prompt_token_ids);
+        output << ",\"evaluated_suffix_token_ids\":"; write_ids(turn.evaluated_suffix_token_ids);
+        output << ",\"selected_token_ids\":"; write_ids(turn.selected_token_ids);
+        output << ",\"visible_token_ids\":"; write_ids(turn.visible_token_ids);
+        output
+               << ',' << units << "}\n";
+    }
+    for (const auto& conversation : result.conversations) {
+        output << "{\"schema_version\":" << conversation.identity.schema_version
+               << ",\"scenario_version\":" << conversation.identity.scenario_version
+               << ",\"record_kind\":\"conversation\"";
+        write_identity(conversation.identity);
+        write_sampler(conversation.sampler);
+        output << ",\"warmup\":"
+               << (conversation.warmup ? "true" : "false")
+               << ",\"repetition_index\":" << conversation.repetition_index
+               << ",\"turn_index\":null"
+               << ",\"timing_eligible\":" << (conversation.timing_eligible ? "true" : "false")
+               << ",\"memory_audit\":" << (conversation.memory_audit ? "true" : "false")
+               << ",\"complete_conversation_ns\":" << conversation.complete_conversation_duration_ns
+               << ",\"per_turn_frontend_complete_ttft_ns\":[";
+        for (std::size_t index = 0; index < conversation.per_turn_frontend_complete_ttft_ns.size(); ++index) {
+            if (index != 0U) output << ',';
+            output << json_optional_u64(conversation.per_turn_frontend_complete_ttft_ns[index]);
         }
         output << ']'
                << ',' << units << "}\n";
     }
     for (const auto& summary : result.summaries) {
-        output << "{\"schema_version\":" << summary.schema_version
-               << ",\"record_kind\":\"summary\",\"case\":" << json_string(generation_benchmark_case_name(summary.benchmark_case))
-               << ",\"model\":" << json_string(result.setup.model_label)
-               << ",\"backend\":" << json_string(backend_name(result.setup.backend))
-               << ",\"prefill_ns\":"; write_json_statistics(output, summary.prefill_duration_ns);
+        output << "{\"schema_version\":" << summary.identity.schema_version
+               << ",\"scenario_version\":" << summary.identity.scenario_version
+               << ",\"record_kind\":\"summary\"";
+        write_identity(summary.identity);
+        write_sampler(summary.sampler);
+        output << ",\"warmup\":false,\"repetition_index\":null,\"turn_index\":"
+               << (summary.turn_index.has_value() ? std::to_string(*summary.turn_index) : "null")
+               << ",\"exact_selected_tokens_stable\":"
+               << (summary.exact_selected_tokens_stable ? "true" : "false")
+               << ",\"exact_rendered_prompts_stable\":"
+               << (summary.exact_rendered_prompts_stable ? "true" : "false")
+               << ",\"workload_stable\":" << (summary.workload_stable ? "true" : "false")
+               << ",\"frontend_complete_ttft_ns\":"; write_json_statistics(output, summary.frontend_complete_ttft_ns);
         output << ",\"prompt_tps\":"; write_json_statistics(output, summary.prompt_tokens_per_second);
-        output << ",\"decode_ns\":"; write_json_statistics(output, summary.decode_duration_ns);
-        output << ",\"generation_tps\":"; write_json_statistics(output, summary.generation_tokens_per_second);
-        output << ",\"runtime_ttft_ns\":"; write_json_statistics(output, summary.runtime_ttft_ns);
-        output << ",\"e2e_ttft_ns\":"; write_json_statistics(output, summary.end_to_end_ttft_ns);
-        output << ",\"total_ns\":"; write_json_statistics(output, summary.total_turn_duration_ns);
+        output << ",\"decode_tps\":"; write_json_statistics(output, summary.decode_tokens_per_second);
+        output << ",\"visible_tps\":"; write_json_statistics(output, summary.visible_tokens_per_second);
+        output << ",\"complete_duration_ns\":"; write_json_statistics(output, summary.complete_duration_ns);
         output << ',' << units << "}\n";
     }
+    output << "{\"schema_version\":" << identity.schema_version
+           << ",\"scenario_version\":" << identity.scenario_version
+           << ",\"record_kind\":\"validation\"";
+    write_identity(identity);
+    output << ",\"valid\":" << (result.valid ? "true" : "false") << ",\"errors\":[";
+    for (std::size_t index = 0; index < result.validation_errors.size(); ++index) {
+        if (index != 0U) output << ',';
+        output << json_string(result.validation_errors[index]);
+    }
+    output << "]," << units << "}\n";
 }
 
 }  // namespace
@@ -964,13 +1123,17 @@ std::string format_chat_timing_line(const engine::Gemma2ChatTurnMetrics& metrics
     return "[ Prompt: "
         + format_tokens_per_second(
             metrics.generation.newly_evaluated_prompt_token_count,
-            metrics.generation.prefill_duration_ns
+            metrics.generation.prompt_evaluation_duration_ns
         )
         + " | Generation: "
         + format_tokens_per_second(
             metrics.generation.decode_token_count,
             metrics.generation.decode_duration_ns
         )
+        + " | Frontend TTFT: "
+        + (metrics.frontend_complete_ttft_ns.has_value()
+            ? std::to_string(*metrics.frontend_complete_ttft_ns) + " ns"
+            : std::string("n/a"))
         + " ]";
 }
 
@@ -996,12 +1159,13 @@ int run_generate(int argc, const char* const* argv, std::ostream& output, std::o
     return run_generate(argc, argv, std::cin, output, error);
 }
 
-int run_generate(
+int run_generate_impl(
     int argc,
     const char* const* argv,
     std::istream& input,
     std::ostream& output,
-    std::ostream& error
+    std::ostream& error,
+    std::optional<std::uint64_t> process_started_ns
 ) {
     if (argc < 2) {
         write_generate_usage(error);
@@ -1038,6 +1202,52 @@ int run_generate(
         return 1;
     }
 
+    if (argv_has_option(argc, argv, "--bench")) {
+        ParsedGenerateCommand command;
+        if (!parse_generate_options(argc, argv, 2, command, error)) return 1;
+        try {
+            // Benchmark JSONL owns stdout. Use a real synchronous OS stream as
+            // the frontend sink so callback-complete TTFT includes write/flush
+            // work without mixing generated text into the record stream.
+            std::ofstream frontend_sink("/dev/null", std::ios::binary);
+            if (!frontend_sink) throw std::runtime_error("could not open benchmark frontend sink");
+            const auto result = run_conversation_benchmark(ConversationBenchmarkRunnerOptions {
+                .model_path = argv[1],
+                .warmup_count = command.warmup_count,
+                .repetition_count = command.repetition_count,
+                .backend = command.options.backend,
+                .sampler = TokenSamplerOptions {.seed = 42U},
+                .frontend_stream_callback = [&](std::string_view delta) {
+                    frontend_sink.write(delta.data(), static_cast<std::streamsize>(delta.size()));
+                    frontend_sink.flush();
+                    if (!frontend_sink) throw std::runtime_error("benchmark frontend write failed");
+                },
+                .frontend_name = "synchronous:/dev/null",
+                .process_started_ns = process_started_ns,
+            });
+            if (command.output_format == BenchmarkOutputFormat::human) write_benchmark_human(output, result);
+            else write_benchmark_jsonl(output, result);
+            if (!result.valid) {
+                error << "error: benchmark workload is not stable across measured repetitions\n";
+                return 1;
+            }
+            return 0;
+        } catch (const GGUFReadError& read_error) {
+            error << "error: invalid GGUF: " << read_error.what() << '\n';
+        } catch (const EngineModelError& model_error) {
+            error << "error: invalid model: " << model_error.what() << '\n';
+        } catch (const TokenizerError& tokenizer_error) {
+            error << "error: tokenizer: " << tokenizer_error.what() << '\n';
+        } catch (const BackendError& backend_error) {
+            error << "error: backend: " << backend_error.what() << '\n';
+        } catch (const TensorError& tensor_error) {
+            error << "error: tensor: " << tensor_error.what() << '\n';
+        } catch (const std::exception& unexpected_error) {
+            error << "error: " << unexpected_error.what() << '\n';
+        }
+        return 1;
+    }
+
     if (argc < 4) {
         write_generate_usage(error);
         error << "error: missing required argument\n";
@@ -1057,20 +1267,6 @@ int run_generate(
     }
 
     try {
-        if (command.benchmark) {
-            const auto result = run_generation_benchmark(GenerationBenchmarkRunnerOptions {
-                .model_path = argv[1],
-                .prompt = argv[2],
-                .max_new_tokens = max_new_tokens,
-                .warmup_count = command.warmup_count,
-                .repetition_count = command.repetition_count,
-                .backend = command.options.backend,
-                .sampled_sampler = command.sampled_sampler,
-            });
-            if (command.output_format == BenchmarkOutputFormat::human) write_benchmark_human(output, result);
-            else write_benchmark_jsonl(output, result);
-            return 0;
-        }
         const auto file_model = read_file_backed_gguf_model(argv[1]);
         output << generate_text_from_gguf_model_view(file_model.view(), argv[2], max_new_tokens, command.options)
                << '\n';
@@ -1090,6 +1286,26 @@ int run_generate(
     }
 
     return 1;
+}
+
+int run_generate(
+    int argc,
+    const char* const* argv,
+    std::istream& input,
+    std::ostream& output,
+    std::ostream& error
+) {
+    return run_generate_impl(argc, argv, input, output, error, std::nullopt);
+}
+
+int run_generate(
+    int argc,
+    const char* const* argv,
+    std::ostream& output,
+    std::ostream& error,
+    std::uint64_t process_started_ns
+) {
+    return run_generate_impl(argc, argv, std::cin, output, error, process_started_ns);
 }
 
 }  // namespace local_gguf_engine::frontends::cli

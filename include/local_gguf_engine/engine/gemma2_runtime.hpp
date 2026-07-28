@@ -30,9 +30,9 @@ struct Gemma2GenerationMetrics {
     std::uint64_t decode_started_ns = 0;
     std::uint64_t decode_completed_ns = 0;
     std::uint64_t generation_completed_ns = 0;
-    std::uint64_t prefill_duration_ns = 0;
+    std::uint64_t prompt_evaluation_duration_ns = 0;
     std::uint64_t decode_duration_ns = 0;
-    std::uint64_t runtime_ttft_ns = 0;
+    std::uint64_t runtime_first_token_selected_ns = 0;
     std::uint64_t selection_duration_ns = 0;
     std::uint64_t compact_readback_bytes = 0;
     std::uint32_t selector_dispatch_count = 0;
@@ -56,6 +56,17 @@ struct Gemma2MetalDecodeExecutionStats {
     std::uint32_t compact_readback_bytes = 0;
     std::uint32_t candidate_count = 0;
     std::uint64_t gpu_duration_ns = 0;
+    std::uint32_t q4_decode_projection_count = 0;
+    std::uint32_t q4_small_batch_projection_count = 0;
+    std::uint32_t q4_exact_16_projection_count = 0;
+    std::uint32_t q4_generic_tiled_projection_count = 0;
+    std::uint32_t q6_decode_projection_count = 0;
+    std::uint32_t q6_small_batch_projection_count = 0;
+    std::uint32_t q6_exact_16_projection_count = 0;
+    std::uint32_t q6_generic_tiled_projection_count = 0;
+    std::uint32_t f16_projection_count = 0;
+    std::uint32_t decode_attention_dispatch_count = 0;
+    std::uint32_t decode_attention_partition_count = 0;
 };
 
 struct Gemma2MetalResidentDecodeResult {
@@ -80,6 +91,17 @@ struct Gemma2MetalPrefillExecutionStats {
     std::uint32_t compact_readback_bytes = 0;
     std::uint32_t candidate_count = 0;
     std::uint64_t gpu_duration_ns = 0;
+    std::uint32_t q4_decode_projection_count = 0;
+    std::uint32_t q4_small_batch_projection_count = 0;
+    std::uint32_t q4_exact_16_projection_count = 0;
+    std::uint32_t q4_generic_tiled_projection_count = 0;
+    std::uint32_t q6_decode_projection_count = 0;
+    std::uint32_t q6_small_batch_projection_count = 0;
+    std::uint32_t q6_exact_16_projection_count = 0;
+    std::uint32_t q6_generic_tiled_projection_count = 0;
+    std::uint32_t f16_projection_count = 0;
+    std::uint32_t decode_attention_dispatch_count = 0;
+    std::uint32_t decode_attention_partition_count = 0;
 };
 
 struct Gemma2MetalResidentPrefillResult {
@@ -90,11 +112,16 @@ struct Gemma2MetalResidentPrefillResult {
 
 struct Gemma2MetalPlanGeneratedTokens {
     std::vector<std::uint32_t> generated_token_ids;
+    // Includes every selected token, including a stop/control token that is
+    // intentionally absent from generated_token_ids and visible output.
+    std::vector<std::uint32_t> selected_token_ids;
     std::optional<std::uint32_t> stop_token_id;
     std::uint32_t prefill_cache_position = 0;
     std::uint32_t prefill_token_count = 0;
     std::uint32_t cached_token_count = 0;
     Gemma2GenerationMetrics metrics;
+    Gemma2MetalPrefillExecutionStats prefill_execution;
+    Gemma2MetalDecodeExecutionStats decode_execution;
 };
 
 enum class Gemma2MetalTokenStreamDecision {

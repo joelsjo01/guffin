@@ -98,7 +98,7 @@ Available chat commands:
 - `/read <path>`: use a text file as the next prompt.
 
 End an input line with `\` to continue a prompt on the next line. Successful
-turns print prompt and generation throughput.
+turns print prompt/generation throughput and callback-complete frontend TTFT.
 
 ## Inspect A GGUF File
 
@@ -151,36 +151,77 @@ make MODE=release generate
 
 ./build/release/local-gguf-generate \
   models/gemma-2-9b-Q4.gguf \
-  "Explain why the sky is blue." \
-  8 \
-  --backend metal \
-  --greedy \
   --bench \
+  --backend metal \
   --warmup 1 \
   --repetitions 5 \
   --output human
 ```
 
-The benchmark runs cold, warm, cached-turn, and seeded-sampling cases, so it
-can take several minutes on the current engine. Keep the machine's thermal
-state stable when comparing changes.
+The benchmark runs the versioned four-turn product conversation through one
+persistent `Gemma2ChatSession`. It retains the warmup and every measured turn,
+reports per-turn and complete-conversation statistics, and clears only logical
+conversation/KV state between repetitions. It can take several minutes on the
+current engine; keep the machine's thermal state stable when comparing changes.
+Primary timing repetitions do not sample per-turn memory. One separately
+labelled, non-timing memory-audit conversation follows them. A run exits with
+failure and suppresses affected summaries if exact prompts or selected tokens
+differ between measured repetitions.
 
 For machine-readable output:
 
 ```bash
 ./build/release/local-gguf-generate \
   models/gemma-2-9b-Q4.gguf \
-  "Explain why the sky is blue." \
-  8 \
-  --backend metal \
-  --greedy \
   --bench \
+  --backend metal \
   --warmup 1 \
   --repetitions 5 \
   --output jsonl > benchmarks/results/gemma2-local.jsonl
 ```
 
 Benchmark result files are local artifacts and should not be committed.
+
+Compare the same scenario with the pinned development-only `llama.cpp`
+reference using:
+
+```bash
+python3 scripts/compare_llama_conversation.py \
+  --model models/gemma-2-9b-Q4.gguf \
+  --warmup 1 \
+  --repetitions 5 \
+  --local-jsonl benchmarks/results/gemma2-local.jsonl \
+  > benchmarks/results/gemma2-llama-reference.jsonl
+
+python3 scripts/compare_llama_conversation.py \
+  --model models/gemma-2-9b-Q4.gguf \
+  --warmup 1 \
+  --repetitions 5 \
+  --workload-view paired \
+  --local-jsonl benchmarks/results/gemma2-local.jsonl \
+  > benchmarks/results/gemma2-llama-paired.jsonl
+```
+
+The default `product` view keeps `llama.cpp`'s own generated history. The
+`paired` view submits the exact local prompt-token sequence for every turn,
+while still independently rendering the `llama.cpp` chat template and
+recording whether its IDs match. The comparator verifies the pinned binary and
+model identity, launches only on an available localhost port, clears the slot
+before every conversation, and records the reference's actual cache reuse
+rather than assuming it matches this engine.
+
+Calibrate the in-process TTFT endpoint against bytes read from the real chat
+frontend, and apply the baseline/candidate retention gate, with:
+
+```bash
+python3 scripts/calibrate_local_chat_ttft.py \
+  --model models/gemma-2-9b-Q4.gguf \
+  > benchmarks/results/gemma2-local-ttft-calibration.jsonl
+
+python3 scripts/compare_local_conversation.py \
+  benchmarks/results/gemma2-baseline.jsonl \
+  benchmarks/results/gemma2-candidate.jsonl
+```
 
 ## Current Scope
 

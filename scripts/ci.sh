@@ -3,6 +3,8 @@ set -euo pipefail
 
 echo "Running repository checks..."
 
+python3 -m unittest discover -s tests/scripts -p '*_tests.py'
+
 if [[ ! -s "README.md" ]]; then
   echo "Missing or empty README.md" >&2
   exit 1
