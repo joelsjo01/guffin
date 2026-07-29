@@ -49,7 +49,7 @@ class BenchmarkScriptTests(unittest.TestCase):
 
     def write_local_run(self, path, speed, changed_token=False):
         identity = {
-            "schema_version": 3, "scenario_version": 1,
+            "schema_version": 4, "scenario_version": 1,
             "model_identity": "model", "backend": "metal", "mode": "greedy",
             "seed": 42, "temperature": 0.0, "top_k": 40, "top_p": 0.95,
             "min_p": 0.05, "repeat_penalty": 1.0,

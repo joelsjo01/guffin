@@ -67,6 +67,13 @@ struct Gemma2MetalDecodeExecutionStats {
     std::uint32_t f16_projection_count = 0;
     std::uint32_t decode_attention_dispatch_count = 0;
     std::uint32_t decode_attention_partition_count = 0;
+    // Schema-4 reserves the fused-family counters so baseline and future
+    // candidates remain directly comparable. The retained legacy schedule
+    // reports zero for all four.
+    std::uint32_t fused_embedding_norm_count = 0;
+    std::uint32_t direct_qkv_cache_count = 0;
+    std::uint32_t dual_norm_bridge_count = 0;
+    std::uint32_t fused_gate_up_gelu_count = 0;
 };
 
 struct Gemma2MetalResidentDecodeResult {
@@ -102,6 +109,10 @@ struct Gemma2MetalPrefillExecutionStats {
     std::uint32_t f16_projection_count = 0;
     std::uint32_t decode_attention_dispatch_count = 0;
     std::uint32_t decode_attention_partition_count = 0;
+    std::uint32_t fused_embedding_norm_count = 0;
+    std::uint32_t direct_qkv_cache_count = 0;
+    std::uint32_t dual_norm_bridge_count = 0;
+    std::uint32_t fused_gate_up_gelu_count = 0;
 };
 
 struct Gemma2MetalResidentPrefillResult {

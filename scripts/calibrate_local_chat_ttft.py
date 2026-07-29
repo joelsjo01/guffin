@@ -79,7 +79,7 @@ def main():
             in_process = parse_frontend_ttft(full_output)
             external = first_observed - started
             print(json.dumps({
-                "schema_version": 3,
+                "schema_version": 4,
                 "record_kind": "local_frontend_calibration",
                 "repetition_index": repetition,
                 "prompt": args.prompt,

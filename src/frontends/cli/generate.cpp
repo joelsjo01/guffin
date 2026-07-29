@@ -886,9 +886,7 @@ void write_benchmark_human(std::ostream& output, const ConversationBenchmarkRunR
                << " stop=" << stop_reason_name(turn.metrics.generation.stop_reason)
                << " reused=" << turn.metrics.reused_cached_token_count
                << " dispatches=" << turn.metrics.prefill_execution.compute_dispatch_count
-                    + turn.metrics.decode_execution.compute_dispatch_count
-               << " barriers=" << turn.metrics.prefill_execution.memory_barrier_count
-                    + turn.metrics.decode_execution.memory_barrier_count << '\n';
+                    + turn.metrics.decode_execution.compute_dispatch_count << '\n';
     }
     const auto write_stat = [&](std::string_view scope, std::string_view metric, const auto& stats) {
         output << "summary scope=" << scope << " metric=" << metric
@@ -966,7 +964,6 @@ void write_benchmark_jsonl(std::ostream& output, const ConversationBenchmarkRunR
                << ",\"compute_encoders\":" << stats.compute_encoder_count
                << ",\"compute_dispatches\":" << stats.compute_dispatch_count
                << ",\"blit_encoders\":" << stats.blit_encoder_count
-               << ",\"barriers\":" << stats.memory_barrier_count
                << ",\"transient_allocations\":" << stats.transient_buffer_allocation_count
                << ",\"selector_dispatches\":" << stats.selector_dispatch_count
                << ",\"compact_readback_bytes\":" << stats.compact_readback_bytes
@@ -981,7 +978,11 @@ void write_benchmark_jsonl(std::ostream& output, const ConversationBenchmarkRunR
                << ",\"q6_generic_tiled\":" << stats.q6_generic_tiled_projection_count
                << ",\"f16_projection\":" << stats.f16_projection_count
                << ",\"decode_attention_dispatches\":" << stats.decode_attention_dispatch_count
-               << ",\"decode_attention_partitions\":" << stats.decode_attention_partition_count << '}';
+               << ",\"decode_attention_partitions\":" << stats.decode_attention_partition_count
+               << ",\"fused_embedding_norm\":" << stats.fused_embedding_norm_count
+               << ",\"direct_qkv_cache\":" << stats.direct_qkv_cache_count
+               << ",\"dual_norm_bridge\":" << stats.dual_norm_bridge_count
+               << ",\"fused_gate_up_gelu\":" << stats.fused_gate_up_gelu_count << '}';
     };
     for (const auto& record : result.turns) {
         const auto& turn = record.result;
@@ -1008,6 +1009,7 @@ void write_benchmark_jsonl(std::ostream& output, const ConversationBenchmarkRunR
                << ",\"session_preparation_ns\":" << benchmark_duration_between(
                     metrics.turn_accepted_ns, metrics.generation.prefill_started_ns)
                << ",\"prompt_evaluation_ns\":" << metrics.generation.prompt_evaluation_duration_ns
+               << ",\"decode_duration_ns\":" << metrics.generation.decode_duration_ns
                << ",\"selection_ns\":" << metrics.generation.selection_duration_ns
                << ",\"first_token_selection_ns\":"
                << benchmark_duration_between(

@@ -14,7 +14,7 @@
 
 namespace local_gguf_engine::benchmarks {
 
-inline constexpr std::uint32_t conversation_benchmark_schema_version = 3U;
+inline constexpr std::uint32_t conversation_benchmark_schema_version = 4U;
 inline constexpr std::uint32_t conversation_benchmark_scenario_version = 1U;
 
 struct ConversationBenchmarkScenarioTurn {

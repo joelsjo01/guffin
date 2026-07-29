@@ -1363,7 +1363,7 @@ void test_runs_conversation_benchmark_human_and_jsonl_when_available() {
     );
     expect(human_exit == EXIT_SUCCESS && human_error.str().empty(), "human benchmark CLI failed");
     const auto human_text = human.str();
-    expect(human_text.starts_with("conversation benchmark schema=3"), "human benchmark setup missing");
+    expect(human_text.starts_with("conversation benchmark schema=4"), "human benchmark setup missing");
     expect(human_text.find("turn=0") != std::string::npos
         && human_text.find("turn=3") != std::string::npos, "human conversation turns missing");
     expect(human_text.find("median=") != std::string::npos
@@ -1383,7 +1383,7 @@ void test_runs_conversation_benchmark_human_and_jsonl_when_available() {
     while (std::getline(lines, line)) {
         ++line_count;
         expect(looks_like_strict_json_object(line), "benchmark JSONL line is not a strict object");
-        expect(line.find("\"schema_version\":3") != std::string::npos, "benchmark JSONL schema missing");
+        expect(line.find("\"schema_version\":4") != std::string::npos, "benchmark JSONL schema missing");
         expect(line.find("\"units\":") != std::string::npos, "benchmark JSONL units missing");
         expect(line.find("\"engine\":") != std::string::npos
             && line.find("\"engine_build\":") != std::string::npos
@@ -1398,6 +1398,15 @@ void test_runs_conversation_benchmark_human_and_jsonl_when_available() {
     expect(jsonl.str().find("benchmark schema=") == std::string::npos, "JSONL stdout contains human banner");
     expect(jsonl.str().find("\"record_kind\":\"setup\"") != std::string::npos, "JSONL setup missing");
     expect(jsonl.str().find("\"record_kind\":\"turn\"") != std::string::npos, "JSONL turn missing");
+    expect(jsonl.str().find("\"decode_duration_ns\":") != std::string::npos,
+        "JSONL raw decode duration missing");
+    expect(jsonl.str().find("\"fused_embedding_norm\":") != std::string::npos
+        && jsonl.str().find("\"direct_qkv_cache\":") != std::string::npos
+        && jsonl.str().find("\"dual_norm_bridge\":") != std::string::npos
+        && jsonl.str().find("\"fused_gate_up_gelu\":") != std::string::npos,
+        "JSONL fused execution counters missing");
+    expect(jsonl.str().find("\"barriers\":") == std::string::npos,
+        "JSONL must not serialize removed barrier state");
     expect(jsonl.str().find("\"record_kind\":\"conversation\"") != std::string::npos,
         "JSONL conversation missing");
     expect(jsonl.str().find("\"record_kind\":\"summary\"") != std::string::npos, "JSONL summary missing");

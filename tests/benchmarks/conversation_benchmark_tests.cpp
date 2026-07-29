@@ -15,7 +15,7 @@ using namespace local_gguf_engine::benchmarks;
 
 void test_conversation_scenario_is_fixed_and_versioned() {
     const auto& scenario = primary_conversation_scenario();
-    expect(conversation_benchmark_schema_version == 3U, "conversation schema version mismatch");
+    expect(conversation_benchmark_schema_version == 4U, "conversation schema version mismatch");
     expect(scenario.version == 1U, "conversation scenario version mismatch");
     expect(scenario.turns.size() == 4U, "conversation turn count mismatch");
     expect(scenario.turns[0].user_text == "Hello, how are you?", "conversation first turn mismatch");
