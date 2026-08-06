@@ -9,7 +9,7 @@ Do not read as history.
 2. Read `docs/ENGINE_PRINCIPLES.md`.
 3. Read `docs/NEXT_TASK.md`.
 4. Read this file only when choosing files to inspect or edit.
-5. Read `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` only for Gemma planning,
+5. Read `docs/GEMMA2_BOTTLENECK_FINDINGS.md` only for Gemma planning,
    architecture, performance, or upstream-comparison work.
 6. Then read only the relevant code/tests below.
 
@@ -17,7 +17,6 @@ Do not read as history.
 
 ```text
 src/frontends/cli
-  -> src/benchmarks
   -> src/engine/gemma2_chat_session.*
 
 src/benchmarks
@@ -51,6 +50,9 @@ benchmark harness is not a live source route.
 | --- | --- |
 | `Makefile` | build graph for engine sources, CLIs, and tests |
 | `scripts/ci.sh` | repository check wrapper |
+| `scripts/quick_benchmark.py` | canonical local real-chat benchmark driver |
+| `scripts/llama_reference_benchmark.py` | infrequent pinned llama-cli reference driver |
+| `docs/LLAMA_CPP_REFERENCE_BASELINE.md` | stored pinned reference identity, protocol, and result |
 | `src/frontends/cli/generate_main.cpp` | `local-gguf-generate` binary entry |
 | `src/frontends/cli/gguf_inspect_main.cpp` | `gguf-inspect` binary entry |
 | `tests/test_main.cpp` | single test binary registry |
@@ -63,7 +65,7 @@ benchmark harness is not a live source route.
 | `src/model_format` | GGUF headers, metadata, tensor directories, payload views, payload-size validation | tokenizer logic, inference |
 | `src/tokenizer` | tokenizer metadata, encode/decode, Gemma prompt/chat formatting | model execution |
 | `src/runtime` | backend enum/error types shared across runtime layers | backend execution |
-| `src/benchmarks` | versioned product-conversation scenario, runner, records, derived metrics, and statistics | inference execution, CLI formatting |
+| `src/benchmarks` | secondary production-kernel probes and summaries | chat inference execution, reference execution, CLI formatting |
 | `src/engine/model.cpp` | engine model loading from GGUF model views, architecture boundary | raw GGUF parsing internals |
 | `src/engine/gemma2_model.*` | Gemma 2 config parsing and weight binding | backend upload/execution |
 | `src/engine/gemma2_metal_plan.*` | Metal resident weight upload, KV cache buffers, prefill/decode schedules | tokenization, CLI formatting |
@@ -206,15 +208,14 @@ Generation and interactive CLI:
 - `src/frontends/cli/generate_main.cpp`
 - `tests/frontends/cli/generate_cli_tests.cpp`
 
-Conversation benchmark runner, records, and statistics:
+Quick local/reference benchmark:
 
-- `include/local_gguf_engine/benchmarks/conversation_benchmark.hpp`
-- `src/benchmarks/conversation_benchmark.cpp`
-- `tests/benchmarks/conversation_benchmark_tests.cpp`
-- `scripts/compare_llama_conversation.py`
-- `scripts/compare_local_conversation.py`
-- `scripts/calibrate_local_chat_ttft.py`
-- `tests/scripts/benchmark_script_tests.py`
+- `include/local_gguf_engine/benchmarks/quick_benchmark.hpp`
+- `src/benchmarks/quick_benchmark.cpp`
+- `src/frontends/cli/benchmark_main.cpp`
+- `scripts/quick_benchmark.py`
+- `tests/benchmarks/quick_benchmark_tests.cpp`
+- `tests/scripts/quick_benchmark_script_tests.py`
 
 GGUF inspection CLI:
 
@@ -233,7 +234,7 @@ Project docs:
 
 - `docs/ENGINE_PRINCIPLES.md` for durable engineering judgment
 - `docs/NEXT_TASK.md` for the active baton
-- `docs/LLAMA_CPP_PIPELINE_GAP_ANALYSIS.md` for the current Gemma Metal structural comparison with `llama.cpp`
+- `docs/GEMMA2_BOTTLENECK_FINDINGS.md` for the current Gemma Metal bottleneck diagnosis and `llama.cpp` comparison
 - `docs/GRAPH.md` for this locator
 
 ## Test Map
@@ -249,7 +250,7 @@ Project docs:
 | Gemma chat session, KV reuse, stops, streaming, context, regeneration | `tests/frontends/cli/generate_cli_tests.cpp` |
 | Gemma reference numerics | `tests/engine/gemma2_reference_tests.cpp` |
 | Token sampling and top-logit helpers | `tests/engine/sampling_tests.cpp`, `tests/tensor/tensor_backend_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp` |
-| Conversation benchmark records, runner, and statistics | `tests/benchmarks/conversation_benchmark_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp` |
+| Quick kernel summaries and real-chat timing parser validation | `tests/benchmarks/quick_benchmark_tests.cpp`, `tests/scripts/quick_benchmark_script_tests.py` |
 | Tokenizer/chat template | `tests/tokenizer/tokenizer_tests.cpp`, plus CLI tests when prompt rendering changes |
 | Generate CLI | `tests/frontends/cli/generate_cli_tests.cpp` |
 | Inspect CLI | `tests/frontends/cli/gguf_inspect_tests.cpp` |

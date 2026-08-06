@@ -28,7 +28,7 @@ namespace {
 
 [[nodiscard]] std::uint64_t elapsed_ns(std::uint64_t start, std::uint64_t end) {
     if (end < start) {
-        throw std::runtime_error("Gemma2 measurement clock moved backwards");
+        throw std::runtime_error("Gemma2 chat measurement clock moved backwards");
     }
     return end - start;
 }
@@ -312,7 +312,6 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
     std::string_view content,
     const Gemma2ChatTurnOptions& turn_options
 ) {
-    const auto turn_accepted_ns = monotonic_now_ns(clock_);
     std::size_t first_retained_message = 0;
     auto messages = message_views_with_user(content);
     auto rendered_token_ids = encode_messages(std::span<const tokenizer::ChatMessage>(messages));
@@ -357,6 +356,9 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
         turn_cache_positions_.clear();
         turn_sampler_states_.clear();
     }
+    // llama.cpp begins prompt timing after tokenization, immediately before
+    // cache reconciliation and prompt processing.
+    const auto prompt_processing_started_ns = monotonic_now_ns(clock_);
     if (
         cached_token_ids_.size() > rendered_token_ids.size()
         || !std::equal(cached_token_ids_.begin(), cached_token_ids_.end(), rendered_token_ids.begin())
@@ -438,26 +440,13 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
     std::size_t emitted_text_size = 0;
     std::optional<std::string> reverse_stop_string;
     bool interrupted = false;
-    std::optional<std::uint64_t> first_visible_ready_ns;
-    std::optional<std::uint64_t> first_visible_callback_completed_ns;
-    std::optional<std::uint64_t> last_visible_callback_completed_ns;
-    std::uint32_t visible_emission_count = 0;
-    const Gemma2ChatStreamCallback measured_text_delta = [&](std::string_view text_delta) {
+    const Gemma2ChatStreamCallback stream_text_delta = [&](std::string_view text_delta) {
         if (text_delta.empty()) {
             return;
-        }
-        if (!first_visible_ready_ns.has_value()) {
-            first_visible_ready_ns = monotonic_now_ns(clock_);
         }
         if (turn_options.on_text_delta) {
             turn_options.on_text_delta(text_delta);
         }
-        const auto callback_completed_ns = monotonic_now_ns(clock_);
-        if (!first_visible_callback_completed_ns.has_value()) {
-            first_visible_callback_completed_ns = callback_completed_ns;
-        }
-        last_visible_callback_completed_ns = callback_completed_ns;
-        ++visible_emission_count;
     };
 
     const auto on_generated_token = [&](const Gemma2MetalGeneratedTokenEvent& event) {
@@ -483,12 +472,12 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             if (stop_match.has_value()) {
                 final_text = visible_text.substr(0, stop_match->first);
                 reverse_stop_string = stop_match->second;
-                emit_text_delta(measured_text_delta, final_text, emitted_text_size, final_text.size());
+                emit_text_delta(stream_text_delta, final_text, emitted_text_size, final_text.size());
                 return Gemma2MetalTokenStreamDecision::stop_generation;
             }
 
             emit_text_delta(
-                measured_text_delta,
+                stream_text_delta,
                 visible_text,
                 emitted_text_size,
                 safe_stream_text_size(visible_text, std::span<const std::string>(reverse_stop_strings_))
@@ -524,7 +513,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             );
         }
         final_text = visible_text;
-        emit_text_delta(measured_text_delta, final_text, emitted_text_size, final_text.size());
+        emit_text_delta(stream_text_delta, final_text, emitted_text_size, final_text.size());
     }
     auto cached_visible_token_ids = reverse_stop_string.has_value()
         ? visible_token_prefix_for_text(std::span<const std::uint32_t>(visible_token_ids), final_text)
@@ -565,22 +554,18 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
     } else if (reverse_stop_string.has_value()) {
         generation_metrics.stop_reason = Gemma2GenerationStopReason::reverse_stop;
     }
-    const auto turn_completed_ns = monotonic_now_ns(clock_);
-    const auto text_ready_ttft_ns = first_visible_ready_ns.has_value()
-        ? std::optional<std::uint64_t>(elapsed_ns(turn_accepted_ns, *first_visible_ready_ns))
-        : std::nullopt;
-    const auto frontend_complete_ttft_ns = first_visible_callback_completed_ns.has_value()
-        ? std::optional<std::uint64_t>(elapsed_ns(turn_accepted_ns, *first_visible_callback_completed_ns))
-        : std::nullopt;
-    const auto visible_stream_interval_ns =
-        first_visible_callback_completed_ns.has_value()
-        && last_visible_callback_completed_ns.has_value()
-        && visible_emission_count >= 2U
-        ? std::optional<std::uint64_t>(elapsed_ns(
-            *first_visible_callback_completed_ns, *last_visible_callback_completed_ns
-        ))
-        : std::nullopt;
-
+    const auto prompt_processing_duration_ns = elapsed_ns(
+        prompt_processing_started_ns, generation_metrics.first_token_selected_ns
+    );
+    // llama.cpp counts every sampled token and measures from the first sample
+    // through the final sample. It clamps the zero-length one-token case to 1 us.
+    const auto generation_duration_ns = std::max<std::uint64_t>(
+        1'000U,
+        elapsed_ns(
+            generation_metrics.first_token_selected_ns,
+            generation_metrics.last_token_selected_ns
+        )
+    );
     return Gemma2ChatTurnResult {
         .text = final_text,
         .cache_position = cache_position,
@@ -598,16 +583,8 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
         .rebuilt_context = first_retained_message > 0U,
         .metrics = Gemma2ChatTurnMetrics {
             .generation = generation_metrics,
-            .turn_accepted_ns = turn_accepted_ns,
-            .first_visible_ready_ns = first_visible_ready_ns,
-            .first_visible_callback_completed_ns = first_visible_callback_completed_ns,
-            .last_visible_callback_completed_ns = last_visible_callback_completed_ns,
-            .turn_completed_ns = turn_completed_ns,
-            .text_ready_ttft_ns = text_ready_ttft_ns,
-            .frontend_complete_ttft_ns = frontend_complete_ttft_ns,
-            .visible_stream_interval_ns = visible_stream_interval_ns,
-            .visible_emission_count = visible_emission_count,
-            .total_turn_duration_ns = elapsed_ns(turn_accepted_ns, turn_completed_ns),
+            .prompt_processing_duration_ns = prompt_processing_duration_ns,
+            .generation_duration_ns = generation_duration_ns,
             .initial_cache_position = cache_position,
             .reused_cached_token_count = cache_position,
             .selection_mode = sampler_before_turn.is_greedy()

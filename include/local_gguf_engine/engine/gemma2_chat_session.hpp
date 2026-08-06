@@ -42,16 +42,10 @@ enum class Gemma2TokenSelectionMode {
 
 struct Gemma2ChatTurnMetrics {
     Gemma2GenerationMetrics generation;
-    std::uint64_t turn_accepted_ns = 0;
-    std::optional<std::uint64_t> first_visible_ready_ns;
-    std::optional<std::uint64_t> first_visible_callback_completed_ns;
-    std::optional<std::uint64_t> last_visible_callback_completed_ns;
-    std::uint64_t turn_completed_ns = 0;
-    std::optional<std::uint64_t> text_ready_ttft_ns;
-    std::optional<std::uint64_t> frontend_complete_ttft_ns;
-    std::optional<std::uint64_t> visible_stream_interval_ns;
-    std::uint32_t visible_emission_count = 0;
-    std::uint64_t total_turn_duration_ns = 0;
+    // Matches llama.cpp result_timings: tokenized prompt processing through
+    // first selection, then first selection through final selection.
+    std::uint64_t prompt_processing_duration_ns = 0;
+    std::uint64_t generation_duration_ns = 0;
     std::uint32_t initial_cache_position = 0;
     std::uint32_t reused_cached_token_count = 0;
     Gemma2TokenSelectionMode selection_mode = Gemma2TokenSelectionMode::greedy;

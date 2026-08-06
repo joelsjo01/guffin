@@ -699,6 +699,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         );
         const auto selection_completed_ns = monotonic_now_ns(clock);
         metrics.selection_duration_ns += elapsed_ns(selection_started_ns, selection_completed_ns);
+        metrics.last_token_selected_ns = selection_completed_ns;
         if (selected_token_id >= plan.config().vocab_size) {
             throw std::invalid_argument("Gemma2 Metal token selector returned token outside vocabulary");
         }
@@ -796,6 +797,9 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
     metrics.generation_completed_ns = monotonic_now_ns(clock);
     metrics.generated_token_count = checked_prompt_token_count(
         std::span<const std::uint32_t>(generated_token_ids)
+    );
+    metrics.selected_token_count = checked_prompt_token_count(
+        std::span<const std::uint32_t>(selected_token_ids)
     );
 
     return Gemma2MetalPlanGeneratedTokens {

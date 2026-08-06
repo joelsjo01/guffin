@@ -1,5 +1,5 @@
 #include "engine_model_tests.hpp"
-#include "conversation_benchmark_tests.hpp"
+#include "quick_benchmark_tests.hpp"
 #include "gemma2_metal_plan_tests.hpp"
 #include "generate_cli_tests.hpp"
 #include "gemma2_reference_tests.hpp"
@@ -43,7 +43,7 @@ int main() {
     for (const auto& test : local_gguf_engine::tests::sampling_test_cases()) {
         run_test(test);
     }
-    for (const auto& test : local_gguf_engine::tests::conversation_benchmark_test_cases()) {
+    for (const auto& test : local_gguf_engine::tests::quick_benchmark_test_cases()) {
         run_test(test);
     }
     for (const auto& test : local_gguf_engine::tests::generate_cli_test_cases()) {

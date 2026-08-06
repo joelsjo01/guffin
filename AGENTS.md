@@ -38,7 +38,7 @@ Current main target: fast local Gemma 2 9B Q4 on Metal.
 2. `docs/ENGINE_PRINCIPLES.md`
 3. `docs/NEXT_TASK.md`
 4. `docs/GRAPH.md` only when locating modules, tests, fixtures, or task docs
-5. `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md` only for Gemma planning,
+5. `docs/GEMMA2_BOTTLENECK_FINDINGS.md` only for Gemma planning,
    architecture, performance research, or upstream comparison
 6. Relevant code and tests only
 
@@ -69,8 +69,30 @@ Do not bulk-read docs or source trees when the task has a narrower route.
   verification, and stop condition.
 - `docs/GRAPH.md`: locator for code, tests, fixtures, commands, and task docs;
   no policy or project history.
-- `docs/GEMMA_Q4_PERFORMANCE_DIAGNOSIS.md`: detailed Gemma architecture,
+- `docs/GEMMA2_BOTTLENECK_FINDINGS.md`: detailed Gemma architecture,
   performance, and upstream research.
 
 Do not put milestones, benchmark results, completed-work history, or the active
 bottleneck in this file.
+
+## Benchmarking
+
+Build and run the canonical local benchmark with:
+
+```sh
+make MODE=release benchmark
+scripts/quick_benchmark.py --model models/gemma-2-9b-Q4.gguf
+```
+
+It drives the actual local chat executable through the fixed two-turn sampled
+conversation, lets both responses stop naturally, and reports TTFT, prompt
+tokens/s, and generation tokens/s with raw counts and durations. One fresh
+process with enforced cooldowns is the quick thermal-safe screen; the
+separately launched local kernel probes are diagnostics only. The pinned
+llama.cpp reference is a separate, infrequent benchmark documented in
+`docs/LLAMA_CPP_REFERENCE_BASELINE.md`. A retention decision uses five paired,
+interleaved baseline/candidate runs and requires at least 2% median improvement,
+four of five paired wins, exact workload/correctness equivalence, and no
+greater-than-2% regression in another headline metric. Do not run retained
+comparisons back to back while the machine is already thermally loaded. Never
+put measured results here.

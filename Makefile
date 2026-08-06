@@ -6,9 +6,10 @@ BUILD_DIR := build/$(MODE)
 TEST_BINARY := $(BUILD_DIR)/local_gguf_engine_tests
 GGUF_INSPECT_BINARY := $(BUILD_DIR)/gguf-inspect
 GENERATE_BINARY := $(BUILD_DIR)/local-gguf-generate
+BENCHMARK_BINARY := $(BUILD_DIR)/local-gguf-bench
 
 ENGINE_SOURCES := \
-	src/benchmarks/conversation_benchmark.cpp \
+	src/benchmarks/quick_benchmark.cpp \
 	src/engine/gemma2_chat_session.cpp \
 	src/engine/gemma2_model.cpp \
 	src/engine/gemma2_metal_plan.cpp \
@@ -54,6 +55,9 @@ GGUF_INSPECT_SOURCES := \
 GENERATE_SOURCES := \
 	src/frontends/cli/generate_main.cpp
 
+BENCHMARK_SOURCES := \
+	src/frontends/cli/benchmark_main.cpp
+
 TEST_INCLUDE_FLAGS := \
 	-Itests/benchmarks \
 	-Itests/engine \
@@ -64,7 +68,7 @@ TEST_INCLUDE_FLAGS := \
 	-Itests/tokenizer
 
 TEST_SOURCES := \
-	tests/benchmarks/conversation_benchmark_tests.cpp \
+	tests/benchmarks/quick_benchmark_tests.cpp \
 	tests/engine/gemma2_metal_plan_tests.cpp \
 	tests/engine/engine_model_tests.cpp \
 	tests/engine/gemma2_reference_tests.cpp \
@@ -92,9 +96,9 @@ else
 	CXXFLAGS := $(COMMON_FLAGS) $(DEBUG_FLAGS)
 endif
 
-.PHONY: test release-test gguf-inspect generate clean
+.PHONY: test release-test gguf-inspect generate benchmark reference-benchmark clean
 
-test: $(TEST_BINARY) $(GGUF_INSPECT_BINARY) $(GENERATE_BINARY)
+test: $(TEST_BINARY) $(GGUF_INSPECT_BINARY) $(GENERATE_BINARY) $(BENCHMARK_BINARY)
 	./$(TEST_BINARY)
 
 release-test:
@@ -103,6 +107,11 @@ release-test:
 gguf-inspect: $(GGUF_INSPECT_BINARY)
 
 generate: $(GENERATE_BINARY)
+
+benchmark: $(GENERATE_BINARY) $(BENCHMARK_BINARY)
+
+reference-benchmark:
+	/opt/homebrew/bin/llama-cli --version 2>&1 | grep -q d48a56eff
 
 $(TEST_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(TEST_SOURCES)
 	mkdir -p $(BUILD_DIR)
@@ -115,6 +124,10 @@ $(GGUF_INSPECT_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GGUF_INSPECT
 $(GENERATE_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GENERATE_SOURCES)
 	mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GENERATE_SOURCES) $(METAL_LDFLAGS) -o $(GENERATE_BINARY)
+
+$(BENCHMARK_BINARY): $(ENGINE_SOURCES) $(BENCHMARK_SOURCES)
+	mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(BENCHMARK_SOURCES) $(METAL_LDFLAGS) -o $(BENCHMARK_BINARY)
 
 clean:
 	rm -rf build

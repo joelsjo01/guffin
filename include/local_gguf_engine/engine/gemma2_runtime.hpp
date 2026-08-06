@@ -27,6 +27,7 @@ struct Gemma2GenerationMetrics {
     std::uint64_t prefill_started_ns = 0;
     std::uint64_t prefill_completed_ns = 0;
     std::uint64_t first_token_selected_ns = 0;
+    std::uint64_t last_token_selected_ns = 0;
     std::uint64_t decode_started_ns = 0;
     std::uint64_t decode_completed_ns = 0;
     std::uint64_t generation_completed_ns = 0;
@@ -39,6 +40,7 @@ struct Gemma2GenerationMetrics {
     std::uint32_t max_candidate_count = 0;
     std::uint32_t newly_evaluated_prompt_token_count = 0;
     std::uint32_t generated_token_count = 0;
+    std::uint32_t selected_token_count = 0;
     std::uint32_t decode_token_count = 0;
     Gemma2GenerationStopReason stop_reason = Gemma2GenerationStopReason::token_limit;
 };

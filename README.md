@@ -98,7 +98,8 @@ Available chat commands:
 - `/read <path>`: use a text file as the next prompt.
 
 End an input line with `\` to continue a prompt on the next line. Successful
-turns print prompt/generation throughput and callback-complete frontend TTFT.
+turns print llama.cpp-compatible prompt/generation throughput and internal
+TTFT, plus the raw token counts and durations behind those rates.
 
 ## Inspect A GGUF File
 
@@ -144,84 +145,37 @@ Build products are written to `build/debug/` or `build/release/`.
 
 ## Benchmark The Real Generation Path
 
-Always benchmark a release build:
+Build and run the canonical local benchmark:
 
 ```bash
-make MODE=release generate
-
-./build/release/local-gguf-generate \
-  models/gemma-2-9b-Q4.gguf \
-  --bench \
-  --backend metal \
-  --warmup 1 \
-  --repetitions 5 \
-  --output human
+make MODE=release benchmark
+scripts/quick_benchmark.py --model models/gemma-2-9b-Q4.gguf
 ```
 
-The benchmark runs the versioned four-turn product conversation through one
-persistent `Gemma2ChatSession`. It retains the warmup and every measured turn,
-reports per-turn and complete-conversation statistics, and clears only logical
-conversation/KV state between repetitions. It can take several minutes on the
-current engine; keep the machine's thermal state stable when comparing changes.
-Primary timing repetitions do not sample per-turn memory. One separately
-labelled, non-timing memory-audit conversation follows them. A run exits with
-failure and suppresses affected summaries if exact prompts or selected tokens
-differ between measured repetitions.
+The headline invokes the real `local-gguf-generate --chat` product with the
+fixed two-turn conversation, seed 42, and normal sampled generation. Responses
+run until their ordinary stop condition; there is no short token cap or hidden
+local warm-up. The script reports the chat product's rates plus evaluated,
+cached, and decoded counts and raw timing durations.
 
-For machine-readable output:
+When attached to a terminal, the runner renders both chat streams in the
+terminal's alternate screen during measurement. This preserves the real
+streaming/compositor load, then restores the screen before printing the compact
+result tables. It submits the follow-up only after the first response finishes,
+with a fixed five-second input pause; keyboard waiting is not timed, but the
+normal between-turn Metal power state is preserved.
 
-```bash
-./build/release/local-gguf-generate \
-  models/gemma-2-9b-Q4.gguf \
-  --bench \
-  --backend metal \
-  --warmup 1 \
-  --repetitions 5 \
-  --output jsonl > benchmarks/results/gemma2-local.jsonl
-```
+The quick screen uses one fresh process and 30-second idle periods before chat
+and kernel diagnostics because repeated natural responses can heat this fanless
+machine enough to bias results. Local kernel probes run only after the headline
+chat in a separate process. Use `--json` for
+machine-readable output; benchmark result files are local artifacts and should
+not be committed.
 
-Benchmark result files are local artifacts and should not be committed.
-
-Compare the same scenario with the pinned development-only `llama.cpp`
-reference using:
-
-```bash
-python3 scripts/compare_llama_conversation.py \
-  --model models/gemma-2-9b-Q4.gguf \
-  --warmup 1 \
-  --repetitions 5 \
-  --local-jsonl benchmarks/results/gemma2-local.jsonl \
-  > benchmarks/results/gemma2-llama-reference.jsonl
-
-python3 scripts/compare_llama_conversation.py \
-  --model models/gemma-2-9b-Q4.gguf \
-  --warmup 1 \
-  --repetitions 5 \
-  --workload-view paired \
-  --local-jsonl benchmarks/results/gemma2-local.jsonl \
-  > benchmarks/results/gemma2-llama-paired.jsonl
-```
-
-The default `product` view keeps `llama.cpp`'s own generated history. The
-`paired` view submits the exact local prompt-token sequence for every turn,
-while still independently rendering the `llama.cpp` chat template and
-recording whether its IDs match. The comparator verifies the pinned binary and
-model identity, launches only on an available localhost port, clears the slot
-before every conversation, and records the reference's actual cache reuse
-rather than assuming it matches this engine.
-
-Calibrate the in-process TTFT endpoint against bytes read from the real chat
-frontend, and apply the baseline/candidate retention gate, with:
-
-```bash
-python3 scripts/calibrate_local_chat_ttft.py \
-  --model models/gemma-2-9b-Q4.gguf \
-  > benchmarks/results/gemma2-local-ttft-calibration.jsonl
-
-python3 scripts/compare_local_conversation.py \
-  benchmarks/results/gemma2-baseline.jsonl \
-  benchmarks/results/gemma2-candidate.jsonl
-```
+The pinned llama.cpp run is intentionally separate and stored in
+`docs/LLAMA_CPP_REFERENCE_BASELINE.md`. Re-run it only under that document's
+stated invalidation conditions. The local quick screen is not the five-pair
+retention test required for accepting a performance optimization.
 
 ## Current Scope
 
@@ -229,8 +183,8 @@ python3 scripts/compare_local_conversation.py \
 - Main target: Gemma 2 9B Q4 with mixed Q4_K/Q6_K projection weights.
 - CPU operators: correctness references and tests, not the product path.
 - Runnable tools: `local-gguf-generate` and `gguf-inspect`.
-- Current phase: measuring and removing end-to-end decode, prefill, startup,
-  and memory bottlenecks.
+- Current phase: measuring and removing end-to-end decode and prefill
+  bottlenecks.
 
 For contributors, start with `AGENTS.md`, then `docs/ENGINE_PRINCIPLES.md` and
 `docs/NEXT_TASK.md`. Use `docs/GRAPH.md` only to locate relevant code and tests.
