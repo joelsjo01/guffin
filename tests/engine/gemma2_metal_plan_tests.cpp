@@ -58,6 +58,9 @@ using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens_with_plan;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::run_gemma2_metal_resident_prefill;
 using local_gguf_engine::engine::run_gemma2_metal_resident_decode_step;
+using local_gguf_engine::engine::warm_up_gemma2_metal_plan;
+using local_gguf_engine::engine::TokenSampler;
+using local_gguf_engine::engine::TokenSamplerOptions;
 using local_gguf_engine::engine::TokenSelectionRequest;
 using local_gguf_engine::engine::TokenLogit;
 using local_gguf_engine::engine::Gemma2MetalSelectionWorkspace;
@@ -187,7 +190,8 @@ std::vector<GGUFMetadataEntry> tiny_gemma2_metadata(
     std::uint32_t attention_head_count = 2,
     std::uint32_t attention_head_count_kv = 1,
     std::uint32_t attention_value_length = 256,
-    std::uint32_t context_length = 16
+    std::uint32_t context_length = 16,
+    std::uint32_t sliding_window = 8
 ) {
     return {
         metadata_string("general.architecture", "gemma2"),
@@ -200,7 +204,7 @@ std::vector<GGUFMetadataEntry> tiny_gemma2_metadata(
         metadata_u32("gemma2.attention.head_count_kv", attention_head_count_kv),
         metadata_u32("gemma2.attention.key_length", 256),
         metadata_u32("gemma2.attention.value_length", attention_value_length),
-        metadata_u32("gemma2.attention.sliding_window", 8),
+        metadata_u32("gemma2.attention.sliding_window", sliding_window),
         metadata_f32("gemma2.attention.layer_norm_rms_epsilon", 0.000001F),
         metadata_f32("gemma2.attn_logit_softcapping", 50.0F),
         metadata_f32("gemma2.final_logit_softcapping", 30.0F),
@@ -765,6 +769,119 @@ void test_creates_gemma2_metal_schedules_when_available() {
         plan.kv_cache()[1].row_capacity == 16U && plan.kv_cache()[1].row_mask == 15U,
         "global KV layout mismatch"
     );
+}
+
+void test_gemma2_metal_warmup_is_state_neutral_and_covers_production_routes_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) {
+        return;
+    }
+
+    auto payload_store = nonzero_tiny_gemma2_payload_store(2U);
+    auto view = tiny_model_view(
+        tiny_gemma2_metadata(2U, 2U, 1U, 256U, 32U, 32U),
+        std::move(payload_store.payloads)
+    );
+    const auto model = load_engine_model_from_gguf(view);
+    auto warmed_plan = create_gemma2_metal_model_plan(model);
+    auto reference_plan = create_gemma2_metal_model_plan(model);
+    const auto identities = warmed_plan.allocation_identities();
+    std::array<std::uint32_t, 16> warmup_tokens {};
+    warmup_tokens.fill(1U);
+    const TokenSamplerOptions sampler_options {
+        .temperature = 0.8F,
+        .top_k = 4U,
+        .top_p = 0.95F,
+        .min_p = 0.05F,
+        .repetition_penalty = 1.1F,
+        .seed = 42U,
+    };
+    auto sampler = TokenSampler(sampler_options);
+    auto sampler_control = TokenSampler(sampler_options);
+
+    const auto stats = warm_up_gemma2_metal_plan(
+        warmed_plan, std::span<const std::uint32_t, 16>(warmup_tokens), sampler
+    );
+
+    expect(stats.prefill_token_count == 16U, "warm-up prefill token count mismatch");
+    expect(stats.cleared_kv_bytes == warmed_plan.kv_cache_byte_count(), "warm-up KV byte count mismatch");
+    expect(stats.prefill.command_buffer_count == 1U && stats.prefill.synchronous_wait_count == 1U,
+        "warm-up prefill must submit and synchronize exactly once");
+    expect(stats.prefill.scheduled_layer_execution_count == 2U && stats.prefill.kv_write_count == 2U,
+        "warm-up prefill layer/KV coverage mismatch");
+    expect(stats.prefill.q4_exact_16_projection_count > 0U,
+        "warm-up did not execute exact-16 Q4 projection");
+    expect(stats.prefill.q6_exact_16_projection_count > 0U,
+        "warm-up did not execute exact-16 Q6 projection");
+    expect(stats.prefill.f16_projection_count > 0U && stats.prefill.selector_dispatch_count > 0U,
+        "warm-up prefill did not execute output projection and selection");
+    expect(stats.decode.command_buffer_count == 1U && stats.decode.synchronous_wait_count == 1U,
+        "warm-up decode must submit and synchronize exactly once");
+    expect(stats.decode.q4_decode_projection_count > 0U && stats.decode.q6_decode_projection_count > 0U,
+        "warm-up did not execute decode K-quant projections");
+    expect(stats.decode.f16_projection_count > 0U && stats.decode.decode_attention_dispatch_count > 0U,
+        "warm-up did not execute decode output projection and attention");
+    expect(stats.decode.selector_dispatch_count > 0U && stats.decode.compact_readback_bytes > 0U,
+        "warm-up decode did not execute compact selection and readback");
+    expect(warmed_plan.allocation_identities() == identities,
+        "warm-up changed resident allocation identities");
+
+    for (const auto& layer : warmed_plan.kv_cache()) {
+        for (const auto* buffer : {&layer.key, &layer.value}) {
+            const auto contents = copy_tensor_from_backend(*buffer);
+            expect(
+                std::all_of(contents.bytes().begin(), contents.bytes().end(), [](std::uint8_t byte) {
+                    return byte == 0U;
+                }),
+                "warm-up did not restore physical zero KV"
+            );
+        }
+    }
+
+    const std::array<TokenLogit, 4> sampler_candidates {{
+        {.token = 0U, .logit = 0.1F},
+        {.token = 1U, .logit = 0.2F},
+        {.token = 2U, .logit = 0.3F},
+        {.token = 3U, .logit = 0.4F},
+    }};
+    expect(
+        sampler.sample(sampler_candidates) == sampler_control.sample(sampler_candidates),
+        "warm-up advanced the caller sampler"
+    );
+
+    constexpr std::array<std::uint32_t, 3> prompt {1U, 2U, 3U};
+    const auto warmed = generate_gemma2_metal_argmax_tokens_with_plan(
+        warmed_plan, prompt, 0U, 2U, {}
+    );
+    const auto reference = generate_gemma2_metal_argmax_tokens_with_plan(
+        reference_plan, prompt, 0U, 2U, {}
+    );
+    expect(warmed.selected_token_ids == reference.selected_token_ids,
+        "warm-up changed first production token selection");
+    for (std::size_t layer = 0; layer < warmed_plan.kv_cache().size(); ++layer) {
+        const auto valid_kv_bytes = 5U
+            * warmed_plan.kv_cache()[layer].key.descriptor().byte_count
+            / warmed_plan.kv_cache()[layer].row_capacity;
+        const auto warmed_key = copy_tensor_from_backend(warmed_plan.kv_cache()[layer].key);
+        const auto reference_key = copy_tensor_from_backend(reference_plan.kv_cache()[layer].key);
+        expect(
+            std::equal(
+                warmed_key.bytes().begin(),
+                warmed_key.bytes().begin() + static_cast<std::ptrdiff_t>(valid_kv_bytes),
+                reference_key.bytes().begin()
+            ),
+            "warm-up changed production key KV contents"
+        );
+        const auto warmed_value = copy_tensor_from_backend(warmed_plan.kv_cache()[layer].value);
+        const auto reference_value = copy_tensor_from_backend(reference_plan.kv_cache()[layer].value);
+        expect(
+            std::equal(
+                warmed_value.bytes().begin(),
+                warmed_value.bytes().begin() + static_cast<std::ptrdiff_t>(valid_kv_bytes),
+                reference_value.bytes().begin()
+            ),
+            "warm-up changed production value KV contents"
+        );
+    }
 }
 
 void test_gemma2_f16_kv_store_rounds_values_and_wraps_when_available() {
@@ -1695,6 +1812,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "creates Gemma2 Metal schedules when available",
         test_creates_gemma2_metal_schedules_when_available,
+    },
+    {
+        "Gemma2 Metal warm-up is state neutral and covers production routes when available",
+        test_gemma2_metal_warmup_is_state_neutral_and_covers_production_routes_when_available,
     },
     {
         "Gemma2 F16 KV store rounds values and wraps when available",

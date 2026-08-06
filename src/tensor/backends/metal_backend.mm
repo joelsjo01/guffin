@@ -1,6 +1,7 @@
 #include "metal_backend.hpp"
 
 #include "metal/metal_context.hpp"
+#include "metal/metal_buffer.hpp"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -8,6 +9,10 @@
 #include <string>
 
 namespace local_gguf_engine::tensor::backends::metal {
+
+void clear_backend_buffer(const BackendBuffer& buffer) {
+    clear_metal_backend_buffer(buffer);
+}
 
 namespace {
 

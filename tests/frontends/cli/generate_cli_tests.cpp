@@ -746,6 +746,12 @@ void test_gemma2_chat_session_appends_second_turn_at_nonzero_cache_when_availabl
         Gemma2ChatSessionOptions {.max_new_tokens = 1}
     );
 
+    expect(session.warmup_stats().has_value(), "Gemma2 default constructor warm-up stats missing");
+    expect(session.warmup_stats()->prefill_token_count == 16U,
+        "Gemma2 constructor warm-up shape mismatch");
+    expect(session.message_count() == 0U && session.cached_token_count() == 0U,
+        "Gemma2 constructor warm-up mutated visible session state");
+
     const auto first_turn = session.generate_user_turn("Hello");
     const auto second_turn = session.generate_user_turn("Hello");
 
@@ -826,6 +832,8 @@ void test_gemma2_chat_session_records_deterministic_turn_metrics_when_available(
             },
         }
     );
+
+    expect(now_ns == 100U, "Gemma2 constructor warm-up must remain outside the turn clock");
 
     std::string streamed;
     const auto first = session.generate_user_turn("Hello", [&](std::string_view delta) {

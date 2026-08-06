@@ -3,6 +3,7 @@
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -207,6 +208,26 @@ Gemma2ChatSession::Gemma2ChatSession(
         throw std::runtime_error("Gemma 2 chat session prepared state requires Gemma 2 model");
     }
     stop_token_ids_ = chat_stop_token_ids(tokenizer_, end_of_turn_token_id_);
+    warm_up_plan();
+}
+
+void Gemma2ChatSession::warm_up_plan() {
+    warmup_stats_.reset();
+    const auto token_id = tokenizer_.special_tokens().bos_token_id.value_or(
+        tokenizer_.special_tokens().eos_token_id.value_or(0U)
+    );
+    if (token_id >= plan_.config().vocab_size) {
+        throw std::runtime_error("Gemma2 chat warm-up token is outside vocabulary");
+    }
+    std::array<std::uint32_t, 16> token_ids {};
+    token_ids.fill(token_id);
+    warmup_stats_ = warm_up_gemma2_metal_plan(
+        plan_, std::span<const std::uint32_t, 16>(token_ids), sampler_
+    );
+    if (!messages_.empty() || !cached_token_ids_.empty() || !turn_cache_positions_.empty()
+        || !turn_sampler_states_.empty()) {
+        throw std::runtime_error("Gemma2 chat warm-up mutated logical session state");
+    }
 }
 
 std::vector<tokenizer::ChatMessage> Gemma2ChatSession::message_views_with_user(
@@ -635,7 +656,19 @@ void Gemma2ChatSession::clear() {
 }
 
 void Gemma2ChatSession::reset() {
-    plan_ = create_gemma2_metal_model_plan(model_);
+    auto replacement_plan = create_gemma2_metal_model_plan(model_);
+    const auto token_id = tokenizer_.special_tokens().bos_token_id.value_or(
+        tokenizer_.special_tokens().eos_token_id.value_or(0U)
+    );
+    std::array<std::uint32_t, 16> token_ids {};
+    token_ids.fill(token_id);
+    auto replacement_stats = warm_up_gemma2_metal_plan(
+        replacement_plan,
+        std::span<const std::uint32_t, 16>(token_ids),
+        TokenSampler(initial_sampler_options_)
+    );
+    plan_ = std::move(replacement_plan);
+    warmup_stats_ = std::move(replacement_stats);
     ++plan_revision_;
     clear();
 }
@@ -683,6 +716,10 @@ std::span<const std::string> Gemma2ChatSession::reverse_stop_strings() const noe
 
 std::array<std::uintptr_t, 4> Gemma2ChatSession::plan_allocation_identities() const noexcept {
     return plan_.allocation_identities();
+}
+
+const std::optional<Gemma2MetalWarmupStats>& Gemma2ChatSession::warmup_stats() const noexcept {
+    return warmup_stats_;
 }
 
 }  // namespace local_gguf_engine::engine

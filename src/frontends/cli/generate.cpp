@@ -359,7 +359,6 @@ struct ParsedChatCommand {
             command.context_shift = false;
             continue;
         }
-
         if (option == "--max-new-tokens") {
             if (index + 1 >= argc) {
                 write_generate_usage(error);

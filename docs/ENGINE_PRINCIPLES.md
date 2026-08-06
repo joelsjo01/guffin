@@ -1,8 +1,6 @@
 # Engine Principles
 
-Read this after `AGENTS.md`. This file defines durable engineering judgment,
-not project status. Keep current work, measurements, and completed milestones
-in `NEXT_TASK.md` or the relevant diagnosis document.
+This file defines the project's permanent engineering and coding principles.
 
 ## Optimize the System
 

@@ -74,7 +74,7 @@ def run_kernel_diagnostics(binary, model):
 
 def print_human(local, kernels, terminal_rendered):
     print("Local two-turn chat (fresh process, seed 42, natural stop)")
-    print("local startup warm-up: none")
+    print("local startup warm-up: enabled (16-token prefill + 1-token decode)")
     stream_mode = "terminal alternate screen" if terminal_rendered else "captured pipes"
     print(f"chat streams: {stream_mode}; fixed 5s input pause between turns")
     print_turn_table("local-gguf-engine", local)
@@ -111,7 +111,9 @@ def main():
             "seed": SEED,
             "repetitions": 1,
             "response_limit": None,
-            "local_startup_warmup": False,
+            "local_startup_warmup": True,
+            "local_startup_warmup_prefill_tokens": 16,
+            "local_startup_warmup_decode_tokens": 1,
             "cooldown_seconds": args.cooldown,
             "inter_turn_pause_seconds": INTER_TURN_PAUSE_SECONDS,
             "terminal_rendered": terminal_rendered,

@@ -9,9 +9,7 @@ Do not read as history.
 2. Read `docs/ENGINE_PRINCIPLES.md`.
 3. Read `docs/NEXT_TASK.md`.
 4. Read this file only when choosing files to inspect or edit.
-5. Read `docs/GEMMA2_BOTTLENECK_FINDINGS.md` only for Gemma planning,
-   architecture, performance, or upstream-comparison work.
-6. Then read only the relevant code/tests below.
+5. Then read only the relevant code/tests below.
 
 ## Dependency Flow
 
@@ -234,7 +232,7 @@ Project docs:
 
 - `docs/ENGINE_PRINCIPLES.md` for durable engineering judgment
 - `docs/NEXT_TASK.md` for the active baton
-- `docs/GEMMA2_BOTTLENECK_FINDINGS.md` for the current Gemma Metal bottleneck diagnosis and `llama.cpp` comparison
+- `docs/LLAMA_CPP_REFERENCE_BASELINE.md` for the pinned external benchmark
 - `docs/GRAPH.md` for this locator
 
 ## Test Map

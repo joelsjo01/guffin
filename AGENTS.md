@@ -38,9 +38,7 @@ Current main target: fast local Gemma 2 9B Q4 on Metal.
 2. `docs/ENGINE_PRINCIPLES.md`
 3. `docs/NEXT_TASK.md`
 4. `docs/GRAPH.md` only when locating modules, tests, fixtures, or task docs
-5. `docs/GEMMA2_BOTTLENECK_FINDINGS.md` only for Gemma planning,
-   architecture, performance research, or upstream comparison
-6. Relevant code and tests only
+5. Relevant code and tests only
 
 Do not bulk-read docs or source trees when the task has a narrower route.
 
@@ -64,13 +62,16 @@ Do not bulk-read docs or source trees when the task has a narrower route.
 ## Document Ownership
 
 - `AGENTS.md`: mission, non-negotiable boundaries, read path, and workflow.
-- `docs/ENGINE_PRINCIPLES.md`: durable engineering judgment.
+- `docs/ENGINE_PRINCIPLES.md`: immutable engineering and coding principles.
+  Do not modify this document unless the user explicitly requests a change to
+  the principles themselves.
 - `docs/NEXT_TASK.md`: verified current state, one active baton, constraints,
   verification, and stop condition.
-- `docs/GRAPH.md`: locator for code, tests, fixtures, commands, and task docs;
-  no policy or project history.
-- `docs/GEMMA2_BOTTLENECK_FINDINGS.md`: detailed Gemma architecture,
-  performance, and upstream research.
+- `docs/GRAPH.md`: mechanically maintained locator for code, tests, fixtures,
+  commands, and task docs; no policy, reasoning, measurements, or project
+  history.
+- `docs/LLAMA_CPP_REFERENCE_BASELINE.md`: pinned external reference identity,
+  protocol, result, invalidation rule, and rerun command.
 
 Do not put milestones, benchmark results, completed-work history, or the active
 bottleneck in this file.

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
 #include <string>
@@ -11,6 +12,7 @@ namespace local_gguf_engine::tensor::backends::metal {
 [[nodiscard]] bool is_available() noexcept;
 [[nodiscard]] std::string unavailable_reason();
 [[nodiscard]] std::optional<std::uint64_t> current_allocated_size_bytes() noexcept;
+void clear_backend_buffer(const BackendBuffer& buffer);
 
 [[nodiscard]] TensorStorage matmul_f32_f16_gguf_weight(
     const TensorStorage& left,

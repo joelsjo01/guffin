@@ -3,6 +3,7 @@
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
 
 #include "../tensor/backends/metal/metal_command_context.hpp"
+#include "../tensor/backends/metal_backend.hpp"
 
 #include <algorithm>
 #include <array>
@@ -614,6 +615,77 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
         .logits = scratch.logits,
         .candidates = candidates,
         .execution = execution,
+    };
+}
+
+Gemma2MetalWarmupStats warm_up_gemma2_metal_plan(
+    Gemma2MetalModelPlan& plan,
+    std::span<const std::uint32_t, 16> token_ids,
+    TokenSampler sampler_copy
+) {
+    if (plan.config().context_length <= token_ids.size()) {
+        throw std::invalid_argument("Gemma2 Metal warm-up requires at least 17 context positions");
+    }
+
+    namespace metal = tensor::backends::metal;
+    const auto clear_kv = [&]() {
+        std::size_t cleared_bytes = 0;
+        for (const auto& layer : plan.kv_cache()) {
+            metal::clear_backend_buffer(layer.key);
+            metal::clear_backend_buffer(layer.value);
+            cleared_bytes += layer.key.descriptor().byte_count;
+            cleared_bytes += layer.value.descriptor().byte_count;
+        }
+        return cleared_bytes;
+    };
+
+    const auto allocation_identities = plan.allocation_identities();
+    const auto started = std::chrono::steady_clock::now();
+    const auto cleared_bytes = clear_kv();
+    const auto embedding_scale = gemma2_input_embedding_scale(plan.config().embedding_length);
+    const auto prefill = run_gemma2_metal_resident_prefill(
+        plan,
+        token_ids,
+        0U,
+        embedding_scale,
+        sampler_copy.selection_request()
+    );
+    if (!prefill.candidates.has_value()) {
+        throw std::runtime_error("Gemma2 Metal warm-up prefill did not return token candidates");
+    }
+    const auto selected_token = sampler_copy.sample(std::span<const TokenLogit>(
+        prefill.candidates->values.data(), prefill.candidates->count
+    ));
+    sampler_copy.observe_tokens(std::span<const std::uint32_t>(&selected_token, 1U));
+    const auto decode_schedule = create_gemma2_metal_decode_schedule(
+        plan, static_cast<std::uint32_t>(token_ids.size())
+    );
+    const auto decode = run_gemma2_metal_resident_decode_step(
+        plan,
+        decode_schedule,
+        selected_token,
+        embedding_scale,
+        sampler_copy.selection_request()
+    );
+    if (!decode.candidates.has_value()) {
+        throw std::runtime_error("Gemma2 Metal warm-up decode did not return token candidates");
+    }
+    const auto restored_bytes = clear_kv();
+    if (restored_bytes != cleared_bytes || cleared_bytes != plan.kv_cache_byte_count()) {
+        throw std::runtime_error("Gemma2 Metal warm-up KV clear byte count mismatch");
+    }
+    if (plan.allocation_identities() != allocation_identities) {
+        throw std::runtime_error("Gemma2 Metal warm-up replaced a resident allocation");
+    }
+    const auto completed = std::chrono::steady_clock::now();
+    return Gemma2MetalWarmupStats {
+        .wall_duration_ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(completed - started).count()
+        ),
+        .prefill_token_count = static_cast<std::uint32_t>(token_ids.size()),
+        .cleared_kv_bytes = cleared_bytes,
+        .prefill = prefill.execution,
+        .decode = decode.execution,
     };
 }
 

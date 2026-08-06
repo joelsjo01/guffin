@@ -123,6 +123,14 @@ struct Gemma2MetalResidentPrefillResult {
     Gemma2MetalPrefillExecutionStats execution;
 };
 
+struct Gemma2MetalWarmupStats {
+    std::uint64_t wall_duration_ns = 0;
+    std::uint32_t prefill_token_count = 0;
+    std::size_t cleared_kv_bytes = 0;
+    Gemma2MetalPrefillExecutionStats prefill;
+    Gemma2MetalDecodeExecutionStats decode;
+};
+
 struct Gemma2MetalPlanGeneratedTokens {
     std::vector<std::uint32_t> generated_token_ids;
     // Includes every selected token, including a stop/control token that is
@@ -164,6 +172,12 @@ using Gemma2MetalGeneratedTokenCallback =
     std::uint32_t cache_position,
     float embedding_scale,
     std::optional<TokenSelectionRequest> selection_request = std::nullopt
+);
+
+[[nodiscard]] Gemma2MetalWarmupStats warm_up_gemma2_metal_plan(
+    Gemma2MetalModelPlan& plan,
+    std::span<const std::uint32_t, 16> token_ids,
+    TokenSampler sampler_copy
 );
 
 [[nodiscard]] std::vector<std::uint32_t> generate_gemma2_metal_argmax_tokens(

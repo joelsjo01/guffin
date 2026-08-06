@@ -128,6 +128,7 @@ public:
     [[nodiscard]] std::span<const std::uint32_t> stop_token_ids() const noexcept;
     [[nodiscard]] std::span<const std::string> reverse_stop_strings() const noexcept;
     [[nodiscard]] std::array<std::uintptr_t, 4> plan_allocation_identities() const noexcept;
+    [[nodiscard]] const std::optional<Gemma2MetalWarmupStats>& warmup_stats() const noexcept;
 
 private:
     struct OwnedChatMessage {
@@ -149,6 +150,7 @@ private:
         std::span<const std::uint32_t> visible_token_ids,
         std::string_view text
     ) const;
+    void warm_up_plan();
 
     model_format::GGUFFileBackedModel file_model_;
     EngineModel model_;
@@ -167,6 +169,7 @@ private:
     TokenSampler sampler_;
     Gemma2MonotonicClock clock_;
     std::size_t plan_revision_ = 0;
+    std::optional<Gemma2MetalWarmupStats> warmup_stats_;
 };
 
 }  // namespace local_gguf_engine::engine

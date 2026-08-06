@@ -27,6 +27,7 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             QUICK.print_human([], {"kernels": []}, False)
         self.assertIn("chat streams: captured pipes;", output.getvalue())
+        self.assertIn("local startup warm-up: enabled (16-token prefill + 1-token decode)", output.getvalue())
 
     def test_process_driver_captures_real_stdio_path(self):
         stdout, stderr = QUICK.run_process(
@@ -106,6 +107,10 @@ slot print_timings:        eval time =   10800.00 ms /   150 tokens (72.00 ms pe
         )
         self.assertEqual(QUICK.SEED, 42)
         self.assertEqual(REFERENCE.REFERENCE_COMMIT, "d48a56effbba99944a677938d4beb63a0065ecdf")
+        source = (SCRIPTS / "quick_benchmark.py").read_text()
+        self.assertIn('"local_startup_warmup": True', source)
+        self.assertIn('"local_startup_warmup_prefill_tokens": 16', source)
+        self.assertIn('"local_startup_warmup_decode_tokens": 1', source)
 
     def test_local_and_reference_entrypoints_are_separate(self):
         local_source = (SCRIPTS / "quick_benchmark.py").read_text()
