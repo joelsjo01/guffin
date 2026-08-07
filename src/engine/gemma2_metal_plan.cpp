@@ -309,39 +309,42 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     std::size_t& allocated_byte_count
 ) {
     const auto tokens = gemma2_metal_prefill_chunk_size;
+    // Prefill is encoded serially. These aliases follow producer/last-consumer
+    // boundaries: scores become probabilities in place; the hidden workspace
+    // advances from attention norm through both residual branches; and GELU
+    // replaces its dead gate input. All aliases retain identical descriptors.
+    const auto hidden_workspace = allocate_buffer(
+        f32_descriptor({tokens, config.embedding_length}), allocated_byte_count
+    );
+    const auto attention_score_workspace = allocate_buffer(
+        f32_descriptor({tokens, config.attention_head_count, config.context_length}),
+        allocated_byte_count
+    );
+    const auto feed_forward_gate_workspace = allocate_buffer(
+        f32_descriptor({tokens, config.feed_forward_length}), allocated_byte_count
+    );
     return Gemma2MetalPrefillScratch {
         .token_id_staging = allocate_buffer(f32_descriptor({config.context_length}), allocated_byte_count),
-        .normalized_hidden = allocate_buffer(f32_descriptor({tokens, config.embedding_length}), allocated_byte_count),
+        .normalized_hidden = hidden_workspace,
         .raw_query = allocate_buffer(f32_descriptor({tokens, attention_query_width(config)}), allocated_byte_count),
         .raw_key = allocate_buffer(f32_descriptor({tokens, attention_key_width(config)}), allocated_byte_count),
         .query = allocate_buffer(f32_descriptor({tokens, attention_query_width(config)}), allocated_byte_count),
         .value = allocate_buffer(f32_descriptor({tokens, attention_value_width(config)}), allocated_byte_count),
-        .attention_scores = allocate_buffer(
-            f32_descriptor({tokens, config.attention_head_count, config.context_length}),
-            allocated_byte_count
-        ),
-        .attention_probabilities = allocate_buffer(
-            f32_descriptor({tokens, config.attention_head_count, config.context_length}),
-            allocated_byte_count
-        ),
+        .attention_scores = attention_score_workspace,
+        .attention_probabilities = attention_score_workspace,
         .attention_output = allocate_buffer(
             f32_descriptor({tokens, attention_output_width(config)}),
             allocated_byte_count
         ),
-        .projected_attention_output =
-            allocate_buffer(f32_descriptor({tokens, config.embedding_length}), allocated_byte_count),
+        .projected_attention_output = hidden_workspace,
         .post_attention_residual =
             allocate_buffer(f32_descriptor({tokens, config.embedding_length}), allocated_byte_count),
-        .normalized_feed_forward_input =
-            allocate_buffer(f32_descriptor({tokens, config.embedding_length}), allocated_byte_count),
-        .feed_forward_gate =
-            allocate_buffer(f32_descriptor({tokens, config.feed_forward_length}), allocated_byte_count),
+        .normalized_feed_forward_input = hidden_workspace,
+        .feed_forward_gate = feed_forward_gate_workspace,
         .feed_forward_up =
             allocate_buffer(f32_descriptor({tokens, config.feed_forward_length}), allocated_byte_count),
-        .feed_forward_gated =
-            allocate_buffer(f32_descriptor({tokens, config.feed_forward_length}), allocated_byte_count),
-        .projected_feed_forward_output =
-            allocate_buffer(f32_descriptor({tokens, config.embedding_length}), allocated_byte_count),
+        .feed_forward_gated = feed_forward_gate_workspace,
+        .projected_feed_forward_output = hidden_workspace,
         .feed_forward_residual =
             allocate_buffer(f32_descriptor({tokens, config.embedding_length}), allocated_byte_count),
         .final_normalized_hidden =
@@ -390,6 +393,9 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     const Gemma2MetalLayerState& layer,
     std::uint32_t total_kv_token_count
 ) {
+    // KV storage may contain stale rows after warm-up, rollback, or a logical
+    // session reset. Only this populated logical prefix/window is addressable;
+    // the store overwrites a row before that row joins the readable range.
     if (layer.uses_sliding_window && config.sliding_window > 0) {
         return std::min(total_kv_token_count, config.sliding_window);
     }

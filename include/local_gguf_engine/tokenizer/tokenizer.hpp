@@ -99,6 +99,11 @@ public:
         std::span<const std::uint32_t> token_ids,
         TokenizerDecodeOptions options
     ) const;
+    void append_decoded_token(
+        std::string& output,
+        std::uint32_t token_id,
+        TokenizerDecodeOptions options = {}
+    ) const;
     [[nodiscard]] bool token_id_is_special(std::uint32_t token_id) const noexcept;
 
 private:

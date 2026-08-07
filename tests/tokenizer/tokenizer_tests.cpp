@@ -393,6 +393,29 @@ void test_sentencepiece_byte_fallback_round_trips_unknown_text() {
     );
 }
 
+void test_incremental_decode_matches_batch_across_token_boundaries() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_gemma2_tokenizer_metadata()));
+    const std::array<std::uint32_t, 10> ids {2, 5, 12, 42, 43, 44, 45, 46, 47, 1};
+    constexpr TokenizerDecodeOptions options {.skip_special_tokens = true};
+
+    std::string incremental;
+    for (const auto token_id : ids) {
+        tokenizer.append_decoded_token(incremental, token_id, options);
+    }
+    expect(
+        incremental == tokenizer.decode(std::span<const std::uint32_t>(ids), options),
+        "incremental decode must match batch SentencePiece, byte, and special-token semantics"
+    );
+
+    try {
+        tokenizer.append_decoded_token(incremental, 110U, options);
+        throw TestFailure("incremental decode should reject an invalid token ID");
+    } catch (const TokenizerError& error) {
+        expect(error.code() == TokenizerErrorCode::token_id_out_of_range,
+            "incremental invalid-ID error mismatch");
+    }
+}
+
 void test_rejects_malformed_sentencepiece_byte_token() {
     auto metadata = tiny_gemma2_tokenizer_metadata();
     for (auto& entry : metadata) {
@@ -513,6 +536,10 @@ std::span<const TestCase> tokenizer_test_cases() {
         {
             "SentencePiece byte fallback round-trips unknown text",
             test_sentencepiece_byte_fallback_round_trips_unknown_text,
+        },
+        {
+            "incremental decode matches batch across token boundaries",
+            test_incremental_decode_matches_batch_across_token_boundaries,
         },
         {
             "rejects malformed SentencePiece byte token",

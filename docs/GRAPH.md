@@ -49,6 +49,7 @@ benchmark harness is not a live source route.
 | `Makefile` | build graph for engine sources, CLIs, and tests |
 | `scripts/ci.sh` | repository check wrapper |
 | `scripts/quick_benchmark.py` | canonical local real-chat benchmark driver |
+| `scripts/memory_benchmark.py` | interleaved production-path startup and process-memory benchmark |
 | `scripts/capture_decode_gpu_trace.py` | one-shot production decode `.gputrace` driver |
 | `scripts/llama_reference_benchmark.py` | infrequent pinned llama-cli reference driver |
 | `docs/LLAMA_CPP_REFERENCE_BASELINE.md` | stored pinned reference identity, protocol, and result |
@@ -216,9 +217,11 @@ Quick local/reference benchmark:
 - `src/benchmarks/quick_benchmark.cpp`
 - `src/frontends/cli/benchmark_main.cpp`
 - `scripts/quick_benchmark.py`
+- `scripts/memory_benchmark.py`
 - `scripts/capture_decode_gpu_trace.py`
 - `tests/benchmarks/quick_benchmark_tests.cpp`
 - `tests/scripts/quick_benchmark_script_tests.py`
+- `tests/scripts/memory_benchmark_script_tests.py`
 
 GGUF inspection CLI:
 
@@ -256,6 +259,7 @@ Project docs:
 | Gemma reference numerics | `tests/engine/gemma2_reference_tests.cpp` |
 | Token sampling and top-logit helpers | `tests/engine/sampling_tests.cpp`, `tests/tensor/tensor_backend_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp` |
 | Quick kernel summaries and real-chat timing parser validation | `tests/benchmarks/quick_benchmark_tests.cpp`, `tests/scripts/quick_benchmark_script_tests.py` |
+| Production startup/process-memory benchmark parsing | `tests/scripts/memory_benchmark_script_tests.py` |
 | Tokenizer/chat template | `tests/tokenizer/tokenizer_tests.cpp`, plus CLI tests when prompt rendering changes |
 | Generate CLI | `tests/frontends/cli/generate_cli_tests.cpp` |
 | Inspect CLI | `tests/frontends/cli/gguf_inspect_tests.cpp` |

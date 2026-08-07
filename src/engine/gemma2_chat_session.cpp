@@ -139,7 +139,8 @@ namespace {
 
 [[nodiscard]] std::optional<std::pair<std::size_t, std::string>> first_reverse_stop_match(
     std::string_view text,
-    std::span<const std::string> reverse_stop_strings
+    std::span<const std::string> reverse_stop_strings,
+    std::size_t search_offset
 ) {
     std::optional<std::pair<std::size_t, std::string>> first_match;
     for (const auto& stop_string : reverse_stop_strings) {
@@ -147,7 +148,7 @@ namespace {
             continue;
         }
 
-        const auto position = text.find(stop_string);
+        const auto position = text.find(stop_string, search_offset);
         if (position == std::string_view::npos) {
             continue;
         }
@@ -316,8 +317,9 @@ std::vector<std::uint32_t> Gemma2ChatSession::visible_token_prefix_for_text(
     std::string decoded_prefix;
     for (const auto token_id : visible_token_ids) {
         prefix_token_ids.push_back(token_id);
-        decoded_prefix = tokenizer_.decode(
-            std::span<const std::uint32_t>(prefix_token_ids),
+        tokenizer_.append_decoded_token(
+            decoded_prefix,
+            token_id,
             tokenizer::TokenizerDecodeOptions {.skip_special_tokens = true}
         );
         if (decoded_prefix.size() > text.size() || text.substr(0, decoded_prefix.size()) != decoded_prefix) {
@@ -481,14 +483,23 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             }
 
             visible_token_ids.push_back(event.token_id);
-            visible_text = tokenizer_.decode(
-                std::span<const std::uint32_t>(visible_token_ids),
+            const auto previous_text_size = visible_text.size();
+            tokenizer_.append_decoded_token(
+                visible_text,
+                event.token_id,
                 tokenizer::TokenizerDecodeOptions {.skip_special_tokens = true}
             );
 
+            const auto max_stop_length = max_reverse_stop_string_length(
+                std::span<const std::string>(reverse_stop_strings_)
+            );
+            const auto boundary_overlap = max_stop_length == 0U ? 0U : max_stop_length - 1U;
+            const auto reverse_stop_search_offset = previous_text_size > boundary_overlap
+                ? previous_text_size - boundary_overlap : 0U;
             const auto stop_match = first_reverse_stop_match(
                 visible_text,
-                std::span<const std::string>(reverse_stop_strings_)
+                std::span<const std::string>(reverse_stop_strings_),
+                reverse_stop_search_offset
             );
             if (stop_match.has_value()) {
                 final_text = visible_text.substr(0, stop_match->first);
@@ -616,6 +627,8 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             .resident_weight_byte_count = plan_.uploaded_weight_byte_count(),
             .resident_kv_cache_byte_count = plan_.kv_cache_byte_count(),
             .resident_scratch_byte_count = plan_.scratch_byte_count(),
+            .warmup_kv_clear_pass_count = warmup_stats_->kv_clear_pass_count,
+            .warmup_host_cleared_kv_bytes = warmup_stats_->host_cleared_kv_bytes,
             .decode_scheduled_weight_bytes = plan_.decode_scheduled_weight_bytes(),
             .prefill_execution = generation.prefill_execution,
             .decode_execution = generation.decode_execution,

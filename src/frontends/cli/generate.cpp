@@ -788,7 +788,7 @@ std::string format_chat_timing_detail_line(const engine::Gemma2ChatTurnMetrics& 
 }
 
 std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetrics& metrics) {
-    constexpr std::uint32_t schema_version = 1U;
+    constexpr std::uint32_t schema_version = 2U;
     const auto decode_tokens = static_cast<std::uint64_t>(metrics.generation.decode_token_count);
     const auto checked_multiply = [](std::uint64_t left, std::uint64_t right, const char* name) {
         if (left != 0U && right > std::numeric_limits<std::uint64_t>::max() / left) {
@@ -820,6 +820,9 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
     if (execution.gpu_duration_ns > metrics.generation.decode_duration_ns) {
         throw std::logic_error("decode attribution GPU duration exceeds decode wall duration");
     }
+    if (execution.output_head_elision_count > decode_tokens) {
+        throw std::logic_error("decode attribution output-head elisions exceed decoded tokens");
+    }
     const auto final_cache_position = checked_add(
         checked_add(
             metrics.initial_cache_position,
@@ -829,7 +832,15 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
         decode_tokens,
         "final cache position"
     );
-    const auto total_scheduled_bytes = checked_multiply(bytes.total, decode_tokens, "scheduled bytes");
+    const auto full_scheduled_bytes = checked_multiply(bytes.total, decode_tokens, "scheduled bytes");
+    const auto minimum_elided_bytes = checked_multiply(
+        bytes.output_head, execution.output_head_elision_count, "elided output-head bytes"
+    );
+    if (execution.output_elided_weight_bytes < minimum_elided_bytes
+        || execution.output_elided_weight_bytes > full_scheduled_bytes) {
+        throw std::logic_error("decode attribution elided byte count is invalid");
+    }
+    const auto total_scheduled_bytes = full_scheduled_bytes - execution.output_elided_weight_bytes;
     const auto wall_residual_ns = metrics.generation.decode_duration_ns - execution.gpu_duration_ns;
 
     std::ostringstream json;
@@ -844,6 +855,11 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"gpu_ns\":" << execution.gpu_duration_ns
          << ",\"selection_ns\":" << metrics.generation.selection_duration_ns
          << ",\"wall_minus_gpu_ns\":" << wall_residual_ns
+         << ",\"resident_weights_bytes\":" << metrics.resident_weight_byte_count
+         << ",\"resident_kv_bytes\":" << metrics.resident_kv_cache_byte_count
+         << ",\"resident_scratch_bytes\":" << metrics.resident_scratch_byte_count
+         << ",\"warmup_kv_clear_passes\":" << metrics.warmup_kv_clear_pass_count
+         << ",\"warmup_host_cleared_kv_bytes\":" << metrics.warmup_host_cleared_kv_bytes
          << ",\"command_buffers\":" << execution.command_buffer_count
          << ",\"commits\":" << execution.commit_count
          << ",\"waits\":" << execution.synchronous_wait_count
@@ -864,6 +880,8 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"q6_exact_16\":" << execution.q6_exact_16_projection_count
          << ",\"q6_generic_tiled\":" << execution.q6_generic_tiled_projection_count
          << ",\"f16\":" << execution.f16_projection_count
+         << ",\"output_head_elisions\":" << execution.output_head_elision_count
+         << ",\"output_elided_weight_bytes\":" << execution.output_elided_weight_bytes
          << ",\"attention_dispatches\":" << execution.decode_attention_dispatch_count
          << ",\"attention_partitions\":" << execution.decode_attention_partition_count
          << ",\"attention_tokens\":" << execution.decode_attention_token_count

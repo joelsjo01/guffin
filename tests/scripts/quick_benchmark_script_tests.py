@@ -74,7 +74,7 @@ def decode_attribution(evaluated, cached, decoded, initial_cache, attention_toke
         "total": 21,
     }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "selected_tokens": decoded,
         "decoded_tokens": decoded,
         "initial_cache_position": initial_cache,
@@ -85,6 +85,11 @@ def decode_attribution(evaluated, cached, decoded, initial_cache, attention_toke
         "gpu_ns": 8_000_000_000,
         "selection_ns": 1000,
         "wall_minus_gpu_ns": 1_000_000_000,
+        "resident_weights_bytes": 100,
+        "resident_kv_bytes": 200,
+        "resident_scratch_bytes": 300,
+        "warmup_kv_clear_passes": 0,
+        "warmup_host_cleared_kv_bytes": 0,
         "command_buffers": decoded,
         "commits": decoded,
         "waits": decoded,
@@ -99,8 +104,10 @@ def decode_attribution(evaluated, cached, decoded, initial_cache, attention_toke
         "attention_dispatches": decoded * 42,
         "attention_partitions": decoded * 42,
         "attention_tokens": attention_tokens,
+        "output_head_elisions": 1 if decoded else 0,
+        "output_elided_weight_bytes": 5 if decoded else 0,
         "scheduled_bytes_per_token": per_token,
-        "scheduled_bytes_total": per_token["total"] * decoded,
+        "scheduled_bytes_total": per_token["total"] * decoded - (5 if decoded else 0),
     }
 
 

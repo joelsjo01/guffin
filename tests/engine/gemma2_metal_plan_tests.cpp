@@ -47,6 +47,7 @@ using local_gguf_engine::engine::EngineModelError;
 using local_gguf_engine::engine::EngineModelErrorCode;
 using local_gguf_engine::engine::Gemma2MetalSchedulePhase;
 using local_gguf_engine::engine::Gemma2MetalScratchOwnership;
+using local_gguf_engine::engine::Gemma2MetalDecodeOutputMode;
 using local_gguf_engine::engine::Gemma2MetalModelPlan;
 using local_gguf_engine::engine::Gemma2ModelWeights;
 using local_gguf_engine::engine::Gemma2ModelConfig;
@@ -460,7 +461,7 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
     const auto& prefill = plan.prefill_scratch();
     const auto& decode = plan.decode_scratch();
     const auto& selection = plan.selection_workspace();
-    return backend_buffer_byte_count(prefill.token_id_staging)
+    const auto logical_bytes = backend_buffer_byte_count(prefill.token_id_staging)
         + backend_buffer_byte_count(prefill.normalized_hidden)
         + backend_buffer_byte_count(prefill.raw_query)
         + backend_buffer_byte_count(prefill.raw_key)
@@ -502,6 +503,12 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(selection.candidate_runs_b)
         + backend_buffer_byte_count(selection.compact_result)
         + backend_buffer_byte_count(selection.history_token_staging);
+    return logical_bytes
+        - backend_buffer_byte_count(prefill.attention_probabilities)
+        - backend_buffer_byte_count(prefill.projected_attention_output)
+        - backend_buffer_byte_count(prefill.normalized_feed_forward_input)
+        - backend_buffer_byte_count(prefill.projected_feed_forward_output)
+        - backend_buffer_byte_count(prefill.feed_forward_gated);
 }
 
 void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() {
@@ -524,6 +531,18 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
         (21ULL * 8192ULL + 21ULL * 4096ULL) * 8ULL * 256ULL * 2ULL * sizeof(std::uint16_t);
     expect(target_kv_bytes == 2'113'929'216ULL, "Gemma2 target KV byte formula mismatch");
     expect(plan.scratch_byte_count() == expected_scratch_byte_count(plan), "Gemma2 Metal scratch byte count mismatch");
+    const auto& prefill = plan.prefill_scratch();
+    const auto same_storage = [](const auto& left, const auto& right) {
+        return &backend_buffer_storage(left) == &backend_buffer_storage(right);
+    };
+    expect(same_storage(prefill.attention_scores, prefill.attention_probabilities),
+        "prefill scores and probabilities must share storage");
+    expect(same_storage(prefill.normalized_hidden, prefill.projected_attention_output)
+            && same_storage(prefill.normalized_hidden, prefill.normalized_feed_forward_input)
+            && same_storage(prefill.normalized_hidden, prefill.projected_feed_forward_output),
+        "prefill hidden-width liveness aliases mismatch");
+    expect(same_storage(prefill.feed_forward_gate, prefill.feed_forward_gated),
+        "prefill gate/GELU liveness alias mismatch");
 
     expect(plan.weights().blocks.size() == 1, "Gemma2 Metal block weight count mismatch");
     expect(plan.kv_cache().size() == 1, "Gemma2 Metal KV layer count mismatch");
@@ -644,6 +663,31 @@ void test_creates_gemma2_metal_schedules_when_available() {
     );
 }
 
+void test_gemma2_metal_schedule_preserves_target_4k_8k_populated_bounds_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+
+    auto payload_store = tiny_gemma2_payload_store(true, 2U);
+    auto view = tiny_model_view(
+        tiny_gemma2_metadata(2U, 2U, 1U, 256U, 8192U, 4096U),
+        std::move(payload_store.payloads)
+    );
+    const auto model = load_engine_model_from_gguf(view);
+    const auto plan = create_gemma2_metal_model_plan(model);
+
+    const auto before_boundary = create_gemma2_metal_decode_schedule(plan, 4095U);
+    expect(before_boundary.layers()[0].attention_token_count == 4096U
+            && before_boundary.layers()[1].attention_token_count == 4096U,
+        "target schedule 4K boundary mismatch");
+    const auto after_boundary = create_gemma2_metal_decode_schedule(plan, 4096U);
+    expect(after_boundary.layers()[0].attention_token_count == 4096U
+            && after_boundary.layers()[1].attention_token_count == 4097U,
+        "target schedule local/global growth mismatch");
+    const auto full = create_gemma2_metal_decode_schedule(plan, 8191U);
+    expect(full.layers()[0].attention_token_count == 4096U
+            && full.layers()[1].attention_token_count == 8192U,
+        "target schedule 8K boundary mismatch");
+}
+
 void test_gemma2_metal_warmup_is_state_neutral_and_covers_production_routes_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -676,7 +720,8 @@ void test_gemma2_metal_warmup_is_state_neutral_and_covers_production_routes_when
     );
 
     expect(stats.prefill_token_count == 16U, "warm-up prefill token count mismatch");
-    expect(stats.cleared_kv_bytes == warmed_plan.kv_cache_byte_count(), "warm-up KV byte count mismatch");
+    expect(stats.kv_clear_pass_count == 0U && stats.host_cleared_kv_bytes == 0U,
+        "warm-up must not materialize the KV allocation with host clears");
     expect(stats.prefill.command_buffer_count == 1U && stats.prefill.synchronous_wait_count == 1U,
         "warm-up prefill must submit and synchronize exactly once");
     expect(stats.prefill.scheduled_layer_execution_count == 2U && stats.prefill.kv_write_count == 2U,
@@ -698,17 +743,13 @@ void test_gemma2_metal_warmup_is_state_neutral_and_covers_production_routes_when
     expect(warmed_plan.allocation_identities() == identities,
         "warm-up changed resident allocation identities");
 
-    for (const auto& layer : warmed_plan.kv_cache()) {
-        for (const auto* buffer : {&layer.key, &layer.value}) {
-            const auto contents = copy_tensor_from_backend(*buffer);
-            expect(
-                std::all_of(contents.bytes().begin(), contents.bytes().end(), [](std::uint8_t byte) {
-                    return byte == 0U;
-                }),
-                "warm-up did not restore physical zero KV"
-            );
-        }
-    }
+    const auto stale_warmup_key = copy_tensor_from_backend(warmed_plan.kv_cache().front().key);
+    expect(
+        std::any_of(stale_warmup_key.bytes().begin(), stale_warmup_key.bytes().end(), [](std::uint8_t byte) {
+            return byte != 0U;
+        }),
+        "warm-up test must retain stale physical KV so parity cannot depend on zero fill"
+    );
 
     const std::array<TokenLogit, 4> sampler_candidates {{
         {.token = 0U, .logit = 0.1F},
@@ -1037,6 +1078,7 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
     const auto weights = bind_gemma2_model_weights(model);
     auto plan = create_gemma2_metal_model_plan(model);
     auto no_selection_plan = create_gemma2_metal_model_plan(model);
+    auto kv_only_plan = create_gemma2_metal_model_plan(model);
     const auto& config = plan.config();
     constexpr std::uint32_t cache_position = 9U;
 
@@ -1100,6 +1142,8 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
         plan.kv_cache()[layer].value = copy_tensor_to_backend(metal_values, BackendKind::metal);
         no_selection_plan.kv_cache()[layer].key = copy_tensor_to_backend(metal_keys, BackendKind::metal);
         no_selection_plan.kv_cache()[layer].value = copy_tensor_to_backend(metal_values, BackendKind::metal);
+        kv_only_plan.kv_cache()[layer].key = copy_tensor_to_backend(metal_keys, BackendKind::metal);
+        kv_only_plan.kv_cache()[layer].value = copy_tensor_to_backend(metal_values, BackendKind::metal);
     }
 
     constexpr std::uint32_t token_id = 3U;
@@ -1198,6 +1242,63 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
         3.0e-3F,
         "no-selection decode logits"
     );
+
+    const auto kv_only_schedule = create_gemma2_metal_decode_schedule(kv_only_plan, cache_position);
+    const auto kv_only = run_gemma2_metal_resident_decode_step(
+        kv_only_plan,
+        kv_only_schedule,
+        token_id,
+        std::sqrt(static_cast<float>(config.embedding_length)),
+        std::nullopt,
+        Gemma2MetalDecodeOutputMode::kv_only
+    );
+    expect(!kv_only.produced_logits && !kv_only.candidates.has_value(),
+        "KV-only decode must omit logits and candidates");
+    expect(kv_only.execution.compute_dispatch_count + 2U == no_selection.execution.compute_dispatch_count,
+        "KV-only decode must elide final norm and output-head dispatches");
+    expect(kv_only.execution.memory_barrier_count + 2U == no_selection.execution.memory_barrier_count,
+        "KV-only decode must elide final norm and output-head barriers");
+    expect(kv_only.execution.f16_projection_count + 1U == no_selection.execution.f16_projection_count,
+        "KV-only decode must elide one F16 output projection");
+    expect(kv_only.execution.output_head_elision_count == 1U,
+        "KV-only decode elision accounting mismatch");
+    expect(
+        kv_only.execution.output_elided_weight_bytes
+            == kv_only_plan.weights().output_norm_weight.descriptor().byte_count
+                + kv_only_plan.weights().output_weight.descriptor().byte_count,
+        "KV-only decode elided weight-byte accounting mismatch"
+    );
+    for (std::size_t layer = 0; layer < plan.kv_cache().size(); ++layer) {
+        const auto kv_only_key = copy_tensor_from_backend(kv_only_plan.kv_cache()[layer].key);
+        const auto full_key = copy_tensor_from_backend(plan.kv_cache()[layer].key);
+        expect(
+            std::equal(kv_only_key.bytes().begin(), kv_only_key.bytes().end(), full_key.bytes().begin()),
+            "KV-only decode key cache differs from full-output decode"
+        );
+        const auto kv_only_value = copy_tensor_from_backend(kv_only_plan.kv_cache()[layer].value);
+        const auto full_value = copy_tensor_from_backend(plan.kv_cache()[layer].value);
+        expect(
+            std::equal(kv_only_value.bytes().begin(), kv_only_value.bytes().end(), full_value.bytes().begin()),
+            "KV-only decode value cache differs from full-output decode"
+        );
+    }
+
+    try {
+        (void)run_gemma2_metal_resident_decode_step(
+            kv_only_plan,
+            kv_only_schedule,
+            token_id,
+            1.0F,
+            TokenSelectionRequest {},
+            Gemma2MetalDecodeOutputMode::kv_only
+        );
+        throw TestFailure("KV-only decode should reject token selection");
+    } catch (const std::invalid_argument& error) {
+        expect(
+            std::string_view(error.what()) == "Gemma2 KV-only decode cannot request token selection",
+            "KV-only selection error mismatch"
+        );
+    }
 
     try {
         (void)run_gemma2_metal_resident_decode_step(
@@ -1780,6 +1881,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "creates Gemma2 Metal schedules when available",
         test_creates_gemma2_metal_schedules_when_available,
+    },
+    {
+        "Gemma2 Metal schedule preserves target 4K/8K populated bounds when available",
+        test_gemma2_metal_schedule_preserves_target_4k_8k_populated_bounds_when_available,
     },
     {
         "Gemma2 Metal warm-up is state neutral and covers production routes when available",

@@ -67,6 +67,8 @@ struct Gemma2MetalDecodeExecutionStats {
     std::uint32_t q6_exact_16_projection_count = 0;
     std::uint32_t q6_generic_tiled_projection_count = 0;
     std::uint32_t f16_projection_count = 0;
+    std::uint32_t output_head_elision_count = 0;
+    std::uint64_t output_elided_weight_bytes = 0;
     std::uint32_t decode_attention_dispatch_count = 0;
     std::uint32_t decode_attention_partition_count = 0;
     std::uint64_t decode_attention_token_count = 0;
@@ -79,8 +81,14 @@ struct Gemma2MetalDecodeExecutionStats {
     std::uint32_t fused_gate_up_gelu_count = 0;
 };
 
+enum class Gemma2MetalDecodeOutputMode {
+    logits,
+    kv_only,
+};
+
 struct Gemma2MetalResidentDecodeResult {
     tensor::BackendBuffer logits;
+    bool produced_logits = true;
     std::optional<CompactTokenCandidates> candidates;
     Gemma2MetalDecodeExecutionStats execution;
 };
@@ -128,7 +136,8 @@ struct Gemma2MetalResidentPrefillResult {
 struct Gemma2MetalWarmupStats {
     std::uint64_t wall_duration_ns = 0;
     std::uint32_t prefill_token_count = 0;
-    std::size_t cleared_kv_bytes = 0;
+    std::uint32_t kv_clear_pass_count = 0;
+    std::size_t host_cleared_kv_bytes = 0;
     Gemma2MetalPrefillExecutionStats prefill;
     Gemma2MetalDecodeExecutionStats decode;
 };
@@ -165,7 +174,8 @@ using Gemma2MetalGeneratedTokenCallback =
     const Gemma2MetalSchedule& decode,
     std::uint32_t token_id,
     float embedding_scale,
-    std::optional<TokenSelectionRequest> selection_request = std::nullopt
+    std::optional<TokenSelectionRequest> selection_request = std::nullopt,
+    Gemma2MetalDecodeOutputMode output_mode = Gemma2MetalDecodeOutputMode::logits
 );
 
 [[nodiscard]] Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(

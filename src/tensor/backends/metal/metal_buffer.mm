@@ -96,25 +96,6 @@ BackendBuffer allocate_metal_backend_buffer(const TensorDescriptor& descriptor) 
     }
 }
 
-void clear_metal_backend_buffer(const BackendBuffer& buffer) {
-    @autoreleasepool {
-        const auto& metal_storage = require_metal_backend_buffer(
-            backend_buffer_storage(buffer)
-        );
-        void* contents = [metal_storage.buffer() contents];
-        if (contents == nullptr) {
-            throw runtime::BackendError(
-                runtime::BackendErrorCode::metal_execution_failed,
-                runtime::BackendKind::metal,
-                "Metal backend buffer does not expose shared storage for zero fill"
-            );
-        }
-        // All production buffers currently use shared storage. A host memset is
-        // synchronous and prefaults the complete allocation without replacing it.
-        std::memset(contents, 0, metal_storage.descriptor().byte_count);
-    }
-}
-
 TensorStorage copy_tensor_from_metal_backend(const detail::BackendBufferStorage& storage) {
     @autoreleasepool {
         const auto& metal_storage = require_metal_backend_buffer(storage);

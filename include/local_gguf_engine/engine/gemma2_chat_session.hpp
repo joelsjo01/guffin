@@ -54,6 +54,8 @@ struct Gemma2ChatTurnMetrics {
     std::size_t resident_weight_byte_count = 0;
     std::size_t resident_kv_cache_byte_count = 0;
     std::size_t resident_scratch_byte_count = 0;
+    std::uint32_t warmup_kv_clear_pass_count = 0;
+    std::size_t warmup_host_cleared_kv_bytes = 0;
     Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes;
     Gemma2MetalPrefillExecutionStats prefill_execution;
     Gemma2MetalDecodeExecutionStats decode_execution;

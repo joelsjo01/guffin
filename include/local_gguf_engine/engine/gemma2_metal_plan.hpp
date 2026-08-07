@@ -96,6 +96,8 @@ inline constexpr std::uint32_t gemma2_metal_prefill_chunk_size = 128U;
 struct Gemma2MetalPrefillScratch {
     // Token IDs are staged by absolute cache position so consecutive command
     // buffers never race with CPU writes while sharing activation scratch.
+    // Equal-descriptor fields may share storage only according to the serial
+    // liveness schedule established by allocate_prefill_scratch().
     tensor::BackendBuffer token_id_staging;
     tensor::BackendBuffer normalized_hidden;
     tensor::BackendBuffer raw_query;

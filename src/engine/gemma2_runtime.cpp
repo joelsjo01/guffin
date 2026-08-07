@@ -128,7 +128,8 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
     const Gemma2MetalSchedule& decode,
     std::uint32_t token_id,
     float embedding_scale,
-    std::optional<TokenSelectionRequest> selection_request
+    std::optional<TokenSelectionRequest> selection_request,
+    Gemma2MetalDecodeOutputMode output_mode
 ) {
     if (decode.phase() != Gemma2MetalSchedulePhase::decode
         || decode.scratch_ownership() != Gemma2MetalScratchOwnership::resident_decode
@@ -140,6 +141,9 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
     }
     if (token_id >= plan.config().vocab_size) {
         throw std::invalid_argument("Gemma2 resident Metal decode token is outside vocabulary");
+    }
+    if (output_mode == Gemma2MetalDecodeOutputMode::kv_only && selection_request.has_value()) {
+        throw std::invalid_argument("Gemma2 KV-only decode cannot request token selection");
     }
 
     namespace metal = tensor::backends::metal;
@@ -286,17 +290,19 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
         command.pop_debug_group();
     }
 
-    command.push_debug_group("Final norm and output head");
-    command.encode_rms_norm(
-        scratch.feed_forward_residual,
-        plan.weights().output_norm_weight,
-        scratch.normalized_hidden,
-        config.rms_norm_epsilon
-    );
-    command.encode_memory_barrier();
-    command.encode_matmul(scratch.normalized_hidden, plan.weights().output_weight, scratch.logits);
-    command.encode_memory_barrier();
-    command.pop_debug_group();
+    if (output_mode == Gemma2MetalDecodeOutputMode::logits) {
+        command.push_debug_group("Final norm and output head");
+        command.encode_rms_norm(
+            scratch.feed_forward_residual,
+            plan.weights().output_norm_weight,
+            scratch.normalized_hidden,
+            config.rms_norm_epsilon
+        );
+        command.encode_memory_barrier();
+        command.encode_matmul(scratch.normalized_hidden, plan.weights().output_weight, scratch.logits);
+        command.encode_memory_barrier();
+        command.pop_debug_group();
+    }
     std::uint32_t selector_dispatch_count = 0;
     if (selection_request.has_value()) {
         command.push_debug_group("Token selection");
@@ -313,6 +319,7 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
 
     return Gemma2MetalResidentDecodeResult {
         .logits = scratch.logits,
+        .produced_logits = output_mode == Gemma2MetalDecodeOutputMode::logits,
         .candidates = candidates,
         .execution = Gemma2MetalDecodeExecutionStats {
             .command_buffer_count = metal_stats.command_buffer_count,
@@ -336,6 +343,11 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             .q6_exact_16_projection_count = metal_stats.q6_exact_16_projection_count,
             .q6_generic_tiled_projection_count = metal_stats.q6_generic_tiled_projection_count,
             .f16_projection_count = metal_stats.f16_projection_count,
+            .output_head_elision_count = output_mode == Gemma2MetalDecodeOutputMode::kv_only ? 1U : 0U,
+            .output_elided_weight_bytes = output_mode == Gemma2MetalDecodeOutputMode::kv_only
+                ? plan.weights().output_norm_weight.descriptor().byte_count
+                    + plan.weights().output_weight.descriptor().byte_count
+                : 0U,
             .decode_attention_dispatch_count = metal_stats.decode_attention_dispatch_count,
             .decode_attention_partition_count = metal_stats.decode_attention_partition_count,
             .decode_attention_token_count = metal_stats.decode_attention_token_count,
@@ -647,21 +659,8 @@ Gemma2MetalWarmupStats warm_up_gemma2_metal_plan(
         throw std::invalid_argument("Gemma2 Metal warm-up requires at least 17 context positions");
     }
 
-    namespace metal = tensor::backends::metal;
-    const auto clear_kv = [&]() {
-        std::size_t cleared_bytes = 0;
-        for (const auto& layer : plan.kv_cache()) {
-            metal::clear_backend_buffer(layer.key);
-            metal::clear_backend_buffer(layer.value);
-            cleared_bytes += layer.key.descriptor().byte_count;
-            cleared_bytes += layer.value.descriptor().byte_count;
-        }
-        return cleared_bytes;
-    };
-
     const auto allocation_identities = plan.allocation_identities();
     const auto started = std::chrono::steady_clock::now();
-    const auto cleared_bytes = clear_kv();
     const auto embedding_scale = gemma2_input_embedding_scale(plan.config().embedding_length);
     const auto prefill = run_gemma2_metal_resident_prefill(
         plan,
@@ -690,10 +689,6 @@ Gemma2MetalWarmupStats warm_up_gemma2_metal_plan(
     if (!decode.candidates.has_value()) {
         throw std::runtime_error("Gemma2 Metal warm-up decode did not return token candidates");
     }
-    const auto restored_bytes = clear_kv();
-    if (restored_bytes != cleared_bytes || cleared_bytes != plan.kv_cache_byte_count()) {
-        throw std::runtime_error("Gemma2 Metal warm-up KV clear byte count mismatch");
-    }
     if (plan.allocation_identities() != allocation_identities) {
         throw std::runtime_error("Gemma2 Metal warm-up replaced a resident allocation");
     }
@@ -703,7 +698,8 @@ Gemma2MetalWarmupStats warm_up_gemma2_metal_plan(
             std::chrono::duration_cast<std::chrono::nanoseconds>(completed - started).count()
         ),
         .prefill_token_count = static_cast<std::uint32_t>(token_ids.size()),
-        .cleared_kv_bytes = cleared_bytes,
+        .kv_clear_pass_count = 0U,
+        .host_cleared_kv_bytes = 0U,
         .prefill = prefill.execution,
         .decode = decode.execution,
     };
@@ -818,7 +814,10 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
             embedding_scale,
             needs_next_candidate
                 ? std::optional<TokenSelectionRequest>(sampler.selection_request())
-                : std::nullopt
+                : std::nullopt,
+            needs_next_candidate
+                ? Gemma2MetalDecodeOutputMode::logits
+                : Gemma2MetalDecodeOutputMode::kv_only
         );
         const auto decode_completed_ns = monotonic_now_ns(clock);
         metrics.decode_completed_ns = decode_completed_ns;
@@ -848,6 +847,8 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         decode_execution.q6_exact_16_projection_count += decode_step.execution.q6_exact_16_projection_count;
         decode_execution.q6_generic_tiled_projection_count += decode_step.execution.q6_generic_tiled_projection_count;
         decode_execution.f16_projection_count += decode_step.execution.f16_projection_count;
+        decode_execution.output_head_elision_count += decode_step.execution.output_head_elision_count;
+        decode_execution.output_elided_weight_bytes += decode_step.execution.output_elided_weight_bytes;
         decode_execution.decode_attention_dispatch_count += decode_step.execution.decode_attention_dispatch_count;
         decode_execution.decode_attention_partition_count += decode_step.execution.decode_attention_partition_count;
         if (decode_step.execution.decode_attention_token_count

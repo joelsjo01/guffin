@@ -78,16 +78,19 @@ def parse_local(output):
 
 def validate_decode_attribution(turn, name):
     record = turn.get("decode_attribution")
-    if not isinstance(record, dict) or record.get("schema_version") != 1:
+    if not isinstance(record, dict) or record.get("schema_version") != 2:
         raise RuntimeError(f"local {name} decode attribution schema mismatch")
     required_nonnegative = (
         "selected_tokens", "decoded_tokens", "initial_cache_position",
         "final_cache_position", "evaluated_prompt_tokens", "reused_cache_tokens",
         "decode_wall_ns", "gpu_ns", "selection_ns", "wall_minus_gpu_ns",
+        "resident_weights_bytes", "resident_kv_bytes", "resident_scratch_bytes",
+        "warmup_kv_clear_passes", "warmup_host_cleared_kv_bytes",
         "command_buffers", "commits", "waits", "compute_encoders",
         "compute_dispatches", "blit_encoders", "barriers", "transient_allocations",
         "selector_dispatches", "max_candidates", "compact_readback_bytes",
         "attention_dispatches", "attention_partitions", "attention_tokens",
+        "output_head_elisions", "output_elided_weight_bytes",
         "scheduled_bytes_total",
     )
     for field in required_nonnegative:
@@ -113,12 +116,16 @@ def validate_decode_attribution(turn, name):
         raise RuntimeError(f"local {name} GPU attribution exceeds decode wall time")
     if record["wall_minus_gpu_ns"] != record["decode_wall_ns"] - record["gpu_ns"]:
         raise RuntimeError(f"local {name} decode residual attribution mismatch")
+    if record["warmup_kv_clear_passes"] != 0 or record["warmup_host_cleared_kv_bytes"] != 0:
+        raise RuntimeError(f"local {name} warm-up materialized KV with a host clear")
     if record["decoded_tokens"] > 0 and (
         record["command_buffers"] == 0
         or record["compute_dispatches"] == 0
         or record["gpu_ns"] == 0
     ):
         raise RuntimeError(f"local {name} decoded tokens have no GPU work")
+    if record["output_head_elisions"] > record["decoded_tokens"]:
+        raise RuntimeError(f"local {name} output-head elisions exceed decoded tokens")
     byte_categories = record.get("scheduled_bytes_per_token")
     if not isinstance(byte_categories, dict):
         raise RuntimeError(f"local {name} scheduled byte categories are missing")
@@ -132,7 +139,12 @@ def validate_decode_attribution(turn, name):
             raise RuntimeError(f"local {name} scheduled byte category {field} is invalid")
     if sum(byte_categories[field] for field in category_names) != byte_categories["total"]:
         raise RuntimeError(f"local {name} scheduled byte categories do not sum")
-    if record["scheduled_bytes_total"] != byte_categories["total"] * record["decoded_tokens"]:
+    minimum_elided = byte_categories["output_head"] * record["output_head_elisions"]
+    if record["output_elided_weight_bytes"] < minimum_elided:
+        raise RuntimeError(f"local {name} output elision byte accounting is too small")
+    expected_scheduled = byte_categories["total"] * record["decoded_tokens"] \
+        - record["output_elided_weight_bytes"]
+    if record["scheduled_bytes_total"] != expected_scheduled:
         raise RuntimeError(f"local {name} scheduled byte total mismatch")
 
 

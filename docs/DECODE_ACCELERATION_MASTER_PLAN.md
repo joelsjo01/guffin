@@ -89,7 +89,7 @@ The order below is dependency-driven. Work within a stage is ranked, not a
 requirement to retain every item. A failed gate moves the program forward rather
 than triggering an open-ended rewrite.
 
-### Stage 0: Make Performance Evidence Trustworthy
+### Completed: Stage 0: Make Performance Evidence Trustworthy
 
 **Goal:** establish a stable measurement and correctness foundation before
 changing the hot path.
@@ -113,7 +113,7 @@ changing the hot path.
 the baseline passes the canonical benchmark protocol, and later candidates can
 be attributed without temporary changes to inference semantics.
 
-### Stage 1: Remove Avoidable Work and Memory Pressure
+### Completed: Stage 1: Remove Avoidable Work and Memory Pressure
 
 **Goal:** correct high-confidence whole-system inefficiencies before adding
 more resident state.
@@ -123,18 +123,29 @@ more resident state.
    prefix reuse, context shift, ring wraparound, and mixed 4K/8K window safety.
    Measure startup, TTFT, resident/compressed memory, and decode; retain it for
    lifecycle and memory improvements even if decode is neutral, provided no
-   headline metric regresses.
+   headline metric regresses. **Completed:** both clears are gone; interleaved
+   target runs reduced ready RSS by 58.87% in five of five pairs and
+   startup-to-ready by 1.98% with neutral decode.
 2. Release or advise away GGUF tensor-payload pages after Metal upload while
    retaining valid metadata ownership. Measure load time, prompt processing,
-   steady decode, page faults, and compressor behavior.
+   steady decode, page faults, and compressor behavior. **Paging hint rejected:**
+   `MADV_DONTNEED` succeeded but changed no resident payload pages in three
+   target runs, so all hint code was removed; revisit only with a different
+   mapping/ownership design and fresh evidence.
 3. Skip final norm/output work when a turn is already known to terminate and no
    next-token distribution is needed. Treat this as tail-latency and energy
-   work, not a generation-throughput claim.
+   work, not a generation-throughput claim. **Completed for stop/max:** the
+   body-only terminal path reduced five-pair median terminal decode by 27.01%;
+   callback-discovered stops preserve execution-before-delivery ordering.
 4. Recover safe memory headroom from prefill scratch aliasing or liveness only
    when ownership is clear and measurements justify the complexity.
+   **Completed:** three proved aliases remove 79,953,920 bytes (44.14% of total
+   plan scratch) with parity and explicit physical accounting.
 5. Replace quadratic whole-prefix streaming decode with incremental text
    decoding before speculative bursts or long outputs make callback work
-   visible. Preserve UTF-8 and tokenizer boundary behavior.
+   visible. Preserve UTF-8 and tokenizer boundary behavior. **Completed:** batch
+   and streaming now share one per-token append operation, and reverse-stop
+   rescans are suffix-bounded.
 
 **Exit gate:** avoidable KV materialization is gone, enough memory headroom
 exists for verifier state and a small proposer, and no remaining housekeeping

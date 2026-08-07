@@ -882,30 +882,37 @@ std::string Tokenizer::decode(
 ) const {
     std::string output;
     for (const auto token_id : token_ids) {
-        if (static_cast<std::uint64_t>(token_id) >= static_cast<std::uint64_t>(vocabulary_.size())) {
-            throw TokenizerError(TokenizerErrorCode::token_id_out_of_range, std::to_string(token_id));
-        }
-
-        if (options.skip_special_tokens && token_id_is_special(token_id)) {
-            continue;
-        }
-
-        const auto& token = vocabulary_[token_id];
-        if (token.type == gguf_token_type_byte) {
-            const auto byte = parse_byte_token(token.text);
-            if (!byte.has_value()) {
-                throw TokenizerError(
-                    TokenizerErrorCode::invalid_vocabulary,
-                    "invalid byte token at id " + std::to_string(token_id)
-                );
-            }
-            output.push_back(static_cast<char>(*byte));
-        } else {
-            append_decoded_token_text(output, model_, token.text);
-        }
+        append_decoded_token(output, token_id, options);
     }
 
     return output;
+}
+
+void Tokenizer::append_decoded_token(
+    std::string& output,
+    std::uint32_t token_id,
+    TokenizerDecodeOptions options
+) const {
+    if (static_cast<std::uint64_t>(token_id) >= static_cast<std::uint64_t>(vocabulary_.size())) {
+        throw TokenizerError(TokenizerErrorCode::token_id_out_of_range, std::to_string(token_id));
+    }
+    if (options.skip_special_tokens && token_id_is_special(token_id)) {
+        return;
+    }
+
+    const auto& token = vocabulary_[token_id];
+    if (token.type == gguf_token_type_byte) {
+        const auto byte = parse_byte_token(token.text);
+        if (!byte.has_value()) {
+            throw TokenizerError(
+                TokenizerErrorCode::invalid_vocabulary,
+                "invalid byte token at id " + std::to_string(token_id)
+            );
+        }
+        output.push_back(static_cast<char>(*byte));
+        return;
+    }
+    append_decoded_token_text(output, model_, token.text);
 }
 
 bool Tokenizer::token_id_is_special(std::uint32_t token_id) const noexcept {

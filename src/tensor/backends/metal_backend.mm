@@ -10,10 +10,6 @@
 
 namespace local_gguf_engine::tensor::backends::metal {
 
-void clear_backend_buffer(const BackendBuffer& buffer) {
-    clear_metal_backend_buffer(buffer);
-}
-
 namespace {
 
 constexpr const char* metal_kernel_source_head = R"metal(

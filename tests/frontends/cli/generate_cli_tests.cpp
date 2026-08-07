@@ -183,6 +183,8 @@ void test_formats_and_validates_chat_decode_attribution() {
     metrics.decode_execution.decode_attention_dispatch_count = 4U;
     metrics.decode_execution.decode_attention_partition_count = 5U;
     metrics.decode_execution.decode_attention_token_count = 123U;
+    metrics.decode_execution.output_head_elision_count = 1U;
+    metrics.decode_execution.output_elided_weight_bytes = 5U;
     metrics.decode_scheduled_weight_bytes = {
         .embedding = 1U,
         .attention_projections = 2U,
@@ -193,7 +195,7 @@ void test_formats_and_validates_chat_decode_attribution() {
         .total = 21U,
     };
     const auto line = format_chat_decode_attribution_line(metrics);
-    expect(line.starts_with("[ Decode: {\"schema_version\":1"),
+    expect(line.starts_with("[ Decode: {\"schema_version\":2"),
         "decode attribution prefix mismatch");
     expect(line.find("\"final_cache_position\":15") != std::string::npos,
         "decode attribution final cache mismatch");
@@ -201,7 +203,11 @@ void test_formats_and_validates_chat_decode_attribution() {
         "decode attribution wall residual mismatch");
     expect(line.find("\"attention_tokens\":123") != std::string::npos,
         "decode attribution attention token mismatch");
-    expect(line.find("\"scheduled_bytes_total\":42") != std::string::npos,
+    expect(line.find("\"output_head_elisions\":1") != std::string::npos,
+        "decode attribution output-head elision mismatch");
+    expect(line.find("\"output_elided_weight_bytes\":5") != std::string::npos,
+        "decode attribution output elision bytes mismatch");
+    expect(line.find("\"scheduled_bytes_total\":37") != std::string::npos,
         "decode attribution scheduled total mismatch");
 
     metrics.decode_execution.gpu_duration_ns = 201U;
@@ -1010,6 +1016,8 @@ void test_gemma2_chat_session_streams_visible_text_before_return_when_available(
     expect(chunks[1] == "Hello", "Gemma2 chat second stream chunk mismatch");
     expect(turn.text == "HelloHello", "Gemma2 chat streamed final text mismatch");
     expect(turn.generated_token_ids.size() == 2, "Gemma2 chat streamed token count mismatch");
+    expect(turn.metrics.decode_execution.output_head_elision_count == 1U,
+        "known token-limit termination must elide exactly one output head");
 }
 
 void test_gemma2_chat_session_can_cancel_generation_when_available() {
@@ -1049,6 +1057,8 @@ void test_gemma2_chat_session_can_cancel_generation_when_available() {
     expect(turn.generated_token_ids.size() == 1, "Gemma2 chat cancelled turn token count mismatch");
     expect(turn.metrics.generation.stop_reason == Gemma2GenerationStopReason::interrupted,
         "Gemma2 chat cancelled turn measurement reason mismatch");
+    expect(turn.metrics.decode_execution.output_head_elision_count == 0U,
+        "callback-discovered cancellation must preserve full-output execution ordering");
 }
 
 void test_gemma2_chat_session_stops_on_eos_when_available() {
@@ -1078,6 +1088,8 @@ void test_gemma2_chat_session_stops_on_eos_when_available() {
     expect(turn.generated_token_ids.empty(), "Gemma2 chat EOS stop should not store visible tokens");
     expect(turn.metrics.generation.stop_reason == Gemma2GenerationStopReason::stop_token,
         "Gemma2 chat EOS measurement reason mismatch");
+    expect(turn.metrics.decode_execution.output_head_elision_count == 1U,
+        "known EOS termination must elide the unused output head");
 }
 
 void test_gemma2_chat_session_stops_on_end_of_turn_when_available() {
@@ -1122,7 +1134,7 @@ void test_gemma2_chat_session_applies_reverse_stop_and_cleans_history_when_avail
         std::move(file_model),
         Gemma2ChatSessionOptions {
             .max_new_tokens = 3,
-            .reverse_stop_strings = {"Hello"},
+            .reverse_stop_strings = {"HelloHello"},
         }
     );
 
@@ -1135,12 +1147,14 @@ void test_gemma2_chat_session_applies_reverse_stop_and_cleans_history_when_avail
     expect(streamed.empty(), "Gemma2 chat reverse stop should not stream the stop string");
     expect(first_turn.text.empty(), "Gemma2 chat reverse stop should trim final text");
     expect(
-        first_turn.reverse_stop_string.has_value() && *first_turn.reverse_stop_string == "Hello",
+        first_turn.reverse_stop_string.has_value() && *first_turn.reverse_stop_string == "HelloHello",
         "Gemma2 chat reverse stop marker mismatch"
     );
     expect(first_turn.generated_token_ids.empty(), "Gemma2 chat reverse stop should not store stop token ids");
     expect(first_turn.metrics.generation.stop_reason == Gemma2GenerationStopReason::reverse_stop,
         "Gemma2 chat reverse-stop measurement reason mismatch");
+    expect(first_turn.metrics.decode_execution.output_head_elision_count == 0U,
+        "callback-discovered reverse stop must preserve full-output execution ordering");
     expect(second_turn.cache_position > first_turn.cache_position, "Gemma2 chat reverse stop history should continue");
     expect(session.message_count() == 4, "Gemma2 chat reverse stop message count mismatch");
 }
@@ -1430,7 +1444,7 @@ void test_runs_generate_chat_decode_diagnostics_only_when_requested_when_availab
     );
     expect(exit_code == EXIT_SUCCESS && error.str().empty(),
         "decode-diagnostic chat invocation failed");
-    expect(output.str().find("[ Decode: {\"schema_version\":1") != std::string::npos,
+    expect(output.str().find("[ Decode: {\"schema_version\":2") != std::string::npos,
         "requested decode attribution record is missing");
 }
 
