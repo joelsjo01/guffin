@@ -25,6 +25,7 @@
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
 #include "tensor_test_support.hpp"
+#include "gemma2_reference_test_support.hpp"
 #include "../../src/tensor/backends/metal/metal_command_context.hpp"
 
 #include <algorithm>
@@ -105,6 +106,9 @@ using local_gguf_engine::tests::TestCase;
 using local_gguf_engine::tests::TestFailure;
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::expect_close;
+using local_gguf_engine::tests::ReferenceDecodeResult;
+using local_gguf_engine::tests::reference_decode;
+using local_gguf_engine::tests::reference_decode_trace;
 using local_gguf_engine::tests::metadata_f32;
 using local_gguf_engine::tests::metadata_string;
 using local_gguf_engine::tests::metadata_u32;
@@ -355,21 +359,6 @@ void expect_f32_matrix_close(
     }
 }
 
-TensorStorage copy_tensor_view(const local_gguf_engine::tensor::TensorView& view) {
-    return TensorStorage::from_bytes(view.descriptor(), view.bytes());
-}
-
-TensorStorage reference_weight_matmul(
-    const TensorStorage& input,
-    const local_gguf_engine::tensor::TensorView& weight
-) {
-    const auto storage = copy_tensor_view(weight);
-    if (weight.descriptor().dtype == DType::f16) {
-        return matmul_f32_f16_gguf_weight(input, storage);
-    }
-    return matmul_f32_quantized_gguf_weight(input, storage);
-}
-
 void write_cache_row(TensorStorage& cache, const TensorStorage& row, std::uint32_t position) {
     const auto row_bytes = row.descriptor().byte_count;
     const auto offset = static_cast<std::size_t>(position) * row_bytes;
@@ -455,132 +444,6 @@ void expect_f16_ring_matches_f32(
         }
     }
 }
-
-struct ReferenceDecodeResult {
-    TensorStorage logits;
-    std::vector<TensorStorage> key_cache;
-    std::vector<TensorStorage> value_cache;
-};
-
-ReferenceDecodeResult reference_decode(
-    const Gemma2ModelConfig& config,
-    const Gemma2ModelWeights& weights,
-    std::uint32_t token_id,
-    std::uint32_t cache_position,
-    std::vector<TensorStorage> key_cache,
-    std::vector<TensorStorage> value_cache
-) {
-    const auto embedding_weight = copy_tensor_view_to_backend(
-        weights.token_embedding_weight,
-        BackendKind::cpu
-    );
-    const std::array<std::uint32_t, 1> token_ids {token_id};
-    auto hidden = copy_tensor_from_backend(embed_f16_gguf_weight_token_ids_to_backend(
-        std::span<const std::uint32_t>(token_ids),
-        embedding_weight,
-        std::sqrt(static_cast<float>(config.embedding_length))
-    ));
-    const auto head_dimension = config.attention_key_length;
-    const auto attention_scale = 1.0F / std::sqrt(static_cast<float>(head_dimension));
-
-    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
-        const auto& block = weights.blocks[layer];
-        const auto normalized_attention = rms_norm_f32(
-            hidden,
-            copy_tensor_view(block.attention.attention_norm_weight),
-            config.rms_norm_epsilon
-        );
-        const auto raw_query = reference_weight_matmul(normalized_attention, block.attention.query_weight);
-        const auto raw_key = reference_weight_matmul(normalized_attention, block.attention.key_weight);
-        const auto value = reference_weight_matmul(normalized_attention, block.attention.value_weight);
-        const auto query = rope_neox_f32_by_heads_with_position_start(
-            raw_query,
-            cache_position,
-            config.attention_head_count,
-            head_dimension,
-            head_dimension,
-            10000.0F
-        );
-        const auto key = round_f32_storage_through_f16(rope_neox_f32_by_heads_with_position_start(
-            raw_key,
-            cache_position,
-            config.attention_head_count_kv,
-            head_dimension,
-            head_dimension,
-            10000.0F
-        ));
-        const auto rounded_value = round_f32_storage_through_f16(value);
-        write_cache_row(key_cache[layer], key, cache_position);
-        write_cache_row(value_cache[layer], rounded_value, cache_position);
-
-        const auto total_tokens = cache_position + 1U;
-        const auto attention_tokens = layer % 2U == 0U
-            ? std::min(total_tokens, config.sliding_window)
-            : total_tokens;
-        const auto scores = causal_grouped_attention_scores_f32(
-            query,
-            key_cache[layer],
-            cache_position,
-            config.attention_head_count,
-            config.attention_head_count_kv,
-            head_dimension,
-            attention_tokens,
-            attention_scale,
-            config.attention_logit_softcap
-        );
-        const auto probabilities = softmax_f32(scores);
-        const auto attention_output = causal_grouped_attention_values_f32(
-            probabilities,
-            value_cache[layer],
-            cache_position,
-            config.attention_head_count,
-            config.attention_head_count_kv,
-            config.attention_value_length,
-            attention_tokens
-        );
-        const auto projected_attention = reference_weight_matmul(
-            attention_output,
-            block.attention.output_weight
-        );
-        const auto post_attention = rms_norm_f32(
-            projected_attention,
-            copy_tensor_view(block.attention.post_attention_norm_weight),
-            config.rms_norm_epsilon
-        );
-        const auto attention_residual = add_f32(hidden, post_attention);
-        const auto normalized_ffn = rms_norm_f32(
-            attention_residual,
-            copy_tensor_view(block.feed_forward.feed_forward_norm_weight),
-            config.rms_norm_epsilon
-        );
-        const auto gate = reference_weight_matmul(normalized_ffn, block.feed_forward.gate_weight);
-        const auto up = reference_weight_matmul(normalized_ffn, block.feed_forward.up_weight);
-        const auto gated = multiply_f32(gelu_tanh_f32(gate), up);
-        const auto projected_ffn = reference_weight_matmul(gated, block.feed_forward.down_weight);
-        const auto post_ffn = rms_norm_f32(
-            projected_ffn,
-            copy_tensor_view(block.feed_forward.post_feed_forward_norm_weight),
-            config.rms_norm_epsilon
-        );
-        hidden = add_f32(attention_residual, post_ffn);
-    }
-
-    const auto normalized_output = rms_norm_f32(
-        hidden,
-        copy_tensor_view(weights.output_norm_weight),
-        config.rms_norm_epsilon
-    );
-    auto logits = reference_weight_matmul(normalized_output, weights.output_weight);
-    logits = softcap_f32(logits, config.final_logit_softcap);
-    return ReferenceDecodeResult {
-        .logits = std::move(logits),
-        .key_cache = std::move(key_cache),
-        .value_cache = std::move(value_cache),
-    };
-}
-
-
-
 
 std::size_t expected_kv_cache_byte_count(const Gemma2ModelConfig& config) {
     std::size_t bytes = 0;
@@ -717,6 +580,16 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
         plan.decode_scratch().feed_forward_residual.descriptor().shape == Shape::from({1, 256}),
         "Gemma2 Metal FFN residual scratch shape mismatch"
     );
+    const auto& bytes = plan.decode_scheduled_weight_bytes();
+    expect(
+        bytes.embedding + bytes.attention_projections + bytes.feed_forward_gate_up
+            + bytes.feed_forward_down + bytes.output_head + bytes.norms == bytes.total,
+        "Gemma2 scheduled decode weight categories do not sum"
+    );
+    expect(bytes.embedding == 256U * sizeof(std::uint16_t),
+        "Gemma2 scheduled embedding must count one F16 row");
+    expect(bytes.output_head == plan.weights().output_weight.descriptor().byte_count,
+        "Gemma2 scheduled output head byte count mismatch");
 }
 
 void test_gemma2_metal_plan_roundtrips_uploaded_borrowed_weight_when_available() {
@@ -1800,6 +1673,101 @@ void test_gemma2_compact_metal_candidates_match_cpu_sort_when_available() {
     }
 }
 
+void test_gemma2_sequential_decode_trace_matches_each_metal_row_and_kv_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    auto payload_store = nonzero_tiny_gemma2_payload_store(2U);
+    auto view = tiny_model_view(
+        tiny_gemma2_metadata(2U, 2U, 1U, 256U, 16U, 8U),
+        std::move(payload_store.payloads)
+    );
+    const auto model = load_engine_model_from_gguf(view);
+    const auto weights = bind_gemma2_model_weights(model);
+    const auto& config = model.gemma2_config();
+    auto plan = create_gemma2_metal_model_plan(model);
+    constexpr std::uint32_t initial_position = 7U;
+    std::vector<TensorStorage> keys;
+    std::vector<TensorStorage> values;
+    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        keys.push_back(TensorStorage::allocate(TensorDescriptor::from(
+            Shape::from({config.context_length, config.attention_head_count_kv * config.attention_key_length}),
+            DType::f32
+        )));
+        values.push_back(TensorStorage::allocate(TensorDescriptor::from(
+            Shape::from({config.context_length, config.attention_head_count_kv * config.attention_value_length}),
+            DType::f32
+        )));
+    }
+    const std::array<std::uint32_t, 3> tokens {1U, 2U, 3U};
+    const auto trace = reference_decode_trace(
+        config, weights, tokens, initial_position, keys, values
+    );
+    expect(trace.steps.size() == tokens.size() && trace.final_cache_position == 10U,
+        "sequential reference trace positions mismatch");
+
+    std::uint64_t total_attention_tokens = 0U;
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        const auto cache_position = initial_position + static_cast<std::uint32_t>(index);
+        const auto schedule = create_gemma2_metal_decode_schedule(plan, cache_position);
+        const auto result = run_gemma2_metal_resident_decode_step(
+            plan,
+            schedule,
+            tokens[index],
+            std::sqrt(static_cast<float>(config.embedding_length)),
+            TokenSelectionRequest {.top_k = 4U, .base_candidate_count = 4U}
+        );
+        const auto actual_logits = copy_tensor_from_backend(result.logits);
+        expect_f32_matrix_close(
+            softcap_f32(actual_logits, config.final_logit_softcap),
+            trace.steps[index].logits,
+            3.0e-3F,
+            "sequential decode per-row logits"
+        );
+        expect(result.candidates.has_value() && result.candidates->count == 4U,
+            "sequential decode candidate set mismatch");
+        for (std::uint32_t candidate = 0; candidate < 4U; ++candidate) {
+            expect(result.candidates->values[candidate].token
+                    == trace.steps[index].candidates[candidate].token,
+                "sequential decode candidate token mismatch");
+            expect_close(
+                result.candidates->values[candidate].logit,
+                trace.steps[index].candidates[candidate].logit,
+                3.0e-3F,
+                "sequential decode candidate logit mismatch"
+            );
+        }
+        std::uint64_t expected_attention_tokens = 0U;
+        for (const auto& layer : schedule.layers()) expected_attention_tokens += layer.attention_token_count;
+        expect(result.execution.decode_attention_token_count == expected_attention_tokens,
+            "sequential decode attention-token accounting mismatch");
+        total_attention_tokens += result.execution.decode_attention_token_count;
+        for (std::size_t layer = 0; layer < plan.kv_cache().size(); ++layer) {
+            const auto row_end = cache_position + 1U;
+            const auto first_row = plan.layers()[layer].uses_sliding_window
+                ? row_end - std::min(row_end, config.sliding_window) : 0U;
+            expect_f16_ring_matches_f32(
+                copy_tensor_from_backend(plan.kv_cache()[layer].key),
+                trace.steps[index].key_cache[layer],
+                first_row,
+                row_end,
+                plan.kv_cache()[layer].row_mask,
+                3.0e-3F,
+                "sequential decode key transition"
+            );
+            expect_f16_ring_matches_f32(
+                copy_tensor_from_backend(plan.kv_cache()[layer].value),
+                trace.steps[index].value_cache[layer],
+                first_row,
+                row_end,
+                plan.kv_cache()[layer].row_mask,
+                3.0e-3F,
+                "sequential decode value transition"
+            );
+        }
+    }
+    expect(total_attention_tokens == 51U,
+        "sequential trace must cross the sliding-window boundary while global attention grows");
+}
+
 const TestCase kGemma2MetalPlanTests[] = {
     {
         "creates Gemma2 Metal plan from borrowed weight views when available",
@@ -1856,6 +1824,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 compact Metal candidates match CPU sort when available",
         test_gemma2_compact_metal_candidates_match_cpu_sort_when_available,
+    },
+    {
+        "Gemma2 sequential decode trace matches each Metal row and KV when available",
+        test_gemma2_sequential_decode_trace_matches_each_metal_row_and_kv_when_available,
     },
     {
         "reports Gemma2 Metal plan unavailable when Metal missing",

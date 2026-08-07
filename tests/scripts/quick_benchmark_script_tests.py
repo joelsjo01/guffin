@@ -1,8 +1,13 @@
 import contextlib
+import copy
 import importlib.util
 import io
 import pathlib
+import json
+import struct
 import sys
+import tempfile
+import types
 import unittest
 
 
@@ -21,6 +26,84 @@ REFERENCE = importlib.util.module_from_spec(REFERENCE_SPEC)
 REFERENCE_SPEC.loader.exec_module(REFERENCE)
 
 
+def kernel_diagnostics_fixture():
+    return {
+        "engine_build": "test-build",
+        "model": "test.gguf",
+        "schema_version": 2,
+        "measured_commands_per_mode": 3,
+        "warmup_commands_per_mode": 1,
+        "sustained_dispatches_per_command": 42,
+        "kernels": [
+            {
+                "name": "Q4_K decode",
+                "shape": "3584x14336, 1 row",
+                "measurements": [
+                    {
+                        "mode": "isolated",
+                        "dispatches_per_command": 1,
+                        "median_per_dispatch_ns": 200,
+                        "min_per_dispatch_ns": 100,
+                        "max_per_dispatch_ns": 300,
+                        "effective_gbps": 30.0,
+                        "raw_command_ns": [300, 100, 200],
+                    },
+                    {
+                        "mode": "sustained",
+                        "dispatches_per_command": 42,
+                        "median_per_dispatch_ns": 200,
+                        "min_per_dispatch_ns": 100,
+                        "max_per_dispatch_ns": 300,
+                        "effective_gbps": 98.0,
+                        "raw_command_ns": [12600, 4200, 8400],
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def decode_attribution(evaluated, cached, decoded, initial_cache, attention_tokens=100):
+    per_token = {
+        "embedding": 1,
+        "attention_projections": 2,
+        "ffn_gate_up": 3,
+        "ffn_down": 4,
+        "output_head": 5,
+        "norms": 6,
+        "total": 21,
+    }
+    return {
+        "schema_version": 1,
+        "selected_tokens": decoded,
+        "decoded_tokens": decoded,
+        "initial_cache_position": initial_cache,
+        "final_cache_position": initial_cache + evaluated + decoded,
+        "evaluated_prompt_tokens": evaluated,
+        "reused_cache_tokens": cached,
+        "decode_wall_ns": 9_000_000_000,
+        "gpu_ns": 8_000_000_000,
+        "selection_ns": 1000,
+        "wall_minus_gpu_ns": 1_000_000_000,
+        "command_buffers": decoded,
+        "commits": decoded,
+        "waits": decoded,
+        "compute_encoders": decoded,
+        "compute_dispatches": decoded * 10,
+        "blit_encoders": 0,
+        "barriers": decoded * 5,
+        "transient_allocations": 0,
+        "selector_dispatches": decoded,
+        "max_candidates": 40,
+        "compact_readback_bytes": decoded * 320,
+        "attention_dispatches": decoded * 42,
+        "attention_partitions": decoded * 42,
+        "attention_tokens": attention_tokens,
+        "scheduled_bytes_per_token": per_token,
+        "scheduled_bytes_total": per_token["total"] * decoded,
+    }
+
+
 class QuickBenchmarkScriptTests(unittest.TestCase):
     def test_human_report_labels_captured_stream_mode(self):
         output = io.StringIO()
@@ -28,6 +111,46 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             QUICK.print_human([], {"kernels": []}, False)
         self.assertIn("chat streams: captured pipes;", output.getvalue())
         self.assertIn("local startup warm-up: enabled (16-token prefill + 1-token decode)", output.getvalue())
+
+    def test_kernel_schema_accepts_and_prints_isolated_and_sustained_modes(self):
+        diagnostics = kernel_diagnostics_fixture()
+        QUICK.validate_kernel_diagnostics(diagnostics)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            QUICK.print_human([], diagnostics, False)
+        report = output.getvalue()
+        self.assertIn("Median/dispatch ms", report)
+        self.assertIn("isolated", report)
+        self.assertIn("sustained", report)
+        self.assertIn("42 serial, buffer-barrier-separated dispatches", report)
+
+    def test_kernel_schema_rejects_unknown_version(self):
+        diagnostics = kernel_diagnostics_fixture()
+        diagnostics["schema_version"] = 3
+        with self.assertRaisesRegex(RuntimeError, "schema version mismatch"):
+            QUICK.validate_kernel_diagnostics(diagnostics)
+
+    def test_kernel_schema_rejects_missing_duplicate_and_wrong_dispatch_modes(self):
+        missing = kernel_diagnostics_fixture()
+        missing["kernels"][0]["measurements"].pop()
+        with self.assertRaisesRegex(RuntimeError, "must contain two modes"):
+            QUICK.validate_kernel_diagnostics(missing)
+
+        duplicate = kernel_diagnostics_fixture()
+        duplicate["kernels"][0]["measurements"][1]["mode"] = "isolated"
+        with self.assertRaisesRegex(RuntimeError, "invalid or duplicate mode"):
+            QUICK.validate_kernel_diagnostics(duplicate)
+
+        wrong_dispatch = copy.deepcopy(kernel_diagnostics_fixture())
+        wrong_dispatch["kernels"][0]["measurements"][1]["dispatches_per_command"] = 41
+        with self.assertRaisesRegex(RuntimeError, "dispatch count mismatch"):
+            QUICK.validate_kernel_diagnostics(wrong_dispatch)
+
+    def test_kernel_schema_rejects_incorrect_median_normalization(self):
+        diagnostics = kernel_diagnostics_fixture()
+        diagnostics["kernels"][0]["measurements"][1]["median_per_dispatch_ns"] = 201
+        with self.assertRaisesRegex(RuntimeError, "median_per_dispatch_ns normalization mismatch"):
+            QUICK.validate_kernel_diagnostics(diagnostics)
 
     def test_process_driver_captures_real_stdio_path(self):
         stdout, stderr = QUICK.run_process(
@@ -56,11 +179,15 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             )
 
     def test_local_parser_uses_interactive_rates_and_raw_details(self):
-        output = """
+        first = json.dumps(decode_attribution(12, 0, 140, 0), separators=(",", ":"))
+        second = json.dumps(decode_attribution(13, 151, 135, 151), separators=(",", ":"))
+        output = f"""
 [ Prompt: 12.0 t/s | Generation: 14.0 t/s | TTFT: 1.000000 s ]
 [ Detail: Evaluated: 12 | Cached: 0 | Decoded: 140 | Prompt: 1.000000 s | Generation: 10.000000 s ]
+[ Decode: {first} ]
 [ Prompt: 130.0 t/s | Generation: 13.5 t/s | TTFT: 0.100000 s ]
 [ Detail: Evaluated: 13 | Cached: 151 | Decoded: 135 | Prompt: 0.100000 s | Generation: 10.000000 s ]
+[ Decode: {second} ]
 """
         turns = QUICK.parse_local(output)
         self.assertEqual(turns[0]["cached"], 0)
@@ -88,14 +215,55 @@ slot print_timings:        eval time =   10800.00 ms /   150 tokens (72.00 ms pe
         self.assertEqual(turns[1]["decoded"], 150)
 
     def test_parser_rejects_a_rate_not_backed_by_raw_counters(self):
-        output = """
+        first = json.dumps(decode_attribution(12, 0, 140, 0), separators=(",", ":"))
+        second = json.dumps(decode_attribution(13, 151, 135, 151), separators=(",", ":"))
+        output = f"""
 [ Prompt: 99.0 t/s | Generation: 14.0 t/s | TTFT: 1.000000 s ]
 [ Detail: Evaluated: 12 | Cached: 0 | Decoded: 140 | Prompt: 1.000000 s | Generation: 10.000000 s ]
+[ Decode: {first} ]
 [ Prompt: 130.0 t/s | Generation: 13.5 t/s | TTFT: 0.100000 s ]
 [ Detail: Evaluated: 13 | Cached: 151 | Decoded: 135 | Prompt: 0.100000 s | Generation: 10.000000 s ]
+[ Decode: {second} ]
 """
         with self.assertRaisesRegex(RuntimeError, "raw counters imply"):
             QUICK.parse_local(output)
+
+    def test_decode_attribution_rejects_inconsistent_bytes(self):
+        turn = {
+            "evaluated": 12,
+            "cached": 0,
+            "decoded": 2,
+            "decode_attribution": decode_attribution(12, 0, 2, 0),
+        }
+        turn["decode_attribution"]["scheduled_bytes_total"] += 1
+        with self.assertRaisesRegex(RuntimeError, "scheduled byte total mismatch"):
+            QUICK.validate_decode_attribution(turn, "First")
+
+    def test_environment_manifest_identifies_model_build_and_platform(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = pathlib.Path(directory) / "tiny.gguf"
+            model.write_bytes(struct.pack("<4sIQQ", b"GGUF", 3, 2, 4) + b"payload")
+
+            def runner(command, **_kwargs):
+                values = {
+                    ("sysctl", "-n", "hw.model"): "Mac16,12\n",
+                    ("sw_vers", "-productVersion"): "26.5.2\n",
+                    ("sw_vers", "-buildVersion"): "25F84\n",
+                    ("system_profiler", "-json", "SPDisplaysDataType"):
+                        '{"SPDisplaysDataType":[{"sppci_model":"Apple M4"}]}',
+                }
+                return types.SimpleNamespace(stdout=values[tuple(command)])
+
+            environment = QUICK.collect_environment(
+                str(model), "build/release/local-gguf-generate",
+                "build/release/local-gguf-bench", kernel_diagnostics_fixture(), runner,
+            )
+            self.assertEqual(environment["engine_build"], "test-build")
+            self.assertEqual(environment["model"]["gguf_version"], 3)
+            self.assertEqual(environment["model"]["tensor_count"], 2)
+            self.assertEqual(environment["hardware"]["metal_device"], "Apple M4")
+            self.assertEqual(environment["os"]["build"], "25F84")
+            self.assertEqual(environment["executables"]["build_mode"], "release")
 
     def test_protocol_is_exact_two_turn_natural_sampled_chat(self):
         self.assertEqual(

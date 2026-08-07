@@ -4,6 +4,7 @@
 #include "metal_context.hpp"
 
 #include "local_gguf_engine/tensor/dtype.hpp"
+#include "local_gguf_engine/tensor/metal_trace_capture.hpp"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -12,6 +13,8 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -20,6 +23,52 @@
 namespace local_gguf_engine::tensor::backends::metal {
 
 namespace {
+
+struct TraceCaptureState {
+    MetalTraceCaptureStatus status = MetalTraceCaptureStatus::idle;
+    std::string output_path;
+};
+
+TraceCaptureState& trace_capture_state() {
+    static TraceCaptureState state;
+    return state;
+}
+
+[[nodiscard]] bool begin_trace_capture_if_armed(
+    std::string_view label,
+    id<MTLCommandQueue> queue
+) {
+    auto& state = trace_capture_state();
+    if (state.status != MetalTraceCaptureStatus::armed || label != "Gemma2 resident decode") {
+        return false;
+    }
+    auto* manager = [MTLCaptureManager sharedCaptureManager];
+    if (![manager supportsDestination:MTLCaptureDestinationGPUTraceDocument]) {
+        state.status = MetalTraceCaptureStatus::idle;
+        throw std::runtime_error("Metal GPU trace document capture is unsupported on this system");
+    }
+    auto* descriptor = [[MTLCaptureDescriptor alloc] init];
+    descriptor.captureObject = queue;
+    descriptor.destination = MTLCaptureDestinationGPUTraceDocument;
+    descriptor.outputURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:state.output_path.c_str()]];
+    NSError* error = nil;
+    if (![manager startCaptureWithDescriptor:descriptor error:&error]) {
+        state.status = MetalTraceCaptureStatus::idle;
+        throw std::runtime_error(
+            "Metal GPU trace capture could not start: "
+            + ns_error_message(error, "unknown capture error")
+        );
+    }
+    state.status = MetalTraceCaptureStatus::active;
+    return true;
+}
+
+void finish_trace_capture(bool completed) noexcept {
+    auto& state = trace_capture_state();
+    if (state.status != MetalTraceCaptureStatus::active) return;
+    [[MTLCaptureManager sharedCaptureManager] stopCapture];
+    state.status = completed ? MetalTraceCaptureStatus::completed : MetalTraceCaptureStatus::idle;
+}
 
 struct MatmulDimensions {
     std::uint32_t rows;
@@ -186,6 +235,8 @@ struct MetalCommandContext::Impl {
     bool concurrent_compute = false;
     bool submitted = false;
     bool waited = false;
+    bool owns_trace_capture = false;
+    std::uint32_t debug_group_depth = 0;
 
     void end_compute_encoding() noexcept {
         if (active_compute_encoder != nil) {
@@ -217,6 +268,7 @@ struct MetalCommandContext::Impl {
 
     ~Impl() {
         end_compute_encoding();
+        if (owns_trace_capture) finish_trace_capture(false);
     }
 };
 
@@ -224,6 +276,7 @@ MetalCommandContext::MetalCommandContext(std::string_view label, bool concurrent
     : impl_(std::make_unique<Impl>()) {
     impl_->concurrent_compute = concurrent_compute;
     impl_->state = &shared_matmul_pipeline_state();
+    impl_->owns_trace_capture = begin_trace_capture_if_armed(label, impl_->state->queue);
     impl_->command_buffer = [impl_->state->queue commandBuffer];
     if (impl_->command_buffer == nil) {
         throw metal_error(
@@ -757,6 +810,11 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     const auto partitions = gemma2_decode_attention_partition_count(attention_token_count);
     ++impl_->stats.decode_attention_dispatch_count;
     impl_->stats.decode_attention_partition_count += partitions;
+    if (attention_token_count > std::numeric_limits<std::uint64_t>::max()
+            - impl_->stats.decode_attention_token_count) {
+        throw std::overflow_error("Metal decode attention token accounting overflow");
+    }
+    impl_->stats.decode_attention_token_count += attention_token_count;
     const Gemma2DecodeAttentionDimensions dims {
         .cache_row_mask = cache_row_mask,
         .first_position = cache_position + 1U - attention_token_count,
@@ -982,9 +1040,28 @@ void MetalCommandContext::encode_memory_barrier() {
     ++impl_->stats.memory_barrier_count;
 }
 
+void MetalCommandContext::push_debug_group(std::string_view label) {
+    if (label.empty()) throw std::invalid_argument("Metal debug group label must not be empty");
+    const std::string owned_label(label);
+    auto encoder = impl_->compute_encoder("Gemma2 diagnostic groups");
+    [encoder pushDebugGroup:[NSString stringWithUTF8String:owned_label.c_str()]];
+    ++impl_->debug_group_depth;
+}
+
+void MetalCommandContext::pop_debug_group() {
+    if (impl_->debug_group_depth == 0U) {
+        throw std::logic_error("Metal debug group stack is empty");
+    }
+    [impl_->active_compute_encoder popDebugGroup];
+    --impl_->debug_group_depth;
+}
+
 MetalCommandStats MetalCommandContext::commit() {
     if (impl_->submitted) {
         throw std::logic_error("Metal resident command buffer was already submitted");
+    }
+    if (impl_->debug_group_depth != 0U) {
+        throw std::logic_error("Metal command buffer has unclosed debug groups");
     }
     impl_->end_compute_encoding();
     impl_->submitted = true;
@@ -1024,7 +1101,52 @@ MetalCommandStats MetalCommandContext::completion_stats() const {
         constexpr double ns_per_second = 1'000'000'000.0;
         impl_->stats.gpu_duration_ns = static_cast<std::uint64_t>((end - start) * ns_per_second);
     }
+    if (impl_->owns_trace_capture) {
+        finish_trace_capture(true);
+        impl_->owns_trace_capture = false;
+    }
     return impl_->stats;
+}
+
+void arm_next_gemma2_decode_trace(std::string output_path) {
+    auto& state = trace_capture_state();
+    if (state.status != MetalTraceCaptureStatus::idle) {
+        throw std::logic_error("a Metal GPU trace capture is already armed or completed");
+    }
+    if (output_path.empty()) throw std::invalid_argument("Metal GPU trace path must not be empty");
+    const char* enabled = std::getenv("MTL_CAPTURE_ENABLED");
+    if (enabled == nullptr || std::string_view(enabled) != "1") {
+        throw std::runtime_error("Metal GPU trace capture requires MTL_CAPTURE_ENABLED=1");
+    }
+    const std::filesystem::path path(output_path);
+    if (std::filesystem::exists(path)) {
+        throw std::runtime_error("Metal GPU trace path already exists: " + output_path);
+    }
+    if (!path.parent_path().empty() && !std::filesystem::exists(path.parent_path())) {
+        throw std::runtime_error("Metal GPU trace parent directory does not exist: " + output_path);
+    }
+    state.output_path = std::move(output_path);
+    state.status = MetalTraceCaptureStatus::armed;
+}
+
+MetalTraceCaptureStatus metal_trace_capture_status() noexcept {
+    return trace_capture_state().status;
+}
+
+void reset_completed_metal_trace_capture() {
+    auto& state = trace_capture_state();
+    if (state.status != MetalTraceCaptureStatus::completed) {
+        throw std::logic_error("Metal GPU trace capture did not complete");
+    }
+    state = TraceCaptureState {};
+}
+
+void cancel_armed_metal_trace_capture() {
+    auto& state = trace_capture_state();
+    if (state.status != MetalTraceCaptureStatus::armed) {
+        throw std::logic_error("Metal GPU trace capture is not armed");
+    }
+    state = TraceCaptureState {};
 }
 
 MetalCommandStats MetalCommandContext::commit_and_wait() {

@@ -3,7 +3,11 @@
 
 import argparse
 import json
+import math
+import os
+import platform
 import re
+import struct
 import subprocess
 import sys
 import time
@@ -28,15 +32,31 @@ LOCAL_DETAIL = re.compile(
     r" \| Decoded: (?P<decoded>[0-9]+) \| Prompt: (?P<prompt_seconds>[0-9.]+) s"
     r" \| Generation: (?P<generation_seconds>[0-9.]+) s \]"
 )
+LOCAL_DECODE = re.compile(r"^\[ Decode: (?P<json>\{.*\}) \]$", re.MULTILINE)
+
+KERNEL_SCHEMA_VERSION = 2
+KERNEL_MEASURED_COMMANDS = 3
+KERNEL_SUSTAINED_DISPATCHES = 42
+KERNEL_MODE_DISPATCHES = {"isolated": 1, "sustained": KERNEL_SUSTAINED_DISPATCHES}
+ENVIRONMENT_SCHEMA_VERSION = 1
 
 
 def parse_local(output):
     rates = list(LOCAL_RATE.finditer(output))
     details = list(LOCAL_DETAIL.finditer(output))
-    if len(rates) != len(PROMPTS) or len(details) != len(PROMPTS):
-        raise RuntimeError("local chat did not report exactly two complete timing records")
+    decode_matches = list(LOCAL_DECODE.finditer(output))
+    if (
+        len(rates) != len(PROMPTS)
+        or len(details) != len(PROMPTS)
+        or len(decode_matches) != len(PROMPTS)
+    ):
+        raise RuntimeError("local chat did not report exactly two complete timing and attribution records")
     turns = []
-    for name, rate, detail in zip(TURN_NAMES, rates, details):
+    for name, rate, detail, decode_match in zip(TURN_NAMES, rates, details, decode_matches):
+        try:
+            attribution = json.loads(decode_match["json"])
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"local {name} decode attribution is invalid JSON") from error
         turn = {
             "name": name,
             "evaluated": int(detail["evaluated"]),
@@ -47,11 +67,73 @@ def parse_local(output):
             "generation_ns": round(float(detail["generation_seconds"]) * 1e9),
             "prompt_tps": float(rate["prompt"]),
             "generation_tps": float(rate["generation"]),
+            "decode_attribution": attribution,
         }
         checked_rate(turn["evaluated"], turn["prompt_ns"], turn["prompt_tps"], f"local {name} prompt")
         checked_rate(turn["decoded"], turn["generation_ns"], turn["generation_tps"], f"local {name} generation")
+        validate_decode_attribution(turn, name)
         turns.append(turn)
     return turns
+
+
+def validate_decode_attribution(turn, name):
+    record = turn.get("decode_attribution")
+    if not isinstance(record, dict) or record.get("schema_version") != 1:
+        raise RuntimeError(f"local {name} decode attribution schema mismatch")
+    required_nonnegative = (
+        "selected_tokens", "decoded_tokens", "initial_cache_position",
+        "final_cache_position", "evaluated_prompt_tokens", "reused_cache_tokens",
+        "decode_wall_ns", "gpu_ns", "selection_ns", "wall_minus_gpu_ns",
+        "command_buffers", "commits", "waits", "compute_encoders",
+        "compute_dispatches", "blit_encoders", "barriers", "transient_allocations",
+        "selector_dispatches", "max_candidates", "compact_readback_bytes",
+        "attention_dispatches", "attention_partitions", "attention_tokens",
+        "scheduled_bytes_total",
+    )
+    for field in required_nonnegative:
+        value = record.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError(f"local {name} decode attribution {field} is invalid")
+    if record["selected_tokens"] != turn["decoded"]:
+        raise RuntimeError(f"local {name} selected-token attribution mismatch")
+    if record["evaluated_prompt_tokens"] != turn["evaluated"]:
+        raise RuntimeError(f"local {name} evaluated-token attribution mismatch")
+    if record["reused_cache_tokens"] != turn["cached"]:
+        raise RuntimeError(f"local {name} cached-token attribution mismatch")
+    if record["decoded_tokens"] != record["selected_tokens"]:
+        raise RuntimeError(f"local {name} selected/decode attribution mismatch")
+    expected_final = (
+        record["initial_cache_position"]
+        + record["evaluated_prompt_tokens"]
+        + record["decoded_tokens"]
+    )
+    if record["final_cache_position"] != expected_final:
+        raise RuntimeError(f"local {name} final cache attribution mismatch")
+    if record["gpu_ns"] > record["decode_wall_ns"]:
+        raise RuntimeError(f"local {name} GPU attribution exceeds decode wall time")
+    if record["wall_minus_gpu_ns"] != record["decode_wall_ns"] - record["gpu_ns"]:
+        raise RuntimeError(f"local {name} decode residual attribution mismatch")
+    if record["decoded_tokens"] > 0 and (
+        record["command_buffers"] == 0
+        or record["compute_dispatches"] == 0
+        or record["gpu_ns"] == 0
+    ):
+        raise RuntimeError(f"local {name} decoded tokens have no GPU work")
+    byte_categories = record.get("scheduled_bytes_per_token")
+    if not isinstance(byte_categories, dict):
+        raise RuntimeError(f"local {name} scheduled byte categories are missing")
+    category_names = (
+        "embedding", "attention_projections", "ffn_gate_up", "ffn_down",
+        "output_head", "norms",
+    )
+    for field in (*category_names, "total"):
+        value = byte_categories.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise RuntimeError(f"local {name} scheduled byte category {field} is invalid")
+    if sum(byte_categories[field] for field in category_names) != byte_categories["total"]:
+        raise RuntimeError(f"local {name} scheduled byte categories do not sum")
+    if record["scheduled_bytes_total"] != byte_categories["total"] * record["decoded_tokens"]:
+        raise RuntimeError(f"local {name} scheduled byte total mismatch")
 
 
 def run_local_chat(binary, model, cooldown):
@@ -59,7 +141,10 @@ def run_local_chat(binary, model, cooldown):
         print(f"cooling down for {cooldown:g}s before local chat...", file=sys.stderr)
         time.sleep(cooldown)
     stdout, stderr = run_process(
-        [binary, model, "--chat", "--backend", "metal", "--seed", str(SEED)],
+        [
+            binary, model, "--chat", "--backend", "metal", "--seed", str(SEED),
+            "--decode-diagnostics",
+        ],
         "[ Detail:",
     )
     return parse_local(stdout + stderr)
@@ -69,7 +154,167 @@ def run_kernel_diagnostics(binary, model):
     result = subprocess.run(
         [binary, model, "--json"], check=True, capture_output=True, text=True
     )
-    return json.loads(result.stdout)
+    diagnostics = json.loads(result.stdout)
+    validate_kernel_diagnostics(diagnostics)
+    return diagnostics
+
+
+def _positive_number(value, name):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError(f"kernel diagnostics {name} must be numeric")
+    if not math.isfinite(value) or value <= 0:
+        raise RuntimeError(f"kernel diagnostics {name} must be finite and positive")
+
+
+def validate_kernel_diagnostics(diagnostics):
+    if diagnostics.get("schema_version") != KERNEL_SCHEMA_VERSION:
+        raise RuntimeError("kernel diagnostics schema version mismatch")
+    if diagnostics.get("measured_commands_per_mode") != KERNEL_MEASURED_COMMANDS:
+        raise RuntimeError("kernel diagnostics measured-command count mismatch")
+    if diagnostics.get("warmup_commands_per_mode") != 1:
+        raise RuntimeError("kernel diagnostics warm-up count mismatch")
+    if diagnostics.get("sustained_dispatches_per_command") != KERNEL_SUSTAINED_DISPATCHES:
+        raise RuntimeError("kernel diagnostics sustained dispatch count mismatch")
+    kernels = diagnostics.get("kernels")
+    if not isinstance(kernels, list) or not kernels:
+        raise RuntimeError("kernel diagnostics must contain kernels")
+    for kernel in kernels:
+        if not isinstance(kernel, dict) or not isinstance(kernel.get("name"), str):
+            raise RuntimeError("kernel diagnostics contains an invalid kernel")
+        measurements = kernel.get("measurements")
+        if not isinstance(measurements, list) or len(measurements) != len(KERNEL_MODE_DISPATCHES):
+            raise RuntimeError(f"kernel diagnostics {kernel['name']} must contain two modes")
+        seen_modes = set()
+        for measurement in measurements:
+            if not isinstance(measurement, dict):
+                raise RuntimeError(f"kernel diagnostics {kernel['name']} measurement is invalid")
+            mode = measurement.get("mode")
+            if mode not in KERNEL_MODE_DISPATCHES or mode in seen_modes:
+                raise RuntimeError(f"kernel diagnostics {kernel['name']} has invalid or duplicate mode")
+            seen_modes.add(mode)
+            expected_dispatches = KERNEL_MODE_DISPATCHES[mode]
+            if measurement.get("dispatches_per_command") != expected_dispatches:
+                raise RuntimeError(
+                    f"kernel diagnostics {kernel['name']} {mode} dispatch count mismatch"
+                )
+            raw = measurement.get("raw_command_ns")
+            if not isinstance(raw, list) or len(raw) != KERNEL_MEASURED_COMMANDS:
+                raise RuntimeError(
+                    f"kernel diagnostics {kernel['name']} {mode} raw sample count mismatch"
+                )
+            for duration in raw:
+                _positive_number(duration, f"{kernel['name']} {mode} raw duration")
+            for field in (
+                "median_per_dispatch_ns",
+                "min_per_dispatch_ns",
+                "max_per_dispatch_ns",
+                "effective_gbps",
+            ):
+                _positive_number(measurement.get(field), f"{kernel['name']} {mode} {field}")
+            sorted_raw = sorted(raw)
+            expected_statistics = {
+                "median_per_dispatch_ns": sorted_raw[len(raw) // 2] / expected_dispatches,
+                "min_per_dispatch_ns": sorted_raw[0] / expected_dispatches,
+                "max_per_dispatch_ns": sorted_raw[-1] / expected_dispatches,
+            }
+            for field, expected in expected_statistics.items():
+                if not math.isclose(
+                    measurement[field], expected, rel_tol=1e-12, abs_tol=1e-6
+                ):
+                    raise RuntimeError(
+                        f"kernel diagnostics {kernel['name']} {mode} {field} normalization mismatch"
+                    )
+        if seen_modes != set(KERNEL_MODE_DISPATCHES):
+            raise RuntimeError(f"kernel diagnostics {kernel['name']} is missing a mode")
+
+
+def _command_text(command, runner=subprocess.run):
+    try:
+        result = runner(command, check=True, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def collect_environment(model, local_binary, kernel_binary, kernels, runner=subprocess.run):
+    model_path = os.path.realpath(model)
+    try:
+        model_size = os.path.getsize(model_path)
+        with open(model_path, "rb") as model_file:
+            header = model_file.read(24)
+        magic, version, tensor_count, metadata_count = struct.unpack("<4sIQQ", header)
+        if magic != b"GGUF":
+            raise RuntimeError("benchmark model does not have a GGUF header")
+    except (OSError, struct.error) as error:
+        raise RuntimeError(f"could not identify benchmark model: {error}") from error
+
+    display_json = _command_text(["system_profiler", "-json", "SPDisplaysDataType"], runner)
+    metal_device = None
+    if display_json is not None:
+        try:
+            displays = json.loads(display_json).get("SPDisplaysDataType", [])
+            if displays:
+                metal_device = displays[0].get("sppci_model") or displays[0].get("_name")
+        except (json.JSONDecodeError, AttributeError):
+            metal_device = None
+    machine_model = _command_text(["sysctl", "-n", "hw.model"], runner)
+    os_version = _command_text(["sw_vers", "-productVersion"], runner)
+    os_build = _command_text(["sw_vers", "-buildVersion"], runner)
+    environment = {
+        "schema_version": ENVIRONMENT_SCHEMA_VERSION,
+        "engine_build": kernels.get("engine_build"),
+        "diagnostic_schema": kernels.get("schema_version"),
+        "model": {
+            "path": model_path,
+            "size_bytes": model_size,
+            "gguf_version": version,
+            "tensor_count": tensor_count,
+            "metadata_count": metadata_count,
+        },
+        "hardware": {
+            "architecture": platform.machine() or None,
+            "machine_model": machine_model,
+            "metal_device": metal_device,
+            "runtime_counter_capabilities": "not_probed_by_canonical_benchmark",
+        },
+        "os": {
+            "name": platform.system() or None,
+            "product_version": os_version,
+            "build": os_build,
+        },
+        "executables": {
+            "local": os.path.realpath(local_binary),
+            "kernels": os.path.realpath(kernel_binary),
+            "build_mode": "release" if "release" in pathlib_parts(local_binary) else "unknown",
+        },
+    }
+    validate_environment(environment)
+    return environment
+
+
+def pathlib_parts(path):
+    return tuple(part for part in os.path.normpath(path).split(os.sep) if part)
+
+
+def validate_environment(environment):
+    if not isinstance(environment, dict) or environment.get("schema_version") != ENVIRONMENT_SCHEMA_VERSION:
+        raise RuntimeError("benchmark environment schema mismatch")
+    if not isinstance(environment.get("engine_build"), str) or not environment["engine_build"]:
+        raise RuntimeError("benchmark environment engine build is missing")
+    if environment.get("diagnostic_schema") != KERNEL_SCHEMA_VERSION:
+        raise RuntimeError("benchmark environment diagnostic schema mismatch")
+    model = environment.get("model")
+    if not isinstance(model, dict) or not isinstance(model.get("path"), str):
+        raise RuntimeError("benchmark environment model identity is missing")
+    for field in ("size_bytes", "gguf_version", "tensor_count", "metadata_count"):
+        if isinstance(model.get(field), bool) or not isinstance(model.get(field), int) or model[field] <= 0:
+            raise RuntimeError(f"benchmark environment model {field} is invalid")
+    hardware = environment.get("hardware")
+    if not isinstance(hardware, dict) or not hardware.get("architecture"):
+        raise RuntimeError("benchmark environment architecture is missing")
+    if not isinstance(environment.get("os"), dict) or not environment["os"].get("name"):
+        raise RuntimeError("benchmark environment operating system is missing")
 
 
 def print_human(local, kernels, terminal_rendered):
@@ -78,14 +323,35 @@ def print_human(local, kernels, terminal_rendered):
     stream_mode = "terminal alternate screen" if terminal_rendered else "captured pipes"
     print(f"chat streams: {stream_mode}; fixed 5s input pause between turns")
     print_turn_table("local-gguf-engine", local)
-    print("\nKernel diagnostics (separate process, after headline chat)")
-    print("Kernel          Shape                    Median ms  Range ms         Effective GB/s")
-    for kernel in kernels["kernels"]:
+    print("\nProduction decode attribution (same chat path; logical scheduled weight bytes)")
+    print("Turn       GPU/token ms  Wall/token ms  Residual/token ms  Scheduled GB/s  Dispatch/token  Attention tokens")
+    for turn in local:
+        record = turn["decode_attribution"]
+        tokens = record["decoded_tokens"]
         print(
-            f"{kernel['name']:<15} {kernel['shape']:<24} {kernel['median_ns'] / 1e6:>9.1f}"
-            f"  {kernel['min_ns'] / 1e6:>5.1f}-{kernel['max_ns'] / 1e6:<5.1f}"
-            f" {kernel['effective_gbps']:>20.1f}"
+            f"{turn['name']:<10} {record['gpu_ns'] / tokens / 1e6:>12.2f}"
+            f" {record['decode_wall_ns'] / tokens / 1e6:>14.2f}"
+            f" {record['wall_minus_gpu_ns'] / tokens / 1e6:>18.2f}"
+            f" {record['scheduled_bytes_total'] / record['gpu_ns']:>15.1f}"
+            f" {record['compute_dispatches'] / tokens:>15.1f}"
+            f" {record['attention_tokens']:>17}"
         )
+    print("\nKernel diagnostics (separate process, after headline chat)")
+    print("sustained mode: 42 serial, buffer-barrier-separated dispatches per command")
+    print(
+        "Kernel          Shape                    Mode       Dispatches  "
+        "Median/dispatch ms  Range/dispatch ms  Effective GB/s"
+    )
+    for kernel in kernels["kernels"]:
+        for measurement in kernel["measurements"]:
+            print(
+                f"{kernel['name']:<15} {kernel['shape']:<24} {measurement['mode']:<10}"
+                f" {measurement['dispatches_per_command']:>10}"
+                f" {measurement['median_per_dispatch_ns'] / 1e6:>19.2f}"
+                f"  {measurement['min_per_dispatch_ns'] / 1e6:>6.2f}-"
+                f"{measurement['max_per_dispatch_ns'] / 1e6:<6.2f}"
+                f" {measurement['effective_gbps']:>15.1f}"
+            )
 
 
 def main():
@@ -105,6 +371,7 @@ def main():
         print(f"cooling down for {args.cooldown:g}s before kernel diagnostics...", file=sys.stderr)
         time.sleep(args.cooldown)
     kernels = run_kernel_diagnostics(args.kernels, args.model)
+    environment = collect_environment(args.model, args.local, args.kernels, kernels)
     result = {
         "protocol": {
             "prompts": PROMPTS,
@@ -117,7 +384,13 @@ def main():
             "cooldown_seconds": args.cooldown,
             "inter_turn_pause_seconds": INTER_TURN_PAUSE_SECONDS,
             "terminal_rendered": terminal_rendered,
+            "chat_stream_mode": "terminal_alternate_screen" if terminal_rendered else "captured_pipes",
+            "decode_attribution_schema": 1,
+            "kernel_diagnostic_schema": KERNEL_SCHEMA_VERSION,
+            "local_executable": os.path.realpath(args.local),
+            "kernel_executable": os.path.realpath(args.kernels),
         },
+        "environment": environment,
         "local": local,
         "kernels": kernels,
     }

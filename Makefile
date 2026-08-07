@@ -78,6 +78,7 @@ TEST_SOURCES := \
 	tests/model_format/gguf_reader_tests.cpp \
 	tests/model_format/gguf_tensor_bridge_tests.cpp \
 	tests/support/tensor_test_support.cpp \
+	tests/support/gemma2_reference_test_support.cpp \
 	tests/support/test_support.cpp \
 	tests/tensor/tensor_backend_tests.cpp \
 	tests/tensor/tensor_tests.cpp \

@@ -41,6 +41,20 @@ struct Gemma2MetalModelWeightBuffers {
     std::vector<Gemma2MetalBlockWeightBuffers> blocks;
 };
 
+// Logical bytes read by one retained one-token decode. These are derived from
+// the plan's validated weight descriptors; they are not hardware traffic
+// counters. The embedding entry is one selected F16 row rather than the whole
+// tied embedding/output allocation.
+struct Gemma2DecodeScheduledWeightBytes {
+    std::uint64_t embedding = 0;
+    std::uint64_t attention_projections = 0;
+    std::uint64_t feed_forward_gate_up = 0;
+    std::uint64_t feed_forward_down = 0;
+    std::uint64_t output_head = 0;
+    std::uint64_t norms = 0;
+    std::uint64_t total = 0;
+};
+
 struct Gemma2MetalKVCacheLayer {
     tensor::BackendBuffer key;
     tensor::BackendBuffer value;
@@ -145,6 +159,7 @@ public:
         Gemma2MetalDecodeScratch decode_scratch,
         Gemma2MetalSelectionWorkspace selection_workspace,
         std::vector<Gemma2MetalLayerState> layers,
+        Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes,
         std::size_t uploaded_weight_byte_count,
         std::size_t kv_cache_byte_count,
         std::size_t scratch_byte_count
@@ -159,6 +174,7 @@ public:
     [[nodiscard]] const Gemma2MetalDecodeScratch& decode_scratch() const noexcept;
     [[nodiscard]] const Gemma2MetalSelectionWorkspace& selection_workspace() const noexcept;
     [[nodiscard]] const std::vector<Gemma2MetalLayerState>& layers() const noexcept;
+    [[nodiscard]] const Gemma2DecodeScheduledWeightBytes& decode_scheduled_weight_bytes() const noexcept;
     [[nodiscard]] std::size_t uploaded_weight_byte_count() const noexcept;
     [[nodiscard]] std::size_t kv_cache_byte_count() const noexcept;
     [[nodiscard]] std::size_t scratch_byte_count() const noexcept;
@@ -172,6 +188,7 @@ private:
     Gemma2MetalDecodeScratch decode_scratch_;
     Gemma2MetalSelectionWorkspace selection_workspace_;
     std::vector<Gemma2MetalLayerState> layers_;
+    Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes_;
     std::size_t uploaded_weight_byte_count_ = 0;
     std::size_t kv_cache_byte_count_ = 0;
     std::size_t scratch_byte_count_ = 0;

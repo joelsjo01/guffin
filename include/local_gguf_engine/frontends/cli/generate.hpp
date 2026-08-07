@@ -28,6 +28,10 @@ struct GenerateOptions {
     const engine::Gemma2ChatTurnMetrics& metrics
 );
 
+[[nodiscard]] std::string format_chat_decode_attribution_line(
+    const engine::Gemma2ChatTurnMetrics& metrics
+);
+
 [[nodiscard]] std::string generate_text_from_gguf_bytes(
     std::span<const std::uint8_t> bytes,
     std::string_view prompt,

@@ -49,6 +49,7 @@ benchmark harness is not a live source route.
 | `Makefile` | build graph for engine sources, CLIs, and tests |
 | `scripts/ci.sh` | repository check wrapper |
 | `scripts/quick_benchmark.py` | canonical local real-chat benchmark driver |
+| `scripts/capture_decode_gpu_trace.py` | one-shot production decode `.gputrace` driver |
 | `scripts/llama_reference_benchmark.py` | infrequent pinned llama-cli reference driver |
 | `docs/LLAMA_CPP_REFERENCE_BASELINE.md` | stored pinned reference identity, protocol, and result |
 | `src/frontends/cli/generate_main.cpp` | `local-gguf-generate` binary entry |
@@ -102,6 +103,8 @@ Gemma Metal runtime and resident prefill/decode execution:
 - `include/local_gguf_engine/engine/gemma2_runtime.hpp`
 - `src/engine/gemma2_runtime.cpp`
 - `src/tensor/backends/metal/metal_command_context.*`
+- `include/local_gguf_engine/tensor/metal_trace_capture.hpp`
+- `docs/METAL_GPU_TRACE.md`
 - `tests/engine/gemma2_metal_plan_tests.cpp`
 
 Gemma chat session and generation orchestration:
@@ -117,6 +120,7 @@ Gemma reference numerics:
 - `include/local_gguf_engine/engine/gemma2_reference.hpp`
 - `src/engine/gemma2_reference.cpp`
 - `tests/engine/gemma2_reference_tests.cpp`
+- `tests/support/gemma2_reference_test_support.*`
 
 Gemma tokenizer/chat template:
 
@@ -212,6 +216,7 @@ Quick local/reference benchmark:
 - `src/benchmarks/quick_benchmark.cpp`
 - `src/frontends/cli/benchmark_main.cpp`
 - `scripts/quick_benchmark.py`
+- `scripts/capture_decode_gpu_trace.py`
 - `tests/benchmarks/quick_benchmark_tests.cpp`
 - `tests/scripts/quick_benchmark_script_tests.py`
 
@@ -226,12 +231,14 @@ Shared test fixtures:
 
 - `tests/support/test_support.*`
 - `tests/support/tensor_test_support.*`
+- `tests/support/gemma2_reference_test_support.*`
 - `tests/fixtures/*.hex`
 
 Project docs:
 
 - `docs/ENGINE_PRINCIPLES.md` for durable engineering judgment
-- `docs/NEXT_TASK.md` for the active baton
+- `docs/NEXT_TASK.md` for verified current state and the active implementation scope
+- `docs/METAL_GPU_TRACE.md` for the production decode trace workflow
 - `docs/LLAMA_CPP_REFERENCE_BASELINE.md` for the pinned external benchmark
 - `docs/GRAPH.md` for this locator
 

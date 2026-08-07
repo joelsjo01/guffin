@@ -49,6 +49,71 @@ void checked_add_bytes(std::size_t& total, std::size_t byte_count) {
     total += byte_count;
 }
 
+void checked_add_decode_bytes(std::uint64_t& total, std::size_t byte_count) {
+    if (byte_count > std::numeric_limits<std::uint64_t>::max() - total) {
+        throw runtime::BackendError(
+            runtime::BackendErrorCode::metal_execution_failed,
+            gemma_backend,
+            "Gemma2 scheduled decode weight byte count overflow"
+        );
+    }
+    total += static_cast<std::uint64_t>(byte_count);
+}
+
+[[nodiscard]] Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes(
+    const Gemma2MetalModelWeightBuffers& weights,
+    const Gemma2ModelConfig& config
+) {
+    Gemma2DecodeScheduledWeightBytes bytes;
+    const auto& embedding = weights.token_embedding_weight.descriptor();
+    if (embedding.shape.rank() != 2U || embedding.shape.dimension(0) != config.embedding_length
+        || embedding.shape.dimension(1) != config.vocab_size) {
+        throw std::invalid_argument("Gemma2 token embedding layout is invalid for decode accounting");
+    }
+    const auto row_elements = embedding.shape.dimension(0);
+    const auto dtype = tensor::dtype_layout(embedding.dtype);
+    if (row_elements % dtype.block_element_count != 0U) {
+        throw std::invalid_argument("Gemma2 token embedding row is not dtype-block aligned");
+    }
+    bytes.embedding = row_elements / dtype.block_element_count * dtype.block_byte_count;
+
+    for (const auto& block : weights.blocks) {
+        for (const auto* projection : {
+                 &block.attention.query_weight, &block.attention.key_weight,
+                 &block.attention.value_weight, &block.attention.output_weight,
+             }) {
+            checked_add_decode_bytes(bytes.attention_projections, projection->descriptor().byte_count);
+        }
+        checked_add_decode_bytes(bytes.feed_forward_gate_up, block.feed_forward.gate_weight.descriptor().byte_count);
+        checked_add_decode_bytes(bytes.feed_forward_gate_up, block.feed_forward.up_weight.descriptor().byte_count);
+        checked_add_decode_bytes(bytes.feed_forward_down, block.feed_forward.down_weight.descriptor().byte_count);
+        for (const auto* norm : {
+                 &block.attention.attention_norm_weight,
+                 &block.attention.post_attention_norm_weight,
+                 &block.feed_forward.feed_forward_norm_weight,
+                 &block.feed_forward.post_feed_forward_norm_weight,
+             }) {
+            checked_add_decode_bytes(bytes.norms, norm->descriptor().byte_count);
+        }
+    }
+    bytes.output_head = weights.output_weight.descriptor().byte_count;
+    checked_add_decode_bytes(bytes.norms, weights.output_norm_weight.descriptor().byte_count);
+    for (const auto value : {
+             bytes.embedding, bytes.attention_projections, bytes.feed_forward_gate_up,
+             bytes.feed_forward_down, bytes.output_head, bytes.norms,
+         }) {
+        if (value > std::numeric_limits<std::uint64_t>::max() - bytes.total) {
+            throw runtime::BackendError(
+                runtime::BackendErrorCode::metal_execution_failed,
+                gemma_backend,
+                "Gemma2 scheduled decode weight total overflow"
+            );
+        }
+        bytes.total += value;
+    }
+    return bytes;
+}
+
 [[nodiscard]] tensor::BackendBuffer upload_weight(tensor::TensorView view, std::size_t& uploaded_byte_count) {
     checked_add_bytes(uploaded_byte_count, view.bytes().size());
     return tensor::copy_tensor_view_to_backend(view, gemma_backend);
@@ -384,6 +449,7 @@ Gemma2MetalModelPlan::Gemma2MetalModelPlan(
     Gemma2MetalDecodeScratch decode_scratch,
     Gemma2MetalSelectionWorkspace selection_workspace,
     std::vector<Gemma2MetalLayerState> layers,
+    Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes,
     std::size_t uploaded_weight_byte_count,
     std::size_t kv_cache_byte_count,
     std::size_t scratch_byte_count
@@ -395,6 +461,7 @@ Gemma2MetalModelPlan::Gemma2MetalModelPlan(
       decode_scratch_(std::move(decode_scratch)),
       selection_workspace_(std::move(selection_workspace)),
       layers_(std::move(layers)),
+      decode_scheduled_weight_bytes_(decode_scheduled_weight_bytes),
       uploaded_weight_byte_count_(uploaded_weight_byte_count),
       kv_cache_byte_count_(kv_cache_byte_count),
       scratch_byte_count_(scratch_byte_count) {}
@@ -433,6 +500,10 @@ const Gemma2MetalSelectionWorkspace& Gemma2MetalModelPlan::selection_workspace()
 
 const std::vector<Gemma2MetalLayerState>& Gemma2MetalModelPlan::layers() const noexcept {
     return layers_;
+}
+
+const Gemma2DecodeScheduledWeightBytes& Gemma2MetalModelPlan::decode_scheduled_weight_bytes() const noexcept {
+    return decode_scheduled_weight_bytes_;
 }
 
 std::size_t Gemma2MetalModelPlan::uploaded_weight_byte_count() const noexcept {
@@ -522,6 +593,7 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     auto decode_scratch = allocate_decode_scratch(config, scratch_byte_count);
     auto selection_workspace = allocate_selection_workspace(config, scratch_byte_count);
     auto layers = make_layer_states(config);
+    const auto scheduled_weight_bytes = decode_scheduled_weight_bytes(resident_weights, config);
 
     return Gemma2MetalModelPlan(
         config,
@@ -531,6 +603,7 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
         std::move(decode_scratch),
         std::move(selection_workspace),
         std::move(layers),
+        scheduled_weight_bytes,
         uploaded_weight_byte_count,
         kv_cache_byte_count,
         scratch_byte_count

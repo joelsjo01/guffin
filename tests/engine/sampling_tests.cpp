@@ -19,6 +19,8 @@ namespace {
 using local_gguf_engine::engine::TokenLogit;
 using local_gguf_engine::engine::TokenSampler;
 using local_gguf_engine::engine::TokenSamplerOptions;
+using local_gguf_engine::engine::TokenSelectionRequest;
+using local_gguf_engine::engine::prepare_token_distribution;
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::TestCase;
 
@@ -154,12 +156,63 @@ void test_rejects_invalid_compact_sampler_inputs() {
     expect(rejected, "non-finite compact candidate must fail");
 }
 
+void test_prepared_distribution_freezes_filter_order_and_probabilities() {
+    const std::array<TokenLogit, 5> candidates {{
+        {3U, 0.0F}, {1U, 2.0F}, {2U, 1.0F}, {1U, 2.0F}, {4U, -4.0F},
+    }};
+    const auto options = TokenSamplerOptions {
+        .temperature = 1.0F,
+        .top_k = 4U,
+        .top_p = 1.0F,
+        .min_p = 0.0F,
+        .repetition_penalty = 2.0F,
+        .seed = 9U,
+        .repetition_window = 64U,
+    };
+    TokenSelectionRequest request {.top_k = 4U, .base_candidate_count = 5U};
+    request.history_token_ids[0] = 1U;
+    request.history_token_count = 1U;
+    const auto prepared = prepare_token_distribution(candidates, options, request);
+    expect(prepared.count == 4U, "prepared distribution candidate count mismatch");
+    expect(prepared.values[0].token == 1U && prepared.values[1].token == 2U
+            && prepared.values[2].token == 3U && prepared.values[3].token == 4U,
+        "prepared distribution token order mismatch");
+    const std::array<double, 4> raw {std::exp(0.0), std::exp(0.0), std::exp(-1.0), std::exp(-5.0)};
+    const auto normalization = std::accumulate(raw.begin(), raw.end(), 0.0);
+    double probability_sum = 0.0;
+    for (std::size_t index = 0; index < prepared.count; ++index) {
+        expect(
+            std::abs(prepared.values[index].probability - raw[index] / normalization) < 1.0e-12,
+            "prepared distribution probability mismatch"
+        );
+        probability_sum += prepared.values[index].probability;
+    }
+    expect(std::abs(probability_sum - 1.0) < 1.0e-12,
+        "prepared distribution probabilities must normalize to one");
+
+    const auto greedy = prepare_token_distribution(
+        candidates,
+        TokenSamplerOptions {.temperature = 0.0F, .top_k = 4U, .repetition_penalty = 2.0F},
+        TokenSelectionRequest {
+            .top_k = 1U,
+            .base_candidate_count = 2U,
+            .history_token_ids = {1U},
+            .history_token_count = 1U,
+        }
+    );
+    expect(greedy.count == 1U && greedy.values[0].token == 1U
+            && greedy.values[0].probability == 1.0,
+        "prepared greedy distribution mismatch");
+}
+
 const TestCase kSamplingTests[] = {
     {"compact sampler stable ties and repetition", test_compact_sampler_stable_ties_and_repetition},
     {"compact sampler seed snapshot and filter order", test_compact_sampler_seed_snapshot_and_filter_order},
     {"repetition window eviction and promotion", test_repetition_window_eviction_and_promotion},
     {"sparse-change candidate superset property", test_sparse_change_candidate_superset_property},
     {"rejects invalid compact sampler inputs", test_rejects_invalid_compact_sampler_inputs},
+    {"prepared distribution freezes filter order and probabilities",
+        test_prepared_distribution_freezes_filter_order_and_probabilities},
 };
 
 }  // namespace

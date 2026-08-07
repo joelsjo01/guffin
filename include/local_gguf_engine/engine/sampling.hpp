@@ -35,6 +35,18 @@ struct CompactTokenCandidates {
     std::uint32_t readback_bytes = 0;
 };
 
+struct PreparedTokenProbability {
+    std::uint32_t token = 0;
+    double probability = 0.0;
+    double sampling_weight = 0.0;
+};
+
+struct PreparedTokenDistribution {
+    std::array<PreparedTokenProbability, token_sampler_max_top_k> values {};
+    std::uint32_t count = 0;
+    double total_sampling_weight = 0.0;
+};
+
 struct TokenSamplerOptions {
     static constexpr std::uint64_t random_seed = std::numeric_limits<std::uint64_t>::max();
 
@@ -46,6 +58,12 @@ struct TokenSamplerOptions {
     std::uint64_t seed = random_seed;
     std::size_t repetition_window = 64;
 };
+
+[[nodiscard]] PreparedTokenDistribution prepare_token_distribution(
+    std::span<const TokenLogit> compact_candidates,
+    const TokenSamplerOptions& options,
+    const TokenSelectionRequest& request
+);
 
 class TokenSampler final {
 public:

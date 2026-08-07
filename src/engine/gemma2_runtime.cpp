@@ -150,6 +150,7 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
     command.write_u32(scratch.token_id_staging, token_id);
     // feed_forward_residual is the layer-to-layer residual ping-pong endpoint;
     // before layer zero it safely serves as the embedded hidden state.
+    command.push_debug_group("Embedding");
     command.encode_embedding(
         scratch.token_id_staging,
         plan.weights().token_embedding_weight,
@@ -157,6 +158,7 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
         embedding_scale
     );
     command.encode_memory_barrier();
+    command.pop_debug_group();
 
     const auto head_dimension = config.attention_key_length;
     const auto attention_scale = 1.0F / std::sqrt(static_cast<float>(head_dimension));
@@ -166,6 +168,9 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
         const auto& attention = block.attention;
         const auto& feed_forward = block.feed_forward;
         const auto& cache = plan.kv_cache()[scheduled_layer.layer_index];
+        const auto layer_label = "Layer " + std::to_string(scheduled_layer.layer_index)
+            + " attention projections";
+        command.push_debug_group(layer_label);
         command.encode_rms_norm(
             scratch.feed_forward_residual,
             attention.attention_norm_weight,
@@ -181,6 +186,8 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             scratch.raw_value
         );
         command.encode_memory_barrier();
+        command.pop_debug_group();
+        command.push_debug_group("Attention and KV");
         command.encode_rope(
             scratch.raw_query,
             scratch.query,
@@ -218,12 +225,16 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             cache.row_mask
         );
         command.encode_memory_barrier();
+        command.pop_debug_group();
+        command.push_debug_group("Attention output projection");
         command.encode_matmul(
             scratch.attention_output,
             attention.output_weight,
             scratch.projected_attention_output
         );
         command.encode_memory_barrier();
+        command.pop_debug_group();
+        command.push_debug_group("FFN gate up and GELU");
         command.encode_rms_norm_add(
             scratch.projected_attention_output,
             attention.post_attention_norm_weight,
@@ -256,6 +267,8 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             scratch.feed_forward_gated
         );
         command.encode_memory_barrier();
+        command.pop_debug_group();
+        command.push_debug_group("FFN down projection");
         command.encode_matmul(
             scratch.feed_forward_gated,
             feed_forward.down_weight,
@@ -270,8 +283,10 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             config.rms_norm_epsilon
         );
         command.encode_memory_barrier();
+        command.pop_debug_group();
     }
 
+    command.push_debug_group("Final norm and output head");
     command.encode_rms_norm(
         scratch.feed_forward_residual,
         plan.weights().output_norm_weight,
@@ -281,11 +296,14 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
     command.encode_memory_barrier();
     command.encode_matmul(scratch.normalized_hidden, plan.weights().output_weight, scratch.logits);
     command.encode_memory_barrier();
+    command.pop_debug_group();
     std::uint32_t selector_dispatch_count = 0;
     if (selection_request.has_value()) {
+        command.push_debug_group("Token selection");
         selector_dispatch_count = command.encode_token_candidates(
             scratch.logits, plan.selection_workspace(), *selection_request, config.final_logit_softcap
         );
+        command.pop_debug_group();
     }
 
     const auto metal_stats = command.commit_and_wait();
@@ -320,6 +338,7 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             .f16_projection_count = metal_stats.f16_projection_count,
             .decode_attention_dispatch_count = metal_stats.decode_attention_dispatch_count,
             .decode_attention_partition_count = metal_stats.decode_attention_partition_count,
+            .decode_attention_token_count = metal_stats.decode_attention_token_count,
         },
     };
 }
@@ -602,6 +621,7 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
         execution.f16_projection_count += stats.f16_projection_count;
         execution.decode_attention_dispatch_count += stats.decode_attention_dispatch_count;
         execution.decode_attention_partition_count += stats.decode_attention_partition_count;
+        execution.decode_attention_token_count += stats.decode_attention_token_count;
     }
 
     auto candidates = selection_request.has_value()
@@ -830,6 +850,12 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         decode_execution.f16_projection_count += decode_step.execution.f16_projection_count;
         decode_execution.decode_attention_dispatch_count += decode_step.execution.decode_attention_dispatch_count;
         decode_execution.decode_attention_partition_count += decode_step.execution.decode_attention_partition_count;
+        if (decode_step.execution.decode_attention_token_count
+                > std::numeric_limits<std::uint64_t>::max()
+                    - decode_execution.decode_attention_token_count) {
+            throw std::overflow_error("Gemma2 decode attention token accounting overflow");
+        }
+        decode_execution.decode_attention_token_count += decode_step.execution.decode_attention_token_count;
         cached_token_count = decode.total_kv_token_count();
         if (decode_step.candidates.has_value()) {
             candidates = *decode_step.candidates;

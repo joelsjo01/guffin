@@ -32,6 +32,7 @@ struct MetalCommandStats {
     std::uint32_t f16_projection_count = 0;
     std::uint32_t decode_attention_dispatch_count = 0;
     std::uint32_t decode_attention_partition_count = 0;
+    std::uint64_t decode_attention_token_count = 0;
 };
 
 [[nodiscard]] std::uint32_t gemma2_decode_attention_partition_count(
@@ -188,6 +189,8 @@ public:
         float softcap
     );
     void encode_memory_barrier();
+    void push_debug_group(std::string_view label);
+    void pop_debug_group();
 
     [[nodiscard]] MetalCommandStats commit();
     [[nodiscard]] MetalCommandStats wait_until_completed();

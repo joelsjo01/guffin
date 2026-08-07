@@ -616,6 +616,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             .resident_weight_byte_count = plan_.uploaded_weight_byte_count(),
             .resident_kv_cache_byte_count = plan_.kv_cache_byte_count(),
             .resident_scratch_byte_count = plan_.scratch_byte_count(),
+            .decode_scheduled_weight_bytes = plan_.decode_scheduled_weight_bytes(),
             .prefill_execution = generation.prefill_execution,
             .decode_execution = generation.decode_execution,
         },

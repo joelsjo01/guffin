@@ -7,6 +7,7 @@
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/tensor_error.hpp"
+#include "local_gguf_engine/tensor/metal_trace_capture.hpp"
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
 #include <cstddef>
@@ -125,6 +126,7 @@ void write_generate_usage(std::ostream& error) {
           << " [--greedy | --temperature T [--top-k K] [--top-p P] [--min-p P]"
           << " [--repeat-penalty R] [--seed S]] [--backend cpu|metal]"
           << " [--reverse-prompt TEXT] [--context-shift]"
+          << " [--decode-diagnostics] [--metal-capture PATH]"
           << '\n';
 }
 
@@ -334,6 +336,42 @@ struct ParsedChatCommand {
     bool greedy_requested = false;
     bool temperature_requested = false;
     bool sampled_modifier_requested = false;
+    bool decode_diagnostics = false;
+    std::optional<std::string> metal_capture_path;
+};
+
+class ScopedMetalTraceArm final {
+public:
+    explicit ScopedMetalTraceArm(const std::optional<std::string>& path)
+        : path_(path), pending_(path.has_value()) {
+        if (path_.has_value()) {
+            tensor::backends::metal::arm_next_gemma2_decode_trace(*path_);
+        }
+    }
+
+    ~ScopedMetalTraceArm() {
+        if (pending_ && tensor::backends::metal::metal_trace_capture_status()
+                == tensor::backends::metal::MetalTraceCaptureStatus::armed) {
+            tensor::backends::metal::cancel_armed_metal_trace_capture();
+        }
+    }
+
+    [[nodiscard]] bool pending() const noexcept { return pending_; }
+
+    void finish(std::ostream& output) {
+        if (!pending_) return;
+        if (tensor::backends::metal::metal_trace_capture_status()
+            != tensor::backends::metal::MetalTraceCaptureStatus::completed) {
+            throw std::runtime_error("Metal GPU trace capture did not capture a production decode");
+        }
+        tensor::backends::metal::reset_completed_metal_trace_capture();
+        output << "[ Metal capture: " << *path_ << " ]\n";
+        pending_ = false;
+    }
+
+private:
+    std::optional<std::string> path_;
+    bool pending_ = false;
 };
 
 [[nodiscard]] bool parse_chat_command(
@@ -353,6 +391,19 @@ struct ParsedChatCommand {
         }
         if (option == "--context-shift") {
             command.context_shift = true;
+            continue;
+        }
+        if (option == "--decode-diagnostics") {
+            command.decode_diagnostics = true;
+            continue;
+        }
+        if (option == "--metal-capture") {
+            if (index + 1 >= argc || std::string_view(argv[index + 1]).empty()) {
+                write_generate_usage(error);
+                error << "error: --metal-capture requires a path\n";
+                return false;
+            }
+            command.metal_capture_path = argv[++index];
             continue;
         }
         if (option == "--no-context-shift") {
@@ -506,6 +557,11 @@ struct ParsedChatCommand {
         error << "error: --repeat-penalty must be positive\n";
         return false;
     }
+    if (command.metal_capture_path.has_value()
+        && (!command.decode_diagnostics || command.options.backend != BackendKind::metal)) {
+        error << "error: --metal-capture requires --decode-diagnostics and --backend metal\n";
+        return false;
+    }
 
     return true;
 }
@@ -602,6 +658,7 @@ int run_generate_chat(
             .sampler = command.sampler,
         }
     );
+    ScopedMetalTraceArm metal_trace(command.metal_capture_path);
 
     output << "local-gguf-engine chat\n";
     output << "commands: /exit /quit /clear /reset /regen /tokens /read <path>\n";
@@ -687,6 +744,10 @@ int run_generate_chat(
         output << '\n';
         output << format_chat_timing_line(turn->metrics) << '\n';
         output << format_chat_timing_detail_line(turn->metrics) << '\n';
+        if (command.decode_diagnostics) {
+            output << format_chat_decode_attribution_line(turn->metrics) << '\n';
+        }
+        if (metal_trace.pending()) metal_trace.finish(output);
         if (turn->rebuilt_context) {
             output << "context: dropped " << turn->trimmed_turn_count
                    << " oldest turn(s) and rebuilt retained KV\n";
@@ -724,6 +785,101 @@ std::string format_chat_timing_detail_line(const engine::Gemma2ChatTurnMetrics& 
         + " | Decoded: " + std::to_string(metrics.generation.selected_token_count)
         + " | Prompt: " + format_seconds(metrics.prompt_processing_duration_ns)
         + " | Generation: " + format_seconds(metrics.generation_duration_ns) + " ]";
+}
+
+std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetrics& metrics) {
+    constexpr std::uint32_t schema_version = 1U;
+    const auto decode_tokens = static_cast<std::uint64_t>(metrics.generation.decode_token_count);
+    const auto checked_multiply = [](std::uint64_t left, std::uint64_t right, const char* name) {
+        if (left != 0U && right > std::numeric_limits<std::uint64_t>::max() / left) {
+            throw std::overflow_error(std::string("decode attribution overflow: ") + name);
+        }
+        return left * right;
+    };
+    const auto checked_add = [](std::uint64_t left, std::uint64_t right, const char* name) {
+        if (right > std::numeric_limits<std::uint64_t>::max() - left) {
+            throw std::overflow_error(std::string("decode attribution overflow: ") + name);
+        }
+        return left + right;
+    };
+    const auto& bytes = metrics.decode_scheduled_weight_bytes;
+    std::uint64_t byte_sum = 0U;
+    for (const auto value : {
+             bytes.embedding, bytes.attention_projections, bytes.feed_forward_gate_up,
+             bytes.feed_forward_down, bytes.output_head, bytes.norms,
+         }) {
+        byte_sum = checked_add(byte_sum, value, "scheduled byte sum");
+    }
+    if (byte_sum != bytes.total) {
+        throw std::logic_error("decode attribution scheduled byte categories do not sum to total");
+    }
+    const auto& execution = metrics.decode_execution;
+    if (decode_tokens > 0U && (execution.command_buffer_count == 0U || execution.gpu_duration_ns == 0U)) {
+        throw std::logic_error("decode attribution has decoded tokens without GPU execution");
+    }
+    if (execution.gpu_duration_ns > metrics.generation.decode_duration_ns) {
+        throw std::logic_error("decode attribution GPU duration exceeds decode wall duration");
+    }
+    const auto final_cache_position = checked_add(
+        checked_add(
+            metrics.initial_cache_position,
+            metrics.generation.newly_evaluated_prompt_token_count,
+            "prompt cache position"
+        ),
+        decode_tokens,
+        "final cache position"
+    );
+    const auto total_scheduled_bytes = checked_multiply(bytes.total, decode_tokens, "scheduled bytes");
+    const auto wall_residual_ns = metrics.generation.decode_duration_ns - execution.gpu_duration_ns;
+
+    std::ostringstream json;
+    json << "[ Decode: {\"schema_version\":" << schema_version
+         << ",\"selected_tokens\":" << metrics.generation.selected_token_count
+         << ",\"decoded_tokens\":" << metrics.generation.decode_token_count
+         << ",\"initial_cache_position\":" << metrics.initial_cache_position
+         << ",\"final_cache_position\":" << final_cache_position
+         << ",\"evaluated_prompt_tokens\":" << metrics.generation.newly_evaluated_prompt_token_count
+         << ",\"reused_cache_tokens\":" << metrics.reused_cached_token_count
+         << ",\"decode_wall_ns\":" << metrics.generation.decode_duration_ns
+         << ",\"gpu_ns\":" << execution.gpu_duration_ns
+         << ",\"selection_ns\":" << metrics.generation.selection_duration_ns
+         << ",\"wall_minus_gpu_ns\":" << wall_residual_ns
+         << ",\"command_buffers\":" << execution.command_buffer_count
+         << ",\"commits\":" << execution.commit_count
+         << ",\"waits\":" << execution.synchronous_wait_count
+         << ",\"compute_encoders\":" << execution.compute_encoder_count
+         << ",\"compute_dispatches\":" << execution.compute_dispatch_count
+         << ",\"blit_encoders\":" << execution.blit_encoder_count
+         << ",\"barriers\":" << execution.memory_barrier_count
+         << ",\"transient_allocations\":" << execution.transient_buffer_allocation_count
+         << ",\"selector_dispatches\":" << execution.selector_dispatch_count
+         << ",\"max_candidates\":" << execution.candidate_count
+         << ",\"compact_readback_bytes\":" << execution.compact_readback_bytes
+         << ",\"q4_decode\":" << execution.q4_decode_projection_count
+         << ",\"q4_small_batch\":" << execution.q4_small_batch_projection_count
+         << ",\"q4_exact_16\":" << execution.q4_exact_16_projection_count
+         << ",\"q4_generic_tiled\":" << execution.q4_generic_tiled_projection_count
+         << ",\"q6_decode\":" << execution.q6_decode_projection_count
+         << ",\"q6_small_batch\":" << execution.q6_small_batch_projection_count
+         << ",\"q6_exact_16\":" << execution.q6_exact_16_projection_count
+         << ",\"q6_generic_tiled\":" << execution.q6_generic_tiled_projection_count
+         << ",\"f16\":" << execution.f16_projection_count
+         << ",\"attention_dispatches\":" << execution.decode_attention_dispatch_count
+         << ",\"attention_partitions\":" << execution.decode_attention_partition_count
+         << ",\"attention_tokens\":" << execution.decode_attention_token_count
+         << ",\"fused_embedding_norm\":" << execution.fused_embedding_norm_count
+         << ",\"direct_qkv_cache\":" << execution.direct_qkv_cache_count
+         << ",\"dual_norm_bridge\":" << execution.dual_norm_bridge_count
+         << ",\"fused_gate_up_gelu\":" << execution.fused_gate_up_gelu_count
+         << ",\"scheduled_bytes_per_token\":{\"embedding\":" << bytes.embedding
+         << ",\"attention_projections\":" << bytes.attention_projections
+         << ",\"ffn_gate_up\":" << bytes.feed_forward_gate_up
+         << ",\"ffn_down\":" << bytes.feed_forward_down
+         << ",\"output_head\":" << bytes.output_head
+         << ",\"norms\":" << bytes.norms
+         << ",\"total\":" << bytes.total
+         << "},\"scheduled_bytes_total\":" << total_scheduled_bytes << "} ]";
+    return json.str();
 }
 
 std::string generate_text_from_gguf_bytes(

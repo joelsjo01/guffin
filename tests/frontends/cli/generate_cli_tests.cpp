@@ -8,6 +8,7 @@
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
+#include "local_gguf_engine/tensor/metal_trace_capture.hpp"
 
 #include "tensor_test_support.hpp"
 
@@ -32,6 +33,7 @@ namespace {
 using local_gguf_engine::frontends::cli::run_generate;
 using local_gguf_engine::frontends::cli::format_chat_timing_line;
 using local_gguf_engine::frontends::cli::format_chat_timing_detail_line;
+using local_gguf_engine::frontends::cli::format_chat_decode_attribution_line;
 using local_gguf_engine::engine::Gemma2ChatSession;
 using local_gguf_engine::engine::Gemma2ChatContextError;
 using local_gguf_engine::engine::Gemma2ChatSessionOptions;
@@ -160,6 +162,100 @@ void test_formats_chat_timing_line_from_runtime_metrics() {
             == "[ Prompt: n/a | Generation: n/a | TTFT: n/a ]",
         "chat timing zero input formatting mismatch"
     );
+}
+
+void test_formats_and_validates_chat_decode_attribution() {
+    local_gguf_engine::engine::Gemma2ChatTurnMetrics metrics;
+    metrics.initial_cache_position = 10U;
+    metrics.reused_cached_token_count = 10U;
+    metrics.generation.newly_evaluated_prompt_token_count = 3U;
+    metrics.generation.selected_token_count = 2U;
+    metrics.generation.decode_token_count = 2U;
+    metrics.generation.decode_duration_ns = 200U;
+    metrics.generation.selection_duration_ns = 7U;
+    metrics.decode_execution.command_buffer_count = 2U;
+    metrics.decode_execution.commit_count = 2U;
+    metrics.decode_execution.synchronous_wait_count = 2U;
+    metrics.decode_execution.compute_encoder_count = 2U;
+    metrics.decode_execution.compute_dispatch_count = 20U;
+    metrics.decode_execution.memory_barrier_count = 8U;
+    metrics.decode_execution.gpu_duration_ns = 150U;
+    metrics.decode_execution.decode_attention_dispatch_count = 4U;
+    metrics.decode_execution.decode_attention_partition_count = 5U;
+    metrics.decode_execution.decode_attention_token_count = 123U;
+    metrics.decode_scheduled_weight_bytes = {
+        .embedding = 1U,
+        .attention_projections = 2U,
+        .feed_forward_gate_up = 3U,
+        .feed_forward_down = 4U,
+        .output_head = 5U,
+        .norms = 6U,
+        .total = 21U,
+    };
+    const auto line = format_chat_decode_attribution_line(metrics);
+    expect(line.starts_with("[ Decode: {\"schema_version\":1"),
+        "decode attribution prefix mismatch");
+    expect(line.find("\"final_cache_position\":15") != std::string::npos,
+        "decode attribution final cache mismatch");
+    expect(line.find("\"wall_minus_gpu_ns\":50") != std::string::npos,
+        "decode attribution wall residual mismatch");
+    expect(line.find("\"attention_tokens\":123") != std::string::npos,
+        "decode attribution attention token mismatch");
+    expect(line.find("\"scheduled_bytes_total\":42") != std::string::npos,
+        "decode attribution scheduled total mismatch");
+
+    metrics.decode_execution.gpu_duration_ns = 201U;
+    bool rejected = false;
+    try {
+        static_cast<void>(format_chat_decode_attribution_line(metrics));
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    expect(rejected, "decode attribution must reject GPU time beyond wall time");
+}
+
+void test_metal_trace_capture_arm_validation() {
+    namespace metal = local_gguf_engine::tensor::backends::metal;
+    const auto path = std::filesystem::temp_directory_path()
+        / "local-gguf-engine-stage0-arm-test.gputrace";
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+    const char* previous = std::getenv("MTL_CAPTURE_ENABLED");
+    const auto previous_value = previous == nullptr ? std::optional<std::string> {}
+                                                    : std::optional<std::string>(previous);
+    unsetenv("MTL_CAPTURE_ENABLED");
+    bool rejected = false;
+    try {
+        metal::arm_next_gemma2_decode_trace(path.string());
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    expect(rejected && metal::metal_trace_capture_status() == metal::MetalTraceCaptureStatus::idle,
+        "Metal trace arm must require MTL_CAPTURE_ENABLED=1");
+
+    setenv("MTL_CAPTURE_ENABLED", "1", 1);
+    {
+        std::ofstream existing(path);
+        existing << "existing";
+    }
+    rejected = false;
+    try {
+        metal::arm_next_gemma2_decode_trace(path.string());
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    expect(rejected && metal::metal_trace_capture_status() == metal::MetalTraceCaptureStatus::idle,
+        "Metal trace arm must refuse overwrite");
+    std::filesystem::remove(path, ignored);
+
+    metal::arm_next_gemma2_decode_trace(path.string());
+    expect(metal::metal_trace_capture_status() == metal::MetalTraceCaptureStatus::armed,
+        "Metal trace must enter armed state");
+    metal::cancel_armed_metal_trace_capture();
+    expect(metal::metal_trace_capture_status() == metal::MetalTraceCaptureStatus::idle,
+        "Metal trace cancellation must restore idle state");
+    if (previous_value.has_value()) setenv("MTL_CAPTURE_ENABLED", previous_value->c_str(), 1);
+    else unsetenv("MTL_CAPTURE_ENABLED");
 }
 
 int run_generate_for_path(
@@ -1314,6 +1410,43 @@ void test_runs_generate_gemma2_chat_loop_until_exit_when_available() {
     expect(error.str().empty(), "generate Gemma2 chat CLI should not write stderr");
 }
 
+void test_runs_generate_chat_decode_diagnostics_only_when_requested_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const auto bytes = write_tiny_gguf_bytes(
+        tiny_gemma2_generate_cli_metadata(32), tiny_gemma2_generate_cli_tensors()
+    );
+    const TempBinaryFile model("tiny-gemma2-chat-diagnostics", std::span<const std::uint8_t>(bytes));
+    const std::vector<std::string> arguments {
+        "local-gguf-generate", model.path().string(), "--chat", "--max-new-tokens", "1",
+        "--greedy", "--decode-diagnostics",
+    };
+    std::vector<const char*> argv;
+    for (const auto& argument : arguments) argv.push_back(argument.c_str());
+    std::istringstream input("Hello\n/exit\n");
+    std::ostringstream output;
+    std::ostringstream error;
+    const auto exit_code = run_generate(
+        static_cast<int>(argv.size()), argv.data(), input, output, error
+    );
+    expect(exit_code == EXIT_SUCCESS && error.str().empty(),
+        "decode-diagnostic chat invocation failed");
+    expect(output.str().find("[ Decode: {\"schema_version\":1") != std::string::npos,
+        "requested decode attribution record is missing");
+}
+
+void test_rejects_metal_capture_without_diagnostics() {
+    std::ostringstream output;
+    std::ostringstream error;
+    const char* argv[] = {
+        "local-gguf-generate", "missing.gguf", "--chat", "--metal-capture", "/tmp/test.gputrace",
+    };
+    std::istringstream input("/exit\n");
+    const auto exit_code = run_generate(5, argv, input, output, error);
+    expect(exit_code == EXIT_FAILURE, "Metal capture without diagnostics must fail");
+    expect(error.str().find("requires --decode-diagnostics and --backend metal") != std::string::npos,
+        "Metal capture validation error mismatch");
+}
+
 void test_runs_generate_gemma2_chat_streams_visible_tokens_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -1691,6 +1824,11 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
         test_formats_chat_timing_line_from_runtime_metrics,
     },
     {
+        "formats and validates chat decode attribution",
+        test_formats_and_validates_chat_decode_attribution,
+    },
+    {"Metal trace capture arm validation", test_metal_trace_capture_arm_validation},
+    {
         "runs generate Gemma2 default greedy when available",
         test_runs_generate_gemma2_default_greedy_when_available,
     },
@@ -1766,6 +1904,11 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
         "runs generate Gemma2 chat loop until exit when available",
         test_runs_generate_gemma2_chat_loop_until_exit_when_available,
     },
+    {
+        "runs generate chat decode diagnostics only when requested when available",
+        test_runs_generate_chat_decode_diagnostics_only_when_requested_when_available,
+    },
+    {"rejects Metal capture without diagnostics", test_rejects_metal_capture_without_diagnostics},
     {
         "runs generate Gemma2 chat streams visible tokens when available",
         test_runs_generate_gemma2_chat_streams_visible_tokens_when_available,

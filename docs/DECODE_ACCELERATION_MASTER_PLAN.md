@@ -4,9 +4,9 @@
 
 This document turns the completed three-phase research in
 `docs/DECODE_RESEARCH_PROGRAM.md` into the durable implementation strategy for
-faster Gemma 2 9B Q4 generation on the base M4. It is not an active task list:
-`docs/NEXT_TASK.md` owns exactly one implementation baton at a time, and each
-baton must stop at its stated evidence boundary before the next is chosen.
+faster Gemma 2 9B Q4 generation on the base M4. It is not an active task list;
+`docs/NEXT_TASK.md` owns the complete currently approved implementation scope
+and its evidence boundary.
 
 The strategy is to extract the worthwhile gains from the current single-token
 engine first, while building only the foundations that directly reduce risk for
@@ -19,8 +19,10 @@ the higher-risk Phase 1 hardware and algorithm experiments.
 Planning starts from these local measurements, not from isolated paper results:
 
 - Current generation is approximately 13.9 tok/s, or about 72 ms per token.
-- A token streams 6,837,368,832 bytes of resident weights. Sustained Q4_K,
-  Q6_K, generic Q4_K, and F16 projection probes converge near 98-103 GB/s.
+- A token schedules 6,837,376,000 logical weight bytes: the previously recorded
+  6,837,368,832 projection/norm bytes plus the 7,168-byte selected F16 embedding
+  row actually read by decode. Sustained Q4_K, Q6_K, generic Q4_K, and F16
+  projection probes converge near 98-103 GB/s.
 - The 98 GB/s weight-only floor is approximately 69.8 ms. Even the M4's
   documented 120 GB/s peak gives an idealized 57.0 ms floor, so an unchanged
   one-token pass has at most about 1.22x theoretical headroom before attention
@@ -30,10 +32,11 @@ Planning starts from these local measurements, not from isolated paper results:
   about 2.55 ms; at the real maximum-context mixture it rises to about 23.2 ms.
 - CPU sampling is about 3.4 microseconds per token. The total wall-minus-GPU
   envelope is about 0.55 ms per token. Neither is a headline bottleneck.
-- Sustained width-two Q4_K and Q6_K work costs approximately 1.23-1.24x and
-  1.32-1.33x their one-row paths. Width four costs approximately 2.32-2.44x and
-  2.59-2.60x. Width two therefore remains promising, but only an end-to-end
-  causal verifier can establish its economics.
+- Mode-major sustained measurement corrected the earlier width estimates.
+  Width-two Q4_K and Q6_K cost approximately 1.7x their one-row paths; width
+  four costs approximately 3.2x and 3.5x. F16 output is effectively flat at
+  width two and approximately 1.07x at width four. These projection results do
+  not establish full causal-verifier economics.
 - Warm-up currently materializes a 2.114 GB KV allocation by clearing it twice.
   This is avoidable memory pressure, not a demonstrated decode-throughput win.
 
@@ -63,7 +66,7 @@ path and comply with the repository benchmark contract. In particular:
    another headline metric.
 3. Diagnostics must observe the production implementation or the same retained
    kernel. A fast diagnostic-only execution path is not a product result.
-4. One `NEXT_TASK.md` baton proves one coherent hypothesis end to end. Rejected
+4. Each approved `NEXT_TASK.md` scope proves its hypotheses end to end. Rejected
    code and temporary instrumentation are removed before moving on.
 5. Report negative results. They narrow the search space and prevent attractive
    but locally invalid ideas from being repeated.
@@ -223,8 +226,9 @@ clear.
    cache-window wraparound, rejection at every position, EOS, and partial
    acceptance.
 5. Measure a sustained full verifier, including all output rows and KV work.
-   The width-two target is less than 1.35x current one-token latency. This is a
-   research gate, not an assumption inherited from the isolated kernels.
+   Derive its gate from complete verifier latency, proposal overhead, measured
+   acceptance/commit distribution, and baseline token latency. Do not inherit a
+   fixed width-two target from isolated or projection-only kernels.
 6. Measure width four only if width two passes. Do not pursue width 16 merely
    because an isolated exact-16 kernel is fast; full causal attention, logits,
    acceptance, and KV economics decide width.
@@ -428,6 +432,6 @@ The program is complete when the engine has retained all compatible candidates
 that still clear their evidence gates, the remaining ideas have ceilings below
 the retention threshold or have failed their declared stop conditions, and the
 final production path has current correctness, quality, thermal, memory,
-canonical chat, and pinned-reference evidence. Until then, progress is recorded
-as a sequence of completed `NEXT_TASK.md` batons, not as unchecked items in this
-master plan.
+canonical chat, and pinned-reference evidence. Until then, `NEXT_TASK.md`
+records the complete currently approved implementation scope and its verified
+outcome rather than treating this master plan as an unchecked task list.
