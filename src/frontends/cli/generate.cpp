@@ -126,6 +126,7 @@ void write_generate_usage(std::ostream& error) {
           << " [--greedy | --temperature T [--top-k K] [--top-p P] [--min-p P]"
           << " [--repeat-penalty R] [--seed S]] [--backend cpu|metal]"
           << " [--reverse-prompt TEXT] [--context-shift]"
+          << " [--output-head f16|q8_0]"
           << " [--decode-diagnostics] [--metal-capture PATH]"
           << '\n';
 }
@@ -337,6 +338,7 @@ struct ParsedChatCommand {
     bool temperature_requested = false;
     bool sampled_modifier_requested = false;
     bool decode_diagnostics = false;
+    engine::Gemma2OutputHeadPolicy output_head_policy = engine::Gemma2OutputHeadPolicy::automatic;
     std::optional<std::string> metal_capture_path;
 };
 
@@ -395,6 +397,22 @@ private:
         }
         if (option == "--decode-diagnostics") {
             command.decode_diagnostics = true;
+            continue;
+        }
+        if (option == "--output-head") {
+            if (index + 1 >= argc) {
+                write_generate_usage(error);
+                error << "error: --output-head requires f16 or q8_0\n";
+                return false;
+            }
+            const std::string_view value(argv[++index]);
+            if (value == "f16") command.output_head_policy = engine::Gemma2OutputHeadPolicy::f16;
+            else if (value == "q8_0") command.output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0;
+            else {
+                write_generate_usage(error);
+                error << "error: --output-head must be f16 or q8_0\n";
+                return false;
+            }
             continue;
         }
         if (option == "--metal-capture") {
@@ -653,6 +671,7 @@ int run_generate_chat(
         Gemma2ChatSessionOptions {
             .max_new_tokens = command.max_new_tokens,
             .backend = command.options.backend,
+            .output_head_policy = command.output_head_policy,
             .context_shift = command.context_shift,
             .reverse_stop_strings = command.reverse_stop_strings,
             .sampler = command.sampler,
@@ -856,6 +875,8 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"selection_ns\":" << metrics.generation.selection_duration_ns
          << ",\"wall_minus_gpu_ns\":" << wall_residual_ns
          << ",\"resident_weights_bytes\":" << metrics.resident_weight_byte_count
+         << ",\"output_head_policy\":\""
+         << engine::gemma2_output_head_policy_name(metrics.output_head_policy) << "\""
          << ",\"resident_kv_bytes\":" << metrics.resident_kv_cache_byte_count
          << ",\"resident_scratch_bytes\":" << metrics.resident_scratch_byte_count
          << ",\"warmup_kv_clear_passes\":" << metrics.warmup_kv_clear_pass_count
@@ -872,6 +893,7 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"max_candidates\":" << execution.candidate_count
          << ",\"compact_readback_bytes\":" << execution.compact_readback_bytes
          << ",\"q4_decode\":" << execution.q4_decode_projection_count
+         << ",\"q8_decode\":" << execution.q8_decode_projection_count
          << ",\"q4_small_batch\":" << execution.q4_small_batch_projection_count
          << ",\"q4_exact_16\":" << execution.q4_exact_16_projection_count
          << ",\"q4_generic_tiled\":" << execution.q4_generic_tiled_projection_count

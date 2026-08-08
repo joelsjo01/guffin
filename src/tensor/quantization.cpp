@@ -2,9 +2,17 @@
 
 #include "local_gguf_engine/tensor/f16.hpp"
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <bit>
+#include <cmath>
+#include <cstring>
+#include <exception>
 #include <limits>
+#include <mutex>
 #include <numeric>
+#include <thread>
 #include <vector>
 
 namespace local_gguf_engine::tensor {
@@ -24,6 +32,176 @@ void require_quantized_descriptor(const TensorDescriptor& descriptor, DType expe
 [[nodiscard]] std::uint16_t read_little_endian_u16(std::span<const std::uint8_t> bytes) noexcept {
     return static_cast<std::uint16_t>(bytes[0])
         | static_cast<std::uint16_t>(static_cast<std::uint16_t>(bytes[1]) << 8);
+}
+
+void write_little_endian_u16(std::span<std::uint8_t> bytes, std::uint16_t value) noexcept {
+    bytes[0] = static_cast<std::uint8_t>(value & 0xFFU);
+    bytes[1] = static_cast<std::uint8_t>(value >> 8U);
+}
+
+// This is the rounding primitive used by the pinned GGML Q4_K encoder. The
+// input bound is far above any value produced by a finite F16 Q6_K block.
+[[nodiscard]] int nearest_int(float value) noexcept {
+    const auto bits = std::bit_cast<std::uint32_t>(value + 12582912.0F);
+    return static_cast<int>(bits & 0x007FFFFFU) - 0x00400000;
+}
+
+[[nodiscard]] std::uint8_t q4_k_scale_min_value(
+    std::span<const std::uint8_t> scale_min_bytes,
+    std::size_t group_index,
+    bool min_value
+);
+
+[[nodiscard]] float make_q4_k_group(
+    std::span<const float, 32> values,
+    std::span<const float, 32> weights,
+    std::span<std::uint8_t, 32> levels,
+    float& minimum_magnitude
+) {
+    float minimum = values[0];
+    float maximum = values[0];
+    float weight_sum = weights[0];
+    float weighted_value_sum = weights[0] * values[0];
+    for (std::size_t index = 1; index < values.size(); ++index) {
+        minimum = std::min(minimum, values[index]);
+        maximum = std::max(maximum, values[index]);
+        weight_sum += weights[index];
+        weighted_value_sum += weights[index] * values[index];
+    }
+    minimum = std::min(minimum, 0.0F);
+    if (maximum == minimum) {
+        std::fill(levels.begin(), levels.end(), 0U);
+        minimum_magnitude = -minimum;
+        return 0.0F;
+    }
+
+    constexpr int maximum_level = 15;
+    float inverse_scale = maximum_level / (maximum - minimum);
+    float scale = 1.0F / inverse_scale;
+    float best_error = 0.0F;
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        const auto level = std::clamp(nearest_int(inverse_scale * (values[index] - minimum)), 0, maximum_level);
+        levels[index] = static_cast<std::uint8_t>(level);
+        const auto difference = scale * static_cast<float>(level) + minimum - values[index];
+        best_error += weights[index] * difference * difference;
+    }
+
+    std::array<std::uint8_t, 32> candidate_levels {};
+    for (int step = 0; step <= 20; ++step) {
+        inverse_scale = (-1.0F + 0.1F * static_cast<float>(step) + maximum_level)
+            / (maximum - minimum);
+        float weighted_level_sum = 0.0F;
+        float weighted_level_squared_sum = 0.0F;
+        float weighted_level_value_sum = 0.0F;
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            const auto level = std::clamp(
+                nearest_int(inverse_scale * (values[index] - minimum)), 0, maximum_level
+            );
+            candidate_levels[index] = static_cast<std::uint8_t>(level);
+            const auto weighted_level = weights[index] * static_cast<float>(level);
+            weighted_level_sum += weighted_level;
+            weighted_level_squared_sum += weighted_level * static_cast<float>(level);
+            weighted_level_value_sum += weighted_level * values[index];
+        }
+        const auto determinant = weight_sum * weighted_level_squared_sum
+            - weighted_level_sum * weighted_level_sum;
+        if (determinant <= 0.0F) continue;
+
+        auto candidate_scale = (weight_sum * weighted_level_value_sum
+            - weighted_value_sum * weighted_level_sum) / determinant;
+        auto candidate_minimum = (weighted_level_squared_sum * weighted_value_sum
+            - weighted_level_sum * weighted_level_value_sum) / determinant;
+        if (candidate_minimum > 0.0F) {
+            candidate_minimum = 0.0F;
+            candidate_scale = weighted_level_value_sum / weighted_level_squared_sum;
+        }
+        float candidate_error = 0.0F;
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            const auto difference = candidate_scale * static_cast<float>(candidate_levels[index])
+                + candidate_minimum - values[index];
+            candidate_error += weights[index] * difference * difference;
+        }
+        if (candidate_error < best_error) {
+            levels = candidate_levels;
+            best_error = candidate_error;
+            scale = candidate_scale;
+            minimum = candidate_minimum;
+        }
+    }
+    minimum_magnitude = -minimum;
+    return scale;
+}
+
+void encode_q4_k_block(
+    std::span<const float, Q4_KBlockView::element_count> values,
+    std::span<std::uint8_t, Q4_KBlockView::byte_count> destination
+) {
+    std::array<std::uint8_t, Q4_KBlockView::element_count> levels {};
+    std::array<float, 8> scales {};
+    std::array<float, 8> minima {};
+    float maximum_scale = 0.0F;
+    float maximum_minimum = 0.0F;
+    for (std::size_t group = 0; group < scales.size(); ++group) {
+        const std::span<const float, 32> group_values(values.data() + group * 32U, 32U);
+        float sum_squares = 0.0F;
+        for (const auto value : group_values) sum_squares += value * value;
+        const auto average_magnitude = std::sqrt(sum_squares / 32.0F);
+        std::array<float, 32> weights {};
+        for (std::size_t index = 0; index < weights.size(); ++index) {
+            weights[index] = average_magnitude + std::abs(group_values[index]);
+        }
+        scales[group] = make_q4_k_group(
+            group_values,
+            weights,
+            std::span<std::uint8_t, 32>(levels.data() + group * 32U, 32U),
+            minima[group]
+        );
+        maximum_scale = std::max(maximum_scale, scales[group]);
+        maximum_minimum = std::max(maximum_minimum, minima[group]);
+    }
+
+    std::fill(destination.begin(), destination.end(), 0U);
+    const auto inverse_scale = maximum_scale > 0.0F ? 63.0F / maximum_scale : 0.0F;
+    const auto inverse_minimum = maximum_minimum > 0.0F ? 63.0F / maximum_minimum : 0.0F;
+    auto packed = destination.subspan<4, Q4_KBlockView::scale_min_byte_count>();
+    for (std::size_t group = 0; group < scales.size(); ++group) {
+        const auto scale = static_cast<std::uint8_t>(std::min(63, nearest_int(inverse_scale * scales[group])));
+        const auto minimum = static_cast<std::uint8_t>(std::min(63, nearest_int(inverse_minimum * minima[group])));
+        if (group < 4U) {
+            packed[group] = scale;
+            packed[group + 4U] = minimum;
+        } else {
+            packed[group + 4U] = static_cast<std::uint8_t>((scale & 0x0FU) | ((minimum & 0x0FU) << 4U));
+            packed[group - 4U] |= static_cast<std::uint8_t>((scale >> 4U) << 6U);
+            packed[group] |= static_cast<std::uint8_t>((minimum >> 4U) << 6U);
+        }
+    }
+    const auto scale_bits = f32_to_f16_bits(maximum_scale / 63.0F);
+    const auto minimum_bits = f32_to_f16_bits(maximum_minimum / 63.0F);
+    write_little_endian_u16(destination.first<2>(), scale_bits);
+    write_little_endian_u16(destination.subspan<2, 2>(), minimum_bits);
+
+    const auto stored_scale = f16_bits_to_f32(scale_bits);
+    const auto stored_minimum = f16_bits_to_f32(minimum_bits);
+    for (std::size_t group = 0; group < scales.size(); ++group) {
+        const auto group_scale = stored_scale * q4_k_scale_min_value(packed, group, false);
+        if (group_scale == 0.0F) continue;
+        const auto group_minimum = stored_minimum * q4_k_scale_min_value(packed, group, true);
+        for (std::size_t index = 0; index < 32U; ++index) {
+            levels[group * 32U + index] = static_cast<std::uint8_t>(std::clamp(
+                nearest_int((values[group * 32U + index] + group_minimum) / group_scale), 0, 15
+            ));
+        }
+    }
+    auto quantized = destination.subspan<16, Q4_KBlockView::quantized_byte_count>();
+    for (std::size_t group = 0; group < 4U; ++group) {
+        const auto base = group * 64U;
+        for (std::size_t index = 0; index < 32U; ++index) {
+            quantized[group * 32U + index] = static_cast<std::uint8_t>(
+                levels[base + index] | (levels[base + index + 32U] << 4U)
+            );
+        }
+    }
 }
 
 [[nodiscard]] std::size_t checked_quantized_block_byte_offset(
@@ -392,6 +570,73 @@ std::array<float, Q8_0BlockView::element_count> dequantize_q8_0_block(
     return values;
 }
 
+TensorStorage quantize_f16_gguf_weight_q8_0(const TensorView& source) {
+    const auto& source_descriptor = source.descriptor();
+    if (source_descriptor.dtype != DType::f16) {
+        throw TensorError(
+            TensorErrorCode::unsupported_operator_dtype,
+            static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::f16)),
+            static_cast<std::uint64_t>(static_cast<std::uint8_t>(source_descriptor.dtype))
+        );
+    }
+    if (source_descriptor.shape.rank() != 2U) {
+        throw TensorError(
+            TensorErrorCode::invalid_shape_rank,
+            2U,
+            static_cast<std::uint64_t>(source_descriptor.shape.rank())
+        );
+    }
+    const auto shared = source_descriptor.shape.dimension(0);
+    if (shared % Q8_0BlockView::element_count != 0U) {
+        throw TensorError(
+            TensorErrorCode::invalid_quantized_element_count,
+            Q8_0BlockView::element_count,
+            shared
+        );
+    }
+
+    const auto destination_descriptor = TensorDescriptor::from_quantized_gguf_weight_matrix(
+        source_descriptor.shape,
+        DType::q8_0
+    );
+    auto destination = TensorStorage::allocate(destination_descriptor);
+    const auto source_bytes = source.bytes();
+    auto destination_bytes = destination.mutable_bytes();
+    const auto block_count = destination_descriptor.element_count / Q8_0BlockView::element_count;
+
+    for (std::uint64_t block_index = 0; block_index < block_count; ++block_index) {
+        std::array<float, Q8_0BlockView::element_count> values {};
+        float absolute_maximum = 0.0F;
+        for (std::size_t element = 0; element < values.size(); ++element) {
+            const auto linear_index = block_index * values.size() + element;
+            const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(std::uint16_t));
+            const auto bits = static_cast<std::uint16_t>(
+                static_cast<std::uint16_t>(source_bytes[byte_offset])
+                | static_cast<std::uint16_t>(static_cast<std::uint16_t>(source_bytes[byte_offset + 1U]) << 8U)
+            );
+            values[element] = f16_bits_to_f32(bits);
+            if (!std::isfinite(values[element])) {
+                throw std::invalid_argument("Q8_0 F16 weight quantization requires finite values");
+            }
+            absolute_maximum = std::max(absolute_maximum, std::abs(values[element]));
+        }
+
+        const float scale = absolute_maximum / 127.0F;
+        const float inverse_scale = scale == 0.0F ? 0.0F : 1.0F / scale;
+        const auto scale_bits = f32_to_f16_bits(scale);
+        const auto destination_offset = static_cast<std::size_t>(block_index * Q8_0BlockView::byte_count);
+        destination_bytes[destination_offset] = static_cast<std::uint8_t>(scale_bits & 0xFFU);
+        destination_bytes[destination_offset + 1U] = static_cast<std::uint8_t>(scale_bits >> 8U);
+        for (std::size_t element = 0; element < values.size(); ++element) {
+            const auto rounded = std::round(values[element] * inverse_scale);
+            const auto quantized = static_cast<std::int8_t>(rounded);
+            destination_bytes[destination_offset + 2U + element] = std::bit_cast<std::uint8_t>(quantized);
+        }
+    }
+
+    return destination;
+}
+
 std::uint64_t q4_k_block_count(const TensorDescriptor& descriptor) {
     require_quantized_descriptor(descriptor, DType::q4_k);
     return descriptor.element_count / Q4_KBlockView::element_count;
@@ -462,6 +707,100 @@ std::array<float, Q6_KBlockView::element_count> dequantize_q6_k_block(
     std::uint64_t block_index
 ) {
     return dequantize_block_values(q6_k_block_view(storage, block_index));
+}
+
+TensorStorage requantize_q6_k_gguf_weight_q4_k(const TensorView& source) {
+    const auto& descriptor = source.descriptor();
+    require_quantized_descriptor(descriptor, DType::q6_k);
+    if (descriptor.shape.rank() != 2U) {
+        throw TensorError(
+            TensorErrorCode::invalid_shape_rank,
+            2U,
+            static_cast<std::uint64_t>(descriptor.shape.rank())
+        );
+    }
+    const auto shared = descriptor.shape.dimension(0);
+    if (shared % Q6_KBlockView::element_count != 0U) {
+        throw TensorError(
+            TensorErrorCode::invalid_quantized_element_count,
+            Q6_KBlockView::element_count,
+            shared
+        );
+    }
+
+    const auto destination_descriptor = TensorDescriptor::from_quantized_gguf_weight_matrix(
+        descriptor.shape, DType::q4_k
+    );
+    auto destination = TensorStorage::allocate(destination_descriptor);
+    const auto source_bytes = source.bytes();
+    auto destination_bytes = destination.mutable_bytes();
+    const auto block_count = descriptor.element_count / Q6_KBlockView::element_count;
+    const auto convert_block = [&](std::uint64_t block_index) {
+        const auto source_offset = static_cast<std::size_t>(block_index * Q6_KBlockView::byte_count);
+        const auto source_block = source_bytes.subspan(source_offset, Q6_KBlockView::byte_count);
+        const Q6_KBlockView block(
+            source_block.first<Q6_KBlockView::low_bit_byte_count>(),
+            source_block.subspan<Q6_KBlockView::low_bit_byte_count, Q6_KBlockView::high_bit_byte_count>(),
+            source_block.subspan<
+                Q6_KBlockView::low_bit_byte_count + Q6_KBlockView::high_bit_byte_count,
+                Q6_KBlockView::scale_byte_count
+            >(),
+            read_little_endian_u16(source_block.last<2>())
+        );
+        std::array<float, Q6_KBlockView::element_count> values {};
+        for (std::size_t element = 0; element < values.size(); ++element) {
+            values[element] = block.dequantized_value(element);
+            if (!std::isfinite(values[element])) {
+                throw std::invalid_argument("Q6_K to Q4_K requantization requires finite decoded values");
+            }
+        }
+        const auto destination_offset = static_cast<std::size_t>(block_index * Q4_KBlockView::byte_count);
+        encode_q4_k_block(
+            values,
+            std::span<std::uint8_t, Q4_KBlockView::byte_count>(
+                destination_bytes.data() + destination_offset, Q4_KBlockView::byte_count
+            )
+        );
+    };
+
+    // Target matrices contain roughly 200k independent blocks. Four workers
+    // use the M4 performance cores without turning a one-time conversion into
+    // a full-machine thermal load; small tensors stay serial for low overhead.
+    constexpr std::uint64_t parallel_block_threshold = 4096U;
+    constexpr std::size_t worker_count = 4U;
+    if (block_count < parallel_block_threshold) {
+        for (std::uint64_t block_index = 0; block_index < block_count; ++block_index) {
+            convert_block(block_index);
+        }
+        return destination;
+    }
+
+    std::atomic<std::uint64_t> next_block {0U};
+    std::atomic<bool> failed {false};
+    std::exception_ptr first_error;
+    std::mutex error_mutex;
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t worker = 0; worker < worker_count; ++worker) {
+        workers.emplace_back([&] {
+            try {
+                while (!failed.load(std::memory_order_relaxed)) {
+                    const auto block_index = next_block.fetch_add(1U, std::memory_order_relaxed);
+                    if (block_index >= block_count) break;
+                    convert_block(block_index);
+                }
+            } catch (...) {
+                failed.store(true, std::memory_order_relaxed);
+                std::lock_guard lock(error_mutex);
+                if (first_error == nullptr) first_error = std::current_exception();
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    if (first_error != nullptr) {
+        std::rethrow_exception(first_error);
+    }
+    return destination;
 }
 
 std::vector<float> dequantize_q6_k_row(const TensorStorage& storage, std::uint64_t row_index) {

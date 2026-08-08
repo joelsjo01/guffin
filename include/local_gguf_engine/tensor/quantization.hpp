@@ -99,6 +99,9 @@ private:
     const TensorStorage& storage,
     std::uint64_t block_index
 );
+// Converts a GGUF/GGML F16 weight matrix shaped [shared, columns] into Q8_0.
+// Blocks remain contiguous along the shared (dimension-0) width.
+[[nodiscard]] TensorStorage quantize_f16_gguf_weight_q8_0(const TensorView& source);
 [[nodiscard]] std::uint64_t q4_k_block_count(const TensorDescriptor& descriptor);
 [[nodiscard]] Q4_KBlockView q4_k_block_view(const TensorStorage& storage, std::uint64_t block_index);
 [[nodiscard]] std::array<float, Q4_KBlockView::element_count> dequantize_q4_k_block(
@@ -117,6 +120,10 @@ private:
     const TensorStorage& storage,
     std::uint64_t block_index
 );
+// Requantizes a GGUF Q6_K matrix shaped [shared, columns] into Q4_K while
+// preserving its dimension-0 block order. Conversion is block-local and does
+// not materialize an F32 matrix.
+[[nodiscard]] TensorStorage requantize_q6_k_gguf_weight_q4_k(const TensorView& source);
 [[nodiscard]] std::vector<float> dequantize_q6_k_row(const TensorStorage& storage, std::uint64_t row_index);
 [[nodiscard]] float dot_q6_k_row_f32(
     const TensorStorage& storage,

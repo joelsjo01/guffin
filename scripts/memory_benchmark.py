@@ -90,9 +90,14 @@ def _drain_process(process, streams, stdout, stderr, deadline):
     return usage
 
 
-def measure(binary, model, require_stage1=True, ps_runner=subprocess.run, timeout=900):
+def measure(
+    binary, model, require_stage1=True, output_head_policy=None,
+    ps_runner=subprocess.run, timeout=900,
+):
     started = time.monotonic_ns()
     command = [binary, model, "--chat", "--max-new-tokens", "1", "--greedy", "--decode-diagnostics"]
+    if output_head_policy is not None:
+        command.extend(("--output-head", output_head_policy))
     process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
@@ -150,6 +155,8 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--candidate", default="build/release/local-gguf-generate")
+    parser.add_argument("--baseline-output-head", choices=("f16", "q8_0"))
+    parser.add_argument("--candidate-output-head", choices=("f16", "q8_0"))
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--cooldown", type=float, default=10.0)
     parser.add_argument("--json", action="store_true")
@@ -167,7 +174,14 @@ def main():
                 time.sleep(args.cooldown)
             binary = args.baseline if name == "baseline" else args.candidate
             print(f"measuring {name} run {repetition + 1}...", file=sys.stderr)
-            sample = measure(binary, args.model, require_stage1=name == "candidate")
+            policy = (
+                args.baseline_output_head if name == "baseline"
+                else args.candidate_output_head
+            )
+            sample = measure(
+                binary, args.model, require_stage1=name == "candidate",
+                output_head_policy=policy,
+            )
             samples[name].append(sample)
             order.append(name)
 
@@ -185,6 +199,10 @@ def main():
             "prompt": "Hello",
             "max_new_tokens": 1,
             "selection": "greedy",
+            "output_head_policies": {
+                "baseline": args.baseline_output_head,
+                "candidate": args.candidate_output_head,
+            },
             "filesystem_cache": "uncontrolled",
         },
         "samples": samples,

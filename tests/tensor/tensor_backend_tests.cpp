@@ -14,6 +14,7 @@
 #include "local_gguf_engine/tensor/ops/reduction.hpp"
 #include "local_gguf_engine/tensor/ops/rope.hpp"
 #include "local_gguf_engine/tensor/ops/softmax.hpp"
+#include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
@@ -47,6 +48,7 @@ using local_gguf_engine::tensor::TensorStorage;
 using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tensor::tensor_backend_unavailable_reason;
 using local_gguf_engine::tensor::write_f32;
+using local_gguf_engine::tensor::quantize_f16_gguf_weight_q8_0;
 using local_gguf_engine::tensor::ops::add_f32;
 using local_gguf_engine::tensor::ops::add_f32_to_backend;
 using local_gguf_engine::tensor::ops::causal_grouped_attention_scores_f32;
@@ -76,6 +78,7 @@ using local_gguf_engine::tensor::ops::softcap_f32_to_backend;
 using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::softmax_f32_to_backend;
 using local_gguf_engine::tensor::ops::top_logit_f32;
+using local_gguf_engine::tensor::requantize_q6_k_gguf_weight_q4_k;
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::expect_close;
 using local_gguf_engine::tests::reference_f32_quantized_gguf_weight_matmul;
@@ -1060,6 +1063,57 @@ void test_matches_cpu_k_quant_decode_simd_boundaries_on_metal() {
     }
 }
 
+void test_matches_converted_q6_k_weight_on_q4_k_metal_paths() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+
+    constexpr std::uint64_t shared = 56U * 256U;
+    constexpr std::uint64_t columns = 5U;
+    const auto source = tensor_q6_k_stress_gguf_weight_matrix(shared, columns, 23U);
+    const auto converted = requantize_q6_k_gguf_weight_q4_k(source.view());
+    for (const std::uint64_t rows : {1U, 15U}) {
+        const auto values = tensor_f32_projection_values(rows, shared);
+        const auto left = tensor_f32_matrix(rows, shared, values);
+        const auto expected = rows == 1U
+            ? reference_f32_quantized_gguf_weight_matmul(left, converted)
+            : reference_f16_staged_quantized_gguf_weight_matmul(left, converted);
+        const auto actual = copy_tensor_from_backend(
+            matmul_f32_quantized_gguf_weight_to_backend(
+                copy_tensor_to_backend(left, BackendKind::metal),
+                copy_tensor_to_backend(converted, BackendKind::metal)
+            )
+        );
+        expect_f32_matrix_close_absolute_relative(
+            actual,
+            expected,
+            rows == 1U ? 0.1F : 2.0F,
+            rows == 1U ? 1.0e-5F : 2.0e-2F,
+            "converted Q6-to-Q4 Metal projection parity"
+        );
+    }
+}
+
+void test_matches_cpu_q8_0_output_matvec_on_metal() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+
+    for (const std::uint64_t shared : {64U, 3584U}) {
+        constexpr std::uint64_t columns = 5U;
+        std::vector<float> activations(static_cast<std::size_t>(shared));
+        std::vector<float> weights(static_cast<std::size_t>(shared * columns));
+        for (std::size_t index = 0; index < activations.size(); ++index) {
+            activations[index] = static_cast<float>(static_cast<int>(index % 17U) - 8) / 9.0F;
+        }
+        for (std::size_t index = 0; index < weights.size(); ++index) {
+            weights[index] = static_cast<float>(static_cast<int>(index % 31U) - 15) / 37.0F;
+        }
+        const auto input = tensor_f32_matrix(1U, shared, std::span<const float>(activations));
+        const auto f16_weight = tensor_f16_gguf_matrix(shared, columns, std::span<const float>(weights));
+        const auto q8_weight = quantize_f16_gguf_weight_q8_0(f16_weight.view());
+        const auto cpu = matmul_f32_quantized_gguf_weight(input, q8_weight, BackendKind::cpu);
+        const auto metal = matmul_f32_quantized_gguf_weight(input, q8_weight, BackendKind::metal);
+        expect_f32_matrix_close(metal, cpu, 2.0e-4F, "Metal Q8_0 output matvec");
+    }
+}
+
 
 void test_copies_tensor_to_and_from_metal_backend_buffer_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
@@ -1885,9 +1939,14 @@ const TestCase tensor_backend_tests[] {
         test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_metal,
     },
     {
+        "matches converted Q6_K weight on Q4_K Metal paths",
+        test_matches_converted_q6_k_weight_on_q4_k_metal_paths,
+    },
+    {
         "matches CPU K-quant decode SIMD boundaries on Metal",
         test_matches_cpu_k_quant_decode_simd_boundaries_on_metal,
     },
+    {"matches CPU Q8_0 output matvec on Metal", test_matches_cpu_q8_0_output_matvec_on_metal},
     {
         "copies tensor to and from Metal backend buffer when available",
         test_copies_tensor_to_and_from_metal_backend_buffer_when_available,

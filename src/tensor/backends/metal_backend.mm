@@ -61,6 +61,7 @@ constant ushort q4_k_decode_block_count [[function_constant(0)]];
 constant ushort q6_k_decode_block_count [[function_constant(1)]];
 constant ushort kquant_tiled_dtype [[function_constant(2)]];
 constant bool kquant_tiled_exact_16 [[function_constant(3)]];
+constant ushort q8_0_decode_block_count [[function_constant(4)]];
 
 inline bool token_candidate_better(TokenCandidate left, TokenCandidate right) {
     return left.logit > right.logit || (left.logit == right.logit && left.token < right.token);
@@ -154,6 +155,53 @@ inline ushort read_little_endian_u16(const device uchar* bytes, uint offset) {
 
 inline float f16_bits_to_float(ushort bits) {
     return float(as_type<half>(bits));
+}
+
+// Q8_0 blocks are an unpadded 2-byte F16 scale followed by 32 signed bytes.
+// Two SIMD groups reuse each activation lane across four output columns.
+kernel void matvec_f32_q8_0_packed_kernel(
+    const device float* left [[buffer(0)]],
+    const device uchar* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulDimensions& dims [[buffer(3)]],
+    uint threadgroup_index [[threadgroup_position_in_grid]],
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint first_column = threadgroup_index * 4 + uint(simdgroup_index) * 2;
+    const uint second_column = first_column + 1;
+    const uint blocks_per_column = q8_0_decode_block_count == 0
+        ? dims.shared / 32
+        : uint(q8_0_decode_block_count);
+    const uint column_stride = blocks_per_column * 34;
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+
+    if (first_column < dims.columns) {
+        const device uchar* first_bytes = right + first_column * column_stride;
+        const device uchar* second_bytes = second_column < dims.columns
+            ? right + second_column * column_stride
+            : first_bytes;
+        for (uint block = 0; block < blocks_per_column; ++block) {
+            const float activation = left[block * 32 + uint(lane)];
+            const uint block_offset = block * 34;
+            const half first_scale = *reinterpret_cast<const device half*>(first_bytes + block_offset);
+            const char first_quant = as_type<char>(first_bytes[block_offset + 2 + uint(lane)]);
+            first_sum += activation * float(first_scale) * float(first_quant);
+            if (second_column < dims.columns) {
+                const half second_scale = *reinterpret_cast<const device half*>(second_bytes + block_offset);
+                const char second_quant = as_type<char>(second_bytes[block_offset + 2 + uint(lane)]);
+                second_sum += activation * float(second_scale) * float(second_quant);
+            }
+        }
+    }
+
+    first_sum = simd_sum(first_sum);
+    second_sum = simd_sum(second_sum);
+    if (lane == 0) {
+        if (first_column < dims.columns) output[first_column] = first_sum;
+        if (second_column < dims.columns) output[second_column] = second_sum;
+    }
 }
 
 struct block_q4_k {

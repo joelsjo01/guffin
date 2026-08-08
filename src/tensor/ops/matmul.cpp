@@ -42,7 +42,7 @@ void require_f32_f16_matmul_gguf_weight_operands(const TensorStorage& left, cons
 }
 
 void require_quantized_gguf_weight_descriptor(const TensorDescriptor& descriptor) {
-    if (descriptor.dtype == DType::q4_k || descriptor.dtype == DType::q6_k) {
+    if (descriptor.dtype == DType::q8_0 || descriptor.dtype == DType::q4_k || descriptor.dtype == DType::q6_k) {
         return;
     }
 
@@ -54,12 +54,12 @@ void require_quantized_gguf_weight_descriptor(const TensorDescriptor& descriptor
 }
 
 void require_quantized_gguf_weight_inner_block_alignment(const TensorDescriptor& descriptor) {
-    constexpr std::uint64_t k_quant_block_elements = 256;
+    const auto block_elements = dtype_layout(descriptor.dtype).block_element_count;
     const auto inner_width = descriptor.shape.dimension(0);
-    if (inner_width % k_quant_block_elements != 0) {
+    if (inner_width % block_elements != 0) {
         throw TensorError(
             TensorErrorCode::invalid_quantized_element_count,
-            k_quant_block_elements,
+            block_elements,
             inner_width
         );
     }

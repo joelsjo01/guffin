@@ -29,6 +29,7 @@ struct Gemma2ChatSessionOptions {
     // Zero means generate until a stop token, cancellation, or context exhaustion.
     std::size_t max_new_tokens = 0;
     runtime::BackendKind backend = runtime::BackendKind::metal;
+    Gemma2OutputHeadPolicy output_head_policy = Gemma2OutputHeadPolicy::automatic;
     bool context_shift = false;
     std::vector<std::string> reverse_stop_strings;
     TokenSamplerOptions sampler;
@@ -51,6 +52,7 @@ struct Gemma2ChatTurnMetrics {
     Gemma2TokenSelectionMode selection_mode = Gemma2TokenSelectionMode::greedy;
     std::uint32_t trimmed_turn_count = 0;
     bool rebuilt_context = false;
+    Gemma2OutputHeadPolicy output_head_policy = Gemma2OutputHeadPolicy::f16;
     std::size_t resident_weight_byte_count = 0;
     std::size_t resident_kv_cache_byte_count = 0;
     std::size_t resident_scratch_byte_count = 0;

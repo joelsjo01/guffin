@@ -1,127 +1,105 @@
 # Next Task
 
-## Status
+## Verified current state
 
-Stage 1 Baton 2 is complete as of 2026-08-07. Stage 1 is complete and no
-implementation task is active. Stop here until the user explicitly authorizes
-Stage 2; do not begin storage-mode, kernel, matmul, quantization, or speculative
-work implicitly.
+Stages 2A through 2C remain retained for the exact Gemma 2 9B Q4 target. The
+production model uses copied shared/default/tracked Metal weights, a separate
+Q8_0 output head while preserving the tied F16 embedding, and load-time
+Q6_K-to-Q4_K conversion for the 21 Q6_K FFN-down matrices. Scheduled decode
+weight traffic is 5,699,040,256 bytes/token and logical resident weights are
+7,534,041,088 bytes. The last cooled retained chats produced 15.96 and 15.82
+tok/s; startup was about 22 seconds with 10.88 GB peak RSS and no swaps.
 
-## Retained Baton 2 implementation
+Stage 2D is complete as a rejected candidate. The attempted kernel preserved
+the current GQA/ring/partition ABI, computed 32 exact softcapped scores into a
+1 KiB threadgroup tile, reduced the block maximum once, rescaled the prior F32
+value state once per block, and made one V pass. It was selected only above 256
+tokens. CPU-reference parity passed across block/partition boundaries through
+8,192 tokens and a wrapped full-cache window. No approximate math, new device
+buffer, hot-path allocation, prefill change, or Stage 2A-C accounting change was
+introduced.
 
-### Terminal body-only decode
+The identical 42-layer release-Metal harness gave these two-run GPU intervals:
 
-Resident decode now has an explicit `logits` versus `kv_only` output mode. When
-the generation loop knows before encoding that the selected token is a stop
-token or the final token allowed by the limit, `kv_only` still executes the
-embedding, every transformer layer, and every K/V store, but omits final
-RMSNorm, the F16 output projection, selection, and their two barriers. A null
-selection request still produces full logits by default, preserving diagnostic
-and API behavior.
-
-The schema-2 production attribution reports the number of terminal output-head
-elisions and the exact skipped weight bytes. On the target, one terminal step
-skips the 1,835,008,000-byte output head plus the 14,336-byte output norm, for
-1,835,022,336 bytes total. Scheduled bytes for that step fall from
-6,837,376,000 to 5,002,353,664, while its cache position and decoded-token count
-remain unchanged.
-
-Callback, reverse-stop, and cancellation termination deliberately retain full
-output execution. Their decisions occur only after the current decode succeeds
-and its KV is resident. Moving delivery before GPU success would change error
-and cache ordering; splitting every continued token into a second output
-command would damage the hot path.
-
-### Physical prefill-scratch liveness
-
-Three exact, equal-descriptor aliases are retained in the serial prefill path:
-
-- attention probabilities replace dead attention scores in place;
-- one hidden-width workspace serves normalized hidden, projected attention,
-  normalized FFN input, and projected FFN output at disjoint live ranges;
-- GELU output replaces its dead gate input in place.
-
-This removes 79,953,920 persistent bytes. Prefill scratch falls from
-176,707,584 to 96,753,664 bytes and total plan scratch falls from 181,146,892
-to exactly 101,192,972 bytes, a 44.14% reduction. The plan counts shared storage
-once, and tests assert both the intended storage identities and numerical
-prefill parity. No arena, offset view, cross-prefill/decode alias, or hazard-mode
-change was added.
-
-### Linear incremental streaming decode
-
-`Tokenizer::append_decoded_token()` is now the single implementation of token
-decoding, and batch `decode()` delegates to it. Chat streaming appends only the
-new token instead of decoding the complete growing prefix, changing token-piece
-visits from quadratic to linear. Reverse-stop cleanup uses the same append
-operation, while matching rescans only the previous possible boundary overlap
-plus new bytes.
-
-SentencePiece space markers, skipped special/control tokens, byte fallback,
-partial multibyte UTF-8 bytes, callback chunking, and invalid-ID errors remain
-byte-for-byte compatible. Reverse-stop tests include a marker spanning two
-generated tokens.
-
-## Verified target result
-
-Five paired, interleaved one-token terminal runs with ten-second cooldowns
-produced five of five wall/GPU wins:
-
-| Metric | Baton 1 median | Baton 2 median | Change |
+| Context | Retained kernel | Block-online, original partitions | Result |
 | --- | ---: | ---: | ---: |
-| Terminal decode wall | 73.638 ms | 53.748 ms | -27.01% |
-| Terminal decode GPU | 71.629 ms | 53.036 ms | -25.96% |
-| Compute dispatches | 633 | 631 | -2 |
-| Memory barriers | 465 | 463 | -2 |
-| F16 projections | 1 | 0 | -1 |
-| Scheduled weight bytes | 6,837,376,000 | 5,002,353,664 | -26.84% |
-| Persistent scratch bytes | 181,146,892 | 101,192,972 | -44.14% |
+| 512 | 3.279 / 2.940 ms | 2.246 / 2.367 ms | clear mechanism win |
+| 1K | 3.751 / 3.638 ms | 3.549 / 3.585 ms | about 3.5% median gain |
+| 2K | 9.470 / 9.010 ms | 10.064 / 9.186 ms | about 4.2% median regression |
+| 4K | 16.144 / 16.201 ms | 16.208 / 16.415 ms | about 0.9% median regression |
+| 21 local 4K + 21 global 8K | 22.897 / 22.943 ms | 22.797 / 24.490 ms | about 3.2% median regression |
 
-Startup-to-ready was neutral at -0.42%. Process RSS varied widely in both
-directions because the lazy shared allocations and file-backed pages were not
-consistently resident at the prompt; it is not used as evidence for the exact
-allocation reduction. Peak RSS changed by -0.49%. The allocation byte count,
-storage identities, and virtual-size reduction are deterministic.
+One bounded partition rescue kept the winning 512/1K geometry and halved
+partitions at 2K/4K/8K. It improved 2K to 7.316 / 7.289 ms, but worsened 4K to
+17.889 / 18.542 ms and the real 4K/8K mixture to 24.505 / 25.291 ms. The long
+regime is dominated by compulsory KV traffic; extra score-tile synchronization
+cost more than reduced rescaling saved. The candidate failed the declared
+whole-token long-context gate and was deleted completely, including its
+pipeline, selector, partition changes, temporary probe, and candidate-only test
+expansion. There is no old/new CLI, environment switch, dead kernel, or
+alternate production path.
 
-The canonical two-turn sampled chat passed with unchanged prompts, seed,
-natural stops, and timing definitions:
+The restored retained source passes `bash scripts/ci.sh`: 21 Python tests and
+319 C++/Metal tests. A full chat benchmark was intentionally not run after the
+focused production-kernel gate failed; it could not rescue a regression in the
+only context regime Stage 2D was intended to improve. Stage 2C therefore remains
+the production performance baseline.
 
-| Turn | TTFT | Prompt t/s | Generation t/s | GPU/decode token | Wall/decode token |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| First | 174.6 ms | 91.6 | 13.9 | 71.08 ms | 71.92 ms |
-| Follow-up | 460.8 ms | 41.2 | 13.7 | 71.97 ms | 73.19 ms |
+The short-context conventional plateau is reached. Remaining one-row cleanup
+ceilings are individually below the 2% gate: all norm/residual work plus GELU is
+about 0.53 ms, RoPE plus KV stores about 0.15 ms, token selection about 0.285 ms,
+and the measured host envelope about 0.55 ms. These operations may be fused or
+rearranged later when they otherwise multiply inside a multirow verifier, but
+Stage 2E does not justify another standalone one-token optimization pass.
 
-Only one terminal token per turn is elided, so sustained generation throughput
-is expected to remain neutral. The improvement is turn-tail latency and future
-memory headroom, not a claim that ordinary full-output decode is 27% faster.
+## Next baton: research the Stage 3 width-two causal verifier
 
-## Correctness and verification
+Do deep implementation research and write one focused width-two verifier plan
+into this file. Do not implement it until the user approves that plan.
 
-- Body-only and full-output decode produce byte-identical live K/V at a
-  nonzero cache position against the independent CPU reference.
-- Body-only mode rejects a selection request and removes exactly final norm,
-  output projection, and two barriers; full-logits-without-selection remains.
-- Stop/max paths elide exactly one output head. Callback cancellation and
-  reverse-stop paths assert zero elisions.
-- Existing prefill chunk/ring parity passes with the liveness aliases.
-- Incremental and batch tokenizer decoding match across SentencePiece,
-  special/control, and multibyte byte-token boundaries.
-- `bash scripts/ci.sh`: passed, 17 Python tests and 308 C++ tests.
-- `make MODE=release benchmark`: passed after the final accounting change.
-- Five-pair production memory/terminal-decode benchmark: passed.
-- Canonical `scripts/quick_benchmark.py` run: passed with schema-2 attribution
-  and sustained kernel diagnostics. The final accounting-only follow-up was
-  smoke-tested on the target and reported exactly 1,835,022,336 skipped bytes.
-- `git diff --check`: rerun at final handoff.
+The research must trace the exact production path and answer one decision:
+whether the existing multirow projection kernels and a new causal two-row
+attention/KV transaction can execute a target verification pass below 1.35x the
+retained one-token latency. Cover:
 
-No model, generated binary, benchmark output, production inference dependency,
-alternate scheduler, or framework runtime is tracked.
+- sustained one-row versus two-row cost for every target projection class,
+  including converted Q4_K FFN down, remaining Q4_K/Q6_K transformer weights,
+  F16 projections, and the Q8_0 output head;
+- which current small-batch or tiled kernels actually serve two rows, their
+  reduction order and numerical relationship to the one-token kernels, and any
+  shapes that still fall back to unsuitable generic work;
+- the exact two-row transformer schedule: normalization/residual ordering,
+  position-dependent RoPE, causal attention between the two rows, alternating
+  4K sliding/global windows, and production logits for both verified positions;
+- a transactional KV design that stages both proposed rows, exposes the first
+  row to the second during verification, commits only the accepted prefix, and
+  restores or ignores rejected speculative rows without corrupting the resident
+  ring;
+- independent row-by-row logits/KV parity against two canonical one-token
+  steps, including full/partial acceptance, rejection at the first proposal,
+  ring wrap, softcap, GQA, cache-full behavior, and Metal-unavailable behavior;
+- exact command, barrier, scratch, output, and resident-memory changes, with no
+  production CLI mode or second inference runtime; and
+- one diagnostic that establishes the width-two cost mechanism, one real-path
+  verification benchmark, and a direct proceed/stop gate before any retrieval
+  or learned proposer is added.
 
-## Next authorized boundary
+The plan should be one coherent implementation pass, not a sequence of tiny
+milestones. Prefer extending the existing model plan, schedule, resident runtime,
+and Metal kernels over building a parallel verifier abstraction. A diagnostic
+verifier is allowed to return both logits and acceptance-independent KV state;
+it must not claim a generation speedup before proposal and exact speculative
+sampling exist.
 
-Stage 2 begins only on explicit user approval. Its first decision should use
-the Stage 0 attribution and Stage 1 headroom to compare weight residency/access
-changes against conventional single-token decode fusion and byte reduction.
-Callback-tail elision remains deferred unless a design preserves
-successful-execution-before-delivery ordering without adding a command boundary
-to every nonterminal token.
+## Constraints and stop condition
+
+- Production inference remains engine-owned, local, Metal-first,
+  model-resident, and allocation-free in the steady hot path.
+- Preserve the retained one-token path, Stage 2A-C byte/residency behavior,
+  prefill, sampling distribution, and current chat semantics.
+- Do not add a drafter, retrieval proposals, speculative acceptance/sampling,
+  width four, tree attention, KV quantization, or Stage 2E cleanup in this task.
+- The research must derive an end-to-end verifier-cycle bound, not extrapolate
+  from one isolated fast matrix.
+- Stop after replacing this baton with the researched implementation plan. Do
+  not begin width-two implementation until the user approves it.

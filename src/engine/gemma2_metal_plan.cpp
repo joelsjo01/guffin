@@ -3,9 +3,8 @@
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
+#include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
-
-
 
 #include <algorithm>
 #include <initializer_list>
@@ -163,6 +162,11 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     return static_cast<std::uint64_t>(config.attention_head_count) * config.attention_value_length;
 }
 
+[[nodiscard]] bool is_retained_gemma2_9b_target(
+    const Gemma2ModelConfig& config,
+    const Gemma2ModelWeights& weights
+);
+
 [[nodiscard]] Gemma2MetalAttentionWeightBuffers upload_attention_weights(
     const Gemma2AttentionWeights& weights,
     std::size_t& uploaded_byte_count
@@ -179,20 +183,30 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
 
 [[nodiscard]] Gemma2MetalFeedForwardWeightBuffers upload_feed_forward_weights(
     const Gemma2FeedForwardWeights& weights,
-    std::size_t& uploaded_byte_count
+    std::size_t& uploaded_byte_count,
+    bool requantize_q6_down
 ) {
+    auto down_weight = [&]() {
+        if (requantize_q6_down && weights.down_weight.descriptor().dtype == DType::q6_k) {
+            auto quantized = tensor::requantize_q6_k_gguf_weight_q4_k(weights.down_weight);
+            checked_add_bytes(uploaded_byte_count, quantized.descriptor().byte_count);
+            return tensor::copy_tensor_to_backend(quantized, gemma_backend);
+        }
+        return upload_weight(weights.down_weight, uploaded_byte_count);
+    }();
     return Gemma2MetalFeedForwardWeightBuffers {
         .feed_forward_norm_weight = upload_weight(weights.feed_forward_norm_weight, uploaded_byte_count),
         .post_feed_forward_norm_weight = upload_weight(weights.post_feed_forward_norm_weight, uploaded_byte_count),
         .gate_weight = upload_weight(weights.gate_weight, uploaded_byte_count),
         .up_weight = upload_weight(weights.up_weight, uploaded_byte_count),
-        .down_weight = upload_weight(weights.down_weight, uploaded_byte_count),
+        .down_weight = std::move(down_weight),
     };
 }
 
 [[nodiscard]] std::vector<Gemma2MetalBlockWeightBuffers> upload_block_weights(
     const Gemma2ModelWeights& weights,
-    std::size_t& uploaded_byte_count
+    std::size_t& uploaded_byte_count,
+    bool requantize_q6_down
 ) {
     std::vector<Gemma2MetalBlockWeightBuffers> blocks;
     blocks.reserve(weights.blocks.size());
@@ -200,7 +214,9 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     for (const auto& block : weights.blocks) {
         blocks.push_back(Gemma2MetalBlockWeightBuffers {
             .attention = upload_attention_weights(block.attention, uploaded_byte_count),
-            .feed_forward = upload_feed_forward_weights(block.feed_forward, uploaded_byte_count),
+            .feed_forward = upload_feed_forward_weights(
+                block.feed_forward, uploaded_byte_count, requantize_q6_down
+            ),
         });
     }
 
@@ -209,19 +225,47 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
 
 [[nodiscard]] Gemma2MetalModelWeightBuffers upload_model_weights(
     const Gemma2ModelWeights& weights,
-    std::size_t& uploaded_byte_count
+    std::size_t& uploaded_byte_count,
+    Gemma2OutputHeadPolicy output_head_policy,
+    bool retained_target
 ) {
     auto token_embedding_weight = upload_weight(weights.token_embedding_weight, uploaded_byte_count);
-    auto output_weight = weights.output_weight.bytes().data() == weights.token_embedding_weight.bytes().data()
-        ? token_embedding_weight
-        : upload_weight(weights.output_weight, uploaded_byte_count);
+    auto output_weight = [&]() {
+        if (output_head_policy == Gemma2OutputHeadPolicy::q8_0) {
+            auto quantized = tensor::quantize_f16_gguf_weight_q8_0(weights.output_weight);
+            checked_add_bytes(uploaded_byte_count, quantized.descriptor().byte_count);
+            return tensor::copy_tensor_to_backend(quantized, gemma_backend);
+        }
+        return weights.output_weight.bytes().data() == weights.token_embedding_weight.bytes().data()
+            ? token_embedding_weight
+            : upload_weight(weights.output_weight, uploaded_byte_count);
+    }();
 
     return Gemma2MetalModelWeightBuffers {
         .token_embedding_weight = token_embedding_weight,
         .output_norm_weight = upload_weight(weights.output_norm_weight, uploaded_byte_count),
         .output_weight = std::move(output_weight),
-        .blocks = upload_block_weights(weights, uploaded_byte_count),
+        .blocks = upload_block_weights(weights, uploaded_byte_count, retained_target),
     };
+}
+
+[[nodiscard]] bool is_retained_gemma2_9b_target(
+    const Gemma2ModelConfig& config,
+    const Gemma2ModelWeights& weights
+) {
+    const auto& embedding = weights.token_embedding_weight;
+    const auto& output = weights.output_weight;
+    return config.uses_tied_output_weight
+        && config.embedding_length == 3584U
+        && config.block_count == 42U
+        && config.feed_forward_length == 14336U
+        && config.vocab_size == 256000U
+        && weights.blocks.size() == 42U
+        && embedding.descriptor().dtype == DType::f16
+        && output.descriptor().dtype == DType::f16
+        && embedding.descriptor().shape == Shape::from({3584U, 256000U})
+        && output.descriptor().shape == embedding.descriptor().shape
+        && output.bytes().data() == embedding.bytes().data();
 }
 
 [[nodiscard]] std::vector<Gemma2MetalKVCacheLayer> allocate_kv_cache(
@@ -447,6 +491,15 @@ void require_decode_cached_token_count(const Gemma2ModelConfig& config, std::uin
 
 }  // namespace
 
+const char* gemma2_output_head_policy_name(Gemma2OutputHeadPolicy policy) noexcept {
+    switch (policy) {
+        case Gemma2OutputHeadPolicy::automatic: return "automatic";
+        case Gemma2OutputHeadPolicy::f16: return "f16";
+        case Gemma2OutputHeadPolicy::q8_0: return "q8_0";
+    }
+    return "unknown";
+}
+
 Gemma2MetalModelPlan::Gemma2MetalModelPlan(
     Gemma2ModelConfig config,
     Gemma2MetalModelWeightBuffers weights,
@@ -455,6 +508,7 @@ Gemma2MetalModelPlan::Gemma2MetalModelPlan(
     Gemma2MetalDecodeScratch decode_scratch,
     Gemma2MetalSelectionWorkspace selection_workspace,
     std::vector<Gemma2MetalLayerState> layers,
+    Gemma2OutputHeadPolicy output_head_policy,
     Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes,
     std::size_t uploaded_weight_byte_count,
     std::size_t kv_cache_byte_count,
@@ -467,6 +521,7 @@ Gemma2MetalModelPlan::Gemma2MetalModelPlan(
       decode_scratch_(std::move(decode_scratch)),
       selection_workspace_(std::move(selection_workspace)),
       layers_(std::move(layers)),
+      output_head_policy_(output_head_policy),
       decode_scheduled_weight_bytes_(decode_scheduled_weight_bytes),
       uploaded_weight_byte_count_(uploaded_weight_byte_count),
       kv_cache_byte_count_(kv_cache_byte_count),
@@ -478,6 +533,10 @@ runtime::BackendKind Gemma2MetalModelPlan::backend() const noexcept {
 
 const Gemma2ModelConfig& Gemma2MetalModelPlan::config() const noexcept {
     return config_;
+}
+
+Gemma2OutputHeadPolicy Gemma2MetalModelPlan::output_head_policy() const noexcept {
+    return output_head_policy_;
 }
 
 const Gemma2MetalModelWeightBuffers& Gemma2MetalModelPlan::weights() const noexcept {
@@ -577,14 +636,18 @@ const std::vector<Gemma2MetalLayerSchedule>& Gemma2MetalSchedule::layers() const
     return layers_;
 }
 
-Gemma2MetalModelPlan create_gemma2_metal_model_plan(const EngineModel& model) {
+Gemma2MetalModelPlan create_gemma2_metal_model_plan(
+    const EngineModel& model,
+    Gemma2OutputHeadPolicy policy
+) {
     const auto weights = bind_gemma2_model_weights(model);
-    return create_gemma2_metal_model_plan(model.gemma2_config(), weights);
+    return create_gemma2_metal_model_plan(model.gemma2_config(), weights, policy);
 }
 
 Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const Gemma2ModelConfig& config,
-    const Gemma2ModelWeights& weights
+    const Gemma2ModelWeights& weights,
+    Gemma2OutputHeadPolicy policy
 ) {
     require_metal_available();
     require_power_of_two_cache_layout(config);
@@ -593,7 +656,15 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     std::size_t kv_cache_byte_count = 0;
     std::size_t scratch_byte_count = 0;
 
-    auto resident_weights = upload_model_weights(weights, uploaded_weight_byte_count);
+    const auto retained_target = is_retained_gemma2_9b_target(config, weights);
+    const auto resolved_policy = policy == Gemma2OutputHeadPolicy::automatic
+        ? (retained_target
+            ? Gemma2OutputHeadPolicy::q8_0
+            : Gemma2OutputHeadPolicy::f16)
+        : policy;
+    auto resident_weights = upload_model_weights(
+        weights, uploaded_weight_byte_count, resolved_policy, retained_target
+    );
     auto kv_cache = allocate_kv_cache(config, kv_cache_byte_count);
     auto prefill_scratch = allocate_prefill_scratch(config, scratch_byte_count);
     auto decode_scratch = allocate_decode_scratch(config, scratch_byte_count);
@@ -609,6 +680,7 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
         std::move(decode_scratch),
         std::move(selection_workspace),
         std::move(layers),
+        resolved_policy,
         scheduled_weight_bytes,
         uploaded_weight_byte_count,
         kv_cache_byte_count,

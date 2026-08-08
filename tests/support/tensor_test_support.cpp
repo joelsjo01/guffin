@@ -336,7 +336,9 @@ TensorStorage tensor_q4_k_stress_gguf_weight_matrix(
 }
 
 TensorStorage tensor_q6_k_gguf_weight_matrix(std::uint64_t shared, std::uint64_t columns, std::uint64_t seed) {
-    auto storage = TensorStorage::allocate(TensorDescriptor::from(Shape::from({shared, columns}), DType::q6_k));
+    auto storage = TensorStorage::allocate(TensorDescriptor::from_quantized_gguf_weight_matrix(
+        Shape::from({shared, columns}), DType::q6_k
+    ));
     auto bytes = storage.mutable_bytes();
     const auto blocks_per_column = shared / Q6_KBlockView::element_count;
 

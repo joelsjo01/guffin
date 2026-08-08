@@ -185,6 +185,18 @@ struct TokenCandidateResultHeader {
     return require_metal_backend_buffer(backend_buffer_storage(buffer));
 }
 
+void bind_buffer(
+    id<MTLComputeCommandEncoder> encoder,
+    const BackendBuffer& buffer,
+    NSUInteger index,
+    std::uint64_t operation_byte_offset = 0
+) {
+    const auto& value = storage(buffer);
+    [encoder setBuffer:value.buffer()
+                offset:metal_buffer_binding_offset(value, operation_byte_offset)
+               atIndex:index];
+}
+
 [[nodiscard]] std::uint32_t u32(std::uint64_t value, const char* name) {
     if (value > std::numeric_limits<std::uint32_t>::max()) {
         throw std::invalid_argument(std::string("Metal resident execution ") + name + " exceeds uint32 range");
@@ -295,7 +307,7 @@ MetalCommandContext& MetalCommandContext::operator=(MetalCommandContext&&) noexc
 
 void MetalCommandContext::write_u32(const BackendBuffer& destination, std::uint32_t value) {
     require_capacity(destination, sizeof(value), "u32 staging");
-    std::memcpy([storage(destination).buffer() contents], &value, sizeof(value));
+    std::memcpy(metal_buffer_contents(storage(destination)), &value, sizeof(value));
 }
 
 void MetalCommandContext::write_u32s(
@@ -307,7 +319,7 @@ void MetalCommandContext::write_u32s(
     const auto byte_count = static_cast<std::uint64_t>(values.size()) * sizeof(std::uint32_t);
     require_capacity(destination, byte_offset + byte_count, "u32 staging");
     std::memcpy(
-        static_cast<std::byte*>([storage(destination).buffer() contents]) + byte_offset,
+        metal_buffer_contents(storage(destination), byte_offset),
         values.data(),
         static_cast<std::size_t>(byte_count)
     );
@@ -336,9 +348,11 @@ void MetalCommandContext::encode_embedding(
     };
     auto encoder = impl_->compute_encoder("Gemma2 embedding");
     [encoder setComputePipelineState:impl_->state->embedding_pipeline];
-    [encoder setBuffer:storage(token_ids).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:weight_storage.buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
+    bind_buffer(encoder, token_ids, 0);
+    [encoder setBuffer:weight_storage.buffer()
+                offset:metal_buffer_binding_offset(weight_storage)
+               atIndex:1];
+    bind_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((hidden + 15U) / 16U),
@@ -373,7 +387,8 @@ void MetalCommandContext::encode_matmul(
         .columns = u32(columns, "matmul columns"),
     };
     auto encoder = impl_->compute_encoder("Gemma2 matmul");
-    const bool quantized = weight.descriptor().dtype == DType::q4_k
+    const bool quantized = weight.descriptor().dtype == DType::q8_0
+        || weight.descriptor().dtype == DType::q4_k
         || weight.descriptor().dtype == DType::q6_k;
     QuantizedMatmulDispatch quantized_dispatch;
     F16MatmulDispatch f16_dispatch;
@@ -383,6 +398,9 @@ void MetalCommandContext::encode_matmul(
             *impl_->state, weight.descriptor().dtype, rows, shared, columns
         );
         pipeline = quantized_dispatch.pipeline;
+        if (weight.descriptor().dtype == DType::q8_0) {
+            ++impl_->stats.q8_decode_projection_count;
+        }
         auto* decode = weight.descriptor().dtype == DType::q4_k
             ? &impl_->stats.q4_decode_projection_count : &impl_->stats.q6_decode_projection_count;
         auto* small = weight.descriptor().dtype == DType::q4_k
@@ -391,7 +409,9 @@ void MetalCommandContext::encode_matmul(
             ? &impl_->stats.q4_exact_16_projection_count : &impl_->stats.q6_exact_16_projection_count;
         auto* generic = weight.descriptor().dtype == DType::q4_k
             ? &impl_->stats.q4_generic_tiled_projection_count : &impl_->stats.q6_generic_tiled_projection_count;
-        if (rows == 1U) ++*decode;
+        if (weight.descriptor().dtype == DType::q8_0) {
+            // Q8_0 is output-only and counted separately above.
+        } else if (rows == 1U) ++*decode;
         else if (rows <= 8U) ++*small;
         else if (rows == 16U && columns % 64U == 0U) ++*exact_16;
         else ++*generic;
@@ -401,9 +421,9 @@ void MetalCommandContext::encode_matmul(
         ++impl_->stats.f16_projection_count;
     }
     [encoder setComputePipelineState:pipeline];
-    [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(weight).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(output).buffer() offset:static_cast<NSUInteger>(output_byte_offset) atIndex:2];
+    bind_buffer(encoder, input, 0);
+    bind_buffer(encoder, weight, 1);
+    bind_buffer(encoder, output, 2, output_byte_offset);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     if (quantized) {
         [encoder dispatchThreadgroups:quantized_dispatch.threadgroups
@@ -437,9 +457,9 @@ void MetalCommandContext::encode_rms_norm(
     };
     auto encoder = impl_->compute_encoder("Gemma2 RMSNorm");
     [encoder setComputePipelineState:impl_->state->rms_norm_pipeline];
-    [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(weight).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
+    bind_buffer(encoder, input, 0);
+    bind_buffer(encoder, weight, 1);
+    bind_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(rows), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -468,10 +488,10 @@ void MetalCommandContext::encode_rms_norm_add(
     };
     auto encoder = impl_->compute_encoder("Gemma2 fused RMSNorm-add");
     [encoder setComputePipelineState:impl_->state->rms_norm_add_pipeline];
-    [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(weight).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(residual).buffer() offset:0 atIndex:2];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:3];
+    bind_buffer(encoder, input, 0);
+    bind_buffer(encoder, weight, 1);
+    bind_buffer(encoder, residual, 2);
+    bind_buffer(encoder, output, 3);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -506,8 +526,8 @@ void MetalCommandContext::encode_rope(
     };
     auto encoder = impl_->compute_encoder("Gemma2 RoPE");
     [encoder setComputePipelineState:impl_->state->rope_neox_by_heads_pipeline];
-    [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(output).buffer() offset:static_cast<NSUInteger>(output_byte_offset) atIndex:1];
+    bind_buffer(encoder, input, 0);
+    bind_buffer(encoder, output, 1, output_byte_offset);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((columns + 15U) / 16U),
@@ -571,10 +591,10 @@ void MetalCommandContext::encode_gemma2_kv_cache_store(
     };
     auto encoder = impl_->compute_encoder("Gemma2 F16 KV store");
     [encoder setComputePipelineState:impl_->state->gemma2_kv_cache_store_pipeline];
-    [encoder setBuffer:storage(raw_key).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(raw_value).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(cache_key).buffer() offset:0 atIndex:2];
-    [encoder setBuffer:storage(cache_value).buffer() offset:0 atIndex:3];
+    bind_buffer(encoder, raw_key, 0);
+    bind_buffer(encoder, raw_value, 1);
+    bind_buffer(encoder, cache_key, 2);
+    bind_buffer(encoder, cache_value, 3);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((width + 255U) / 256U),
@@ -624,9 +644,9 @@ void MetalCommandContext::encode_attention_scores(
     };
     auto encoder = impl_->compute_encoder("Gemma2 attention scores");
     [encoder setComputePipelineState:impl_->state->gemma2_prefill_attention_scores_pipeline];
-    [encoder setBuffer:storage(query).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(key_cache).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
+    bind_buffer(encoder, query, 0);
+    bind_buffer(encoder, key_cache, 1);
+    bind_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((attention_token_count + 7U) / 8U),
@@ -648,8 +668,8 @@ void MetalCommandContext::encode_softmax(
     const SoftmaxDimensions dims {.rows = rows, .columns = columns};
     auto encoder = impl_->compute_encoder("Gemma2 softmax");
     [encoder setComputePipelineState:impl_->state->softmax_pipeline];
-    [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:1];
+    bind_buffer(encoder, input, 0);
+    bind_buffer(encoder, output, 1);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((rows + 63U) / 64U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
@@ -695,9 +715,9 @@ void MetalCommandContext::encode_attention_values(
     };
     auto encoder = impl_->compute_encoder("Gemma2 attention values");
     [encoder setComputePipelineState:impl_->state->gemma2_prefill_attention_values_pipeline];
-    [encoder setBuffer:storage(probabilities).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(value_cache).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
+    bind_buffer(encoder, probabilities, 0);
+    bind_buffer(encoder, value_cache, 1);
+    bind_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((value_length + 7U) / 8U),
@@ -829,13 +849,13 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     };
     auto encoder = impl_->compute_encoder("Gemma2 fused decode attention");
     [encoder setComputePipelineState:impl_->state->gemma2_decode_attention_pipeline];
-    [encoder setBuffer:storage(query).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(key_cache).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(value_cache).buffer() offset:0 atIndex:2];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:3];
-    [encoder setBuffer:storage(partial_output).buffer() offset:0 atIndex:4];
-    [encoder setBuffer:storage(partial_maxima).buffer() offset:0 atIndex:5];
-    [encoder setBuffer:storage(partial_denominators).buffer() offset:0 atIndex:6];
+    bind_buffer(encoder, query, 0);
+    bind_buffer(encoder, key_cache, 1);
+    bind_buffer(encoder, value_cache, 2);
+    bind_buffer(encoder, output, 3);
+    bind_buffer(encoder, partial_output, 4);
+    bind_buffer(encoder, partial_maxima, 5);
+    bind_buffer(encoder, partial_denominators, 6);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:7];
     [encoder dispatchThreadgroups:MTLSizeMake(kv_heads, partitions, 1)
               threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
@@ -845,10 +865,10 @@ void MetalCommandContext::encode_gemma2_decode_attention(
         encode_memory_barrier();
         encoder = impl_->compute_encoder("Gemma2 fused decode attention reduction");
         [encoder setComputePipelineState:impl_->state->gemma2_decode_attention_reduce_pipeline];
-        [encoder setBuffer:storage(partial_output).buffer() offset:0 atIndex:0];
-        [encoder setBuffer:storage(partial_maxima).buffer() offset:0 atIndex:1];
-        [encoder setBuffer:storage(partial_denominators).buffer() offset:0 atIndex:2];
-        [encoder setBuffer:storage(output).buffer() offset:0 atIndex:3];
+        bind_buffer(encoder, partial_output, 0);
+        bind_buffer(encoder, partial_maxima, 1);
+        bind_buffer(encoder, partial_denominators, 2);
+        bind_buffer(encoder, output, 3);
         [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
         [encoder dispatchThreadgroups:MTLSizeMake(kv_heads, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -868,9 +888,9 @@ void MetalCommandContext::encode_add(
     const ElementwiseDimensions dims {.elements = u32(elements, "add elements")};
     auto encoder = impl_->compute_encoder("Gemma2 add");
     [encoder setComputePipelineState:impl_->state->add_pipeline];
-    [encoder setBuffer:storage(left).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(right).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
+    bind_buffer(encoder, left, 0);
+    bind_buffer(encoder, right, 1);
+    bind_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -889,9 +909,9 @@ void MetalCommandContext::encode_silu_multiply(
     const ElementwiseDimensions dims {.elements = u32(elements, "SiLU elements")};
     auto encoder = impl_->compute_encoder("Gemma2 SiLU multiply");
     [encoder setComputePipelineState:impl_->state->silu_multiply_pipeline];
-    [encoder setBuffer:storage(gate).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(up).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
+    bind_buffer(encoder, gate, 0);
+    bind_buffer(encoder, up, 1);
+    bind_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -910,9 +930,9 @@ void MetalCommandContext::encode_gelu_tanh_multiply(
     const ElementwiseDimensions dims {.elements = u32(elements, "GELU-tanh elements")};
     auto encoder = impl_->compute_encoder("Gemma2 GELU-tanh multiply");
     [encoder setComputePipelineState:impl_->state->gelu_tanh_multiply_pipeline];
-    [encoder setBuffer:storage(gate).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(up).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:2];
+    bind_buffer(encoder, gate, 0);
+    bind_buffer(encoder, up, 1);
+    bind_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -930,8 +950,8 @@ void MetalCommandContext::encode_softcap(
     const SoftcapDimensions dims {.elements = u32(elements, "softcap elements"), .softcap = softcap};
     auto encoder = impl_->compute_encoder("Gemma2 final softcap");
     [encoder setComputePipelineState:impl_->state->softcap_pipeline];
-    [encoder setBuffer:storage(input).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(output).buffer() offset:0 atIndex:1];
+    bind_buffer(encoder, input, 0);
+    bind_buffer(encoder, output, 1);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -977,8 +997,8 @@ std::uint32_t MetalCommandContext::encode_token_candidates(
     if (retain_count == 1U && request.history_token_count == 0U) {
         auto encoder = impl_->compute_encoder("Gemma2 compact token top-1");
         [encoder setComputePipelineState:impl_->state->token_candidate_top1_pipeline];
-        [encoder setBuffer:storage(logits).buffer() offset:0 atIndex:0];
-        [encoder setBuffer:storage(workspace.compact_result).buffer() offset:0 atIndex:1];
+        bind_buffer(encoder, logits, 0);
+        bind_buffer(encoder, workspace.compact_result, 1);
         [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
         [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
         ++impl_->stats.compute_dispatch_count;
@@ -987,9 +1007,9 @@ std::uint32_t MetalCommandContext::encode_token_candidates(
 
     auto encoder = impl_->compute_encoder("Gemma2 compact token candidates");
     [encoder setComputePipelineState:impl_->state->token_candidate_tile_pipeline];
-    [encoder setBuffer:storage(logits).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(workspace.candidate_runs_a).buffer() offset:0 atIndex:1];
-    [encoder setBuffer:storage(workspace.compact_result).buffer() offset:0 atIndex:2];
+    bind_buffer(encoder, logits, 0);
+    bind_buffer(encoder, workspace.candidate_runs_a, 1);
+    bind_buffer(encoder, workspace.compact_result, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(run_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
     ++impl_->stats.compute_dispatch_count;
@@ -1006,10 +1026,8 @@ std::uint32_t MetalCommandContext::encode_token_candidates(
         };
         encoder = impl_->compute_encoder("Gemma2 compact token merge");
         [encoder setComputePipelineState:impl_->state->token_candidate_merge_pipeline];
-        [encoder setBuffer:storage(input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b).buffer()
-                    offset:0 atIndex:0];
-        [encoder setBuffer:storage(input_is_a ? workspace.candidate_runs_b : workspace.candidate_runs_a).buffer()
-                    offset:0 atIndex:1];
+        bind_buffer(encoder, input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 0);
+        bind_buffer(encoder, input_is_a ? workspace.candidate_runs_b : workspace.candidate_runs_a, 1);
         [encoder setBytes:&merge_dims length:sizeof(merge_dims) atIndex:2];
         [encoder dispatchThreadgroups:MTLSizeMake(output_run_count, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
@@ -1022,11 +1040,10 @@ std::uint32_t MetalCommandContext::encode_token_candidates(
     encode_memory_barrier();
     encoder = impl_->compute_encoder("Gemma2 compact token result");
     [encoder setComputePipelineState:impl_->state->token_candidate_finalize_pipeline];
-    [encoder setBuffer:storage(logits).buffer() offset:0 atIndex:0];
-    [encoder setBuffer:storage(input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b).buffer()
-                offset:0 atIndex:1];
-    [encoder setBuffer:storage(workspace.history_token_staging).buffer() offset:0 atIndex:2];
-    [encoder setBuffer:storage(workspace.compact_result).buffer() offset:0 atIndex:3];
+    bind_buffer(encoder, logits, 0);
+    bind_buffer(encoder, input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 1);
+    bind_buffer(encoder, workspace.history_token_staging, 2);
+    bind_buffer(encoder, workspace.compact_result, 3);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(retain_count + request.history_token_count, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
@@ -1160,7 +1177,9 @@ engine::CompactTokenCandidates MetalCommandContext::read_token_candidates(
     if (!impl_->submitted) {
         throw std::logic_error("Metal token-candidate result cannot be read before completion");
     }
-    const auto* bytes = static_cast<const std::byte*>([storage(workspace.compact_result).buffer() contents]);
+    const auto* bytes = static_cast<const std::byte*>(
+        metal_buffer_contents(storage(workspace.compact_result))
+    );
     TokenCandidateResultHeader header {};
     std::memcpy(&header, bytes, sizeof(header));
     if (header.status != 0U) {

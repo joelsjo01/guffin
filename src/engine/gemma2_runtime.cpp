@@ -335,6 +335,7 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             .candidate_count = candidates.has_value() ? candidates->count : 0U,
             .gpu_duration_ns = metal_stats.gpu_duration_ns,
             .q4_decode_projection_count = metal_stats.q4_decode_projection_count,
+            .q8_decode_projection_count = metal_stats.q8_decode_projection_count,
             .q4_small_batch_projection_count = metal_stats.q4_small_batch_projection_count,
             .q4_exact_16_projection_count = metal_stats.q4_exact_16_projection_count,
             .q4_generic_tiled_projection_count = metal_stats.q4_generic_tiled_projection_count,
@@ -623,6 +624,7 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
         execution.transient_buffer_allocation_count += stats.transient_buffer_allocation_count;
         execution.gpu_duration_ns += stats.gpu_duration_ns;
         execution.q4_decode_projection_count += stats.q4_decode_projection_count;
+        execution.q8_decode_projection_count += stats.q8_decode_projection_count;
         execution.q4_small_batch_projection_count += stats.q4_small_batch_projection_count;
         execution.q4_exact_16_projection_count += stats.q4_exact_16_projection_count;
         execution.q4_generic_tiled_projection_count += stats.q4_generic_tiled_projection_count;
@@ -839,6 +841,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         );
         decode_execution.gpu_duration_ns += decode_step.execution.gpu_duration_ns;
         decode_execution.q4_decode_projection_count += decode_step.execution.q4_decode_projection_count;
+        decode_execution.q8_decode_projection_count += decode_step.execution.q8_decode_projection_count;
         decode_execution.q4_small_batch_projection_count += decode_step.execution.q4_small_batch_projection_count;
         decode_execution.q4_exact_16_projection_count += decode_step.execution.q4_exact_16_projection_count;
         decode_execution.q4_generic_tiled_projection_count += decode_step.execution.q4_generic_tiled_projection_count;

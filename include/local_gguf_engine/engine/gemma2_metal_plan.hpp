@@ -12,6 +12,14 @@
 
 namespace local_gguf_engine::engine {
 
+enum class Gemma2OutputHeadPolicy {
+    automatic,
+    f16,
+    q8_0,
+};
+
+[[nodiscard]] const char* gemma2_output_head_policy_name(Gemma2OutputHeadPolicy policy) noexcept;
+
 struct Gemma2MetalAttentionWeightBuffers {
     tensor::BackendBuffer attention_norm_weight;
     tensor::BackendBuffer post_attention_norm_weight;
@@ -161,6 +169,7 @@ public:
         Gemma2MetalDecodeScratch decode_scratch,
         Gemma2MetalSelectionWorkspace selection_workspace,
         std::vector<Gemma2MetalLayerState> layers,
+        Gemma2OutputHeadPolicy output_head_policy,
         Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes,
         std::size_t uploaded_weight_byte_count,
         std::size_t kv_cache_byte_count,
@@ -169,6 +178,7 @@ public:
 
     [[nodiscard]] runtime::BackendKind backend() const noexcept;
     [[nodiscard]] const Gemma2ModelConfig& config() const noexcept;
+    [[nodiscard]] Gemma2OutputHeadPolicy output_head_policy() const noexcept;
     [[nodiscard]] const Gemma2MetalModelWeightBuffers& weights() const noexcept;
     [[nodiscard]] std::vector<Gemma2MetalKVCacheLayer>& kv_cache() noexcept;
     [[nodiscard]] const std::vector<Gemma2MetalKVCacheLayer>& kv_cache() const noexcept;
@@ -190,6 +200,7 @@ private:
     Gemma2MetalDecodeScratch decode_scratch_;
     Gemma2MetalSelectionWorkspace selection_workspace_;
     std::vector<Gemma2MetalLayerState> layers_;
+    Gemma2OutputHeadPolicy output_head_policy_ = Gemma2OutputHeadPolicy::f16;
     Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes_;
     std::size_t uploaded_weight_byte_count_ = 0;
     std::size_t kv_cache_byte_count_ = 0;
@@ -238,10 +249,14 @@ private:
     std::uint32_t total_kv_token_count_ = 0;
 };
 
-[[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(const EngineModel& model);
+[[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
+    const EngineModel& model,
+    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic
+);
 [[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const Gemma2ModelConfig& config,
-    const Gemma2ModelWeights& weights
+    const Gemma2ModelWeights& weights,
+    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic
 );
 [[nodiscard]] Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(
     const Gemma2MetalModelPlan& plan,

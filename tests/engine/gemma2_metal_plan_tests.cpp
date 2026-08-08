@@ -49,6 +49,7 @@ using local_gguf_engine::engine::Gemma2MetalSchedulePhase;
 using local_gguf_engine::engine::Gemma2MetalScratchOwnership;
 using local_gguf_engine::engine::Gemma2MetalDecodeOutputMode;
 using local_gguf_engine::engine::Gemma2MetalModelPlan;
+using local_gguf_engine::engine::Gemma2OutputHeadPolicy;
 using local_gguf_engine::engine::Gemma2ModelWeights;
 using local_gguf_engine::engine::Gemma2ModelConfig;
 using local_gguf_engine::engine::create_gemma2_metal_decode_schedule;
@@ -609,6 +610,34 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
         "Gemma2 scheduled embedding must count one F16 row");
     expect(bytes.output_head == plan.weights().output_weight.descriptor().byte_count,
         "Gemma2 scheduled output head byte count mismatch");
+}
+
+void test_gemma2_q8_output_policy_preserves_f16_embedding_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+
+    auto payload_store = tiny_gemma2_payload_store();
+    const auto source_weight_bytes = payload_byte_count(
+        std::span<const GGUFTensorPayloadView>(payload_store.payloads)
+    );
+    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    auto plan = create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::q8_0);
+
+    const auto expected_q8_bytes = TensorDescriptor::from_quantized_gguf_weight_matrix(
+        Shape::from({256U, 4U}), DType::q8_0
+    ).byte_count;
+    expect(plan.output_head_policy() == Gemma2OutputHeadPolicy::q8_0, "Gemma2 Q8 output policy mismatch");
+    expect(plan.weights().token_embedding_weight.descriptor().dtype == DType::f16,
+        "Gemma2 Q8 policy changed embedding dtype");
+    expect(plan.weights().output_weight.descriptor().dtype == DType::q8_0,
+        "Gemma2 Q8 output dtype mismatch");
+    expect(&backend_buffer_storage(plan.weights().token_embedding_weight)
+            != &backend_buffer_storage(plan.weights().output_weight),
+        "Gemma2 Q8 output must not alias F16 embedding");
+    expect(plan.uploaded_weight_byte_count() == source_weight_bytes + expected_q8_bytes,
+        "Gemma2 Q8 resident weight accounting mismatch");
+    expect(plan.decode_scheduled_weight_bytes().output_head == expected_q8_bytes,
+        "Gemma2 Q8 scheduled output bytes mismatch");
 }
 
 void test_gemma2_metal_plan_roundtrips_uploaded_borrowed_weight_when_available() {
@@ -1877,6 +1906,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "roundtrips Gemma2 Metal uploaded borrowed weight when available",
         test_gemma2_metal_plan_roundtrips_uploaded_borrowed_weight_when_available,
+    },
+    {
+        "Gemma2 Q8 output policy preserves F16 embedding when available",
+        test_gemma2_q8_output_policy_preserves_f16_embedding_when_available,
     },
     {
         "creates Gemma2 Metal schedules when available",

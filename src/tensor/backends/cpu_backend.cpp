@@ -45,21 +45,22 @@ void write_f32_linear(TensorStorage& storage, std::uint64_t linear_index, float 
     std::uint64_t column,
     std::uint64_t inner
 ) {
-    constexpr std::uint64_t k_quant_block_elements = 256;
+    const auto block_elements = dtype_layout(storage.descriptor().dtype).block_element_count;
     // GGUF/GGML projection weights are shaped [input_width, output_columns],
     // but each output column owns the contiguous packed K-quant blocks.
-    const auto blocks_per_column = storage.descriptor().shape.dimension(0) / k_quant_block_elements;
-    const auto block_index = column * blocks_per_column + (inner / k_quant_block_elements);
-    const auto element_index = static_cast<std::size_t>(inner % k_quant_block_elements);
+    const auto blocks_per_column = storage.descriptor().shape.dimension(0) / block_elements;
+    const auto block_index = column * blocks_per_column + (inner / block_elements);
+    const auto element_index = static_cast<std::size_t>(inner % block_elements);
 
     switch (storage.descriptor().dtype) {
+        case DType::q8_0:
+            return q8_0_block_view(storage, block_index).dequantized_value(element_index);
         case DType::q4_k:
             return q4_k_block_view(storage, block_index).dequantized_value(element_index);
         case DType::q6_k:
             return q6_k_block_view(storage, block_index).dequantized_value(element_index);
         case DType::f32:
         case DType::f16:
-        case DType::q8_0:
             break;
     }
 

@@ -1678,6 +1678,23 @@ void test_rejects_generate_gemma2_chat_invalid_sampling_flags() {
     }
 }
 
+void test_rejects_generate_gemma2_chat_invalid_output_head_flags() {
+    const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-output-head.gguf";
+    const std::vector<std::vector<std::string>> cases {
+        {"--output-head"},
+        {"--output-head", "q4_0"},
+    };
+    for (const auto& arguments : cases) {
+        std::ostringstream output;
+        std::ostringstream error;
+        const auto exit_code = run_generate_chat_with_extra_arguments(path, arguments, output, error);
+        expect(exit_code == EXIT_FAILURE, "invalid output-head flag should fail");
+        expect(output.str().empty(), "invalid output-head flag should not write stdout");
+        expect(error.str().find("--output-head") != std::string::npos,
+            "invalid output-head error should identify the option");
+    }
+}
+
 void test_reports_generate_gemma2_metal_runtime_shell_unavailable_when_missing() {
     if (tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -1950,6 +1967,10 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     {
         "rejects generate Gemma2 chat invalid sampling flags",
         test_rejects_generate_gemma2_chat_invalid_sampling_flags,
+    },
+    {
+        "rejects generate Gemma2 chat invalid output-head flags",
+        test_rejects_generate_gemma2_chat_invalid_output_head_flags,
     },
     {
         "reports generate Gemma2 Metal runtime shell unavailable when missing",

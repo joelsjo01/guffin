@@ -190,6 +190,13 @@ MatmulPipelineState::MatmulPipelineState() {
         return pipeline;
     };
 
+    matvec_q8_0_packed_pipeline = make_specialized_pipeline(
+        @"matvec_f32_q8_0_packed_kernel", 4, 0, "Q8_0 packed decode matvec"
+    );
+    matvec_q8_0_packed_112_pipeline = make_specialized_pipeline(
+        @"matvec_f32_q8_0_packed_kernel", 4, 112, "Q8_0 112-block packed decode matvec"
+    );
+
     matmul_q4_k_tiled_pipeline = make_tiled_pipeline(0, false, "Q4_K tiled matmul");
     matmul_q4_k_tiled_exact_16_pipeline =
         make_tiled_pipeline(0, true, "Q4_K exact 16-row tiled matmul");
@@ -600,11 +607,35 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
     std::uint64_t shared,
     std::uint64_t columns
 ) {
-    if (dtype != DType::q4_k && dtype != DType::q6_k) {
+    if (dtype != DType::q8_0 && dtype != DType::q4_k && dtype != DType::q6_k) {
         throw std::invalid_argument("Metal K-quant matmul weight dtype is unsupported");
     }
-    if (rows == 0 || shared == 0 || columns == 0 || shared % 256 != 0) {
+    if (rows == 0 || shared == 0 || columns == 0) {
         throw std::invalid_argument("Metal K-quant matmul dimensions are unsupported");
+    }
+
+    if (dtype == DType::q8_0) {
+        if (rows != 1U || shared % 32U != 0U) {
+            throw std::invalid_argument("Metal Q8_0 output matvec requires one row and 32-aligned shared width");
+        }
+        auto pipeline = shared == 3584U
+            ? state.matvec_q8_0_packed_112_pipeline
+            : state.matvec_q8_0_packed_pipeline;
+        if (pipeline == nil || pipeline.threadExecutionWidth != 32
+            || pipeline.maxTotalThreadsPerThreadgroup < 64U) {
+            throw metal_error(
+                runtime::BackendErrorCode::metal_execution_failed,
+                "Metal Q8_0 matvec requires two 32-lane SIMD groups"
+            );
+        }
+        return QuantizedMatmulDispatch {
+            .pipeline = pipeline,
+            .threadgroups = MTLSizeMake(static_cast<NSUInteger>((columns + 3U) / 4U), 1U, 1U),
+            .threads_per_threadgroup = MTLSizeMake(64U, 1U, 1U),
+        };
+    }
+    if (shared % 256U != 0U) {
+        throw std::invalid_argument("Metal K-quant matmul shared width must be 256-aligned");
     }
 
     id<MTLComputePipelineState> pipeline = nil;

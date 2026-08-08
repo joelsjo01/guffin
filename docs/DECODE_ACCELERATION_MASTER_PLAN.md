@@ -157,50 +157,77 @@ item has a plausible 2% current-workload throughput ceiling.
 measured context-dependent cost; do not polish already bandwidth-saturated
 kernels without counter evidence.
 
-#### 2A. Weight residency and access
+#### Completed: 2A. Weight residency and access
 
-- Probe immutable shared, write-combined, private, and hazard-tracking choices
-  on representative sustained matrices before changing production ownership.
-- Test an offset-aware contiguous weight buffer or safe no-copy mapping only if
-  it reduces physical duplication or counters show better access behavior.
-- Retain a storage change only with real decode improvement or a material,
-  independently measured memory reduction that enables a later stage without
-  regressing load, prompt, or decode performance.
+- The one-weight-at-a-time production-kernel probe covered shared/default,
+  shared/write-combined, private, and tracked/untracked hazards with exact byte
+  parity and explicit upload/resource accounting. No alternative passed the
+  three-pair 2% advancement screen; weighted median changes ranged from -1.51%
+  to +1.31%, so no policy reached production or the five-pair chat gate.
+- Metal accepted one page-aligned, single-region read-only GGUF no-copy parent,
+  and real nonzero tensor offsets passed byte and matmul execution checks.
+  Sustained file-backed access nevertheless regressed representative Q4_K down
+  from about 101 to 72-81 GB/s and Q6_K down from about 103 to 80-91 GB/s. The
+  no-copy production/ownership branch was rejected before memory attribution.
+- Copied-contiguous storage was not attempted: neither resource-policy results
+  nor the retained trace established a credible whole-path 2% ceiling. The
+  production path remains separate copied shared/default/tracked weights;
+  reusable resource-policy/no-copy diagnostics remain available for future
+  hardware or mapping changes.
 
-#### 2B. Output head
+#### Completed: 2B. Output head
 
-- In the canonical lane, keep the existing F16 head until the certified Phase 1
-  shortlist is ready; projection/top-k fusion has a sub-millisecond ceiling and
-  is cleanup unless it is needed by the verifier.
-- In the explicitly approved altered-numerics lane, prototype output-only Q8
-  first. Its first-order bound is approximately 15.8 tok/s from a 13.9 tok/s
-  baseline. Advance to Q6 or Q4 only if Q8 quality and measured bandwidth justify
-  the larger divergence.
-- Measure logit error, top-40 overlap, post-transform KL divergence, perplexity,
-  deterministic chat cases, representative quality tasks, memory, TTFT, and
-  end-to-end throughput. Account for tied embedding storage explicitly.
+- Output-only Q8_0 is retained for the exact tied-F16 Gemma 2 9B target while
+  token embedding remains F16. Generic and target Metal matvecs, an independent
+  CPU reference, explicit F16/Q8 controls, accounting, and quality/benchmark
+  evidence are retained with the implementation.
+- The 512-position full-vocabulary evidence passed all declared gates, including
+  99.609% top-1 agreement, 99.438% mean top-40 overlap, mean KL 1.752e-5, and a
+  0.009% relative perplexity increase. Hidden-state parity was exact.
+- Isolated/sustained head timing improved from 17.77/17.88 ms for F16 to
+  11.01/10.89 ms for Q8_0, saving about 6.99 ms per sustained projection even
+  though Q8's effective bandwidth was lower.
+- One user-requested thermally spaced production-chat pair measured a 9.22%
+  generation-rate improvement (13.97 to 15.26 tok/s). This overrides the normal
+  five-pair sample count and remains an explicit confidence limitation. Startup
+  rose by 4.20 seconds for one-time quantization; allocation and physical-memory
+  evidence remained viable. Q6/Q4 output formats and projection/top-k fusion
+  were not pursued.
 
-#### 2C. FFN bytes and quantized projections
+#### Completed: 2C. FFN bytes and quantized projections
 
-- Use counters to decide whether any hot shape is limited by memory traffic,
-  unpack arithmetic, occupancy, or register pressure. The generic 56-block Q4
-  path already sustains about 99 GB/s, so specialization by name alone is not a
-  hypothesis.
-- Test repacking, interleaving, or an alternate low-bit representation only when
-  it physically removes fetched bytes or resolves a measured hardware limit.
-  Include conversion/load cost, alignment, tails, and all Q4/Q6 layer mixtures.
-- Do not retain gate/up/GELU fusion solely for dispatch reduction; the weights
-  dominate and all norm/residual/GELU work is only about 0.53 ms per token.
+- The exact retained target now converts its 21 Q6_K FFN-down matrices to the
+  existing Q4_K representation during load. The engine-owned converter matches
+  independent reference bytes, works one 256-value block at a time, and uses
+  four load-time workers for target-sized matrices. Attention Q6_K weights and
+  all non-target models preserve their source formats.
+- This removes 278,175,744 resident and scheduled bytes: FFN down is now
+  1,213,857,792 bytes, total scheduled decode weights are 5,699,040,256 bytes,
+  and logical resident weights are 7,534,041,088 bytes. The converted production
+  shape sustained 0.284 ms at 101.86 GB/s, so no new Metal specialization was
+  warranted.
+- The 512-position quality run measured Q8 perplexity 3.18999 versus the Stage
+  2B baseline 3.18521, a 0.150% increase within the declared 0.5% gate. Two
+  thermally cooled candidate chats measured 15.96 and 15.82 tok/s against the
+  cooled 14.98 tok/s Stage 2B control, gains of 6.60% and 5.65%. The user-requested
+  reduced sample count remains a confidence limitation.
+- Four-worker conversion reduced measured startup/initialization from 47.05
+  seconds for the scalar candidate to about 22.0 seconds. The retained candidate
+  had no swaps and a 10.88 GB peak RSS in the one-token startup probe. Gate/up
+  fusion, Q5/Q3 formats, and a Q4 56-block specialization were not added.
 
 #### 2D. Attention by context regime
 
-- Preserve the present short-context attention unless a candidate has a
-  measured whole-token bound above noise.
-- Build and tune block-online softmax for 256, 512, 1K, 2K, 4K, and 8K contexts,
-  reducing per-element rescaling while preserving Gemma attention softcap,
-  GQA, causal masks, ring behavior, and alternating local/global windows.
-- Consider partition autotuning next. Consider KV quantization or paging only
-  for the long-context lane and only when conversion/dequantization is included.
+- **Complete, no production change.** A correct 32-score block-online kernel
+  clearly improved 512 tokens and slightly improved 1K, but regressed 2K, 4K,
+  and the real 21-by-4K plus 21-by-8K layer mixture. Halving long-context
+  partitions improved 2K but made 4K and the real mixture worse. The candidate,
+  tuning, and temporary diagnostics were deleted; the retained online-softmax
+  and partitioned attention path remains production.
+- The result confirms that compulsory F16 KV streaming governs the useful long
+  regime and the remaining arithmetic reduction cannot clear the whole-token
+  gate. KV representation changes remain a later long-context option, not a
+  reason to delay multi-token verification.
 
 #### 2E. Bounded cleanup
 
@@ -216,6 +243,11 @@ value conventional candidates fail their retain gates, or (b) every remaining
 candidate for the headline short-context workload has a credible whole-path
 ceiling below 2%. Record the new retained baseline and bottleneck decomposition.
 Do not wait for the long-context track to finish before beginning Stage 3.
+
+The project now satisfies condition (b). Stage 2E's measured one-row cleanup
+components are individually below 2% and are more useful when preventing costs
+from multiplying inside a verifier. Stage 2C remains the retained baseline and
+the active route moves to Stage 3.
 
 ### Stage 3: Build the Multi-Token Verification Foundation
 

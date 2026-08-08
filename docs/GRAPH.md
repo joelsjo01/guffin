@@ -50,6 +50,8 @@ benchmark harness is not a live source route.
 | `scripts/ci.sh` | repository check wrapper |
 | `scripts/quick_benchmark.py` | canonical local real-chat benchmark driver |
 | `scripts/memory_benchmark.py` | interleaved production-path startup and process-memory benchmark |
+| `scripts/output_head_benchmark.py` | thermally spaced F16/Q8 output-head production-chat comparison |
+| `scripts/storage_policy_benchmark.py` | paired immutable-weight Metal resource-policy screen |
 | `scripts/capture_decode_gpu_trace.py` | one-shot production decode `.gputrace` driver |
 | `scripts/llama_reference_benchmark.py` | infrequent pinned llama-cli reference driver |
 | `docs/LLAMA_CPP_REFERENCE_BASELINE.md` | stored pinned reference identity, protocol, and result |
@@ -213,15 +215,23 @@ Generation and interactive CLI:
 
 Quick local/reference benchmark:
 
+- `include/local_gguf_engine/benchmarks/immutable_weight_benchmark.hpp`
+- `include/local_gguf_engine/benchmarks/output_head_benchmark.hpp`
 - `include/local_gguf_engine/benchmarks/quick_benchmark.hpp`
+- `src/benchmarks/immutable_weight_benchmark.mm`
+- `src/benchmarks/output_head_benchmark.cpp`
 - `src/benchmarks/quick_benchmark.cpp`
 - `src/frontends/cli/benchmark_main.cpp`
 - `scripts/quick_benchmark.py`
 - `scripts/memory_benchmark.py`
+- `scripts/output_head_benchmark.py`
+- `scripts/storage_policy_benchmark.py`
 - `scripts/capture_decode_gpu_trace.py`
 - `tests/benchmarks/quick_benchmark_tests.cpp`
 - `tests/scripts/quick_benchmark_script_tests.py`
 - `tests/scripts/memory_benchmark_script_tests.py`
+- `tests/scripts/output_head_benchmark_script_tests.py`
+- `tests/scripts/storage_policy_benchmark_script_tests.py`
 
 GGUF inspection CLI:
 

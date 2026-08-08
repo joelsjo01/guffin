@@ -15,6 +15,8 @@ struct MatmulPipelineState {
     id<MTLDevice> device = nil;
     id<MTLComputePipelineState> matmul_f16_simd_pipeline = nil;
     id<MTLComputePipelineState> embedding_pipeline = nil;
+    id<MTLComputePipelineState> matvec_q8_0_packed_pipeline = nil;
+    id<MTLComputePipelineState> matvec_q8_0_packed_112_pipeline = nil;
     id<MTLComputePipelineState> matvec_q4_k_packed_pipeline = nil;
     id<MTLComputePipelineState> matvec_q4_k_packed_14_pipeline = nil;
     id<MTLComputePipelineState> matvec_q4_k_packed_16_pipeline = nil;

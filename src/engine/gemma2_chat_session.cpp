@@ -49,7 +49,7 @@ namespace {
         );
     }
 
-    return create_gemma2_metal_model_plan(model);
+    return create_gemma2_metal_model_plan(model, options.output_head_policy);
 }
 
 [[nodiscard]] Gemma2ChatSessionState create_chat_session_state(
@@ -624,6 +624,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
                 : Gemma2TokenSelectionMode::sampled,
             .trimmed_turn_count = checked_cached_token_count(trimmed_turn_count),
             .rebuilt_context = first_retained_message > 0U,
+            .output_head_policy = plan_.output_head_policy(),
             .resident_weight_byte_count = plan_.uploaded_weight_byte_count(),
             .resident_kv_cache_byte_count = plan_.kv_cache_byte_count(),
             .resident_scratch_byte_count = plan_.scratch_byte_count(),
@@ -670,7 +671,7 @@ void Gemma2ChatSession::clear() {
 }
 
 void Gemma2ChatSession::reset() {
-    auto replacement_plan = create_gemma2_metal_model_plan(model_);
+    auto replacement_plan = create_gemma2_metal_model_plan(model_, plan_.output_head_policy());
     const auto token_id = tokenizer_.special_tokens().bos_token_id.value_or(
         tokenizer_.special_tokens().eos_token_id.value_or(0U)
     );

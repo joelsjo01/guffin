@@ -22,6 +22,7 @@ struct MetalCommandStats {
     std::uint32_t transient_buffer_allocation_count = 0;
     std::uint64_t gpu_duration_ns = 0;
     std::uint32_t q4_decode_projection_count = 0;
+    std::uint32_t q8_decode_projection_count = 0;
     std::uint32_t q4_small_batch_projection_count = 0;
     std::uint32_t q4_exact_16_projection_count = 0;
     std::uint32_t q4_generic_tiled_projection_count = 0;

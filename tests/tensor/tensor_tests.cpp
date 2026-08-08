@@ -51,6 +51,8 @@ using local_gguf_engine::tensor::dequantize_q4_k_row;
 using local_gguf_engine::tensor::dequantize_q6_k_block;
 using local_gguf_engine::tensor::dequantize_q6_k_row;
 using local_gguf_engine::tensor::dequantize_q8_0_block;
+using local_gguf_engine::tensor::quantize_f16_gguf_weight_q8_0;
+using local_gguf_engine::tensor::requantize_q6_k_gguf_weight_q4_k;
 using local_gguf_engine::tensor::dot_q4_k_row_f32;
 using local_gguf_engine::tensor::dot_q6_k_row_f32;
 using local_gguf_engine::tensor::q4_k_block_count;
@@ -107,6 +109,7 @@ using local_gguf_engine::tests::tensor_f16_gguf_matrix;
 using local_gguf_engine::tests::tensor_f16_matrix;
 using local_gguf_engine::tests::tensor_f32_matrix;
 using local_gguf_engine::tests::tensor_f32_vector;
+using local_gguf_engine::tests::tensor_q6_k_gguf_weight_matrix;
 
 void test_default_backend_starts_on_cpu() {
     expect(
@@ -351,6 +354,31 @@ void test_decodes_q8_0_block_values() {
     expect(values[4] == -64.0F, "Q8_0 dequantized value 4 mismatch");
 }
 
+void test_quantizes_f16_gguf_weight_to_q8_0_exact_bytes() {
+    std::array<float, 64> values {};
+    values[0] = -127.0F;
+    values[2] = -0.5F;
+    values[4] = 0.5F;
+    values[62] = 127.0F;
+    const auto source = tensor_f16_gguf_matrix(32U, 2U, std::span<const float>(values));
+    const auto quantized = quantize_f16_gguf_weight_q8_0(source.view());
+
+    expect(quantized.descriptor().dtype == DType::q8_0, "Q8_0 converter dtype mismatch");
+    expect(quantized.descriptor().shape == source.descriptor().shape, "Q8_0 converter shape mismatch");
+    expect(quantized.bytes().size() == 68U, "Q8_0 converter byte count mismatch");
+    const auto first = q8_0_block_view(quantized, 0U);
+    expect_close(first.scale(), 1.0F, 0.0F, "Q8_0 converter scale mismatch");
+    expect(first.quantized_value(0U) == -127, "Q8_0 converter negative maximum mismatch");
+    expect(first.quantized_value(1U) == -1, "Q8_0 converter negative half rounding mismatch");
+    expect(first.quantized_value(2U) == 1, "Q8_0 converter positive half rounding mismatch");
+    expect(first.quantized_value(31U) == 127, "Q8_0 converter positive maximum mismatch");
+    const auto second = q8_0_block_view(quantized, 1U);
+    expect_close(second.scale(), 0.0F, 0.0F, "Q8_0 converter zero scale mismatch");
+    for (std::size_t index = 0; index < 32U; ++index) {
+        expect(second.quantized_value(index) == 0, "Q8_0 converter zero quant mismatch");
+    }
+}
+
 void test_decodes_q4_k_reference_block_values() {
     const auto storage = q4_k_reference_tensor();
     const auto block = q4_k_block_view(storage, 0);
@@ -371,6 +399,93 @@ void test_decodes_q4_k_reference_block_values() {
     const auto values = dequantize_q4_k_block(storage, 0);
     expect_close(values[31], 29.5F, 0.0F, "Q4_K dequantized value 31 mismatch");
     expect_close(values[63], 17.0F, 0.0F, "Q4_K dequantized value 63 mismatch");
+}
+
+void test_requantizes_q6_k_gguf_weight_to_q4_k() {
+    const auto source = tensor_q6_k_gguf_weight_matrix(512U, 2U, 19U);
+    const auto converted = requantize_q6_k_gguf_weight_q4_k(source.view());
+    const auto repeated = requantize_q6_k_gguf_weight_q4_k(source.view());
+
+    expect(converted.descriptor().dtype == DType::q4_k, "Q6-to-Q4 converter dtype mismatch");
+    expect(converted.descriptor().shape == source.descriptor().shape, "Q6-to-Q4 converter shape mismatch");
+    expect(converted.bytes().size() == 4U * Q4_KBlockView::byte_count,
+        "Q6-to-Q4 converter byte count mismatch");
+    expect(std::equal(converted.bytes().begin(), converted.bytes().end(), repeated.bytes().begin()),
+        "Q6-to-Q4 converter must be deterministic");
+    // Golden bytes were produced independently with ggml_quantize_chunk(Q4_K)
+    // from the decoded first source block. They pin scale/min packing and the
+    // stored-F16 nibble recomputation, not just reconstruction error.
+    constexpr std::array<std::uint8_t, 16> expected_header {
+        0x16U, 0x2AU, 0x96U, 0x35U, 0xFAU, 0xBFU, 0xA7U, 0xE7U,
+        0xFBU, 0xBFU, 0xA9U, 0xE9U, 0xEFU, 0xAAU, 0xAAU, 0xACU,
+    };
+    expect(std::equal(expected_header.begin(), expected_header.end(), converted.bytes().begin()),
+        "Q6-to-Q4 converter reference header mismatch");
+    std::uint64_t first_block_hash = 14695981039346656037ULL;
+    for (const auto byte : converted.bytes().first<Q4_KBlockView::byte_count>()) {
+        first_block_hash ^= byte;
+        first_block_hash *= 1099511628211ULL;
+    }
+    expect(first_block_hash == 1718757788837238422ULL,
+        "Q6-to-Q4 converter reference block bytes mismatch");
+
+    double squared_source = 0.0;
+    double squared_error = 0.0;
+    for (std::uint64_t block_index = 0; block_index < 4U; ++block_index) {
+        const auto source_values = dequantize_q6_k_block(source, block_index);
+        const auto converted_values = dequantize_q4_k_block(converted, block_index);
+        for (std::size_t element = 0; element < source_values.size(); ++element) {
+            const auto source_value = static_cast<double>(source_values[element]);
+            const auto difference = static_cast<double>(converted_values[element]) - source_value;
+            squared_source += source_value * source_value;
+            squared_error += difference * difference;
+        }
+    }
+    expect(squared_error / squared_source < 0.01,
+        "Q6-to-Q4 converter relative squared error is unexpectedly high");
+}
+
+void test_requantizes_zero_q6_k_block_to_exact_zero_q4_k_block() {
+    const auto descriptor = TensorDescriptor::from_quantized_gguf_weight_matrix(
+        Shape::from({256U, 1U}), DType::q6_k
+    );
+    const auto source = TensorStorage::allocate(descriptor);
+    const auto converted = requantize_q6_k_gguf_weight_q4_k(source.view());
+    expect(std::all_of(converted.bytes().begin(), converted.bytes().end(), [](std::uint8_t byte) {
+        return byte == 0U;
+    }), "zero Q6_K block must encode as an exact zero Q4_K block");
+}
+
+void test_rejects_invalid_q6_k_to_q4_k_requantization_inputs() {
+    const auto rank_one = TensorStorage::allocate(TensorDescriptor::from(Shape::from({256U}), DType::q6_k));
+    try {
+        (void)requantize_q6_k_gguf_weight_q4_k(rank_one.view());
+        throw TestFailure("Q6-to-Q4 converter should reject a rank-one tensor");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_shape_rank,
+            "Q6-to-Q4 rank error code mismatch");
+    }
+
+    const std::vector<float> zero_f16_values(256U, 0.0F);
+    const auto wrong_dtype = tensor_f16_gguf_matrix(256U, 1U, zero_f16_values);
+    try {
+        (void)requantize_q6_k_gguf_weight_q4_k(wrong_dtype.view());
+        throw TestFailure("Q6-to-Q4 converter should reject a non-Q6 tensor");
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::unsupported_quantized_dtype,
+            "Q6-to-Q4 dtype error code mismatch");
+    }
+
+    auto nonfinite = TensorStorage::allocate(TensorDescriptor::from_quantized_gguf_weight_matrix(
+        Shape::from({256U, 1U}), DType::q6_k
+    ));
+    nonfinite.mutable_bytes()[Q6_KBlockView::byte_count - 2U] = 0x00U;
+    nonfinite.mutable_bytes()[Q6_KBlockView::byte_count - 1U] = 0x7CU;
+    try {
+        (void)requantize_q6_k_gguf_weight_q4_k(nonfinite.view());
+        throw TestFailure("Q6-to-Q4 converter should reject nonfinite decoded values");
+    } catch (const std::invalid_argument&) {
+    }
 }
 
 void test_dequantizes_q4_k_reference_row_and_dot() {
@@ -2674,8 +2789,12 @@ const TestCase tensor_core_tests[] = {
         test_rejects_tensor_descriptor_with_invalid_shape_dtype_combination,
     },
     {"decodes Q8_0 block values", test_decodes_q8_0_block_values},
+    {"quantizes F16 GGUF weight to Q8_0 exact bytes", test_quantizes_f16_gguf_weight_to_q8_0_exact_bytes},
     {"decodes Q4_K reference block values", test_decodes_q4_k_reference_block_values},
     {"dequantizes Q4_K reference row and dot", test_dequantizes_q4_k_reference_row_and_dot},
+    {"requantizes Q6_K GGUF weight to Q4_K", test_requantizes_q6_k_gguf_weight_to_q4_k},
+    {"requantizes zero Q6_K block to exact zero Q4_K block", test_requantizes_zero_q6_k_block_to_exact_zero_q4_k_block},
+    {"rejects invalid Q6_K to Q4_K requantization inputs", test_rejects_invalid_q6_k_to_q4_k_requantization_inputs},
     {"decodes Q6_K reference block values", test_decodes_q6_k_reference_block_values},
     {"dequantizes Q6_K reference row and dot", test_dequantizes_q6_k_reference_row_and_dot},
     {"rejects Q4_K reference row width mismatch", test_rejects_q4_k_reference_row_width_mismatch},

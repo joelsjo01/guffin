@@ -36,7 +36,7 @@ TensorDescriptor TensorDescriptor::from_quantized_gguf_weight_matrix(
     if (shape.rank() != 2) {
         throw TensorError(TensorErrorCode::invalid_shape_rank, 2, static_cast<std::uint64_t>(shape.rank()));
     }
-    if (dtype != DType::q4_k && dtype != DType::q6_k) {
+    if (dtype != DType::q8_0 && dtype != DType::q4_k && dtype != DType::q6_k) {
         throw TensorError(
             TensorErrorCode::unsupported_quantized_dtype,
             static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::q4_k)),

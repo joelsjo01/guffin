@@ -207,7 +207,7 @@ QuickKernelBenchmarkResult run_quick_kernel_benchmark(const std::string& model_p
     const auto feed_forward = static_cast<std::uint64_t>(plan.config().feed_forward_length);
     const BackendBuffer* q4_gate = nullptr;
     const BackendBuffer* q4_down = nullptr;
-    const BackendBuffer* q6_down = nullptr;
+    const BackendBuffer* converted_q4_down = nullptr;
     for (const auto& block : weights.blocks) {
         const auto& gate = block.feed_forward.gate_weight;
         const auto& down = block.feed_forward.down_weight;
@@ -218,26 +218,29 @@ QuickKernelBenchmarkResult run_quick_kernel_benchmark(const std::string& model_p
         }
         if (down.descriptor().shape.dimension(0) == feed_forward
             && down.descriptor().shape.dimension(1) == hidden) {
-            if (q4_down == nullptr && down.descriptor().dtype == tensor::DType::q4_k) {
-                q4_down = &down;
-            }
-            if (q6_down == nullptr && down.descriptor().dtype == tensor::DType::q6_k) {
-                q6_down = &down;
+            if (down.descriptor().dtype == tensor::DType::q4_k) {
+                if (q4_down == nullptr) {
+                    q4_down = &down;
+                } else if (converted_q4_down == nullptr) {
+                    converted_q4_down = &down;
+                }
             }
         }
     }
-    if (q4_gate == nullptr || q4_down == nullptr || q6_down == nullptr) {
-        throw std::runtime_error("benchmark model is missing a target Q4_K/Q6_K FFN tensor");
+    if (q4_gate == nullptr || q4_down == nullptr || converted_q4_down == nullptr) {
+        throw std::runtime_error("benchmark model is missing target Q4_K FFN tensors");
     }
     require_weight_shape(*q4_gate, tensor::DType::q4_k, hidden, feed_forward, "Q4_K gate");
     require_weight_shape(*q4_down, tensor::DType::q4_k, feed_forward, hidden, "Q4_K down");
-    require_weight_shape(*q6_down, tensor::DType::q6_k, feed_forward, hidden, "Q6_K down");
+    require_weight_shape(
+        *converted_q4_down, tensor::DType::q4_k, feed_forward, hidden, "converted Q4_K down"
+    );
     require_weight_shape(
         weights.output_weight,
-        tensor::DType::f16,
+        tensor::DType::q8_0,
         hidden,
         plan.config().vocab_size,
-        "F16 output"
+        "Q8_0 output"
     );
     std::vector<KernelInvocation> invocations;
     const auto add_kernel = [&](
@@ -269,12 +272,12 @@ QuickKernelBenchmarkResult run_quick_kernel_benchmark(const std::string& model_p
         prefill.feed_forward_gated, *q4_down, prefill.projected_feed_forward_output, 1U
     );
     add_kernel(
-        "Q6_K decode", shape_label(feed_forward, hidden, 1U),
-        prefill.feed_forward_gated, *q6_down, prefill.projected_feed_forward_output, 1U
+        "Q4_K converted down", shape_label(feed_forward, hidden, 1U),
+        prefill.feed_forward_gated, *converted_q4_down, prefill.projected_feed_forward_output, 1U
     );
     add_kernel(
-        "F16 output", shape_label(hidden, plan.config().vocab_size, 1U),
-        prefill.normalized_hidden, weights.output_weight, prefill.feed_forward_gate, 1U
+        "Q8_0 output", shape_label(hidden, plan.config().vocab_size, 1U),
+        prefill.normalized_hidden, weights.output_weight, prefill.logits, 1U
     );
     for (const std::uint32_t rows : {2U, 4U}) {
         add_kernel(
@@ -282,12 +285,8 @@ QuickKernelBenchmarkResult run_quick_kernel_benchmark(const std::string& model_p
             prefill.normalized_feed_forward_input, *q4_gate, prefill.feed_forward_gate, rows
         );
         add_kernel(
-            "Q6_K verifier", shape_label(feed_forward, hidden, rows),
-            prefill.feed_forward_gated, *q6_down, prefill.projected_feed_forward_output, rows
-        );
-        add_kernel(
-            "F16 verifier", shape_label(hidden, plan.config().vocab_size, rows),
-            prefill.normalized_hidden, weights.output_weight, prefill.feed_forward_gate, rows
+            "Q4_K converted verifier", shape_label(feed_forward, hidden, rows),
+            prefill.feed_forward_gated, *converted_q4_down, prefill.projected_feed_forward_output, rows
         );
     }
     for (const std::uint32_t rows : {15U, 16U}) {

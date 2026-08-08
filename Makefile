@@ -9,6 +9,8 @@ GENERATE_BINARY := $(BUILD_DIR)/local-gguf-generate
 BENCHMARK_BINARY := $(BUILD_DIR)/local-gguf-bench
 
 ENGINE_SOURCES := \
+	src/benchmarks/immutable_weight_benchmark.mm \
+	src/benchmarks/output_head_benchmark.cpp \
 	src/benchmarks/quick_benchmark.cpp \
 	src/engine/gemma2_chat_session.cpp \
 	src/engine/gemma2_model.cpp \

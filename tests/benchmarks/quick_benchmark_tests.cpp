@@ -1,6 +1,7 @@
 #include "quick_benchmark_tests.hpp"
 
 #include "local_gguf_engine/benchmarks/quick_benchmark.hpp"
+#include "local_gguf_engine/benchmarks/immutable_weight_benchmark.hpp"
 
 #include <array>
 #include <limits>
@@ -19,6 +20,83 @@ using benchmarks::quick_kernel_measurement_mode_name;
 using benchmarks::run_quick_kernel_benchmark;
 using benchmarks::summarize_kernel_measurement;
 using benchmarks::summarize_values;
+
+void test_immutable_weight_policy_parsing_and_labels() {
+    using benchmarks::ImmutableWeightPolicy;
+    const std::array policies {
+        ImmutableWeightPolicy::shared_default_tracked,
+        ImmutableWeightPolicy::shared_write_combined_tracked,
+        ImmutableWeightPolicy::shared_default_untracked,
+        ImmutableWeightPolicy::shared_write_combined_untracked,
+        ImmutableWeightPolicy::private_tracked,
+        ImmutableWeightPolicy::private_untracked,
+    };
+    for (const auto policy : policies) {
+        const auto label = benchmarks::immutable_weight_policy_name(policy);
+        expect(!label.empty(), "immutable-weight policy label should not be empty");
+        expect(
+            benchmarks::parse_immutable_weight_policy(label) == policy,
+            "immutable-weight policy should roundtrip"
+        );
+    }
+    bool rejected = false;
+    try {
+        static_cast<void>(benchmarks::parse_immutable_weight_policy("shared-fast-magic"));
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    expect(rejected, "unknown immutable-weight policy should be rejected");
+}
+
+void test_immutable_weight_policy_accounting() {
+    using benchmarks::ImmutableWeightPolicy;
+    const auto shared = benchmarks::describe_immutable_weight_policy(
+        ImmutableWeightPolicy::shared_default_tracked, 4096U, 120U, 0U
+    );
+    expect(shared.storage_mode == "shared", "shared policy storage mode mismatch");
+    expect(shared.parent_allocation_count == 1U, "shared parent count mismatch");
+    expect(shared.logical_tensor_bytes == 4096U, "shared logical bytes mismatch");
+    expect(shared.copied_bytes == 4096U, "shared copied bytes mismatch");
+    expect(shared.file_backed_bytes == 0U, "shared file-backed bytes mismatch");
+    expect(shared.staging_bytes == 0U, "shared staging bytes mismatch");
+    expect(shared.cpu_contents_accessible, "shared contents accessibility mismatch");
+
+    const auto private_untracked = benchmarks::describe_immutable_weight_policy(
+        ImmutableWeightPolicy::private_untracked, 8192U, 240U, 80U
+    );
+    expect(private_untracked.storage_mode == "private", "private storage mode mismatch");
+    expect(private_untracked.hazard_mode == "untracked", "private hazard mode mismatch");
+    expect(private_untracked.staging_bytes == 8192U, "private staging bytes mismatch");
+    expect(private_untracked.copied_bytes == 8192U, "private copied bytes mismatch");
+    expect(private_untracked.upload_wall_duration_ns == 240U, "private wall time mismatch");
+    expect(private_untracked.upload_gpu_duration_ns == 80U, "private GPU time mismatch");
+    expect(!private_untracked.cpu_contents_accessible, "private contents accessibility mismatch");
+}
+
+void test_no_copy_mapping_constraint_validation() {
+    benchmarks::validate_no_copy_mapping_constraints(0x4000U, 12000U, 16384U, 16384U, 32768U, true);
+    const auto rejects = [](auto invoke) {
+        bool rejected = false;
+        try {
+            invoke();
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        return rejected;
+    };
+    expect(rejects([] { benchmarks::validate_no_copy_mapping_constraints(
+        0x4001U, 12000U, 16384U, 16384U, 32768U, true
+    ); }), "misaligned no-copy base should be rejected");
+    expect(rejects([] { benchmarks::validate_no_copy_mapping_constraints(
+        0x4000U, 17000U, 16384U, 16384U, 32768U, true
+    ); }), "short no-copy extent should be rejected");
+    expect(rejects([] { benchmarks::validate_no_copy_mapping_constraints(
+        0x4000U, 12000U, 16384U, 16384U, 8192U, true
+    ); }), "oversize no-copy extent should be rejected");
+    expect(rejects([] { benchmarks::validate_no_copy_mapping_constraints(
+        0x4000U, 12000U, 16384U, 16384U, 32768U, false
+    ); }), "multi-region no-copy extent should be rejected");
+}
 
 void test_quick_kernel_benchmark_contract_is_explicit() {
     expect(quick_kernel_repetition_count == 3U, "quick kernel repetition count mismatch");
@@ -145,7 +223,10 @@ void test_quick_kernel_benchmark_rejects_empty_model_path() {
     expect(rejected, "quick kernel benchmark should reject empty model path");
 }
 
-const std::array<TestCase, 6> kTests {{
+const std::array<TestCase, 9> kTests {{
+    {"immutable weight policy parsing and labels", test_immutable_weight_policy_parsing_and_labels},
+    {"immutable weight policy accounting", test_immutable_weight_policy_accounting},
+    {"no-copy mapping constraint validation", test_no_copy_mapping_constraint_validation},
     {"quick kernel benchmark contract is explicit", test_quick_kernel_benchmark_contract_is_explicit},
     {"quick kernel statistics report median and range", test_quick_kernel_statistics_report_median_and_range},
     {"quick kernel measurement normalizes sustained commands", test_quick_kernel_measurement_normalizes_sustained_commands},
