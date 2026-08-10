@@ -204,6 +204,70 @@ kernel void matvec_f32_q8_0_packed_kernel(
     }
 }
 
+// Width-two decode keeps both activation rows live while each packed Q8 block
+// is resident in the texture/cache hierarchy. The per-row traversal and SIMD
+// reduction match the retained matvec; only the weight load is shared.
+kernel void matmul_f32_q8_0_width_two_kernel(
+    const device float* left [[buffer(0)]],
+    const device uchar* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulDimensions& dims [[buffer(3)]],
+    uint threadgroup_index [[threadgroup_position_in_grid]],
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint first_column = threadgroup_index * 4 + uint(simdgroup_index) * 2;
+    const uint second_column = first_column + 1;
+    const uint blocks_per_column = q8_0_decode_block_count == 0
+        ? dims.shared / 32
+        : uint(q8_0_decode_block_count);
+    const uint column_stride = blocks_per_column * 34;
+    float first_sum_0 = 0.0f;
+    float first_sum_1 = 0.0f;
+    float second_sum_0 = 0.0f;
+    float second_sum_1 = 0.0f;
+
+    if (first_column < dims.columns) {
+        const device uchar* first_bytes = right + first_column * column_stride;
+        const device uchar* second_bytes = second_column < dims.columns
+            ? right + second_column * column_stride
+            : first_bytes;
+        for (uint block = 0; block < blocks_per_column; ++block) {
+            const uint activation_index = block * 32 + uint(lane);
+            const float activation_0 = left[activation_index];
+            const float activation_1 = left[dims.shared + activation_index];
+            const uint block_offset = block * 34;
+            const half first_scale = *reinterpret_cast<const device half*>(first_bytes + block_offset);
+            const float first_weight = float(first_scale)
+                * float(as_type<char>(first_bytes[block_offset + 2 + uint(lane)]));
+            first_sum_0 += activation_0 * first_weight;
+            first_sum_1 += activation_1 * first_weight;
+            if (second_column < dims.columns) {
+                const half second_scale = *reinterpret_cast<const device half*>(second_bytes + block_offset);
+                const float second_weight = float(second_scale)
+                    * float(as_type<char>(second_bytes[block_offset + 2 + uint(lane)]));
+                second_sum_0 += activation_0 * second_weight;
+                second_sum_1 += activation_1 * second_weight;
+            }
+        }
+    }
+
+    first_sum_0 = simd_sum(first_sum_0);
+    first_sum_1 = simd_sum(first_sum_1);
+    second_sum_0 = simd_sum(second_sum_0);
+    second_sum_1 = simd_sum(second_sum_1);
+    if (lane == 0) {
+        if (first_column < dims.columns) {
+            output[first_column] = first_sum_0;
+            output[dims.columns + first_column] = first_sum_1;
+        }
+        if (second_column < dims.columns) {
+            output[second_column] = second_sum_0;
+            output[dims.columns + second_column] = second_sum_1;
+        }
+    }
+}
+
 struct block_q4_k {
     half d;
     half dmin;
@@ -616,6 +680,108 @@ kernel void matvec_f32_q4_k_packed_kernel(
     }
 }
 
+// Numerically equivalent width-two form of the retained packed decode kernel.
+// Each row preserves the exact worker assignment and accumulation order. The
+// second scan immediately reuses the same column's packed blocks from cache;
+// this trades some peak reuse for stable deep-network parity.
+kernel void matmul_f32_q4_k_packed_width_two_kernel(
+    const device float* left [[buffer(0)]],
+    const device uchar* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulDimensions& dims [[buffer(3)]],
+    uint threadgroup_index [[threadgroup_position_in_grid]],
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint first_column = threadgroup_index * 4 + uint(simdgroup_index) * 2;
+    const uint second_column = first_column + 1;
+    const ushort block_worker = lane / 8;
+    const ushort worker_lane = lane % 8;
+    const ushort quant_half = worker_lane / 4;
+    const ushort pair_index = worker_lane % 4;
+    const uint blocks_per_column = q4_k_decode_block_count == 0
+        ? dims.shared / 256 : uint(q4_k_decode_block_count);
+    const uint column_stride = blocks_per_column * 144;
+    const uint adjacent_stride = second_column < dims.columns ? column_stride : 0;
+    float row_sums[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    if (first_column < dims.columns) {
+        for (ushort row = 0; row < 2; ++row) {
+            const device uchar* first_column_bytes = right + first_column * column_stride;
+            const device float* activation = left + uint(row) * dims.shared
+                + uint(block_worker) * 256 + 64 * uint(quant_half) + 8 * uint(pair_index);
+            float activation_low[16];
+            float activation_high[16];
+            ushort packed_scales[4];
+            thread const uchar* scales = reinterpret_cast<thread const uchar*>(packed_scales);
+            for (uint block = uint(block_worker); block < blocks_per_column; block += 4) {
+                float4 activation_sums = float4(0.0f);
+#pragma clang loop unroll(full)
+                for (ushort item = 0; item < 8; ++item) {
+                    activation_low[item] = activation[item];
+                    activation_sums[0] += activation_low[item];
+                    activation_low[item + 8] = activation[item + 32];
+                    activation_sums[1] += activation_low[item + 8];
+                    activation_high[item] = activation[item + 128];
+                    activation_sums[2] += activation_high[item];
+                    activation_high[item + 8] = activation[item + 160];
+                    activation_sums[3] += activation_high[item + 8];
+                }
+                const device uchar* block_bytes = first_column_bytes + block * 144;
+                const device ushort* scale_words =
+                    reinterpret_cast<const device ushort*>(block_bytes + 4) + quant_half;
+                const device ushort* quants = reinterpret_cast<const device ushort*>(block_bytes + 16)
+                    + 16 * quant_half + 4 * pair_index;
+                const device half* factors = reinterpret_cast<const device half*>(block_bytes);
+#pragma clang loop unroll(full)
+                for (ushort output_index = 0; output_index < 2; ++output_index) {
+                    packed_scales[0] = scale_words[0] & 0x3f3f;
+                    packed_scales[1] = scale_words[2] & 0x3f3f;
+                    packed_scales[2] = ((scale_words[4] >> 0) & 0x0f0f)
+                        | ((scale_words[0] & 0xc0c0) >> 2);
+                    packed_scales[3] = ((scale_words[4] >> 4) & 0x0f0f)
+                        | ((scale_words[2] & 0xc0c0) >> 2);
+                    const device ushort* high_quants = quants + 32;
+                    float4 low_accumulator = float4(0.0f);
+                    float4 high_accumulator = float4(0.0f);
+#pragma clang loop unroll(full)
+                    for (ushort item = 0; item < 4; ++item) {
+                        low_accumulator[0] += activation_low[2 * item] * (quants[item] & 0x000f);
+                        low_accumulator[1] += activation_low[2 * item + 1] * (quants[item] & 0x0f00);
+                        low_accumulator[2] += activation_low[2 * item + 8] * (quants[item] & 0x00f0);
+                        low_accumulator[3] += activation_low[2 * item + 9] * (quants[item] & 0xf000);
+                        high_accumulator[0] += activation_high[2 * item] * (high_quants[item] & 0x000f);
+                        high_accumulator[1] += activation_high[2 * item + 1] * (high_quants[item] & 0x0f00);
+                        high_accumulator[2] += activation_high[2 * item + 8] * (high_quants[item] & 0x00f0);
+                        high_accumulator[3] += activation_high[2 * item + 9] * (high_quants[item] & 0xf000);
+                    }
+                    row_sums[2 * row + output_index] += float(factors[0]) * (
+                            (low_accumulator[0] + low_accumulator[1] / 256.0f) * scales[0]
+                            + (low_accumulator[2] + low_accumulator[3] / 256.0f) * scales[1] / 16.0f
+                            + (high_accumulator[0] + high_accumulator[1] / 256.0f) * scales[4]
+                            + (high_accumulator[2] + high_accumulator[3] / 256.0f) * scales[5] / 16.0f
+                        ) - float(factors[1]) * (
+                            activation_sums[0] * scales[2] + activation_sums[1] * scales[3]
+                            + activation_sums[2] * scales[6] + activation_sums[3] * scales[7]
+                        );
+                    quants += adjacent_stride / 2;
+                    scale_words += adjacent_stride / 2;
+                    factors += adjacent_stride / 2;
+                }
+                activation += 4 * 256;
+            }
+        }
+    }
+#pragma clang loop unroll(full)
+    for (ushort index = 0; index < 4; ++index) row_sums[index] = simd_sum(row_sums[index]);
+    if (lane == 0) {
+        for (ushort row = 0; row < 2; ++row) {
+            if (first_column < dims.columns) output[uint(row) * dims.columns + first_column] = row_sums[2 * row];
+            if (second_column < dims.columns) output[uint(row) * dims.columns + second_column] = row_sums[2 * row + 1];
+        }
+    }
+}
+
 )metal";
 constexpr const char* metal_kernel_source_tail = R"metal(
 
@@ -707,6 +873,87 @@ kernel void matvec_f32_q6_k_packed_kernel(
         }
         if (second_column < dims.columns) {
             output[second_column] = sums[1];
+        }
+    }
+}
+
+kernel void matmul_f32_q6_k_packed_width_two_kernel(
+    const device float* left [[buffer(0)]],
+    const device uchar* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulDimensions& dims [[buffer(3)]],
+    uint threadgroup_index [[threadgroup_position_in_grid]],
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint first_column = threadgroup_index * 4 + uint(simdgroup_index) * 2;
+    const uint second_column = first_column + 1;
+    const ushort block_parity = lane % 2;
+    const ushort block_lane = lane / 2;
+    const ushort half_block = block_lane / 8;
+    const ushort lane_in_half = block_lane % 8;
+    const ushort lane_offset = 4 * lane_in_half;
+    const ushort scale_offset = 8 * half_block + lane_offset / 16;
+    const uint blocks_per_column = q6_k_decode_block_count == 0
+        ? dims.shared / 256 : uint(q6_k_decode_block_count);
+    const uint column_stride = blocks_per_column * 210;
+    const uint adjacent_stride = second_column < dims.columns ? column_stride : 0;
+    float row_sums[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (first_column < dims.columns) {
+        for (ushort row = 0; row < 2; ++row) {
+            const device uchar* first_column_bytes = right + first_column * column_stride;
+            for (uint block = uint(block_parity); block < blocks_per_column; block += 2) {
+                const device uchar* block_bytes = first_column_bytes + block * 210;
+                const device uchar* low0 = block_bytes + 64 * half_block + lane_offset;
+                const device uchar* low1 = low0 + 32;
+                const device uchar* high = block_bytes + 128 + 32 * half_block + lane_offset;
+                const device int8_t* scales =
+                    reinterpret_cast<const device int8_t*>(block_bytes + 192) + scale_offset;
+                const device half* factor = reinterpret_cast<const device half*>(block_bytes + 208);
+                const device float* activation = left + uint(row) * dims.shared
+                    + block * 256 + 128 * half_block + lane_offset;
+                float activation_values[16];
+#pragma clang loop unroll(full)
+                for (ushort item = 0; item < 4; ++item) {
+                    activation_values[4 * item] = activation[item];
+                    activation_values[4 * item + 1] = activation[item + 32];
+                    activation_values[4 * item + 2] = activation[item + 64];
+                    activation_values[4 * item + 3] = activation[item + 96];
+                }
+#pragma clang loop unroll(full)
+                for (ushort output_index = 0; output_index < 2; ++output_index) {
+                    float4 accumulator = float4(0.0f);
+#pragma clang loop unroll(full)
+                    for (ushort item = 0; item < 4; ++item) {
+                        const uchar high_value = high[item];
+                        accumulator[0] += activation_values[4 * item]
+                            * (int((low0[item] & 0x0f) | ((high_value & 0x03) << 4)) - 32);
+                        accumulator[1] += activation_values[4 * item + 1]
+                            * (int((low1[item] & 0x0f) | ((high_value & 0x0c) << 2)) - 32);
+                        accumulator[2] += activation_values[4 * item + 2]
+                            * (int((low0[item] >> 4) | (high_value & 0x30)) - 32);
+                        accumulator[3] += activation_values[4 * item + 3]
+                            * (int((low1[item] >> 4) | ((high_value & 0xc0) >> 2)) - 32);
+                    }
+                    row_sums[2 * row + output_index] += float(factor[0]) * (
+                        accumulator[0] * float(scales[0]) + accumulator[1] * float(scales[2])
+                        + accumulator[2] * float(scales[4]) + accumulator[3] * float(scales[6])
+                    );
+                    low0 += adjacent_stride;
+                    low1 += adjacent_stride;
+                    high += adjacent_stride;
+                    scales += adjacent_stride;
+                    factor += adjacent_stride / 2;
+                }
+            }
+        }
+    }
+#pragma clang loop unroll(full)
+    for (ushort index = 0; index < 4; ++index) row_sums[index] = simd_sum(row_sums[index]);
+    if (lane == 0) {
+        for (ushort row = 0; row < 2; ++row) {
+            if (first_column < dims.columns) output[uint(row) * dims.columns + first_column] = row_sums[2 * row];
+            if (second_column < dims.columns) output[uint(row) * dims.columns + second_column] = row_sums[2 * row + 1];
         }
     }
 }
@@ -831,6 +1078,14 @@ struct Gemma2KVCacheStoreDimensions {
     uint position_start;
     uint cache_row_mask;
     float frequency_base;
+};
+
+struct Gemma2KVCacheCopyDimensions {
+    uint rows;
+    uint row_width;
+    uint position_start;
+    uint source_row_mask;
+    uint destination_row_mask;
 };
 
 struct GroupedAttentionScoreDimensions {
@@ -972,16 +1227,23 @@ kernel void rms_norm_add_f32_kernel(
     const device float* residual [[buffer(2)]],
     device float* output [[buffer(3)]],
     constant RMSNormDimensions& dims [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
     uint thread_index [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint simdgroup_index [[simdgroup_index_in_threadgroup]],
     uint simdgroup_count [[simdgroups_per_threadgroup]],
     uint thread_count [[threads_per_threadgroup]]
 ) {
+    if (row >= dims.rows) {
+        return;
+    }
+
     threadgroup float partial_sums[32];
     float sum_squares = 0.0f;
     const uint vector_count = dims.hidden / 4u;
-    const device float4* input4 = reinterpret_cast<const device float4*>(input);
+    const uint row_vector_offset = row * vector_count;
+    const device float4* input4 = reinterpret_cast<const device float4*>(input)
+        + row_vector_offset;
     for (uint column = thread_index; column < vector_count; column += thread_count) {
         const float4 value = input4[column];
         sum_squares += dot(value, value);
@@ -1002,8 +1264,9 @@ kernel void rms_norm_add_f32_kernel(
 
     const float inverse_rms = rsqrt((partial_sums[0] / float(dims.hidden)) + dims.epsilon);
     const device float4* weight4 = reinterpret_cast<const device float4*>(weight);
-    const device float4* residual4 = reinterpret_cast<const device float4*>(residual);
-    device float4* output4 = reinterpret_cast<device float4*>(output);
+    const device float4* residual4 = reinterpret_cast<const device float4*>(residual)
+        + row_vector_offset;
+    device float4* output4 = reinterpret_cast<device float4*>(output) + row_vector_offset;
     for (uint column = thread_index; column < vector_count; column += thread_count) {
         output4[column] = input4[column] * inverse_rms * weight4[column] + residual4[column];
     }
@@ -1136,6 +1399,22 @@ kernel void gemma2_kv_cache_store_f16_kernel(
     const uint destination_index = cache_row * row_width + column;
     key_cache[destination_index] = half(rotated);
     value_cache[destination_index] = half(raw_value[source_index]);
+}
+
+kernel void gemma2_kv_cache_copy_f16_kernel(
+    const device half* source_key [[buffer(0)]],
+    const device half* source_value [[buffer(1)]],
+    device half* destination_key [[buffer(2)]],
+    device half* destination_value [[buffer(3)]],
+    constant Gemma2KVCacheCopyDimensions& dims [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.y >= dims.rows || gid.x >= dims.row_width) return;
+    const uint position = dims.position_start + gid.y;
+    const uint source_index = (position & dims.source_row_mask) * dims.row_width + gid.x;
+    const uint destination_index = (position & dims.destination_row_mask) * dims.row_width + gid.x;
+    destination_key[destination_index] = source_key[source_index];
+    destination_value[destination_index] = source_value[source_index];
 }
 
 kernel void causal_grouped_attention_scores_f32_kernel(

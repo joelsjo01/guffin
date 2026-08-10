@@ -119,6 +119,14 @@ struct Gemma2KVCacheStoreDimensions {
     float frequency_base;
 };
 
+struct Gemma2KVCacheCopyDimensions {
+    std::uint32_t rows;
+    std::uint32_t row_width;
+    std::uint32_t position_start;
+    std::uint32_t source_row_mask;
+    std::uint32_t destination_row_mask;
+};
+
 struct GroupedAttentionScoreDimensions {
     std::uint32_t query_rows;
     std::uint32_t key_rows;
@@ -400,6 +408,7 @@ void MetalCommandContext::encode_matmul(
         pipeline = quantized_dispatch.pipeline;
         if (weight.descriptor().dtype == DType::q8_0) {
             ++impl_->stats.q8_decode_projection_count;
+            if (rows == 2U) ++impl_->stats.q8_width_two_projection_count;
         }
         auto* decode = weight.descriptor().dtype == DType::q4_k
             ? &impl_->stats.q4_decode_projection_count : &impl_->stats.q6_decode_projection_count;
@@ -412,7 +421,16 @@ void MetalCommandContext::encode_matmul(
         if (weight.descriptor().dtype == DType::q8_0) {
             // Q8_0 is output-only and counted separately above.
         } else if (rows == 1U) ++*decode;
-        else if (rows <= 8U) ++*small;
+        else if (rows <= 8U) {
+            ++*small;
+            if (rows == 2U) {
+                if (weight.descriptor().dtype == DType::q4_k) {
+                    ++impl_->stats.q4_width_two_projection_count;
+                } else {
+                    ++impl_->stats.q6_width_two_projection_count;
+                }
+            }
+        }
         else if (rows == 16U && columns % 64U == 0U) ++*exact_16;
         else ++*generic;
     } else {
@@ -471,17 +489,20 @@ void MetalCommandContext::encode_rms_norm_add(
     const BackendBuffer& weight,
     const BackendBuffer& residual,
     const BackendBuffer& output,
-    float epsilon
+    float epsilon,
+    std::uint32_t row_count
 ) {
+    const auto rows = row_count == 0U ? input.descriptor().shape.dimension(0) : row_count;
     const auto hidden = input.descriptor().shape.dimension(1);
     if ((hidden & 3U) != 0U) {
         throw std::invalid_argument("Metal fused RMSNorm-add hidden width must be divisible by four");
     }
     require_capacity(weight, hidden * sizeof(float), "fused RMSNorm-add weight");
-    require_capacity(residual, hidden * sizeof(float), "fused RMSNorm-add residual");
-    require_capacity(output, hidden * sizeof(float), "fused RMSNorm-add output");
+    require_capacity(input, rows * hidden * sizeof(float), "fused RMSNorm-add input");
+    require_capacity(residual, rows * hidden * sizeof(float), "fused RMSNorm-add residual");
+    require_capacity(output, rows * hidden * sizeof(float), "fused RMSNorm-add output");
     const RMSNormDimensions dims {
-        .rows = 1U,
+        .rows = u32(rows, "fused RMSNorm-add rows"),
         .hidden = u32(hidden, "fused RMSNorm-add hidden"),
         .input_row_start = 0U,
         .epsilon = epsilon,
@@ -493,7 +514,7 @@ void MetalCommandContext::encode_rms_norm_add(
     bind_buffer(encoder, residual, 2);
     bind_buffer(encoder, output, 3);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
-    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+    [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(rows), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     ++impl_->stats.compute_dispatch_count;
 }
@@ -549,14 +570,16 @@ void MetalCommandContext::encode_gemma2_kv_cache_store(
     std::uint32_t rope_dimension_count,
     float frequency_base,
     std::uint32_t cache_row_mask,
-    std::uint32_t token_count
+    std::uint32_t token_count,
+    std::uint32_t source_row_start
 ) {
     const auto rows = token_count == 0U ? raw_key.descriptor().shape.dimension(0) : token_count;
     const auto width = static_cast<std::uint64_t>(head_count) * head_dimension;
     const auto require_raw = [&](const BackendBuffer& buffer, const char* name) {
         const auto& descriptor = buffer.descriptor();
         if (descriptor.dtype != DType::f32 || descriptor.shape.rank() != 2U
-            || descriptor.shape.dimension(0) < rows || descriptor.shape.dimension(1) != width) {
+            || descriptor.shape.dimension(0) < static_cast<std::uint64_t>(source_row_start) + rows
+            || descriptor.shape.dimension(1) != width) {
             throw std::invalid_argument(std::string("Metal Gemma 2 KV store ") + name + " layout is invalid");
         }
         (void)storage(buffer);
@@ -591,14 +614,64 @@ void MetalCommandContext::encode_gemma2_kv_cache_store(
     };
     auto encoder = impl_->compute_encoder("Gemma2 F16 KV store");
     [encoder setComputePipelineState:impl_->state->gemma2_kv_cache_store_pipeline];
-    bind_buffer(encoder, raw_key, 0);
-    bind_buffer(encoder, raw_value, 1);
+    const auto source_byte_offset = static_cast<std::uint64_t>(source_row_start) * width * sizeof(float);
+    bind_buffer(encoder, raw_key, 0, source_byte_offset);
+    bind_buffer(encoder, raw_value, 1, source_byte_offset);
     bind_buffer(encoder, cache_key, 2);
     bind_buffer(encoder, cache_value, 3);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((width + 255U) / 256U),
                                       static_cast<NSUInteger>(rows),
+                                      1
+                                  )
+              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_gemma2_kv_cache_copy(
+    const BackendBuffer& source_key,
+    const BackendBuffer& source_value,
+    const BackendBuffer& destination_key,
+    const BackendBuffer& destination_value,
+    std::uint32_t position_start,
+    std::uint32_t token_count,
+    std::uint32_t source_row_mask,
+    std::uint32_t destination_row_mask
+) {
+    const auto& source = source_key.descriptor();
+    const auto& source_v = source_value.descriptor();
+    const auto& destination = destination_key.descriptor();
+    const auto& destination_v = destination_value.descriptor();
+    if (token_count == 0U || source.dtype != DType::f16 || destination.dtype != DType::f16
+        || source.shape.rank() != 3U || destination.shape.rank() != 3U
+        || source.shape.dimension(0) != static_cast<std::uint64_t>(source_row_mask) + 1U
+        || destination.shape.dimension(0) != static_cast<std::uint64_t>(destination_row_mask) + 1U
+        || source.shape.dimension(1) != destination.shape.dimension(1)
+        || source.shape.dimension(2) != destination.shape.dimension(2)
+        || source_v != source || destination_v != destination
+        || (source_row_mask & (source_row_mask + 1U)) != 0U
+        || (destination_row_mask & (destination_row_mask + 1U)) != 0U) {
+        throw std::invalid_argument("Metal Gemma 2 KV-cache copy layout is invalid");
+    }
+    const auto row_width = source.shape.dimension(1) * source.shape.dimension(2);
+    const Gemma2KVCacheCopyDimensions dims {
+        .rows = token_count,
+        .row_width = u32(row_width, "KV-cache copy row width"),
+        .position_start = position_start,
+        .source_row_mask = source_row_mask,
+        .destination_row_mask = destination_row_mask,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 F16 KV-cache copy");
+    [encoder setComputePipelineState:impl_->state->gemma2_kv_cache_copy_pipeline];
+    bind_buffer(encoder, source_key, 0);
+    bind_buffer(encoder, source_value, 1);
+    bind_buffer(encoder, destination_key, 2);
+    bind_buffer(encoder, destination_value, 3);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(
+                                      static_cast<NSUInteger>((row_width + 255U) / 256U),
+                                      token_count,
                                       1
                                   )
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -740,30 +813,16 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     std::uint32_t attention_token_count,
     float scale,
     float logit_softcap,
-    std::uint32_t cache_row_mask
+    std::uint32_t cache_row_mask,
+    std::uint32_t query_row,
+    std::uint32_t output_row
 ) {
     constexpr std::uint32_t dimension = 256U;
     constexpr std::uint32_t max_partitions = 32U;
-    const auto require_f32_shape = [](const BackendBuffer& buffer,
-                                      std::initializer_list<std::uint64_t> dimensions,
-                                      const char* name) {
-        const auto& descriptor = buffer.descriptor();
-        const auto expected = tensor::TensorDescriptor::from(
-            tensor::Shape::from(dimensions),
-            DType::f32
-        );
-        if (descriptor != expected) {
-            throw std::invalid_argument(
-                std::string("Metal Gemma 2 decode attention ") + name + " layout is invalid"
-            );
-        }
-        (void)storage(buffer);
-    };
-
     const auto& query_descriptor = query.descriptor();
     if (query_descriptor.dtype != DType::f32
         || query_descriptor.shape.rank() != 2U
-        || query_descriptor.shape.dimension(0) != 1U
+        || query_descriptor.shape.dimension(0) <= query_row
         || query_descriptor.shape.dimension(1) % dimension != 0U) {
         throw std::invalid_argument("Metal Gemma 2 decode attention query layout is invalid");
     }
@@ -792,7 +851,12 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     (void)storage(key_cache);
     (void)storage(value_cache);
     (void)storage(query);
-    require_f32_shape(output, {1U, static_cast<std::uint64_t>(query_heads) * dimension}, "output");
+    if (output.descriptor().dtype != DType::f32 || output.descriptor().shape.rank() != 2U
+        || output.descriptor().shape.dimension(0) <= output_row
+        || output.descriptor().shape.dimension(1)
+            != static_cast<std::uint64_t>(query_heads) * dimension) {
+        throw std::invalid_argument("Metal Gemma 2 decode attention output layout is invalid");
+    }
     if (partial_output.descriptor().dtype != DType::f32
         || partial_output.descriptor().byte_count
             < static_cast<std::uint64_t>(max_partitions) * query_heads * dimension * sizeof(float)) {
@@ -849,10 +913,11 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     };
     auto encoder = impl_->compute_encoder("Gemma2 fused decode attention");
     [encoder setComputePipelineState:impl_->state->gemma2_decode_attention_pipeline];
-    bind_buffer(encoder, query, 0);
+    const auto row_bytes = static_cast<std::uint64_t>(query_heads) * dimension * sizeof(float);
+    bind_buffer(encoder, query, 0, static_cast<std::uint64_t>(query_row) * row_bytes);
     bind_buffer(encoder, key_cache, 1);
     bind_buffer(encoder, value_cache, 2);
-    bind_buffer(encoder, output, 3);
+    bind_buffer(encoder, output, 3, static_cast<std::uint64_t>(output_row) * row_bytes);
     bind_buffer(encoder, partial_output, 4);
     bind_buffer(encoder, partial_maxima, 5);
     bind_buffer(encoder, partial_denominators, 6);
@@ -868,7 +933,7 @@ void MetalCommandContext::encode_gemma2_decode_attention(
         bind_buffer(encoder, partial_output, 0);
         bind_buffer(encoder, partial_maxima, 1);
         bind_buffer(encoder, partial_denominators, 2);
-        bind_buffer(encoder, output, 3);
+        bind_buffer(encoder, output, 3, static_cast<std::uint64_t>(output_row) * row_bytes);
         [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
         [encoder dispatchThreadgroups:MTLSizeMake(kv_heads, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];

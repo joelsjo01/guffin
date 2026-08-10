@@ -958,8 +958,9 @@ void test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_
     };
     // Distribute the small-batch/tile boundaries, production K-block counts,
     // and the 64-column output boundary without a combinatorial suite.
-    constexpr std::array<ProjectionCase, 14> cases {{
-        {2, 1, 1}, {3, 2, 2}, {4, 14, 3}, {5, 16, 4},
+    constexpr std::array<ProjectionCase, 17> cases {{
+        {2, 1, 1}, {2, 14, 3}, {2, 16, 4}, {2, 56, 5},
+        {3, 2, 2}, {4, 14, 3}, {5, 16, 4},
         {6, 56, 5}, {7, 1, 63}, {8, 2, 64},
         {9, 14, 65}, {15, 16, 5}, {16, 56, 4},
         {17, 1, 3}, {31, 2, 2}, {32, 14, 1}, {33, 16, 5},
@@ -1017,6 +1018,30 @@ void test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_
                 relative_tolerance,
                 "Metal backend-buffer K-quant selected numerical-contract parity"
             );
+            if (test_case.rows == 2U) {
+                for (std::uint64_t row = 0; row < 2U; ++row) {
+                    const auto row_begin = static_cast<std::size_t>(row * shared);
+                    const auto row_input = tensor_f32_matrix(
+                        1U,
+                        shared,
+                        std::span<const float>(left_values).subspan(
+                            row_begin, static_cast<std::size_t>(shared)
+                        )
+                    );
+                    const auto row_output = matmul_f32_quantized_gguf_weight(
+                        row_input, right, BackendKind::metal
+                    );
+                    for (std::uint64_t column = 0; column < test_case.columns; ++column) {
+                        const std::array<std::uint64_t, 2> batched_index {row, column};
+                        const std::array<std::uint64_t, 2> row_index {0U, column};
+                        expect(
+                            read_f32(tensor_output, batched_index)
+                                == read_f32(row_output, row_index),
+                            "Metal K-quant width-two packed decode-order parity"
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -1097,7 +1122,7 @@ void test_matches_cpu_q8_0_output_matvec_on_metal() {
 
     for (const std::uint64_t shared : {64U, 3584U}) {
         constexpr std::uint64_t columns = 5U;
-        std::vector<float> activations(static_cast<std::size_t>(shared));
+        std::vector<float> activations(static_cast<std::size_t>(2U * shared));
         std::vector<float> weights(static_cast<std::size_t>(shared * columns));
         for (std::size_t index = 0; index < activations.size(); ++index) {
             activations[index] = static_cast<float>(static_cast<int>(index % 17U) - 8) / 9.0F;
@@ -1105,12 +1130,41 @@ void test_matches_cpu_q8_0_output_matvec_on_metal() {
         for (std::size_t index = 0; index < weights.size(); ++index) {
             weights[index] = static_cast<float>(static_cast<int>(index % 31U) - 15) / 37.0F;
         }
-        const auto input = tensor_f32_matrix(1U, shared, std::span<const float>(activations));
         const auto f16_weight = tensor_f16_gguf_matrix(shared, columns, std::span<const float>(weights));
         const auto q8_weight = quantize_f16_gguf_weight_q8_0(f16_weight.view());
-        const auto cpu = matmul_f32_quantized_gguf_weight(input, q8_weight, BackendKind::cpu);
-        const auto metal = matmul_f32_quantized_gguf_weight(input, q8_weight, BackendKind::metal);
-        expect_f32_matrix_close(metal, cpu, 2.0e-4F, "Metal Q8_0 output matvec");
+        for (const std::uint64_t rows : {1U, 2U}) {
+            const auto input = tensor_f32_matrix(
+                rows,
+                shared,
+                std::span<const float>(activations).first(static_cast<std::size_t>(rows * shared))
+            );
+            const auto cpu = matmul_f32_quantized_gguf_weight(input, q8_weight, BackendKind::cpu);
+            const auto metal = matmul_f32_quantized_gguf_weight(input, q8_weight, BackendKind::metal);
+            expect_f32_matrix_close(metal, cpu, 2.0e-4F, "Metal Q8_0 output projection");
+            if (rows == 2U) {
+                for (std::uint64_t row = 0; row < 2U; ++row) {
+                    const auto row_input = tensor_f32_matrix(
+                        1U,
+                        shared,
+                        std::span<const float>(activations).subspan(
+                            static_cast<std::size_t>(row * shared),
+                            static_cast<std::size_t>(shared)
+                        )
+                    );
+                    const auto row_output = matmul_f32_quantized_gguf_weight(
+                        row_input, q8_weight, BackendKind::metal
+                    );
+                    for (std::uint64_t column = 0; column < columns; ++column) {
+                        const std::array<std::uint64_t, 2> batched_index {row, column};
+                        const std::array<std::uint64_t, 2> row_index {0U, column};
+                        expect_close(
+                            read_f32(metal, batched_index), read_f32(row_output, row_index),
+                            2.0e-4F, "Metal Q8_0 width-two decode-order parity"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

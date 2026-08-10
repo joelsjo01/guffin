@@ -1,6 +1,7 @@
 #include "local_gguf_engine/benchmarks/quick_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/immutable_weight_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/output_head_benchmark.hpp"
+#include "local_gguf_engine/benchmarks/width_two_verifier_benchmark.hpp"
 
 #include <cstdlib>
 #include <iomanip>
@@ -246,24 +247,51 @@ void write_storage_human(std::ostream& output, const ImmutableWeightBenchmarkRes
 }  // namespace
 
 int main(int argc, const char* const* argv) {
+    const bool width_two_mode = argc == 3 && std::string_view(argv[2]) == "--width-two";
     const bool output_quality_mode = argc >= 3 && std::string_view(argv[2]) == "--output-head-quality";
     const bool storage_mode = argc >= 4 && std::string_view(argv[2]) == "--storage-policy";
     const bool no_copy_mode = argc >= 3 && std::string_view(argv[2]) == "--no-copy-feasibility";
     const bool json = (argc == 3 && std::string_view(argv[2]) == "--json")
         || (argc == 4 && no_copy_mode && std::string_view(argv[3]) == "--json")
         || (argc == 5 && storage_mode && std::string_view(argv[4]) == "--json");
-    if (argc < 2 || (!storage_mode && !no_copy_mode && !output_quality_mode && argc > 3)
+    if (argc < 2 || (!storage_mode && !no_copy_mode && !output_quality_mode && !width_two_mode && argc > 3)
         || (storage_mode && argc > 5) || (no_copy_mode && argc > 4)
-        || (argc == 3 && !json && !no_copy_mode && !output_quality_mode)
+        || (argc == 3 && !json && !no_copy_mode && !output_quality_mode && !width_two_mode)
         || (output_quality_mode && argc != 4)
         || (storage_mode && argc == 5 && !json) || (no_copy_mode && argc == 4 && !json)) {
         std::cerr << "usage: local-gguf-bench <model.gguf> [--json]\n"
+                     "       local-gguf-bench <model.gguf> --width-two\n"
                      "       local-gguf-bench <model.gguf> --output-head-quality --json\n"
                      "       local-gguf-bench <model.gguf> --storage-policy <policy> [--json]\n"
                      "       local-gguf-bench <model.gguf> --no-copy-feasibility [--json]\n";
         return EXIT_FAILURE;
     }
     try {
+        if (width_two_mode) {
+            const auto result = local_gguf_engine::benchmarks::run_width_two_verifier_benchmark(argv[1]);
+            std::cout << std::fixed << std::setprecision(3)
+                << "one-row GPU: " << static_cast<double>(result.first_decode_gpu_ns) / 1.0e6 << " / "
+                << static_cast<double>(result.second_decode_gpu_ns) / 1.0e6 << " ms\n"
+                << "width-two GPU: " << static_cast<double>(result.verifier_gpu_ns) / 1.0e6 << " ms\n"
+                << "commit-two GPU: " << static_cast<double>(result.commit_two_gpu_ns) / 1.0e6 << " ms\n"
+                << "verifier / mean one-row: " << result.verifier_to_mean_decode_ratio << "x\n"
+                << "verifier / two rows: " << result.verifier_to_two_decode_ratio << "x\n"
+                << "maximum logit error: " << result.maximum_logit_absolute_error << "\n"
+                << "maximum post-softcap logit error: "
+                << result.maximum_softcapped_logit_absolute_error << "\n"
+                << "mean KL: " << result.mean_kl_divergence << "\n"
+                << "mean top-40 overlap: " << result.mean_top40_overlap << "\n"
+                << "top-1 agreement: " << (result.top1_agreement ? "yes" : "no") << "\n"
+                << "maximum committed KV error: "
+                << result.maximum_committed_kv_absolute_error << "\n"
+                << "verifier scratch: " << result.verifier_scratch_bytes << " bytes\n"
+                << "resident unchanged before commit: "
+                << (result.resident_cache_unchanged_before_commit ? "yes" : "no") << "\n"
+                << "committed cache matches sequential: "
+                << (result.committed_cache_matches_sequential ? "yes" : "no") << "\n"
+                << "1.35x gate: " << (result.gate_pass ? "PASS" : "FAIL") << "\n";
+            return result.gate_pass ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
         if (output_quality_mode) {
             if (std::string_view(argv[3]) != "--json") {
                 throw std::invalid_argument("output-head quality mode requires --json");

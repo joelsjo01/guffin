@@ -12,6 +12,7 @@ ENGINE_SOURCES := \
 	src/benchmarks/immutable_weight_benchmark.mm \
 	src/benchmarks/output_head_benchmark.cpp \
 	src/benchmarks/quick_benchmark.cpp \
+	src/benchmarks/width_two_verifier_benchmark.cpp \
 	src/engine/gemma2_chat_session.cpp \
 	src/engine/gemma2_model.cpp \
 	src/engine/gemma2_metal_plan.cpp \

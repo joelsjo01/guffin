@@ -23,11 +23,14 @@ struct MetalCommandStats {
     std::uint64_t gpu_duration_ns = 0;
     std::uint32_t q4_decode_projection_count = 0;
     std::uint32_t q8_decode_projection_count = 0;
+    std::uint32_t q8_width_two_projection_count = 0;
     std::uint32_t q4_small_batch_projection_count = 0;
+    std::uint32_t q4_width_two_projection_count = 0;
     std::uint32_t q4_exact_16_projection_count = 0;
     std::uint32_t q4_generic_tiled_projection_count = 0;
     std::uint32_t q6_decode_projection_count = 0;
     std::uint32_t q6_small_batch_projection_count = 0;
+    std::uint32_t q6_width_two_projection_count = 0;
     std::uint32_t q6_exact_16_projection_count = 0;
     std::uint32_t q6_generic_tiled_projection_count = 0;
     std::uint32_t f16_projection_count = 0;
@@ -87,7 +90,8 @@ public:
         const BackendBuffer& weight,
         const BackendBuffer& residual,
         const BackendBuffer& output,
-        float epsilon
+        float epsilon,
+        std::uint32_t row_count = 0
     );
     void encode_rope(
         const BackendBuffer& input,
@@ -111,7 +115,18 @@ public:
         std::uint32_t rope_dimension_count,
         float frequency_base,
         std::uint32_t cache_row_mask,
-        std::uint32_t token_count = 0
+        std::uint32_t token_count = 0,
+        std::uint32_t source_row_start = 0
+    );
+    void encode_gemma2_kv_cache_copy(
+        const BackendBuffer& source_key,
+        const BackendBuffer& source_value,
+        const BackendBuffer& destination_key,
+        const BackendBuffer& destination_value,
+        std::uint32_t position_start,
+        std::uint32_t token_count,
+        std::uint32_t source_row_mask,
+        std::uint32_t destination_row_mask
     );
     void encode_attention_scores(
         const BackendBuffer& query,
@@ -157,7 +172,9 @@ public:
         std::uint32_t attention_token_count,
         float scale,
         float logit_softcap,
-        std::uint32_t cache_row_mask
+        std::uint32_t cache_row_mask,
+        std::uint32_t query_row = 0,
+        std::uint32_t output_row = 0
     );
     void encode_add(
         const BackendBuffer& left,

@@ -348,6 +348,56 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     };
 }
 
+[[nodiscard]] Gemma2MetalVerifierScratch allocate_verifier_scratch(
+    const Gemma2ModelConfig& config,
+    std::size_t& allocated_byte_count
+) {
+    constexpr std::uint64_t rows = 2U;
+    const auto staged_kv_descriptor = f16_descriptor({
+        rows, config.attention_head_count_kv, config.attention_key_length,
+    });
+    std::vector<Gemma2MetalTentativeKVLayer> tentative_kv;
+    tentative_kv.reserve(config.block_count);
+    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        tentative_kv.push_back(Gemma2MetalTentativeKVLayer {
+            .key = allocate_buffer(staged_kv_descriptor, allocated_byte_count),
+            .value = allocate_buffer(staged_kv_descriptor, allocated_byte_count),
+        });
+    }
+    return Gemma2MetalVerifierScratch {
+        .token_id_staging = allocate_buffer(f32_descriptor({rows}), allocated_byte_count),
+        .normalized_hidden = allocate_buffer(f32_descriptor({rows, config.embedding_length}), allocated_byte_count),
+        .raw_query = allocate_buffer(f32_descriptor({rows, attention_query_width(config)}), allocated_byte_count),
+        .raw_key = allocate_buffer(f32_descriptor({rows, attention_key_width(config)}), allocated_byte_count),
+        .raw_value = allocate_buffer(f32_descriptor({rows, attention_value_width(config)}), allocated_byte_count),
+        .query = allocate_buffer(f32_descriptor({rows, attention_query_width(config)}), allocated_byte_count),
+        .attention_partial_output = allocate_buffer(f32_descriptor({
+            gemma2_decode_attention_max_partitions,
+            gemma2_decode_attention_query_heads,
+            gemma2_decode_attention_head_dimension,
+        }), allocated_byte_count),
+        .attention_partial_maxima = allocate_buffer(f32_descriptor({
+            gemma2_decode_attention_max_partitions, gemma2_decode_attention_query_heads,
+        }), allocated_byte_count),
+        .attention_partial_denominators = allocate_buffer(f32_descriptor({
+            gemma2_decode_attention_max_partitions, gemma2_decode_attention_query_heads,
+        }), allocated_byte_count),
+        .attention_output = allocate_buffer(f32_descriptor({rows, attention_output_width(config)}), allocated_byte_count),
+        .projected_attention_output = allocate_buffer(f32_descriptor({rows, config.embedding_length}), allocated_byte_count),
+        .post_attention_residual = allocate_buffer(f32_descriptor({rows, config.embedding_length}), allocated_byte_count),
+        .normalized_feed_forward_input = allocate_buffer(f32_descriptor({rows, config.embedding_length}), allocated_byte_count),
+        .feed_forward_gate = allocate_buffer(f32_descriptor({rows, config.feed_forward_length}), allocated_byte_count),
+        .feed_forward_up = allocate_buffer(f32_descriptor({rows, config.feed_forward_length}), allocated_byte_count),
+        .feed_forward_gated = allocate_buffer(f32_descriptor({rows, config.feed_forward_length}), allocated_byte_count),
+        .projected_feed_forward_output = allocate_buffer(f32_descriptor({rows, config.embedding_length}), allocated_byte_count),
+        .feed_forward_residual = allocate_buffer(f32_descriptor({rows, config.embedding_length}), allocated_byte_count),
+        .logits = allocate_buffer(f32_descriptor({rows, config.vocab_size}), allocated_byte_count),
+        .backup_key = allocate_buffer(staged_kv_descriptor, allocated_byte_count),
+        .backup_value = allocate_buffer(staged_kv_descriptor, allocated_byte_count),
+        .tentative_kv = std::move(tentative_kv),
+    };
+}
+
 [[nodiscard]] Gemma2MetalPrefillScratch allocate_prefill_scratch(
     const Gemma2ModelConfig& config,
     std::size_t& allocated_byte_count
@@ -506,6 +556,7 @@ Gemma2MetalModelPlan::Gemma2MetalModelPlan(
     std::vector<Gemma2MetalKVCacheLayer> kv_cache,
     Gemma2MetalPrefillScratch prefill_scratch,
     Gemma2MetalDecodeScratch decode_scratch,
+    Gemma2MetalVerifierScratch verifier_scratch,
     Gemma2MetalSelectionWorkspace selection_workspace,
     std::vector<Gemma2MetalLayerState> layers,
     Gemma2OutputHeadPolicy output_head_policy,
@@ -519,6 +570,7 @@ Gemma2MetalModelPlan::Gemma2MetalModelPlan(
       kv_cache_(std::move(kv_cache)),
       prefill_scratch_(std::move(prefill_scratch)),
       decode_scratch_(std::move(decode_scratch)),
+      verifier_scratch_(std::move(verifier_scratch)),
       selection_workspace_(std::move(selection_workspace)),
       layers_(std::move(layers)),
       output_head_policy_(output_head_policy),
@@ -557,6 +609,34 @@ const Gemma2MetalPrefillScratch& Gemma2MetalModelPlan::prefill_scratch() const n
 
 const Gemma2MetalDecodeScratch& Gemma2MetalModelPlan::decode_scratch() const noexcept {
     return decode_scratch_;
+}
+
+const Gemma2MetalVerifierScratch& Gemma2MetalModelPlan::verifier_scratch() const noexcept {
+    return verifier_scratch_;
+}
+
+bool Gemma2MetalModelPlan::has_pending_verification() const noexcept {
+    return has_pending_verification_;
+}
+
+std::uint32_t Gemma2MetalModelPlan::pending_verification_position() const {
+    if (!has_pending_verification_) {
+        throw std::logic_error("Gemma2 Metal plan has no pending verification");
+    }
+    return pending_verification_position_;
+}
+
+void Gemma2MetalModelPlan::set_pending_verification(std::uint32_t cache_position) {
+    if (has_pending_verification_) {
+        throw std::logic_error("Gemma2 Metal plan already has a pending verification");
+    }
+    has_pending_verification_ = true;
+    pending_verification_position_ = cache_position;
+}
+
+void Gemma2MetalModelPlan::clear_pending_verification() noexcept {
+    has_pending_verification_ = false;
+    pending_verification_position_ = 0U;
 }
 
 const Gemma2MetalSelectionWorkspace& Gemma2MetalModelPlan::selection_workspace() const noexcept {
@@ -668,6 +748,7 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     auto kv_cache = allocate_kv_cache(config, kv_cache_byte_count);
     auto prefill_scratch = allocate_prefill_scratch(config, scratch_byte_count);
     auto decode_scratch = allocate_decode_scratch(config, scratch_byte_count);
+    auto verifier_scratch = allocate_verifier_scratch(config, scratch_byte_count);
     auto selection_workspace = allocate_selection_workspace(config, scratch_byte_count);
     auto layers = make_layer_states(config);
     const auto scheduled_weight_bytes = decode_scheduled_weight_bytes(resident_weights, config);
@@ -678,6 +759,7 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
         std::move(kv_cache),
         std::move(prefill_scratch),
         std::move(decode_scratch),
+        std::move(verifier_scratch),
         std::move(selection_workspace),
         std::move(layers),
         resolved_policy,
@@ -732,6 +814,30 @@ Gemma2MetalSchedule create_gemma2_metal_decode_schedule(
         token_count,
         cached_token_count,
         total_kv_token_count
+    );
+}
+
+Gemma2MetalSchedule create_gemma2_metal_verifier_schedule(
+    const Gemma2MetalModelPlan& plan,
+    std::uint32_t cached_token_count
+) {
+    if (plan.config().context_length < 2U || cached_token_count == 0U
+        || cached_token_count > plan.config().context_length - 2U) {
+        throw std::invalid_argument("Gemma2 Metal verifier schedule requires room for two tokens");
+    }
+    auto layers = make_layer_schedules(plan, cached_token_count + 1U);
+    for (std::size_t index = 0; index < layers.size(); ++index) {
+        layers[index].second_attention_token_count = layer_attention_token_count(
+            plan.config(), plan.layers()[index], cached_token_count + 2U
+        );
+    }
+    return Gemma2MetalSchedule(
+        std::move(layers),
+        Gemma2MetalSchedulePhase::verify,
+        Gemma2MetalScratchOwnership::resident_verifier,
+        2U,
+        cached_token_count,
+        cached_token_count + 2U
     );
 }
 

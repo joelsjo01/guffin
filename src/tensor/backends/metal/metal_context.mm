@@ -196,12 +196,27 @@ MatmulPipelineState::MatmulPipelineState() {
     matvec_q8_0_packed_112_pipeline = make_specialized_pipeline(
         @"matvec_f32_q8_0_packed_kernel", 4, 112, "Q8_0 112-block packed decode matvec"
     );
+    matmul_q8_0_width_two_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q8_0_width_two_kernel", 4, 0, "Q8_0 packed width-two matmul"
+    );
+    matmul_q8_0_width_two_112_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q8_0_width_two_kernel", 4, 112, "Q8_0 112-block width-two matmul"
+    );
 
     matmul_q4_k_tiled_pipeline = make_tiled_pipeline(0, false, "Q4_K tiled matmul");
     matmul_q4_k_tiled_exact_16_pipeline =
         make_tiled_pipeline(0, true, "Q4_K exact 16-row tiled matmul");
     matmul_q4_k_small_batch_pipeline = make_specialized_pipeline(
         @"matmul_f32_kquant_small_batch_kernel", 2, 0, "Q4_K packed small-batch matmul"
+    );
+    matmul_q4_k_width_two_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q4_k_packed_width_two_kernel", 0, 0, "Q4_K packed width-two matmul"
+    );
+    matmul_q4_k_width_two_14_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q4_k_packed_width_two_kernel", 0, 14, "Q4_K 14-block width-two matmul"
+    );
+    matmul_q4_k_width_two_16_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q4_k_packed_width_two_kernel", 0, 16, "Q4_K 16-block width-two matmul"
     );
 
     matvec_q4_k_packed_pipeline =
@@ -218,6 +233,15 @@ MatmulPipelineState::MatmulPipelineState() {
         make_tiled_pipeline(1, true, "Q6_K exact 16-row tiled matmul");
     matmul_q6_k_small_batch_pipeline = make_specialized_pipeline(
         @"matmul_f32_kquant_small_batch_kernel", 2, 1, "Q6_K packed small-batch matmul"
+    );
+    matmul_q6_k_width_two_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q6_k_packed_width_two_kernel", 1, 0, "Q6_K packed width-two matmul"
+    );
+    matmul_q6_k_width_two_14_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q6_k_packed_width_two_kernel", 1, 14, "Q6_K 14-block width-two matmul"
+    );
+    matmul_q6_k_width_two_56_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q6_k_packed_width_two_kernel", 1, 56, "Q6_K 56-block width-two matmul"
     );
 
     matvec_q6_k_packed_pipeline =
@@ -421,6 +445,10 @@ MatmulPipelineState::MatmulPipelineState() {
         @"gemma2_kv_cache_store_f16_kernel",
         "Gemma 2 F16 KV-cache store"
     );
+    gemma2_kv_cache_copy_pipeline = make_pipeline(
+        @"gemma2_kv_cache_copy_f16_kernel",
+        "Gemma 2 F16 KV-cache copy"
+    );
 
     id<MTLFunction> causal_grouped_attention_scores_function =
         [library newFunctionWithName:@"causal_grouped_attention_scores_f32_kernel"];
@@ -615,12 +643,16 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
     }
 
     if (dtype == DType::q8_0) {
-        if (rows != 1U || shared % 32U != 0U) {
-            throw std::invalid_argument("Metal Q8_0 output matvec requires one row and 32-aligned shared width");
+        if ((rows != 1U && rows != 2U) || shared % 32U != 0U) {
+            throw std::invalid_argument("Metal Q8_0 output projection requires one or two rows and 32-aligned shared width");
         }
-        auto pipeline = shared == 3584U
-            ? state.matvec_q8_0_packed_112_pipeline
-            : state.matvec_q8_0_packed_pipeline;
+        auto pipeline = rows == 2U
+            ? (shared == 3584U
+                ? state.matmul_q8_0_width_two_112_pipeline
+                : state.matmul_q8_0_width_two_pipeline)
+            : (shared == 3584U
+                ? state.matvec_q8_0_packed_112_pipeline
+                : state.matvec_q8_0_packed_pipeline);
         if (pipeline == nil || pipeline.threadExecutionWidth != 32
             || pipeline.maxTotalThreadsPerThreadgroup < 64U) {
             throw metal_error(
@@ -656,6 +688,18 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
                     ? state.matvec_q6_k_packed_56_pipeline
                     : state.matvec_q6_k_packed_pipeline;
         }
+    } else if (rows == 2) {
+        row_tile = 2;
+        const auto blocks = shared / 256;
+        if (dtype == DType::q4_k) {
+            pipeline = blocks == 14 ? state.matmul_q4_k_width_two_14_pipeline
+                : blocks == 16 ? state.matmul_q4_k_width_two_16_pipeline
+                : state.matmul_q4_k_width_two_pipeline;
+        } else {
+            pipeline = blocks == 14 ? state.matmul_q6_k_width_two_14_pipeline
+                : blocks == 56 ? state.matmul_q6_k_width_two_56_pipeline
+                : state.matmul_q6_k_width_two_pipeline;
+        }
     } else if (rows <= 8) {
         row_tile = 4;
         threads = 64;
@@ -683,7 +727,7 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
         .pipeline = pipeline,
         .threadgroups = MTLSizeMake(
             static_cast<NSUInteger>(
-                rows == 1 ? (columns + 3) / 4
+                rows <= 2 ? (columns + 3) / 4
                 : rows <= 8 ? (columns + 1) / 2
                 : (columns + 63) / 64
             ),

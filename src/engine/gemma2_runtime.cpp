@@ -131,6 +131,9 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
     std::optional<TokenSelectionRequest> selection_request,
     Gemma2MetalDecodeOutputMode output_mode
 ) {
+    if (plan.has_pending_verification()) {
+        throw std::logic_error("Gemma2 resident decode cannot run with pending verification");
+    }
     if (decode.phase() != Gemma2MetalSchedulePhase::decode
         || decode.scratch_ownership() != Gemma2MetalScratchOwnership::resident_decode
         || decode.token_count() != 1U) {
@@ -336,11 +339,14 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             .gpu_duration_ns = metal_stats.gpu_duration_ns,
             .q4_decode_projection_count = metal_stats.q4_decode_projection_count,
             .q8_decode_projection_count = metal_stats.q8_decode_projection_count,
+            .q8_width_two_projection_count = metal_stats.q8_width_two_projection_count,
             .q4_small_batch_projection_count = metal_stats.q4_small_batch_projection_count,
+            .q4_width_two_projection_count = metal_stats.q4_width_two_projection_count,
             .q4_exact_16_projection_count = metal_stats.q4_exact_16_projection_count,
             .q4_generic_tiled_projection_count = metal_stats.q4_generic_tiled_projection_count,
             .q6_decode_projection_count = metal_stats.q6_decode_projection_count,
             .q6_small_batch_projection_count = metal_stats.q6_small_batch_projection_count,
+            .q6_width_two_projection_count = metal_stats.q6_width_two_projection_count,
             .q6_exact_16_projection_count = metal_stats.q6_exact_16_projection_count,
             .q6_generic_tiled_projection_count = metal_stats.q6_generic_tiled_projection_count,
             .f16_projection_count = metal_stats.f16_projection_count,
@@ -356,6 +362,283 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
     };
 }
 
+Gemma2MetalVerifierResult run_gemma2_metal_width_two_verifier(
+    Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& verifier,
+    std::span<const std::uint32_t, 2> token_ids,
+    float embedding_scale
+) {
+    if (plan.has_pending_verification()) {
+        throw std::logic_error("Gemma2 width-two verifier already has a pending transaction");
+    }
+    if (verifier.phase() != Gemma2MetalSchedulePhase::verify
+        || verifier.scratch_ownership() != Gemma2MetalScratchOwnership::resident_verifier
+        || verifier.token_count() != 2U) {
+        throw std::invalid_argument("Gemma2 width-two verifier requires a two-token verifier schedule");
+    }
+    if (plan.backend() != verifier.backend()
+        || verifier.layers().size() != plan.weights().blocks.size()) {
+        throw std::invalid_argument("Gemma2 width-two verifier plan and schedule do not match");
+    }
+    for (const auto token_id : token_ids) {
+        if (token_id >= plan.config().vocab_size) {
+            throw std::invalid_argument("Gemma2 width-two verifier token is outside vocabulary");
+        }
+    }
+
+    namespace metal = tensor::backends::metal;
+    metal::MetalCommandContext command("Gemma2 width-two verifier", true);
+    const auto& config = plan.config();
+    const auto& scratch = plan.verifier_scratch();
+    command.write_u32s(scratch.token_id_staging, 0U, token_ids);
+    command.push_debug_group("Width-two embedding");
+    command.encode_embedding(
+        scratch.token_id_staging,
+        plan.weights().token_embedding_weight,
+        scratch.feed_forward_residual,
+        embedding_scale,
+        0U,
+        2U
+    );
+    command.encode_memory_barrier();
+    command.pop_debug_group();
+
+    const auto head_dimension = config.attention_key_length;
+    const auto attention_scale = 1.0F / std::sqrt(static_cast<float>(head_dimension));
+    for (const auto& scheduled_layer : verifier.layers()) {
+        const auto& block = plan.weights().blocks[scheduled_layer.layer_index];
+        const auto& attention = block.attention;
+        const auto& feed_forward = block.feed_forward;
+        const auto& cache = plan.kv_cache()[scheduled_layer.layer_index];
+        const auto& tentative = scratch.tentative_kv[scheduled_layer.layer_index];
+
+        command.push_debug_group("Width-two attention projections");
+        command.encode_rms_norm(
+            scratch.feed_forward_residual,
+            attention.attention_norm_weight,
+            scratch.normalized_hidden,
+            config.rms_norm_epsilon,
+            2U
+        );
+        command.encode_memory_barrier();
+        command.encode_matmul(scratch.normalized_hidden, attention.query_weight, scratch.raw_query, 2U);
+        command.encode_matmul(scratch.normalized_hidden, attention.key_weight, scratch.raw_key, 2U);
+        command.encode_matmul(scratch.normalized_hidden, attention.value_weight, scratch.raw_value, 2U);
+        command.encode_memory_barrier();
+        command.encode_rope(
+            scratch.raw_query,
+            scratch.query,
+            verifier.cache_position(),
+            config.attention_head_count,
+            head_dimension,
+            head_dimension,
+            gemma2_rope_frequency_base,
+            2U
+        );
+        command.encode_gemma2_kv_cache_copy(
+            cache.key, cache.value, scratch.backup_key, scratch.backup_value,
+            verifier.cache_position(), 2U, cache.row_mask, 1U
+        );
+        command.encode_memory_barrier();
+        // Before the sliding ring is full, row one occupies unused storage and
+        // both proposed rows can be staged together. At full-window pressure,
+        // however, row one's slot still holds the oldest key/value needed by
+        // row-zero attention, so that store must wait until row zero finishes.
+        const bool second_store_aliases_first_attention =
+            scheduled_layer.attention_token_count == cache.row_capacity;
+        command.encode_gemma2_kv_cache_store(
+            scratch.raw_key, scratch.raw_value, cache.key, cache.value,
+            verifier.cache_position(), config.attention_head_count_kv,
+            head_dimension, head_dimension, gemma2_rope_frequency_base,
+            cache.row_mask, second_store_aliases_first_attention ? 1U : 2U, 0U
+        );
+        command.encode_memory_barrier();
+        command.encode_gemma2_decode_attention(
+            scratch.query, cache.key, cache.value, scratch.attention_output,
+            scratch.attention_partial_output, scratch.attention_partial_maxima,
+            scratch.attention_partial_denominators, verifier.cache_position(),
+            scheduled_layer.attention_token_count, attention_scale,
+            config.attention_logit_softcap, cache.row_mask, 0U, 0U
+        );
+        command.encode_memory_barrier();
+        if (second_store_aliases_first_attention) {
+            command.encode_gemma2_kv_cache_store(
+                scratch.raw_key, scratch.raw_value, cache.key, cache.value,
+                verifier.cache_position() + 1U, config.attention_head_count_kv,
+                head_dimension, head_dimension, gemma2_rope_frequency_base,
+                cache.row_mask, 1U, 1U
+            );
+            command.encode_memory_barrier();
+        }
+        command.encode_gemma2_decode_attention(
+            scratch.query, cache.key, cache.value, scratch.attention_output,
+            scratch.attention_partial_output, scratch.attention_partial_maxima,
+            scratch.attention_partial_denominators, verifier.cache_position() + 1U,
+            scheduled_layer.second_attention_token_count, attention_scale,
+            config.attention_logit_softcap, cache.row_mask, 1U, 1U
+        );
+        command.encode_memory_barrier();
+        command.encode_gemma2_kv_cache_copy(
+            cache.key, cache.value, tentative.key, tentative.value,
+            verifier.cache_position(), 2U, cache.row_mask, 1U
+        );
+        command.encode_memory_barrier();
+        command.encode_gemma2_kv_cache_copy(
+            scratch.backup_key, scratch.backup_value, cache.key, cache.value,
+            verifier.cache_position(), 2U, 1U, cache.row_mask
+        );
+        command.encode_memory_barrier();
+        command.pop_debug_group();
+
+        command.encode_matmul(
+            scratch.attention_output, attention.output_weight,
+            scratch.projected_attention_output, 2U
+        );
+        command.encode_memory_barrier();
+        command.encode_rms_norm_add(
+            scratch.projected_attention_output,
+            attention.post_attention_norm_weight,
+            scratch.feed_forward_residual,
+            scratch.post_attention_residual,
+            config.rms_norm_epsilon,
+            2U
+        );
+        command.encode_memory_barrier();
+        command.encode_rms_norm(
+            scratch.post_attention_residual,
+            feed_forward.feed_forward_norm_weight,
+            scratch.normalized_feed_forward_input,
+            config.rms_norm_epsilon,
+            2U
+        );
+        command.encode_memory_barrier();
+        command.encode_matmul(
+            scratch.normalized_feed_forward_input, feed_forward.gate_weight,
+            scratch.feed_forward_gate, 2U
+        );
+        command.encode_matmul(
+            scratch.normalized_feed_forward_input, feed_forward.up_weight,
+            scratch.feed_forward_up, 2U
+        );
+        command.encode_memory_barrier();
+        command.encode_gelu_tanh_multiply(
+            scratch.feed_forward_gate, scratch.feed_forward_up,
+            scratch.feed_forward_gated,
+            static_cast<std::uint64_t>(2U) * config.feed_forward_length
+        );
+        command.encode_memory_barrier();
+        command.encode_matmul(
+            scratch.feed_forward_gated, feed_forward.down_weight,
+            scratch.projected_feed_forward_output, 2U
+        );
+        command.encode_memory_barrier();
+        command.encode_rms_norm_add(
+            scratch.projected_feed_forward_output,
+            feed_forward.post_feed_forward_norm_weight,
+            scratch.post_attention_residual,
+            scratch.feed_forward_residual,
+            config.rms_norm_epsilon,
+            2U
+        );
+        command.encode_memory_barrier();
+    }
+
+    command.push_debug_group("Width-two final norm and output head");
+    command.encode_rms_norm(
+        scratch.feed_forward_residual, plan.weights().output_norm_weight,
+        scratch.normalized_hidden, config.rms_norm_epsilon, 2U
+    );
+    command.encode_memory_barrier();
+    command.encode_matmul(
+        scratch.normalized_hidden, plan.weights().output_weight, scratch.logits, 2U
+    );
+    command.encode_memory_barrier();
+    command.pop_debug_group();
+
+    const auto stats = command.commit_and_wait();
+    plan.set_pending_verification(verifier.cache_position());
+    return Gemma2MetalVerifierResult {
+        .logits = scratch.logits,
+        .cache_position = verifier.cache_position(),
+        .execution = Gemma2MetalDecodeExecutionStats {
+            .command_buffer_count = stats.command_buffer_count,
+            .commit_count = stats.commit_count,
+            .synchronous_wait_count = stats.synchronous_wait_count,
+            .compute_encoder_count = stats.compute_encoder_count,
+            .compute_dispatch_count = stats.compute_dispatch_count,
+            .blit_encoder_count = stats.blit_encoder_count,
+            .memory_barrier_count = stats.memory_barrier_count,
+            .transient_buffer_allocation_count = stats.transient_buffer_allocation_count,
+            .gpu_duration_ns = stats.gpu_duration_ns,
+            .q4_decode_projection_count = stats.q4_decode_projection_count,
+            .q8_decode_projection_count = stats.q8_decode_projection_count,
+            .q8_width_two_projection_count = stats.q8_width_two_projection_count,
+            .q4_small_batch_projection_count = stats.q4_small_batch_projection_count,
+            .q4_width_two_projection_count = stats.q4_width_two_projection_count,
+            .q4_exact_16_projection_count = stats.q4_exact_16_projection_count,
+            .q4_generic_tiled_projection_count = stats.q4_generic_tiled_projection_count,
+            .q6_decode_projection_count = stats.q6_decode_projection_count,
+            .q6_small_batch_projection_count = stats.q6_small_batch_projection_count,
+            .q6_width_two_projection_count = stats.q6_width_two_projection_count,
+            .q6_exact_16_projection_count = stats.q6_exact_16_projection_count,
+            .q6_generic_tiled_projection_count = stats.q6_generic_tiled_projection_count,
+            .f16_projection_count = stats.f16_projection_count,
+            .decode_attention_dispatch_count = stats.decode_attention_dispatch_count,
+            .decode_attention_partition_count = stats.decode_attention_partition_count,
+            .decode_attention_token_count = stats.decode_attention_token_count,
+        },
+    };
+}
+
+Gemma2MetalVerifierCommitResult commit_gemma2_metal_width_two_verification(
+    Gemma2MetalModelPlan& plan,
+    std::uint32_t accepted_token_count
+) {
+    if (!plan.has_pending_verification()) {
+        throw std::logic_error("Gemma2 width-two commit requires pending verification");
+    }
+    if (accepted_token_count > 2U) {
+        throw std::invalid_argument("Gemma2 width-two commit accepts at most two tokens");
+    }
+    if (accepted_token_count == 0U) {
+        plan.clear_pending_verification();
+        return Gemma2MetalVerifierCommitResult {};
+    }
+
+    namespace metal = tensor::backends::metal;
+    metal::MetalCommandContext command("Gemma2 width-two KV commit", true);
+    const auto position = plan.pending_verification_position();
+    const auto& scratch = plan.verifier_scratch();
+    for (std::size_t layer = 0; layer < plan.kv_cache().size(); ++layer) {
+        const auto& tentative = scratch.tentative_kv[layer];
+        const auto& cache = plan.kv_cache()[layer];
+        command.encode_gemma2_kv_cache_copy(
+            tentative.key, tentative.value, cache.key, cache.value,
+            position, accepted_token_count, 1U, cache.row_mask
+        );
+    }
+    const auto stats = command.commit_and_wait();
+    plan.clear_pending_verification();
+    return Gemma2MetalVerifierCommitResult {
+        .accepted_token_count = accepted_token_count,
+        .execution = Gemma2MetalDecodeExecutionStats {
+            .command_buffer_count = stats.command_buffer_count,
+            .commit_count = stats.commit_count,
+            .synchronous_wait_count = stats.synchronous_wait_count,
+            .compute_encoder_count = stats.compute_encoder_count,
+            .compute_dispatch_count = stats.compute_dispatch_count,
+            .blit_encoder_count = stats.blit_encoder_count,
+            .memory_barrier_count = stats.memory_barrier_count,
+            .transient_buffer_allocation_count = stats.transient_buffer_allocation_count,
+            .gpu_duration_ns = stats.gpu_duration_ns,
+        },
+    };
+}
+
+void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan) noexcept {
+    plan.clear_pending_verification();
+}
+
 Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
     Gemma2MetalModelPlan& plan,
     std::span<const std::uint32_t> prompt_token_ids,
@@ -363,6 +646,9 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
     float embedding_scale,
     std::optional<TokenSelectionRequest> selection_request
 ) {
+    if (plan.has_pending_verification()) {
+        throw std::logic_error("Gemma2 resident prefill cannot run with pending verification");
+    }
     if (prompt_token_ids.empty()) {
         throw std::invalid_argument("Gemma2 resident Metal prefill token ids must not be empty");
     }

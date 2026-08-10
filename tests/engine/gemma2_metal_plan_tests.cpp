@@ -55,12 +55,16 @@ using local_gguf_engine::engine::Gemma2ModelConfig;
 using local_gguf_engine::engine::create_gemma2_metal_decode_schedule;
 using local_gguf_engine::engine::create_gemma2_metal_model_plan;
 using local_gguf_engine::engine::create_gemma2_metal_prefill_schedule;
+using local_gguf_engine::engine::create_gemma2_metal_verifier_schedule;
 using local_gguf_engine::engine::bind_gemma2_model_weights;
 using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens;
 using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens_with_plan;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::run_gemma2_metal_resident_prefill;
 using local_gguf_engine::engine::run_gemma2_metal_resident_decode_step;
+using local_gguf_engine::engine::run_gemma2_metal_width_two_verifier;
+using local_gguf_engine::engine::commit_gemma2_metal_width_two_verification;
+using local_gguf_engine::engine::discard_gemma2_metal_width_two_verification;
 using local_gguf_engine::engine::warm_up_gemma2_metal_plan;
 using local_gguf_engine::engine::TokenSampler;
 using local_gguf_engine::engine::TokenSamplerOptions;
@@ -462,6 +466,7 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
     const auto& prefill = plan.prefill_scratch();
     const auto& decode = plan.decode_scratch();
     const auto& selection = plan.selection_workspace();
+    const auto& verifier = plan.verifier_scratch();
     const auto logical_bytes = backend_buffer_byte_count(prefill.token_id_staging)
         + backend_buffer_byte_count(prefill.normalized_hidden)
         + backend_buffer_byte_count(prefill.raw_query)
@@ -500,11 +505,37 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(decode.projected_feed_forward_output)
         + backend_buffer_byte_count(decode.feed_forward_residual)
         + backend_buffer_byte_count(decode.logits)
+        + backend_buffer_byte_count(verifier.token_id_staging)
+        + backend_buffer_byte_count(verifier.normalized_hidden)
+        + backend_buffer_byte_count(verifier.raw_query)
+        + backend_buffer_byte_count(verifier.raw_key)
+        + backend_buffer_byte_count(verifier.raw_value)
+        + backend_buffer_byte_count(verifier.query)
+        + backend_buffer_byte_count(verifier.attention_partial_output)
+        + backend_buffer_byte_count(verifier.attention_partial_maxima)
+        + backend_buffer_byte_count(verifier.attention_partial_denominators)
+        + backend_buffer_byte_count(verifier.attention_output)
+        + backend_buffer_byte_count(verifier.projected_attention_output)
+        + backend_buffer_byte_count(verifier.post_attention_residual)
+        + backend_buffer_byte_count(verifier.normalized_feed_forward_input)
+        + backend_buffer_byte_count(verifier.feed_forward_gate)
+        + backend_buffer_byte_count(verifier.feed_forward_up)
+        + backend_buffer_byte_count(verifier.feed_forward_gated)
+        + backend_buffer_byte_count(verifier.projected_feed_forward_output)
+        + backend_buffer_byte_count(verifier.feed_forward_residual)
+        + backend_buffer_byte_count(verifier.logits)
+        + backend_buffer_byte_count(verifier.backup_key)
+        + backend_buffer_byte_count(verifier.backup_value)
         + backend_buffer_byte_count(selection.candidate_runs_a)
         + backend_buffer_byte_count(selection.candidate_runs_b)
         + backend_buffer_byte_count(selection.compact_result)
         + backend_buffer_byte_count(selection.history_token_staging);
-    return logical_bytes
+    auto verifier_kv_bytes = std::size_t {0};
+    for (const auto& layer : verifier.tentative_kv) {
+        verifier_kv_bytes += backend_buffer_byte_count(layer.key)
+            + backend_buffer_byte_count(layer.value);
+    }
+    return logical_bytes + verifier_kv_bytes
         - backend_buffer_byte_count(prefill.attention_probabilities)
         - backend_buffer_byte_count(prefill.projected_attention_output)
         - backend_buffer_byte_count(prefill.normalized_feed_forward_input)
@@ -671,6 +702,7 @@ void test_creates_gemma2_metal_schedules_when_available() {
     const auto plan = create_gemma2_metal_model_plan(model);
     const auto prefill = create_gemma2_metal_prefill_schedule(plan, 3, 4);
     const auto decode = create_gemma2_metal_decode_schedule(plan, 9);
+    const auto verifier = create_gemma2_metal_verifier_schedule(plan, 9);
 
     expect(prefill.phase() == Gemma2MetalSchedulePhase::prefill, "prefill phase mismatch");
     expect(prefill.scratch_ownership() == Gemma2MetalScratchOwnership::resident_prefill, "prefill ownership mismatch");
@@ -679,6 +711,17 @@ void test_creates_gemma2_metal_schedules_when_available() {
     expect(decode.phase() == Gemma2MetalSchedulePhase::decode, "decode phase mismatch");
     expect(decode.scratch_ownership() == Gemma2MetalScratchOwnership::resident_decode, "decode ownership mismatch");
     expect(decode.token_count() == 1U && decode.cache_position() == 9U, "decode range mismatch");
+    expect(verifier.phase() == Gemma2MetalSchedulePhase::verify, "verifier phase mismatch");
+    expect(verifier.scratch_ownership() == Gemma2MetalScratchOwnership::resident_verifier,
+        "verifier ownership mismatch");
+    expect(verifier.token_count() == 2U && verifier.cache_position() == 9U,
+        "verifier range mismatch");
+    expect(verifier.layers()[0].attention_token_count == 8U
+            && verifier.layers()[0].second_attention_token_count == 8U,
+        "local verifier attention bounds mismatch");
+    expect(verifier.layers()[1].attention_token_count == 10U
+            && verifier.layers()[1].second_attention_token_count == 11U,
+        "global verifier attention bounds mismatch");
     expect(decode.layers().size() == 2U, "decode layer count mismatch");
     expect(decode.layers()[0].attention_token_count == 8U, "sliding attention count mismatch");
     expect(decode.layers()[1].attention_token_count == 10U, "global attention count mismatch");
@@ -1351,19 +1394,22 @@ void test_gemma2_fused_rms_norm_add_matches_decode_width_when_available() {
     }
 
     constexpr std::uint32_t hidden = 3584U;
+    constexpr std::uint32_t rows = 2U;
     constexpr float epsilon = 1.0e-6F;
-    std::vector<float> input_values(hidden);
+    std::vector<float> input_values(rows * hidden);
     std::vector<float> weight_values(hidden);
-    std::vector<float> residual_values(hidden);
-    for (std::uint32_t index = 0; index < hidden; ++index) {
+    std::vector<float> residual_values(rows * hidden);
+    for (std::uint32_t index = 0; index < rows * hidden; ++index) {
         input_values[index] = static_cast<float>(static_cast<int>(index % 37U) - 18) * 0.03125F;
-        weight_values[index] = 0.75F + static_cast<float>(index % 11U) * 0.015625F;
         residual_values[index] = static_cast<float>(static_cast<int>(index % 23U) - 11) * 0.0625F;
     }
+    for (std::uint32_t index = 0; index < hidden; ++index) {
+        weight_values[index] = 0.75F + static_cast<float>(index % 11U) * 0.015625F;
+    }
 
-    const auto input_cpu = tensor_f32_matrix(1U, hidden, input_values);
+    const auto input_cpu = tensor_f32_matrix(rows, hidden, input_values);
     const auto weight_cpu = tensor_f32_vector(weight_values);
-    const auto residual_cpu = tensor_f32_matrix(1U, hidden, residual_values);
+    const auto residual_cpu = tensor_f32_matrix(rows, hidden, residual_values);
     const auto normalized = rms_norm_f32(input_cpu, weight_cpu, epsilon);
     const auto expected = add_f32(normalized, residual_cpu);
     const auto input = copy_tensor_to_backend(input_cpu, BackendKind::metal);
@@ -1620,6 +1666,173 @@ void test_gemma2_metal_plan_generation_ignores_stale_kv_rows_when_available() {
     );
 }
 
+void test_gemma2_width_two_verifier_matches_sequential_decode_and_commits_transactionally_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+
+    auto make_plan = []() {
+        auto payload_store = nonzero_tiny_gemma2_payload_store(2U);
+        auto view = tiny_model_view(
+            tiny_gemma2_metadata(2U, 2U, 1U, 256U, 16U, 8U),
+            std::move(payload_store.payloads)
+        );
+        const auto model = load_engine_model_from_gguf(view);
+        return create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::q8_0);
+    };
+    auto candidate = make_plan();
+    auto control = make_plan();
+    const auto embedding_scale = std::sqrt(static_cast<float>(candidate.config().embedding_length));
+    const std::array<std::uint32_t, 2> prefix {0U, 1U};
+    (void)run_gemma2_metal_resident_prefill(candidate, prefix, 0U, embedding_scale);
+    (void)run_gemma2_metal_resident_prefill(control, prefix, 0U, embedding_scale);
+
+    std::vector<TensorStorage> before_keys;
+    std::vector<TensorStorage> before_values;
+    for (const auto& layer : candidate.kv_cache()) {
+        before_keys.push_back(copy_tensor_from_backend(layer.key));
+        before_values.push_back(copy_tensor_from_backend(layer.value));
+    }
+
+    const std::array<std::uint32_t, 2> proposed {2U, 3U};
+    const auto verifier = create_gemma2_metal_verifier_schedule(candidate, 2U);
+    const auto verified = run_gemma2_metal_width_two_verifier(
+        candidate, verifier, proposed, embedding_scale
+    );
+    expect(candidate.has_pending_verification(), "width-two verifier transaction missing");
+    expect(verified.execution.command_buffer_count == 1U
+            && verified.execution.commit_count == 1U
+            && verified.execution.synchronous_wait_count == 1U,
+        "width-two verifier must use one submission and wait");
+    expect(verified.execution.q4_small_batch_projection_count != 0U
+            && verified.execution.q6_small_batch_projection_count != 0U,
+        "width-two verifier did not select K-quant small-batch projections");
+    expect(verified.execution.q4_width_two_projection_count
+            == verified.execution.q4_small_batch_projection_count
+            && verified.execution.q6_width_two_projection_count
+                == verified.execution.q6_small_batch_projection_count,
+        "width-two verifier K-quant family accounting mismatch");
+    expect(verified.execution.q8_decode_projection_count == 1U,
+        "width-two verifier Q8 output projection count mismatch");
+    expect(verified.execution.q8_width_two_projection_count == 1U,
+        "width-two verifier Q8 family accounting mismatch");
+
+    const auto first = run_gemma2_metal_resident_decode_step(
+        control, create_gemma2_metal_decode_schedule(control, 2U), proposed[0], embedding_scale
+    );
+    const auto first_logits = copy_tensor_from_backend(first.logits);
+    const auto second = run_gemma2_metal_resident_decode_step(
+        control, create_gemma2_metal_decode_schedule(control, 3U), proposed[1], embedding_scale
+    );
+    const auto second_logits = copy_tensor_from_backend(second.logits);
+    const auto verifier_logits = copy_tensor_from_backend(verified.logits);
+    for (std::uint64_t token = 0; token < candidate.config().vocab_size; ++token) {
+        const std::array<std::uint64_t, 2> actual_first {0U, token};
+        const std::array<std::uint64_t, 2> actual_second {1U, token};
+        const std::array<std::uint64_t, 2> expected {0U, token};
+        expect_close(read_f32(verifier_logits, actual_first), read_f32(first_logits, expected),
+            2.0e-2F, "width-two first logit parity");
+        expect_close(read_f32(verifier_logits, actual_second), read_f32(second_logits, expected),
+            2.0e-2F, "width-two second logit parity");
+    }
+
+    for (std::size_t layer = 0; layer < candidate.kv_cache().size(); ++layer) {
+        const auto actual_key = copy_tensor_from_backend(candidate.kv_cache()[layer].key);
+        const auto actual_value = copy_tensor_from_backend(candidate.kv_cache()[layer].value);
+        expect(std::equal(actual_key.bytes().begin(), actual_key.bytes().end(),
+                          before_keys[layer].bytes().begin()),
+            "width-two verifier mutated resident key cache before commit");
+        expect(std::equal(actual_value.bytes().begin(), actual_value.bytes().end(),
+                          before_values[layer].bytes().begin()),
+            "width-two verifier mutated resident value cache before commit");
+    }
+    try {
+        (void)run_gemma2_metal_resident_decode_step(
+            candidate,
+            create_gemma2_metal_decode_schedule(candidate, 2U),
+            proposed[0],
+            embedding_scale
+        );
+        throw TestFailure("decode should reject a pending verifier transaction");
+    } catch (const std::logic_error&) {
+    }
+
+    const auto committed = commit_gemma2_metal_width_two_verification(candidate, 2U);
+    expect(committed.accepted_token_count == 2U && !candidate.has_pending_verification(),
+        "width-two two-row commit state mismatch");
+    const auto expect_f16_close = [](const TensorStorage& actual, const TensorStorage& expected,
+                                     std::string_view message) {
+        expect(actual.descriptor() == expected.descriptor(), std::string(message) + " descriptor mismatch");
+        for (std::size_t offset = 0; offset < actual.bytes().size(); offset += sizeof(std::uint16_t)) {
+            std::uint16_t actual_bits = 0;
+            std::uint16_t expected_bits = 0;
+            std::memcpy(&actual_bits, actual.bytes().data() + offset, sizeof(actual_bits));
+            std::memcpy(&expected_bits, expected.bytes().data() + offset, sizeof(expected_bits));
+            expect_close(f16_bits_to_f32(actual_bits), f16_bits_to_f32(expected_bits), 2.0e-2F, message);
+        }
+    };
+    for (std::size_t layer = 0; layer < candidate.kv_cache().size(); ++layer) {
+        expect_f16_close(
+            copy_tensor_from_backend(candidate.kv_cache()[layer].key),
+            copy_tensor_from_backend(control.kv_cache()[layer].key),
+            "width-two committed key parity"
+        );
+        expect_f16_close(
+            copy_tensor_from_backend(candidate.kv_cache()[layer].value),
+            copy_tensor_from_backend(control.kv_cache()[layer].value),
+            "width-two committed value parity"
+        );
+    }
+
+    const std::array<std::uint32_t, 2> partially_accepted_tokens {0U, 1U};
+    (void)run_gemma2_metal_width_two_verifier(
+        candidate, create_gemma2_metal_verifier_schedule(candidate, 7U),
+        partially_accepted_tokens, embedding_scale
+    );
+    (void)run_gemma2_metal_resident_decode_step(
+        control, create_gemma2_metal_decode_schedule(control, 7U),
+        partially_accepted_tokens[0], embedding_scale
+    );
+    const auto partially_committed = commit_gemma2_metal_width_two_verification(candidate, 1U);
+    expect(partially_committed.accepted_token_count == 1U && !candidate.has_pending_verification(),
+        "width-two one-row commit state mismatch");
+    for (std::size_t layer = 0; layer < candidate.kv_cache().size(); ++layer) {
+        expect_f16_close(
+            copy_tensor_from_backend(candidate.kv_cache()[layer].key),
+            copy_tensor_from_backend(control.kv_cache()[layer].key),
+            "width-two partially committed wrapped key parity"
+        );
+        expect_f16_close(
+            copy_tensor_from_backend(candidate.kv_cache()[layer].value),
+            copy_tensor_from_backend(control.kv_cache()[layer].value),
+            "width-two partially committed wrapped value parity"
+        );
+    }
+
+    const auto discard_schedule = create_gemma2_metal_verifier_schedule(candidate, 8U);
+    const std::array<std::uint32_t, 2> discarded_tokens {0U, 1U};
+    (void)run_gemma2_metal_width_two_verifier(
+        candidate, discard_schedule, discarded_tokens, embedding_scale
+    );
+    try {
+        (void)run_gemma2_metal_resident_prefill(
+            candidate, std::span<const std::uint32_t>(discarded_tokens).first(1U),
+            8U, embedding_scale
+        );
+        throw TestFailure("prefill should reject a pending verifier transaction");
+    } catch (const std::logic_error&) {
+    }
+    try {
+        (void)commit_gemma2_metal_width_two_verification(candidate, 3U);
+        throw TestFailure("width-two commit should reject more than two rows");
+    } catch (const std::invalid_argument&) {
+    }
+    expect(candidate.has_pending_verification(),
+        "invalid width-two commit must preserve pending transaction");
+    const auto discarded = commit_gemma2_metal_width_two_verification(candidate, 0U);
+    expect(discarded.accepted_token_count == 0U && !candidate.has_pending_verification(),
+        "width-two zero-row discard state mismatch");
+    discard_gemma2_metal_width_two_verification(candidate);
+}
+
 void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -1678,6 +1891,19 @@ void test_rejects_invalid_gemma2_metal_schedule_shapes_when_available() {
             std::string_view(error.what()) == "Gemma2 Metal decode schedule cached token count must leave room for one token",
             "Gemma2 Metal full decode cache error mismatch"
         );
+    }
+
+    for (const auto cached_token_count : {0U, 15U, 16U}) {
+        try {
+            (void)create_gemma2_metal_verifier_schedule(plan, cached_token_count);
+            throw TestFailure("Gemma2 Metal verifier schedule should reject invalid cache range");
+        } catch (const std::invalid_argument& error) {
+            expect(
+                std::string_view(error.what())
+                    == "Gemma2 Metal verifier schedule requires room for two tokens",
+                "Gemma2 Metal verifier cache-range error mismatch"
+            );
+        }
     }
 }
 
@@ -1950,6 +2176,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 Metal plan generation ignores stale KV rows when available",
         test_gemma2_metal_plan_generation_ignores_stale_kv_rows_when_available,
+    },
+    {
+        "Gemma2 width-two verifier matches sequential decode and commits transactionally when available",
+        test_gemma2_width_two_verifier_matches_sequential_decode_and_commits_transactionally_when_available,
     },
     {
         "rejects invalid Gemma2 Metal schedule shapes when available",

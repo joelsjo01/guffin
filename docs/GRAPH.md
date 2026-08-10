@@ -70,8 +70,8 @@ benchmark harness is not a live source route.
 | `src/benchmarks` | secondary production-kernel probes and summaries | chat inference execution, reference execution, CLI formatting |
 | `src/engine/model.cpp` | engine model loading from GGUF model views, architecture boundary | raw GGUF parsing internals |
 | `src/engine/gemma2_model.*` | Gemma 2 config parsing and weight binding | backend upload/execution |
-| `src/engine/gemma2_metal_plan.*` | Metal resident weight upload, KV cache buffers, prefill/decode schedules | tokenization, CLI formatting |
-| `src/engine/gemma2_runtime.*` | Gemma Metal prefill/decode execution, resident decode, metrics, argmax and selector-driven token loops | chat history, CLI parsing |
+| `src/engine/gemma2_metal_plan.*` | Metal resident weight upload, KV cache buffers, prefill/decode/verifier schedules and transaction state | tokenization, CLI formatting |
+| `src/engine/gemma2_runtime.*` | Gemma Metal prefill/decode/verifier execution, resident decode, metrics, argmax and selector-driven token loops | chat history, CLI parsing |
 | `src/engine/gemma2_chat_session.*` | persistent chat state, prompt rendering, KV-prefix reuse, context trimming, stops, streaming, regeneration, sampler integration | CLI commands and formatting |
 | `src/engine/gemma2_reference.*` | tiny CPU/reference Gemma numerics for parity tests | product CPU runtime |
 | `src/engine/sampling.*` | greedy and seeded stochastic token selection, top-k/top-p, repetition penalty, token history, top-logit helpers | model execution |
@@ -101,7 +101,7 @@ Gemma Metal plan and resident schedules:
 - `tests/engine/gemma2_metal_plan_tests.cpp`
 - `tests/support/tensor_test_support.*`
 
-Gemma Metal runtime and resident prefill/decode execution:
+Gemma Metal runtime and resident prefill/decode/verifier execution:
 
 - `include/local_gguf_engine/engine/gemma2_runtime.hpp`
 - `src/engine/gemma2_runtime.cpp`
@@ -218,9 +218,11 @@ Quick local/reference benchmark:
 - `include/local_gguf_engine/benchmarks/immutable_weight_benchmark.hpp`
 - `include/local_gguf_engine/benchmarks/output_head_benchmark.hpp`
 - `include/local_gguf_engine/benchmarks/quick_benchmark.hpp`
+- `include/local_gguf_engine/benchmarks/width_two_verifier_benchmark.hpp`
 - `src/benchmarks/immutable_weight_benchmark.mm`
 - `src/benchmarks/output_head_benchmark.cpp`
 - `src/benchmarks/quick_benchmark.cpp`
+- `src/benchmarks/width_two_verifier_benchmark.cpp`
 - `src/frontends/cli/benchmark_main.cpp`
 - `scripts/quick_benchmark.py`
 - `scripts/memory_benchmark.py`

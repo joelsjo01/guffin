@@ -60,11 +60,14 @@ struct Gemma2MetalDecodeExecutionStats {
     std::uint64_t gpu_duration_ns = 0;
     std::uint32_t q4_decode_projection_count = 0;
     std::uint32_t q8_decode_projection_count = 0;
+    std::uint32_t q8_width_two_projection_count = 0;
     std::uint32_t q4_small_batch_projection_count = 0;
+    std::uint32_t q4_width_two_projection_count = 0;
     std::uint32_t q4_exact_16_projection_count = 0;
     std::uint32_t q4_generic_tiled_projection_count = 0;
     std::uint32_t q6_decode_projection_count = 0;
     std::uint32_t q6_small_batch_projection_count = 0;
+    std::uint32_t q6_width_two_projection_count = 0;
     std::uint32_t q6_exact_16_projection_count = 0;
     std::uint32_t q6_generic_tiled_projection_count = 0;
     std::uint32_t f16_projection_count = 0;
@@ -91,6 +94,17 @@ struct Gemma2MetalResidentDecodeResult {
     tensor::BackendBuffer logits;
     bool produced_logits = true;
     std::optional<CompactTokenCandidates> candidates;
+    Gemma2MetalDecodeExecutionStats execution;
+};
+
+struct Gemma2MetalVerifierResult {
+    tensor::BackendBuffer logits;
+    std::uint32_t cache_position = 0;
+    Gemma2MetalDecodeExecutionStats execution;
+};
+
+struct Gemma2MetalVerifierCommitResult {
+    std::uint32_t accepted_token_count = 0;
     Gemma2MetalDecodeExecutionStats execution;
 };
 
@@ -179,6 +193,20 @@ using Gemma2MetalGeneratedTokenCallback =
     std::optional<TokenSelectionRequest> selection_request = std::nullopt,
     Gemma2MetalDecodeOutputMode output_mode = Gemma2MetalDecodeOutputMode::logits
 );
+
+[[nodiscard]] Gemma2MetalVerifierResult run_gemma2_metal_width_two_verifier(
+    Gemma2MetalModelPlan& plan,
+    const Gemma2MetalSchedule& verifier,
+    std::span<const std::uint32_t, 2> token_ids,
+    float embedding_scale
+);
+
+[[nodiscard]] Gemma2MetalVerifierCommitResult commit_gemma2_metal_width_two_verification(
+    Gemma2MetalModelPlan& plan,
+    std::uint32_t accepted_token_count
+);
+
+void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan) noexcept;
 
 [[nodiscard]] Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
     Gemma2MetalModelPlan& plan,

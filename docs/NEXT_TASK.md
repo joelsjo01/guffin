@@ -40,7 +40,7 @@ expansion. There is no old/new CLI, environment switch, dead kernel, or
 alternate production path.
 
 The restored retained source passes `bash scripts/ci.sh`: 21 Python tests and
-319 C++/Metal tests. A full chat benchmark was intentionally not run after the
+320 C++/Metal tests. A full chat benchmark was intentionally not run after the
 focused production-kernel gate failed; it could not rescue a regression in the
 only context regime Stage 2D was intended to improve. Stage 2C therefore remains
 the production performance baseline.
@@ -52,54 +52,87 @@ and the measured host envelope about 0.55 ms. These operations may be fused or
 rearranged later when they otherwise multiply inside a multirow verifier, but
 Stage 2E does not justify another standalone one-token optimization pass.
 
-## Next baton: research the Stage 3 width-two causal verifier
+## Stage 3 retained state
 
-Do deep implementation research and write one focused width-two verifier plan
-into this file. Do not implement it until the user approves that plan.
+Stage 3 is complete and retained. Its exact width-two verifier extends the
+existing plan, schedule, runtime, and Metal command context rather than creating
+a second inference path. It has two-row activation/logit scratch, per-layer
+tentative F16 K/V, an explicit pending transaction, and zero/one/two
+accepted-prefix resolution. Verification backs up the two destination ring rows,
+stores both proposed rows in one dispatch, executes row-zero then causal row-one
+attention, stages the resulting K/V, and restores the resident rows before
+leaving each layer. Rejection is therefore a logical discard and cannot destroy
+a live row at cache-full pressure.
 
-The research must trace the exact production path and answer one decision:
-whether the existing multirow projection kernels and a new causal two-row
-attention/KV transaction can execute a target verification pass below 1.35x the
-retained one-token latency. Cover:
+The projection path includes dedicated packed width-two Q4_K, Q6_K, and Q8_0
+kernels. The Q4_K/Q6_K forms retain the canonical one-row worker assignment and
+accumulation order while immediately rescanning the same column for row two; the
+second scan benefits from cache residency and proved faster than the generic
+small-batch kernel on the complete verifier. The Q8_0 head loads each packed
+weight once and updates both row accumulators. Fused RMSNorm-add now accepts and
+correctly indexes an explicit row count, and decode attention accepts explicit
+query/output rows.
 
-- sustained one-row versus two-row cost for every target projection class,
-  including converted Q4_K FFN down, remaining Q4_K/Q6_K transformer weights,
-  F16 projections, and the Q8_0 output head;
-- which current small-batch or tiled kernels actually serve two rows, their
-  reduction order and numerical relationship to the one-token kernels, and any
-  shapes that still fall back to unsuitable generic work;
-- the exact two-row transformer schedule: normalization/residual ordering,
-  position-dependent RoPE, causal attention between the two rows, alternating
-  4K sliding/global windows, and production logits for both verified positions;
-- a transactional KV design that stages both proposed rows, exposes the first
-  row to the second during verification, commits only the accepted prefix, and
-  restores or ignores rejected speculative rows without corrupting the resident
-  ring;
-- independent row-by-row logits/KV parity against two canonical one-token
-  steps, including full/partial acceptance, rejection at the first proposal,
-  ring wrap, softcap, GQA, cache-full behavior, and Metal-unavailable behavior;
-- exact command, barrier, scratch, output, and resident-memory changes, with no
-  production CLI mode or second inference runtime; and
-- one diagnostic that establishes the width-two cost mechanism, one real-path
-  verification benchmark, and a direct proceed/stop gate before any retrieval
-  or learned proposer is added.
+The retained verifier adds 3,928,072 descriptor-accounted bytes on the exact target.
+Steady verification and commit allocate no transient buffers. Width-two Q4_K,
+Q6_K, and Q8_0 dispatch families have explicit counters. The focused suite covers
+two-row quantized projection and RMSNorm-add parity, two-row logits against
+sequential decode, resident-cache preservation before resolution, two-row
+commit, one-row commit across a sliding-cache wrap, zero-row discard,
+pending-transaction exclusion, and unavailable-Metal behavior. The current
+focused suite reports 320 passing C++/Metal tests.
 
-The plan should be one coherent implementation pass, not a sequence of tiny
-milestones. Prefer extending the existing model plan, schedule, resident runtime,
-and Metal kernels over building a parallel verifier abstraction. A diagnostic
-verifier is allowed to return both logits and acceptance-independent KV state;
-it must not claim a generation speedup before proposal and exact speculative
-sampling exist.
+The initial development measurements established the mechanism: generic
+small-batch projections took 97.441 ms versus 60.466 / 60.139 ms one-row
+commands, while packed width-two projections reduced that to 81.704 ms versus
+62.960 / 61.748 ms. The latter was 1.310x mean one-row latency and 0.655x two
+sequential commands, with a 0.061 ms two-row commit. Those runs used an invalid
+raw-logit/byte-equality correctness verdict and are performance evidence only.
 
-## Constraints and stop condition
+Corrected thermally separated adjudication first found the fused RMSNorm-add
+row-indexing defect. Once repaired, it produced exact printed parity: maximum
+raw and post-softcap logit error 0.000, mean KL -0.000, top-40 overlap 1.000,
+top-1 agreement, maximum committed-KV error 0.000, exact rollback, and an exact
+sequential cache after commit. It took 81.455 ms versus 60.091 / 59.817 ms
+one-row commands, or 1.359x.
 
-- Production inference remains engine-owned, local, Metal-first,
-  model-resident, and allocation-free in the steady hot path.
-- Preserve the retained one-token path, Stage 2A-C byte/residency behavior,
-  prefill, sampling distribution, and current chat semantics.
-- Do not add a drafter, retrieval proposals, speculative acceptance/sampling,
-  width four, tree attention, KV quantization, or Stage 2E cleanup in this task.
-- The research must derive an end-to-end verifier-cycle bound, not extrapolate
-  from one isolated fast matrix.
-- Stop after replacing this baton with the researched implementation plan. Do
-  not begin width-two implementation until the user approves it.
+The final bounded optimization combines the two per-layer KV stores while a
+ring still has unused capacity, removing 42 dispatches and 42 barriers in the
+measured short-context target without changing results. The cooled measurement
+improved the verifier to 80.715 ms versus 60.178 / 59.339 ms, with a 0.062 ms
+commit and exact quality/cache parity. This is 1.351x mean one-row latency and
+0.675x two sequential rows. The literal 1.35x boundary was missed by about
+0.041 ms, or 0.05%, which is below observed thermal and run variation. By the
+user's explicit completion decision, this is accepted as practically meeting
+the gate; further verifier micro-optimization is not a Stage 3 requirement.
+
+A subsequent nonzero-weight cache-wrap audit proved that the second proposed
+row aliases the oldest row still needed by row-zero attention once a sliding
+window is full. Full-window layers therefore retain the causal two-store order;
+global layers and sliding layers with unused capacity keep the combined fast
+path. The deterministic integration test now exercises this nonzero wrapped
+one-row commit case.
+
+## Next baton: select the Stage 4 proposer and acceptance design
+
+Ordinary generation and chat do not invoke the retained verifier yet; their
+production loop still executes one resident decode per selected token. Stage 3
+owns the verified engine primitive, resident scratch, and transactional KV
+resolution. Stage 4 must supply the proposer and exact acceptance controller,
+extract the required verifier-row distributions/candidates without a full-logit
+host readback, aggregate speculative metrics, warm the width-two route, and wire
+that controller into the existing generation/chat orchestration.
+
+Research and choose the smallest engine-owned proposer that can supply two-token
+drafts cheaply enough for the retained verifier to produce an end-to-end decode
+gain. Specify exact speculative acceptance for greedy and sampled generation,
+including rejection recovery and zero/one/two KV commit behavior. Measure draft
+acceptance on the canonical local conversation before implementing a production
+proposer. Preserve the existing sampler distribution and deterministic seeded
+behavior; do not weaken acceptance correctness to inflate the rate.
+
+Do not broaden immediately to width four or tree attention. First connect one
+bounded width-two proposer through the retained transaction and compare actual
+generation tokens/s, output equivalence, acceptance distribution, and proposer
+overhead against ordinary decode under the repository's thermal-safe retention
+protocol.

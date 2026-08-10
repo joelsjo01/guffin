@@ -99,6 +99,36 @@ struct Gemma2MetalDecodeScratch {
     tensor::BackendBuffer logits;
 };
 
+struct Gemma2MetalTentativeKVLayer {
+    tensor::BackendBuffer key;
+    tensor::BackendBuffer value;
+};
+
+struct Gemma2MetalVerifierScratch {
+    tensor::BackendBuffer token_id_staging;
+    tensor::BackendBuffer normalized_hidden;
+    tensor::BackendBuffer raw_query;
+    tensor::BackendBuffer raw_key;
+    tensor::BackendBuffer raw_value;
+    tensor::BackendBuffer query;
+    tensor::BackendBuffer attention_partial_output;
+    tensor::BackendBuffer attention_partial_maxima;
+    tensor::BackendBuffer attention_partial_denominators;
+    tensor::BackendBuffer attention_output;
+    tensor::BackendBuffer projected_attention_output;
+    tensor::BackendBuffer post_attention_residual;
+    tensor::BackendBuffer normalized_feed_forward_input;
+    tensor::BackendBuffer feed_forward_gate;
+    tensor::BackendBuffer feed_forward_up;
+    tensor::BackendBuffer feed_forward_gated;
+    tensor::BackendBuffer projected_feed_forward_output;
+    tensor::BackendBuffer feed_forward_residual;
+    tensor::BackendBuffer logits;
+    tensor::BackendBuffer backup_key;
+    tensor::BackendBuffer backup_value;
+    std::vector<Gemma2MetalTentativeKVLayer> tentative_kv;
+};
+
 inline constexpr std::uint32_t gemma2_metal_prefill_chunk_size = 128U;
 
 struct Gemma2MetalPrefillScratch {
@@ -146,17 +176,20 @@ struct Gemma2MetalLayerState {
 enum class Gemma2MetalSchedulePhase {
     prefill,
     decode,
+    verify,
 };
 
 enum class Gemma2MetalScratchOwnership {
     resident_prefill,
     resident_decode,
+    resident_verifier,
 };
 
 struct Gemma2MetalLayerSchedule {
     std::uint32_t layer_index = 0;
     bool uses_sliding_window = false;
     std::uint32_t attention_token_count = 0;
+    std::uint32_t second_attention_token_count = 0;
 };
 
 class Gemma2MetalModelPlan final {
@@ -167,6 +200,7 @@ public:
         std::vector<Gemma2MetalKVCacheLayer> kv_cache,
         Gemma2MetalPrefillScratch prefill_scratch,
         Gemma2MetalDecodeScratch decode_scratch,
+        Gemma2MetalVerifierScratch verifier_scratch,
         Gemma2MetalSelectionWorkspace selection_workspace,
         std::vector<Gemma2MetalLayerState> layers,
         Gemma2OutputHeadPolicy output_head_policy,
@@ -184,6 +218,7 @@ public:
     [[nodiscard]] const std::vector<Gemma2MetalKVCacheLayer>& kv_cache() const noexcept;
     [[nodiscard]] const Gemma2MetalPrefillScratch& prefill_scratch() const noexcept;
     [[nodiscard]] const Gemma2MetalDecodeScratch& decode_scratch() const noexcept;
+    [[nodiscard]] const Gemma2MetalVerifierScratch& verifier_scratch() const noexcept;
     [[nodiscard]] const Gemma2MetalSelectionWorkspace& selection_workspace() const noexcept;
     [[nodiscard]] const std::vector<Gemma2MetalLayerState>& layers() const noexcept;
     [[nodiscard]] const Gemma2DecodeScheduledWeightBytes& decode_scheduled_weight_bytes() const noexcept;
@@ -191,6 +226,10 @@ public:
     [[nodiscard]] std::size_t kv_cache_byte_count() const noexcept;
     [[nodiscard]] std::size_t scratch_byte_count() const noexcept;
     [[nodiscard]] std::array<std::uintptr_t, 4> allocation_identities() const noexcept;
+    [[nodiscard]] bool has_pending_verification() const noexcept;
+    [[nodiscard]] std::uint32_t pending_verification_position() const;
+    void set_pending_verification(std::uint32_t cache_position);
+    void clear_pending_verification() noexcept;
 
 private:
     Gemma2ModelConfig config_;
@@ -198,6 +237,7 @@ private:
     std::vector<Gemma2MetalKVCacheLayer> kv_cache_;
     Gemma2MetalPrefillScratch prefill_scratch_;
     Gemma2MetalDecodeScratch decode_scratch_;
+    Gemma2MetalVerifierScratch verifier_scratch_;
     Gemma2MetalSelectionWorkspace selection_workspace_;
     std::vector<Gemma2MetalLayerState> layers_;
     Gemma2OutputHeadPolicy output_head_policy_ = Gemma2OutputHeadPolicy::f16;
@@ -205,6 +245,8 @@ private:
     std::size_t uploaded_weight_byte_count_ = 0;
     std::size_t kv_cache_byte_count_ = 0;
     std::size_t scratch_byte_count_ = 0;
+    bool has_pending_verification_ = false;
+    std::uint32_t pending_verification_position_ = 0;
 };
 
 class Gemma2MetalSchedule final {
@@ -240,6 +282,10 @@ private:
         const Gemma2MetalModelPlan& plan,
         std::uint32_t cached_token_count
     );
+    friend Gemma2MetalSchedule create_gemma2_metal_verifier_schedule(
+        const Gemma2MetalModelPlan& plan,
+        std::uint32_t cached_token_count
+    );
 
     std::vector<Gemma2MetalLayerSchedule> layers_;
     Gemma2MetalSchedulePhase phase_ = Gemma2MetalSchedulePhase::decode;
@@ -268,6 +314,10 @@ private:
     std::uint32_t cache_position
 );
 [[nodiscard]] Gemma2MetalSchedule create_gemma2_metal_decode_schedule(
+    const Gemma2MetalModelPlan& plan,
+    std::uint32_t cached_token_count
+);
+[[nodiscard]] Gemma2MetalSchedule create_gemma2_metal_verifier_schedule(
     const Gemma2MetalModelPlan& plan,
     std::uint32_t cached_token_count
 );
