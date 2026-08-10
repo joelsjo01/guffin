@@ -184,6 +184,17 @@ struct TokenCandidateMergeDimensions {
     std::uint32_t input_run_count;
 };
 
+struct TokenCandidateBatchSelectionDimensions {
+    std::array<TokenCandidateSelectionDimensions, 2> rows;
+    std::uint32_t run_stride;
+};
+
+struct TokenCandidateBatchMergeDimensions {
+    std::array<std::uint32_t, 2> retain_count;
+    std::uint32_t input_run_count;
+    std::uint32_t run_stride;
+};
+
 struct TokenCandidateResultHeader {
     std::uint32_t status;
     std::uint32_t count;
@@ -1116,6 +1127,116 @@ std::uint32_t MetalCommandContext::encode_token_candidates(
     return selector_dispatches + 1U;
 }
 
+std::uint32_t MetalCommandContext::encode_token_candidates_width_two(
+    const BackendBuffer& logits,
+    const engine::Gemma2MetalSelectionWorkspace& workspace,
+    const std::array<engine::TokenSelectionRequest, 2>& requests,
+    float softcap
+) {
+    if (!std::isfinite(softcap) || softcap <= 0.0F) {
+        throw std::invalid_argument("Metal batched token-candidate softcap must be finite and positive");
+    }
+    const auto columns = u32(
+        logits.descriptor().shape.dimension(logits.descriptor().shape.rank() - 1U),
+        "batched token-candidate columns"
+    );
+    if (logits.descriptor().shape.rank() < 2U
+        || logits.descriptor().shape.dimension(logits.descriptor().shape.rank() - 2U) < 2U) {
+        throw std::invalid_argument("Metal batched token-candidate logits require two rows");
+    }
+    const auto run_count = (columns + engine::gemma2_metal_selection_tile_size - 1U)
+        / engine::gemma2_metal_selection_tile_size;
+    const auto run_stride = run_count * static_cast<std::uint32_t>(engine::token_sampler_max_base_candidates);
+    TokenCandidateBatchSelectionDimensions batch {
+        .rows = {},
+        .run_stride = run_stride,
+    };
+    constexpr auto result_u32_stride = std::uint32_t {2U + engine::token_sampler_max_candidates * 2U};
+    constexpr std::array<std::uint32_t, 2> empty_header {0U, 0U};
+    for (std::size_t row = 0; row < requests.size(); ++row) {
+        const auto& request = requests[row];
+        if (request.top_k == 0U || request.top_k > engine::token_sampler_max_top_k
+            || request.history_token_count > engine::token_sampler_max_repetition_window
+            || request.base_candidate_count != request.top_k + request.history_token_count) {
+            throw std::invalid_argument("Metal batched token-candidate request is outside product bounds");
+        }
+        batch.rows[row] = TokenCandidateSelectionDimensions {
+            .columns = columns,
+            .retain_count = std::min(columns, request.base_candidate_count),
+            .run_count = run_count,
+            .history_count = request.history_token_count,
+            .softcap = softcap,
+        };
+        write_u32s(workspace.compact_result, static_cast<std::uint32_t>(row) * result_u32_stride, empty_header);
+        if (request.history_token_count > 0U) {
+            write_u32s(
+                workspace.history_token_staging,
+                static_cast<std::uint32_t>(row) * static_cast<std::uint32_t>(engine::token_sampler_max_repetition_window),
+                std::span<const std::uint32_t>(request.history_token_ids).first(request.history_token_count)
+            );
+        }
+    }
+
+    const bool top1 = batch.rows[0].retain_count == 1U && batch.rows[1].retain_count == 1U
+        && batch.rows[0].history_count == 0U && batch.rows[1].history_count == 0U;
+    if (top1) {
+        auto encoder = impl_->compute_encoder("Gemma2 batched compact token top-1");
+        [encoder setComputePipelineState:impl_->state->token_candidate_batch_top1_pipeline];
+        bind_buffer(encoder, logits, 0);
+        bind_buffer(encoder, workspace.compact_result, 1);
+        [encoder setBytes:&batch length:sizeof(batch) atIndex:2];
+        [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
+        ++impl_->stats.compute_dispatch_count;
+        return 1U;
+    }
+
+    auto encoder = impl_->compute_encoder("Gemma2 batched compact token candidates");
+    [encoder setComputePipelineState:impl_->state->token_candidate_batch_tile_pipeline];
+    bind_buffer(encoder, logits, 0);
+    bind_buffer(encoder, workspace.candidate_runs_a, 1);
+    bind_buffer(encoder, workspace.compact_result, 2);
+    [encoder setBytes:&batch length:sizeof(batch) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake(run_count, 2, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
+    ++impl_->stats.compute_dispatch_count;
+    std::uint32_t selector_dispatches = 1U;
+    auto input_is_a = true;
+    auto input_run_count = run_count;
+    while (input_run_count > 1U) {
+        encode_memory_barrier();
+        const auto output_run_count = (input_run_count + 1U) / 2U;
+        const TokenCandidateBatchMergeDimensions merge {
+            .retain_count = {batch.rows[0].retain_count, batch.rows[1].retain_count},
+            .input_run_count = input_run_count,
+            .run_stride = run_stride,
+        };
+        encoder = impl_->compute_encoder("Gemma2 batched compact token merge");
+        [encoder setComputePipelineState:impl_->state->token_candidate_batch_merge_pipeline];
+        bind_buffer(encoder, input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 0);
+        bind_buffer(encoder, input_is_a ? workspace.candidate_runs_b : workspace.candidate_runs_a, 1);
+        [encoder setBytes:&merge length:sizeof(merge) atIndex:2];
+        [encoder dispatchThreadgroups:MTLSizeMake(output_run_count, 2, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        ++impl_->stats.compute_dispatch_count;
+        ++selector_dispatches;
+        input_run_count = output_run_count;
+        input_is_a = !input_is_a;
+    }
+    encode_memory_barrier();
+    const auto finalize_count = std::max(
+        batch.rows[0].retain_count + batch.rows[0].history_count,
+        batch.rows[1].retain_count + batch.rows[1].history_count
+    );
+    encoder = impl_->compute_encoder("Gemma2 batched compact token result");
+    [encoder setComputePipelineState:impl_->state->token_candidate_batch_finalize_pipeline];
+    bind_buffer(encoder, logits, 0);
+    bind_buffer(encoder, input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 1);
+    bind_buffer(encoder, workspace.history_token_staging, 2);
+    bind_buffer(encoder, workspace.compact_result, 3);
+    [encoder setBytes:&batch length:sizeof(batch) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(finalize_count, 2, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    ++impl_->stats.compute_dispatch_count;
+    return selector_dispatches + 1U;
+}
+
 void MetalCommandContext::encode_memory_barrier() {
     auto encoder = impl_->compute_encoder("Gemma2 dependency barrier");
     [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
@@ -1262,6 +1383,38 @@ engine::CompactTokenCandidates MetalCommandContext::read_token_candidates(
     result.readback_bytes = header.count * sizeof(engine::TokenLogit);
     std::memcpy(result.values.data(), bytes + sizeof(header), result.readback_bytes);
     return result;
+}
+
+std::array<engine::CompactTokenCandidates, 2>
+MetalCommandContext::read_token_candidates_width_two(
+    const engine::Gemma2MetalSelectionWorkspace& workspace
+) const {
+    if (!impl_->submitted) {
+        throw std::logic_error("Metal batched token-candidate result cannot be read before completion");
+    }
+    constexpr auto result_byte_stride = sizeof(TokenCandidateResultHeader)
+        + engine::token_sampler_max_candidates * sizeof(engine::TokenLogit);
+    const auto* bytes = static_cast<const std::byte*>(metal_buffer_contents(storage(workspace.compact_result)));
+    std::array<engine::CompactTokenCandidates, 2> output;
+    for (std::size_t row = 0; row < output.size(); ++row) {
+        TokenCandidateResultHeader header {};
+        const auto* row_bytes = bytes + row * result_byte_stride;
+        std::memcpy(&header, row_bytes, sizeof(header));
+        if (header.status != 0U) {
+            throw std::invalid_argument(
+                (header.status & 2U) != 0U
+                    ? "Metal batched token-candidate history token is outside vocabulary"
+                    : "Metal batched token-candidate logit must be finite after softcap"
+            );
+        }
+        if (header.count == 0U || header.count > engine::token_sampler_max_candidates) {
+            throw std::runtime_error("Metal batched token-candidate result count is invalid");
+        }
+        output[row].count = header.count;
+        output[row].readback_bytes = header.count * sizeof(engine::TokenLogit);
+        std::memcpy(output[row].values.data(), row_bytes + sizeof(header), output[row].readback_bytes);
+    }
+    return output;
 }
 
 }  // namespace local_gguf_engine::tensor::backends::metal

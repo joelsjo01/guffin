@@ -91,9 +91,11 @@ tokens/s, and generation tokens/s with raw counts and durations. One fresh
 process with enforced cooldowns is the quick thermal-safe screen; the
 separately launched local kernel probes are diagnostics only. The pinned
 llama.cpp reference is a separate, infrequent benchmark documented in
-`docs/LLAMA_CPP_REFERENCE_BASELINE.md`. A retention decision uses five paired,
-interleaved baseline/candidate runs and requires at least 2% median improvement,
-four of five paired wins, exact workload/correctness equivalence, and no
-greater-than-2% regression in another headline metric. Do not run retained
-comparisons back to back while the machine is already thermally loaded. Never
-put measured results here.
+`docs/LLAMA_CPP_REFERENCE_BASELINE.md`. On this fanless machine, repeated pairs
+systematically heat-soak and throttle later runs, so a retention decision uses
+one candidate and one baseline in fresh processes with at least four minutes of
+idle cooldown before each. Require at least 2% aggregate generation improvement,
+wins on both turns, exact workload/token-hash correctness equivalence, and no
+greater-than-2% regression in another headline metric. Do not substitute a
+back-to-back repetition burst for thermal isolation. Never put measured results
+here.

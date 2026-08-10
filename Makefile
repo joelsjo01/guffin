@@ -19,6 +19,7 @@ ENGINE_SOURCES := \
 	src/engine/gemma2_reference.cpp \
 	src/engine/gemma2_runtime.cpp \
 	src/engine/model.cpp \
+	src/engine/retrieval_proposer.cpp \
 	src/engine/sampling.cpp \
 	src/model_format/gguf_reader.cpp \
 	src/model_format/gguf_tensor_bridge.cpp \
@@ -75,6 +76,7 @@ TEST_SOURCES := \
 	tests/engine/gemma2_metal_plan_tests.cpp \
 	tests/engine/engine_model_tests.cpp \
 	tests/engine/gemma2_reference_tests.cpp \
+	tests/engine/retrieval_proposer_tests.cpp \
 	tests/engine/sampling_tests.cpp \
 	tests/frontends/cli/generate_cli_tests.cpp \
 	tests/frontends/cli/gguf_inspect_tests.cpp \

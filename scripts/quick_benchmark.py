@@ -39,6 +39,7 @@ KERNEL_MEASURED_COMMANDS = 3
 KERNEL_SUSTAINED_DISPATCHES = 42
 KERNEL_MODE_DISPATCHES = {"isolated": 1, "sustained": KERNEL_SUSTAINED_DISPATCHES}
 ENVIRONMENT_SCHEMA_VERSION = 1
+DEFAULT_COOLDOWN_SECONDS = 240.0
 
 
 def parse_local(output):
@@ -78,8 +79,34 @@ def parse_local(output):
 
 def validate_decode_attribution(turn, name):
     record = turn.get("decode_attribution")
-    if not isinstance(record, dict) or record.get("schema_version") != 2:
+    if not isinstance(record, dict) or record.get("schema_version") != 3:
         raise RuntimeError(f"local {name} decode attribution schema mismatch")
+    token_hash = record.get("selected_token_hash")
+    if not isinstance(token_hash, str) or len(token_hash) != 16 \
+            or any(character not in "0123456789abcdef" for character in token_hash):
+        raise RuntimeError(f"local {name} selected-token hash is invalid")
+    buckets = record.get("proposal_buckets")
+    if not isinstance(buckets, list):
+        raise RuntimeError(f"local {name} proposal buckets are invalid")
+    bucket_cycles = 0
+    bucket_matches = 0
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            raise RuntimeError(f"local {name} proposal bucket is invalid")
+        for field in ("match_length", "support", "confidence"):
+            if not isinstance(bucket.get(field), str):
+                raise RuntimeError(f"local {name} proposal bucket {field} is invalid")
+        for field in ("cycles", "matches"):
+            if isinstance(bucket.get(field), bool) or not isinstance(bucket.get(field), int) \
+                    or bucket[field] < 0:
+                raise RuntimeError(f"local {name} proposal bucket {field} is invalid")
+        if bucket["matches"] > bucket["cycles"]:
+            raise RuntimeError(f"local {name} proposal bucket matches exceed cycles")
+        bucket_cycles += bucket["cycles"]
+        bucket_matches += bucket["matches"]
+    if bucket_cycles != record.get("speculative_cycles") \
+            or bucket_matches != record.get("speculative_matches"):
+        raise RuntimeError(f"local {name} proposal bucket totals mismatch")
     required_nonnegative = (
         "selected_tokens", "decoded_tokens", "initial_cache_position",
         "final_cache_position", "evaluated_prompt_tokens", "reused_cache_tokens",
@@ -148,15 +175,18 @@ def validate_decode_attribution(turn, name):
         raise RuntimeError(f"local {name} scheduled byte total mismatch")
 
 
-def run_local_chat(binary, model, cooldown):
+def run_local_chat(binary, model, cooldown, speculative=True):
     if cooldown:
         print(f"cooling down for {cooldown:g}s before local chat...", file=sys.stderr)
         time.sleep(cooldown)
+    command = [
+        binary, model, "--chat", "--backend", "metal", "--seed", str(SEED),
+        "--decode-diagnostics",
+    ]
+    if not speculative:
+        command.append("--no-speculative")
     stdout, stderr = run_process(
-        [
-            binary, model, "--chat", "--backend", "metal", "--seed", str(SEED),
-            "--decode-diagnostics",
-        ],
+        command,
         "[ Detail:",
     )
     return parse_local(stdout + stderr)
@@ -331,7 +361,7 @@ def validate_environment(environment):
 
 def print_human(local, kernels, terminal_rendered):
     print("Local two-turn chat (fresh process, seed 42, natural stop)")
-    print("local startup warm-up: enabled (16-token prefill + 1-token decode)")
+    print("local startup warm-up: enabled (16-token prefill + 1-token decode + width-two verifier)")
     stream_mode = "terminal alternate screen" if terminal_rendered else "captured pipes"
     print(f"chat streams: {stream_mode}; fixed 5s input pause between turns")
     print_turn_table("local-gguf-engine", local)
@@ -371,14 +401,15 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--local", default="build/release/local-gguf-generate")
     parser.add_argument("--kernels", default="build/release/local-gguf-bench")
-    parser.add_argument("--cooldown", type=float, default=30.0)
+    parser.add_argument("--cooldown", type=float, default=DEFAULT_COOLDOWN_SECONDS)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--no-speculative", action="store_true")
     args = parser.parse_args()
     if args.cooldown < 0:
         parser.error("cooldown must be nonnegative")
 
     terminal_rendered = sys.stderr.isatty()
-    local = run_local_chat(args.local, args.model, args.cooldown)
+    local = run_local_chat(args.local, args.model, args.cooldown, not args.no_speculative)
     if args.cooldown:
         print(f"cooling down for {args.cooldown:g}s before kernel diagnostics...", file=sys.stderr)
         time.sleep(args.cooldown)
@@ -393,11 +424,13 @@ def main():
             "local_startup_warmup": True,
             "local_startup_warmup_prefill_tokens": 16,
             "local_startup_warmup_decode_tokens": 1,
+            "local_startup_warmup_verifier_tokens": 2,
+            "speculative_decode": not args.no_speculative,
             "cooldown_seconds": args.cooldown,
             "inter_turn_pause_seconds": INTER_TURN_PAUSE_SECONDS,
             "terminal_rendered": terminal_rendered,
             "chat_stream_mode": "terminal_alternate_screen" if terminal_rendered else "captured_pipes",
-            "decode_attribution_schema": 1,
+            "decode_attribution_schema": 3,
             "kernel_diagnostic_schema": KERNEL_SCHEMA_VERSION,
             "local_executable": os.path.realpath(args.local),
             "kernel_executable": os.path.realpath(args.kernels),

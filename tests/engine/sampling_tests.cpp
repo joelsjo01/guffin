@@ -92,6 +92,25 @@ void test_repetition_window_eviction_and_promotion() {
     expect(promoting.sample(candidates) == 1U, "penalty below one must promote a positive history logit");
 }
 
+void test_selection_request_after_observing_matches_sampler_copy() {
+    TokenSampler sampler(TokenSamplerOptions {
+        .temperature = 0.8F, .top_k = 8U, .top_p = 1.0F, .min_p = 0.0F,
+        .repetition_penalty = 1.1F, .seed = 42U, .repetition_window = 3U,
+    });
+    const std::array<std::uint32_t, 3> history {7U, 8U, 9U};
+    sampler.observe_tokens(history);
+    auto copied = sampler;
+    const auto next = std::uint32_t {8U};
+    copied.observe_tokens(std::span<const std::uint32_t>(&next, 1U));
+    const auto direct = sampler.selection_request_after_observing(next);
+    const auto reference = copied.selection_request();
+    expect(direct.top_k == reference.top_k
+            && direct.base_candidate_count == reference.base_candidate_count
+            && direct.history_token_count == reference.history_token_count
+            && direct.history_token_ids == reference.history_token_ids,
+        "selection request after observing differs from sampler copy");
+}
+
 void test_sparse_change_candidate_superset_property() {
     std::mt19937 rng(77U);
     std::uniform_real_distribution<float> values(-5.0F, 5.0F);
@@ -209,6 +228,8 @@ const TestCase kSamplingTests[] = {
     {"compact sampler stable ties and repetition", test_compact_sampler_stable_ties_and_repetition},
     {"compact sampler seed snapshot and filter order", test_compact_sampler_seed_snapshot_and_filter_order},
     {"repetition window eviction and promotion", test_repetition_window_eviction_and_promotion},
+    {"selection request after observing matches sampler copy",
+        test_selection_request_after_observing_matches_sampler_copy},
     {"sparse-change candidate superset property", test_sparse_change_candidate_superset_property},
     {"rejects invalid compact sampler inputs", test_rejects_invalid_compact_sampler_inputs},
     {"prepared distribution freezes filter order and probabilities",

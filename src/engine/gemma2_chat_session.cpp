@@ -199,6 +199,7 @@ Gemma2ChatSession::Gemma2ChatSession(
       end_of_turn_token_id_(find_token_id_by_text(tokenizer_, "<end_of_turn>")),
       max_new_tokens_(options.max_new_tokens),
       context_shift_(options.context_shift),
+      speculative_decode_(options.speculative_decode),
       initial_sampler_options_(options.sampler),
       sampler_(initial_sampler_options_),
       clock_(std::move(options.clock)) {
@@ -521,6 +522,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             return Gemma2MetalTokenStreamDecision::continue_generation;
     };
     const auto run_generation = [&]() {
+        proposer_.rebuild(std::span<const std::uint32_t>(rendered_token_ids));
         return generate_gemma2_metal_sampled_tokens_with_plan(
             plan_,
             std::span<const std::uint32_t>(appended_token_ids),
@@ -529,7 +531,8 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             std::span<const std::uint32_t>(stop_token_ids_),
             working_sampler,
             on_generated_token,
-            clock_
+            clock_,
+            speculative_decode_ ? &proposer_ : nullptr
         );
     };
     auto generation = run_generation();

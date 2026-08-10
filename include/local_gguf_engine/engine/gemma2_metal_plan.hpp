@@ -99,9 +99,9 @@ struct Gemma2MetalDecodeScratch {
     tensor::BackendBuffer logits;
 };
 
-struct Gemma2MetalTentativeKVLayer {
-    tensor::BackendBuffer key;
-    tensor::BackendBuffer value;
+struct Gemma2MetalVerifierKVBackupLayer {
+    tensor::BackendBuffer backup_key;
+    tensor::BackendBuffer backup_value;
 };
 
 struct Gemma2MetalVerifierScratch {
@@ -124,9 +124,10 @@ struct Gemma2MetalVerifierScratch {
     tensor::BackendBuffer projected_feed_forward_output;
     tensor::BackendBuffer feed_forward_residual;
     tensor::BackendBuffer logits;
-    tensor::BackendBuffer backup_key;
-    tensor::BackendBuffer backup_value;
-    std::vector<Gemma2MetalTentativeKVLayer> tentative_kv;
+    // The verifier leaves both computed rows in the resident cache. Original
+    // rows remain here until the controller accepts both rows or restores a
+    // rejected suffix. This makes full acceptance a zero-dispatch operation.
+    std::vector<Gemma2MetalVerifierKVBackupLayer> kv_backups;
 };
 
 inline constexpr std::uint32_t gemma2_metal_prefill_chunk_size = 128U;
@@ -161,7 +162,9 @@ inline constexpr std::uint32_t gemma2_metal_selection_tile_size = 512U;
 
 struct Gemma2MetalSelectionWorkspace {
     // Candidate buffers store packed { uint32 token, float logit } pairs. They
-    // are shared by prefill and decode, which cannot select concurrently.
+    // are shared by prefill, decode, and the two-row verifier, which cannot
+    // select concurrently. Storage has two fixed row lanes; one-row paths use
+    // lane zero without a separate allocation.
     tensor::BackendBuffer candidate_runs_a;
     tensor::BackendBuffer candidate_runs_b;
     tensor::BackendBuffer compact_result;
@@ -228,7 +231,9 @@ public:
     [[nodiscard]] std::array<std::uintptr_t, 4> allocation_identities() const noexcept;
     [[nodiscard]] bool has_pending_verification() const noexcept;
     [[nodiscard]] std::uint32_t pending_verification_position() const;
+    [[nodiscard]] std::uint32_t provisionally_committed_token_count() const noexcept;
     void set_pending_verification(std::uint32_t cache_position);
+    void set_provisionally_committed_token_count(std::uint32_t token_count);
     void clear_pending_verification() noexcept;
 
 private:
@@ -247,6 +252,7 @@ private:
     std::size_t scratch_byte_count_ = 0;
     bool has_pending_verification_ = false;
     std::uint32_t pending_verification_position_ = 0;
+    std::uint32_t provisionally_committed_token_count_ = 0;
 };
 
 class Gemma2MetalSchedule final {

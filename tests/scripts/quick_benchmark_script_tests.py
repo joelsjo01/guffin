@@ -74,8 +74,9 @@ def decode_attribution(evaluated, cached, decoded, initial_cache, attention_toke
         "total": 21,
     }
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "selected_tokens": decoded,
+        "selected_token_hash": "0123456789abcdef",
         "decoded_tokens": decoded,
         "initial_cache_position": initial_cache,
         "final_cache_position": initial_cache + evaluated + decoded,
@@ -84,6 +85,13 @@ def decode_attribution(evaluated, cached, decoded, initial_cache, attention_toke
         "decode_wall_ns": 9_000_000_000,
         "gpu_ns": 8_000_000_000,
         "selection_ns": 1000,
+        "proposer_ns": 0,
+        "speculative_cycles": 0,
+        "speculative_matches": 0,
+        "speculative_misses": 0,
+        "speculative_fallbacks": 0,
+        "speculative_rollbacks": 0,
+        "proposal_buckets": [],
         "wall_minus_gpu_ns": 1_000_000_000,
         "resident_weights_bytes": 100,
         "resident_kv_bytes": 200,
@@ -117,7 +125,10 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             QUICK.print_human([], {"kernels": []}, False)
         self.assertIn("chat streams: captured pipes;", output.getvalue())
-        self.assertIn("local startup warm-up: enabled (16-token prefill + 1-token decode)", output.getvalue())
+        self.assertIn(
+            "local startup warm-up: enabled (16-token prefill + 1-token decode + width-two verifier)",
+            output.getvalue(),
+        )
 
     def test_kernel_schema_accepts_and_prints_isolated_and_sustained_modes(self):
         diagnostics = kernel_diagnostics_fixture()
@@ -273,6 +284,7 @@ slot print_timings:        eval time =   10800.00 ms /   150 tokens (72.00 ms pe
             self.assertEqual(environment["executables"]["build_mode"], "release")
 
     def test_protocol_is_exact_two_turn_natural_sampled_chat(self):
+        self.assertEqual(QUICK.DEFAULT_COOLDOWN_SECONDS, 240.0)
         self.assertEqual(
             QUICK.PROMPTS,
             (

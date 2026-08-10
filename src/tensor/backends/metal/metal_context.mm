@@ -587,8 +587,22 @@ MatmulPipelineState::MatmulPipelineState() {
     token_candidate_top1_pipeline = make_candidate_pipeline(
         @"token_candidate_top1_f32_kernel", "Metal token-candidate top-1 pipeline creation failed"
     );
+    token_candidate_batch_tile_pipeline = make_candidate_pipeline(
+        @"token_candidate_batch_tile_f32_kernel", "Metal batched token-candidate tile pipeline creation failed"
+    );
+    token_candidate_batch_merge_pipeline = make_candidate_pipeline(
+        @"token_candidate_batch_merge_f32_kernel", "Metal batched token-candidate merge pipeline creation failed"
+    );
+    token_candidate_batch_finalize_pipeline = make_candidate_pipeline(
+        @"token_candidate_batch_finalize_f32_kernel", "Metal batched token-candidate finalization pipeline creation failed"
+    );
+    token_candidate_batch_top1_pipeline = make_candidate_pipeline(
+        @"token_candidate_batch_top1_f32_kernel", "Metal batched token-candidate top-1 pipeline creation failed"
+    );
     if (token_candidate_tile_pipeline.maxTotalThreadsPerThreadgroup < 512U
-        || token_candidate_top1_pipeline.maxTotalThreadsPerThreadgroup < 512U) {
+        || token_candidate_top1_pipeline.maxTotalThreadsPerThreadgroup < 512U
+        || token_candidate_batch_tile_pipeline.maxTotalThreadsPerThreadgroup < 512U
+        || token_candidate_batch_top1_pipeline.maxTotalThreadsPerThreadgroup < 512U) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal token-candidate selection requires 512 threads per threadgroup"

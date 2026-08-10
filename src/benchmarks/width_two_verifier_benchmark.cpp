@@ -39,9 +39,9 @@ namespace {
         + buffer_bytes(scratch.normalized_feed_forward_input) + buffer_bytes(scratch.feed_forward_gate)
         + buffer_bytes(scratch.feed_forward_up) + buffer_bytes(scratch.feed_forward_gated)
         + buffer_bytes(scratch.projected_feed_forward_output) + buffer_bytes(scratch.feed_forward_residual)
-        + buffer_bytes(scratch.logits) + buffer_bytes(scratch.backup_key) + buffer_bytes(scratch.backup_value);
-    for (const auto& layer : scratch.tentative_kv) {
-        bytes += buffer_bytes(layer.key) + buffer_bytes(layer.value);
+        + buffer_bytes(scratch.logits);
+    for (const auto& layer : scratch.kv_backups) {
+        bytes += buffer_bytes(layer.backup_key) + buffer_bytes(layer.backup_value);
     }
     return bytes;
 }

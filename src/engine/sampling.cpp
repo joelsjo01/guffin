@@ -167,16 +167,56 @@ TokenSampler::TokenSampler(TokenSamplerOptions options)
     token_history_.reserve(token_sampler_max_repetition_window);
 }
 
+TokenSampler::TokenSampler(const TokenSampler& other)
+    : options_(other.options_), rng_(other.rng_) {
+    token_history_.reserve(token_sampler_max_repetition_window);
+    token_history_.assign(other.token_history_.begin(), other.token_history_.end());
+}
+
+TokenSampler& TokenSampler::operator=(const TokenSampler& other) {
+    if (this == &other) return *this;
+    options_ = other.options_;
+    rng_ = other.rng_;
+    token_history_.assign(other.token_history_.begin(), other.token_history_.end());
+    return *this;
+}
+
 bool TokenSampler::is_greedy() const noexcept {
     return options_.temperature == 0.0F;
 }
 
 TokenSelectionRequest TokenSampler::selection_request() const noexcept {
+    return selection_request_for_history(token_history_);
+}
+
+TokenSelectionRequest TokenSampler::selection_request_after_observing(
+    std::uint32_t token_id
+) const noexcept {
+    std::array<std::uint32_t, token_sampler_max_repetition_window> history {};
+    if (options_.repetition_window == 0U) {
+        return selection_request_for_history({});
+    }
+    const auto retained = std::min(token_history_.size(), options_.repetition_window - 1U);
+    if (retained > 0U) {
+        std::copy(
+            token_history_.end() - static_cast<std::ptrdiff_t>(retained),
+            token_history_.end(), history.begin()
+        );
+    }
+    history[retained] = token_id;
+    return selection_request_for_history(
+        std::span<const std::uint32_t>(history).first(retained + 1U)
+    );
+}
+
+TokenSelectionRequest TokenSampler::selection_request_for_history(
+    std::span<const std::uint32_t> token_history
+) const noexcept {
     TokenSelectionRequest request;
     request.top_k = static_cast<std::uint32_t>(is_greedy() ? 1U : options_.top_k);
 
     if (options_.repetition_penalty != 1.0F) {
-        for (const auto token : token_history_) {
+        for (const auto token : token_history) {
             const auto begin = request.history_token_ids.begin();
             const auto end = begin + request.history_token_count;
             if (std::find(begin, end, token) == end) {

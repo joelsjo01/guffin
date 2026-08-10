@@ -60,6 +60,10 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> token_candidate_merge_pipeline = nil;
     id<MTLComputePipelineState> token_candidate_finalize_pipeline = nil;
     id<MTLComputePipelineState> token_candidate_top1_pipeline = nil;
+    id<MTLComputePipelineState> token_candidate_batch_tile_pipeline = nil;
+    id<MTLComputePipelineState> token_candidate_batch_merge_pipeline = nil;
+    id<MTLComputePipelineState> token_candidate_batch_finalize_pipeline = nil;
+    id<MTLComputePipelineState> token_candidate_batch_top1_pipeline = nil;
     id<MTLCommandQueue> queue = nil;
 
     MatmulPipelineState();

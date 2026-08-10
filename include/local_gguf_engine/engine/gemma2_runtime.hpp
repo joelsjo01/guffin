@@ -3,8 +3,10 @@
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
+#include "local_gguf_engine/engine/retrieval_proposer.hpp"
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -21,6 +23,19 @@ enum class Gemma2GenerationStopReason {
     callback_stop,
     reverse_stop,
     interrupted,
+};
+
+inline constexpr std::size_t gemma2_proposal_match_length_bucket_count = 4U;
+inline constexpr std::size_t gemma2_proposal_support_bucket_count = 3U;
+inline constexpr std::size_t gemma2_proposal_confidence_bucket_count = 3U;
+inline constexpr std::size_t gemma2_proposal_bucket_count =
+    gemma2_proposal_match_length_bucket_count
+    * gemma2_proposal_support_bucket_count
+    * gemma2_proposal_confidence_bucket_count;
+
+struct Gemma2ProposalBucketMetrics {
+    std::uint32_t cycle_count = 0;
+    std::uint32_t match_count = 0;
 };
 
 struct Gemma2GenerationMetrics {
@@ -42,6 +57,17 @@ struct Gemma2GenerationMetrics {
     std::uint32_t generated_token_count = 0;
     std::uint32_t selected_token_count = 0;
     std::uint32_t decode_token_count = 0;
+    std::uint32_t speculative_cycle_count = 0;
+    std::uint32_t speculative_second_token_match_count = 0;
+    std::uint32_t speculative_second_token_miss_count = 0;
+    std::uint32_t speculative_fallback_count = 0;
+    std::uint32_t speculative_rollback_count = 0;
+    std::uint64_t proposer_duration_ns = 0;
+    // FNV-1a over each selected uint32 token in little-endian byte order.
+    // This is diagnostic evidence, not a cryptographic identity.
+    std::uint64_t selected_token_hash = 0;
+    std::array<Gemma2ProposalBucketMetrics, gemma2_proposal_bucket_count>
+        speculative_proposal_buckets {};
     Gemma2GenerationStopReason stop_reason = Gemma2GenerationStopReason::token_limit;
 };
 
@@ -99,6 +125,7 @@ struct Gemma2MetalResidentDecodeResult {
 
 struct Gemma2MetalVerifierResult {
     tensor::BackendBuffer logits;
+    std::optional<std::array<CompactTokenCandidates, 2>> candidates;
     std::uint32_t cache_position = 0;
     Gemma2MetalDecodeExecutionStats execution;
 };
@@ -156,6 +183,7 @@ struct Gemma2MetalWarmupStats {
     std::size_t host_cleared_kv_bytes = 0;
     Gemma2MetalPrefillExecutionStats prefill;
     Gemma2MetalDecodeExecutionStats decode;
+    Gemma2MetalDecodeExecutionStats verifier;
 };
 
 struct Gemma2MetalPlanGeneratedTokens {
@@ -198,7 +226,8 @@ using Gemma2MetalGeneratedTokenCallback =
     Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& verifier,
     std::span<const std::uint32_t, 2> token_ids,
-    float embedding_scale
+    float embedding_scale,
+    std::optional<std::array<TokenSelectionRequest, 2>> selection_requests = std::nullopt
 );
 
 [[nodiscard]] Gemma2MetalVerifierCommitResult commit_gemma2_metal_width_two_verification(
@@ -206,7 +235,18 @@ using Gemma2MetalGeneratedTokenCallback =
     std::uint32_t accepted_token_count
 );
 
-void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan) noexcept;
+[[nodiscard]] Gemma2MetalVerifierCommitResult
+provisionally_commit_gemma2_metal_width_two_verification(
+    Gemma2MetalModelPlan& plan,
+    std::uint32_t accepted_token_count
+);
+
+[[nodiscard]] Gemma2MetalVerifierCommitResult finalize_gemma2_metal_width_two_verification(
+    Gemma2MetalModelPlan& plan,
+    std::uint32_t retained_token_count
+);
+
+void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan);
 
 [[nodiscard]] Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
     Gemma2MetalModelPlan& plan,
@@ -247,7 +287,8 @@ void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan) noe
     std::span<const std::uint32_t> stop_token_ids,
     TokenSampler& sampler,
     const Gemma2MetalGeneratedTokenCallback& on_token = {},
-    const Gemma2MonotonicClock& clock = {}
+    const Gemma2MonotonicClock& clock = {},
+    RetrievalProposer* proposer = nullptr
 );
 
 }  // namespace local_gguf_engine::engine

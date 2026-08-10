@@ -25,6 +25,7 @@ src/engine/gemma2_chat_session.*
   -> src/model_format
   -> src/tokenizer
   -> src/engine/sampling.*
+  -> src/engine/retrieval_proposer.*
   -> src/engine/gemma2_runtime.*
       -> src/engine/gemma2_metal_plan.*
       -> src/tensor
@@ -75,6 +76,7 @@ benchmark harness is not a live source route.
 | `src/engine/gemma2_chat_session.*` | persistent chat state, prompt rendering, KV-prefix reuse, context trimming, stops, streaming, regeneration, sampler integration | CLI commands and formatting |
 | `src/engine/gemma2_reference.*` | tiny CPU/reference Gemma numerics for parity tests | product CPU runtime |
 | `src/engine/sampling.*` | greedy and seeded stochastic token selection, top-k/top-p, repetition penalty, token history, top-logit helpers | model execution |
+| `src/engine/retrieval_proposer.*` | session-local bounded suffix retrieval, continuation evidence, and profitability gating | sampling, model execution, chat rendering |
 | `src/tensor` | tensor descriptors/storage, dtype/layout, F16, quantization views, typed access, backend buffer wrapper | model-family policy |
 | `src/tensor/ops` | CPU/reference tensor ops and backend-dispatched op front doors | device setup |
 | `src/tensor/backends/cpu_backend.*` | CPU backend buffers and CPU backend execution helpers | product-speed Gemma path |
@@ -116,6 +118,9 @@ Gemma chat session and generation orchestration:
 - `src/engine/gemma2_chat_session.cpp`
 - `include/local_gguf_engine/engine/sampling.hpp`
 - `src/engine/sampling.cpp`
+- `include/local_gguf_engine/engine/retrieval_proposer.hpp`
+- `src/engine/retrieval_proposer.cpp`
+- `tests/engine/retrieval_proposer_tests.cpp`
 - `tests/frontends/cli/generate_cli_tests.cpp`
 
 Gemma reference numerics:

@@ -127,6 +127,7 @@ void write_generate_usage(std::ostream& error) {
           << " [--repeat-penalty R] [--seed S]] [--backend cpu|metal]"
           << " [--reverse-prompt TEXT] [--context-shift]"
           << " [--output-head f16|q8_0]"
+          << " [--no-speculative]"
           << " [--decode-diagnostics] [--metal-capture PATH]"
           << '\n';
 }
@@ -338,6 +339,7 @@ struct ParsedChatCommand {
     bool temperature_requested = false;
     bool sampled_modifier_requested = false;
     bool decode_diagnostics = false;
+    bool speculative_decode = true;
     engine::Gemma2OutputHeadPolicy output_head_policy = engine::Gemma2OutputHeadPolicy::automatic;
     std::optional<std::string> metal_capture_path;
 };
@@ -397,6 +399,10 @@ private:
         }
         if (option == "--decode-diagnostics") {
             command.decode_diagnostics = true;
+            continue;
+        }
+        if (option == "--no-speculative") {
+            command.speculative_decode = false;
             continue;
         }
         if (option == "--output-head") {
@@ -673,6 +679,7 @@ int run_generate_chat(
             .backend = command.options.backend,
             .output_head_policy = command.output_head_policy,
             .context_shift = command.context_shift,
+            .speculative_decode = command.speculative_decode,
             .reverse_stop_strings = command.reverse_stop_strings,
             .sampler = command.sampler,
         }
@@ -807,7 +814,7 @@ std::string format_chat_timing_detail_line(const engine::Gemma2ChatTurnMetrics& 
 }
 
 std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetrics& metrics) {
-    constexpr std::uint32_t schema_version = 2U;
+    constexpr std::uint32_t schema_version = 3U;
     const auto decode_tokens = static_cast<std::uint64_t>(metrics.generation.decode_token_count);
     const auto checked_multiply = [](std::uint64_t left, std::uint64_t right, const char* name) {
         if (left != 0U && right > std::numeric_limits<std::uint64_t>::max() / left) {
@@ -862,9 +869,14 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
     const auto total_scheduled_bytes = full_scheduled_bytes - execution.output_elided_weight_bytes;
     const auto wall_residual_ns = metrics.generation.decode_duration_ns - execution.gpu_duration_ns;
 
+    std::ostringstream token_hash;
+    token_hash << std::hex << std::setw(16) << std::setfill('0')
+               << metrics.generation.selected_token_hash;
+
     std::ostringstream json;
     json << "[ Decode: {\"schema_version\":" << schema_version
          << ",\"selected_tokens\":" << metrics.generation.selected_token_count
+         << ",\"selected_token_hash\":\"" << token_hash.str() << "\""
          << ",\"decoded_tokens\":" << metrics.generation.decode_token_count
          << ",\"initial_cache_position\":" << metrics.initial_cache_position
          << ",\"final_cache_position\":" << final_cache_position
@@ -873,6 +885,35 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"decode_wall_ns\":" << metrics.generation.decode_duration_ns
          << ",\"gpu_ns\":" << execution.gpu_duration_ns
          << ",\"selection_ns\":" << metrics.generation.selection_duration_ns
+         << ",\"proposer_ns\":" << metrics.generation.proposer_duration_ns
+         << ",\"speculative_cycles\":" << metrics.generation.speculative_cycle_count
+         << ",\"speculative_matches\":" << metrics.generation.speculative_second_token_match_count
+         << ",\"speculative_misses\":" << metrics.generation.speculative_second_token_miss_count
+         << ",\"speculative_fallbacks\":" << metrics.generation.speculative_fallback_count
+         << ",\"speculative_rollbacks\":" << metrics.generation.speculative_rollback_count
+         << ",\"proposal_buckets\":[";
+    bool first_bucket = true;
+    constexpr std::array<const char*, 4> length_labels {"2", "3-4", "5-8", "9-16"};
+    constexpr std::array<const char*, 3> support_labels {"2", "3", "4+"};
+    constexpr std::array<const char*, 3> confidence_labels {"0.5-2/3", "2/3-1", "1"};
+    for (std::size_t length = 0; length < length_labels.size(); ++length) {
+        for (std::size_t support = 0; support < support_labels.size(); ++support) {
+            for (std::size_t confidence = 0; confidence < confidence_labels.size(); ++confidence) {
+                const auto index = (length * support_labels.size() + support)
+                    * confidence_labels.size() + confidence;
+                const auto& bucket = metrics.generation.speculative_proposal_buckets[index];
+                if (bucket.cycle_count == 0U) continue;
+                if (!first_bucket) json << ',';
+                first_bucket = false;
+                json << "{\"match_length\":\"" << length_labels[length]
+                     << "\",\"support\":\"" << support_labels[support]
+                     << "\",\"confidence\":\"" << confidence_labels[confidence]
+                     << "\",\"cycles\":" << bucket.cycle_count
+                     << ",\"matches\":" << bucket.match_count << '}';
+            }
+        }
+    }
+    json << ']'
          << ",\"wall_minus_gpu_ns\":" << wall_residual_ns
          << ",\"resident_weights_bytes\":" << metrics.resident_weight_byte_count
          << ",\"output_head_policy\":\""
@@ -894,11 +935,14 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"compact_readback_bytes\":" << execution.compact_readback_bytes
          << ",\"q4_decode\":" << execution.q4_decode_projection_count
          << ",\"q8_decode\":" << execution.q8_decode_projection_count
+         << ",\"q8_width_two\":" << execution.q8_width_two_projection_count
          << ",\"q4_small_batch\":" << execution.q4_small_batch_projection_count
+         << ",\"q4_width_two\":" << execution.q4_width_two_projection_count
          << ",\"q4_exact_16\":" << execution.q4_exact_16_projection_count
          << ",\"q4_generic_tiled\":" << execution.q4_generic_tiled_projection_count
          << ",\"q6_decode\":" << execution.q6_decode_projection_count
          << ",\"q6_small_batch\":" << execution.q6_small_batch_projection_count
+         << ",\"q6_width_two\":" << execution.q6_width_two_projection_count
          << ",\"q6_exact_16\":" << execution.q6_exact_16_projection_count
          << ",\"q6_generic_tiled\":" << execution.q6_generic_tiled_projection_count
          << ",\"f16\":" << execution.f16_projection_count

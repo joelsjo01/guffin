@@ -4,6 +4,7 @@
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
+#include "local_gguf_engine/engine/retrieval_proposer.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
@@ -31,6 +32,7 @@ struct Gemma2ChatSessionOptions {
     runtime::BackendKind backend = runtime::BackendKind::metal;
     Gemma2OutputHeadPolicy output_head_policy = Gemma2OutputHeadPolicy::automatic;
     bool context_shift = false;
+    bool speculative_decode = true;
     std::vector<std::string> reverse_stop_strings;
     TokenSamplerOptions sampler;
     Gemma2MonotonicClock clock;
@@ -170,8 +172,10 @@ private:
     std::optional<std::uint32_t> end_of_turn_token_id_;
     std::size_t max_new_tokens_ = 0;
     bool context_shift_ = false;
+    bool speculative_decode_ = true;
     TokenSamplerOptions initial_sampler_options_;
     TokenSampler sampler_;
+    RetrievalProposer proposer_;
     Gemma2MonotonicClock clock_;
     std::size_t plan_revision_ = 0;
     std::optional<Gemma2MetalWarmupStats> warmup_stats_;

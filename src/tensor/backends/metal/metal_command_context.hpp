@@ -5,6 +5,7 @@
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 
 #include <cstdint>
+#include <array>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -206,6 +207,12 @@ public:
         const engine::TokenSelectionRequest& request,
         float softcap
     );
+    [[nodiscard]] std::uint32_t encode_token_candidates_width_two(
+        const BackendBuffer& logits,
+        const engine::Gemma2MetalSelectionWorkspace& workspace,
+        const std::array<engine::TokenSelectionRequest, 2>& requests,
+        float softcap
+    );
     void encode_memory_barrier();
     void push_debug_group(std::string_view label);
     void pop_debug_group();
@@ -217,6 +224,8 @@ public:
     [[nodiscard]] engine::CompactTokenCandidates read_token_candidates(
         const engine::Gemma2MetalSelectionWorkspace& workspace
     ) const;
+    [[nodiscard]] std::array<engine::CompactTokenCandidates, 2>
+    read_token_candidates_width_two(const engine::Gemma2MetalSelectionWorkspace& workspace) const;
 
 private:
     struct Impl;

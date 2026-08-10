@@ -68,14 +68,25 @@ struct TokenSamplerOptions {
 class TokenSampler final {
 public:
     explicit TokenSampler(TokenSamplerOptions options = {});
+    TokenSampler(const TokenSampler& other);
+    TokenSampler& operator=(const TokenSampler& other);
+    TokenSampler(TokenSampler&& other) noexcept = default;
+    TokenSampler& operator=(TokenSampler&& other) noexcept = default;
 
     [[nodiscard]] bool is_greedy() const noexcept;
     [[nodiscard]] TokenSelectionRequest selection_request() const noexcept;
+    [[nodiscard]] TokenSelectionRequest selection_request_after_observing(
+        std::uint32_t token_id
+    ) const noexcept;
     [[nodiscard]] std::uint32_t sample(std::span<const TokenLogit> compact_candidates);
     void observe_tokens(std::span<const std::uint32_t> token_ids);
     void reset_history(std::span<const std::uint32_t> token_ids = {});
 
 private:
+    [[nodiscard]] TokenSelectionRequest selection_request_for_history(
+        std::span<const std::uint32_t> token_history
+    ) const noexcept;
+
     TokenSamplerOptions options_;
     std::mt19937_64 rng_;
     std::vector<std::uint32_t> token_history_;

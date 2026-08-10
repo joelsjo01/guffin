@@ -356,12 +356,12 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     const auto staged_kv_descriptor = f16_descriptor({
         rows, config.attention_head_count_kv, config.attention_key_length,
     });
-    std::vector<Gemma2MetalTentativeKVLayer> tentative_kv;
-    tentative_kv.reserve(config.block_count);
+    std::vector<Gemma2MetalVerifierKVBackupLayer> kv_backups;
+    kv_backups.reserve(config.block_count);
     for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
-        tentative_kv.push_back(Gemma2MetalTentativeKVLayer {
-            .key = allocate_buffer(staged_kv_descriptor, allocated_byte_count),
-            .value = allocate_buffer(staged_kv_descriptor, allocated_byte_count),
+        kv_backups.push_back(Gemma2MetalVerifierKVBackupLayer {
+            .backup_key = allocate_buffer(staged_kv_descriptor, allocated_byte_count),
+            .backup_value = allocate_buffer(staged_kv_descriptor, allocated_byte_count),
         });
     }
     return Gemma2MetalVerifierScratch {
@@ -392,9 +392,7 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
         .projected_feed_forward_output = allocate_buffer(f32_descriptor({rows, config.embedding_length}), allocated_byte_count),
         .feed_forward_residual = allocate_buffer(f32_descriptor({rows, config.embedding_length}), allocated_byte_count),
         .logits = allocate_buffer(f32_descriptor({rows, config.vocab_size}), allocated_byte_count),
-        .backup_key = allocate_buffer(staged_kv_descriptor, allocated_byte_count),
-        .backup_value = allocate_buffer(staged_kv_descriptor, allocated_byte_count),
-        .tentative_kv = std::move(tentative_kv),
+        .kv_backups = std::move(kv_backups),
     };
 }
 
@@ -455,16 +453,20 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     const auto tile_count = (
         static_cast<std::uint64_t>(config.vocab_size) + gemma2_metal_selection_tile_size - 1U
     ) / gemma2_metal_selection_tile_size;
-    const auto run_elements = tile_count * token_sampler_max_base_candidates * candidate_f32_elements;
+    constexpr std::uint64_t selection_rows = 2U;
+    const auto run_elements = selection_rows * tile_count
+        * token_sampler_max_base_candidates * candidate_f32_elements;
     constexpr auto result_header_f32_elements = std::uint64_t {2};
     constexpr auto result_elements = result_header_f32_elements
         + token_sampler_max_candidates * candidate_f32_elements;
     return Gemma2MetalSelectionWorkspace {
         .candidate_runs_a = allocate_buffer(f32_descriptor({run_elements}), allocated_byte_count),
         .candidate_runs_b = allocate_buffer(f32_descriptor({run_elements}), allocated_byte_count),
-        .compact_result = allocate_buffer(f32_descriptor({result_elements}), allocated_byte_count),
+        .compact_result = allocate_buffer(
+            f32_descriptor({selection_rows * result_elements}), allocated_byte_count
+        ),
         .history_token_staging = allocate_buffer(
-            f32_descriptor({token_sampler_max_repetition_window}), allocated_byte_count
+            f32_descriptor({selection_rows * token_sampler_max_repetition_window}), allocated_byte_count
         ),
     };
 }
@@ -626,17 +628,31 @@ std::uint32_t Gemma2MetalModelPlan::pending_verification_position() const {
     return pending_verification_position_;
 }
 
+std::uint32_t Gemma2MetalModelPlan::provisionally_committed_token_count() const noexcept {
+    return provisionally_committed_token_count_;
+}
+
 void Gemma2MetalModelPlan::set_pending_verification(std::uint32_t cache_position) {
     if (has_pending_verification_) {
         throw std::logic_error("Gemma2 Metal plan already has a pending verification");
     }
     has_pending_verification_ = true;
     pending_verification_position_ = cache_position;
+    provisionally_committed_token_count_ = 0U;
+}
+
+void Gemma2MetalModelPlan::set_provisionally_committed_token_count(std::uint32_t token_count) {
+    if (!has_pending_verification_ || provisionally_committed_token_count_ != 0U
+        || token_count == 0U || token_count > 2U) {
+        throw std::logic_error("Gemma2 Metal provisional verification state is invalid");
+    }
+    provisionally_committed_token_count_ = token_count;
 }
 
 void Gemma2MetalModelPlan::clear_pending_verification() noexcept {
     has_pending_verification_ = false;
     pending_verification_position_ = 0U;
+    provisionally_committed_token_count_ = 0U;
 }
 
 const Gemma2MetalSelectionWorkspace& Gemma2MetalModelPlan::selection_workspace() const noexcept {

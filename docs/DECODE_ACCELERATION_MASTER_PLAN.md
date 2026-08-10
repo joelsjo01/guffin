@@ -60,10 +60,12 @@ path and comply with the repository benchmark contract. In particular:
 1. Correctness is established with an independent reference or golden oracle,
    including shape tails, cache boundaries, reset/regeneration, context shift,
    unavailable-Metal behavior, and relevant sampling modes.
-2. A performance candidate graduates only after the canonical real chat path
-   shows at least 2% median improvement, four of five paired interleaved wins,
-   workload and correctness equivalence, and no greater-than-2% regression in
-   another headline metric.
+2. A performance candidate graduates only after one candidate and one baseline
+   run in fresh processes with at least four minutes of idle cooldown before
+   each show at least 2% aggregate improvement, candidate wins on both turns,
+   exact workload/token-hash equivalence, and no greater-than-2% regression in
+   another headline metric. Repetition bursts on this fanless machine are
+   invalid because later runs systematically measure heat soak.
 3. Diagnostics must observe the production implementation or the same retained
    kernel. A fast diagnostic-only execution path is not a product result.
 4. Each approved `NEXT_TASK.md` scope proves its hypotheses end to end. Rejected
@@ -249,7 +251,7 @@ components are individually below 2% and are more useful when preventing costs
 from multiplying inside a verifier. Stage 2C remains the retained baseline and
 the active route moves to Stage 3.
 
-### Stage 3: Build the Multi-Token Verification Foundation
+### Completed: Stage 3: Build the Multi-Token Verification Foundation
 
 **Goal:** prove that one target-weight cycle can correctly process enough
 positions to reduce committed-token latency. This is the bridge from conventional
@@ -285,13 +287,13 @@ E > (V + D) / B
 ```
 
 The retain gate remains stricter because it also requires the repository's 2%
-and four-of-five result. If width two misses its latency target, attribute the
+isolated-pair result. If width two misses its latency target, attribute the
 gap to quantized projections, F16 output rows, causal attention, KV handling,
 or synchronization and attempt one evidence-backed repair. If it still cannot
 beat the economic inequality with realistic acceptance, stop before building a
 drafter and reconsider byte reduction or the Phase 1 hardware experiments.
 
-### Stage 4: Obtain the First Multi-Token Speedup Without Training
+### completed: Stage 4: Obtain the First Multi-Token Speedup Without Training
 
 **Goal:** validate the entire speculative protocol and acceptance economics
 with a cheap, removable proposer.

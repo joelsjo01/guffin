@@ -7,6 +7,7 @@
 #include "gguf_reader_tests.hpp"
 #include "gguf_tensor_bridge_tests.hpp"
 #include "sampling_tests.hpp"
+#include "retrieval_proposer_tests.hpp"
 #include "tensor_backend_tests.hpp"
 #include "tensor_tests.hpp"
 #include "test_support.hpp"
@@ -41,6 +42,9 @@ int main() {
         run_test(test);
     }
     for (const auto& test : local_gguf_engine::tests::sampling_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::retrieval_proposer_test_cases()) {
         run_test(test);
     }
     for (const auto& test : local_gguf_engine::tests::quick_benchmark_test_cases()) {

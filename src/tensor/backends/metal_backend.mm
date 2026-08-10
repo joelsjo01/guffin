@@ -51,6 +51,17 @@ struct TokenCandidateMergeDimensions {
     uint input_run_count;
 };
 
+struct TokenCandidateBatchSelectionDimensions {
+    TokenCandidateSelectionDimensions rows[2];
+    uint run_stride;
+};
+
+struct TokenCandidateBatchMergeDimensions {
+    uint retain_count[2];
+    uint input_run_count;
+    uint run_stride;
+};
+
 struct TokenCandidateResult {
     atomic_uint status;
     uint count;
@@ -1930,6 +1941,144 @@ kernel void token_candidate_top1_f32_kernel(
     if (tid == 0) {
         result->count = 1;
         result->candidates[0] = best[0];
+    }
+}
+
+kernel void token_candidate_batch_tile_f32_kernel(
+    const device float* logits [[buffer(0)]],
+    device TokenCandidate* runs [[buffer(1)]],
+    device TokenCandidateResult* results [[buffer(2)]],
+    constant TokenCandidateBatchSelectionDimensions& batch [[buffer(3)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    const uint row = group.y;
+    const TokenCandidateSelectionDimensions dims = batch.rows[row];
+    threadgroup TokenCandidate tile[token_candidate_tile_size];
+    const uint token = group.x * token_candidate_tile_size + tid;
+    TokenCandidate candidate = {uint(-1), -INFINITY};
+    if (token < dims.columns) {
+        const float transformed = dims.softcap * tanh(logits[row * dims.columns + token] / dims.softcap);
+        if (isfinite(transformed)) candidate = {token, transformed};
+        else atomic_fetch_or_explicit(&results[row].status, 1u, memory_order_relaxed);
+    }
+    tile[tid] = candidate;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint width = 2; width <= token_candidate_tile_size; width <<= 1) {
+        for (uint stride = width >> 1; stride > 0; stride >>= 1) {
+            const uint other = tid ^ stride;
+            if (other > tid) {
+                const bool best_first = (tid & width) == 0;
+                const bool other_better = token_candidate_better(tile[other], tile[tid]);
+                const bool self_better = token_candidate_better(tile[tid], tile[other]);
+                if ((best_first && other_better) || (!best_first && self_better)) {
+                    const TokenCandidate temporary = tile[tid];
+                    tile[tid] = tile[other];
+                    tile[other] = temporary;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    if (tid < dims.retain_count) {
+        runs[row * batch.run_stride + group.x * dims.retain_count + tid] = tile[tid];
+    }
+}
+
+kernel void token_candidate_batch_merge_f32_kernel(
+    const device TokenCandidate* input [[buffer(0)]],
+    device TokenCandidate* output [[buffer(1)]],
+    constant TokenCandidateBatchMergeDimensions& dims [[buffer(2)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    const uint output_run = position.x;
+    const uint row = position.y;
+    const uint retain_count = dims.retain_count[row];
+    const uint row_offset = row * dims.run_stride;
+    const uint left_run = output_run * 2;
+    if (left_run >= dims.input_run_count) return;
+    const uint right_run = left_run + 1;
+    uint left = 0;
+    uint right = 0;
+    for (uint index = 0; index < retain_count; ++index) {
+        TokenCandidate selected = {uint(-1), -INFINITY};
+        if (right_run < dims.input_run_count) {
+            const TokenCandidate left_value = left < retain_count
+                ? input[row_offset + left_run * retain_count + left]
+                : TokenCandidate{uint(-1), -INFINITY};
+            const TokenCandidate right_value = right < retain_count
+                ? input[row_offset + right_run * retain_count + right]
+                : TokenCandidate{uint(-1), -INFINITY};
+            if (left >= retain_count || (right < retain_count && token_candidate_better(right_value, left_value))) {
+                selected = right_value;
+                ++right;
+            } else {
+                selected = left_value;
+                ++left;
+            }
+        } else {
+            selected = input[row_offset + left_run * retain_count + left];
+            ++left;
+        }
+        output[row_offset + output_run * retain_count + index] = selected;
+    }
+}
+
+kernel void token_candidate_batch_finalize_f32_kernel(
+    const device float* logits [[buffer(0)]],
+    const device TokenCandidate* final_runs [[buffer(1)]],
+    const device uint* history [[buffer(2)]],
+    device TokenCandidateResult* results [[buffer(3)]],
+    constant TokenCandidateBatchSelectionDimensions& batch [[buffer(4)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    const uint index = position.x;
+    const uint row = position.y;
+    const TokenCandidateSelectionDimensions dims = batch.rows[row];
+    const uint count = dims.retain_count + dims.history_count;
+    if (index == 0) results[row].count = count;
+    if (index < dims.retain_count) {
+        results[row].candidates[index] = final_runs[row * batch.run_stride + index];
+    } else if (index < count) {
+        const uint token = history[row * 64 + index - dims.retain_count];
+        if (token >= dims.columns) {
+            atomic_fetch_or_explicit(&results[row].status, 2u, memory_order_relaxed);
+            results[row].candidates[index] = {uint(-1), -INFINITY};
+        } else {
+            const float transformed = dims.softcap * tanh(logits[row * dims.columns + token] / dims.softcap);
+            if (!isfinite(transformed)) atomic_fetch_or_explicit(&results[row].status, 1u, memory_order_relaxed);
+            results[row].candidates[index] = {token, transformed};
+        }
+    }
+}
+
+kernel void token_candidate_batch_top1_f32_kernel(
+    const device float* logits [[buffer(0)]],
+    device TokenCandidateResult* results [[buffer(1)]],
+    constant TokenCandidateBatchSelectionDimensions& batch [[buffer(2)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    const TokenCandidateSelectionDimensions dims = batch.rows[row];
+    threadgroup TokenCandidate best[token_candidate_tile_size];
+    TokenCandidate local = {uint(-1), -INFINITY};
+    for (uint token = tid; token < dims.columns; token += token_candidate_tile_size) {
+        const float transformed = dims.softcap * tanh(logits[row * dims.columns + token] / dims.softcap);
+        if (!isfinite(transformed)) atomic_fetch_or_explicit(&results[row].status, 1u, memory_order_relaxed);
+        else {
+            const TokenCandidate candidate = {token, transformed};
+            if (token_candidate_better(candidate, local)) local = candidate;
+        }
+    }
+    best[tid] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = token_candidate_tile_size >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride && token_candidate_better(best[tid + stride], best[tid])) best[tid] = best[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        results[row].count = 1;
+        results[row].candidates[0] = best[0];
     }
 }
 

@@ -173,6 +173,12 @@ void test_formats_and_validates_chat_decode_attribution() {
     metrics.generation.decode_token_count = 2U;
     metrics.generation.decode_duration_ns = 200U;
     metrics.generation.selection_duration_ns = 7U;
+    metrics.generation.selected_token_hash = 0x1234U;
+    metrics.generation.speculative_cycle_count = 1U;
+    metrics.generation.speculative_second_token_match_count = 1U;
+    metrics.generation.speculative_proposal_buckets[0] = {
+        .cycle_count = 1U, .match_count = 1U,
+    };
     metrics.decode_execution.command_buffer_count = 2U;
     metrics.decode_execution.commit_count = 2U;
     metrics.decode_execution.synchronous_wait_count = 2U;
@@ -195,8 +201,14 @@ void test_formats_and_validates_chat_decode_attribution() {
         .total = 21U,
     };
     const auto line = format_chat_decode_attribution_line(metrics);
-    expect(line.starts_with("[ Decode: {\"schema_version\":2"),
+    expect(line.starts_with("[ Decode: {\"schema_version\":3"),
         "decode attribution prefix mismatch");
+    expect(line.find("\"selected_token_hash\":\"0000000000001234\"") != std::string::npos,
+        "decode attribution selected-token hash mismatch");
+    expect(line.find("\"proposal_buckets\":[{\"match_length\":\"2\",\"support\":\"2\","
+                     "\"confidence\":\"0.5-2/3\",\"cycles\":1,\"matches\":1}]")
+            != std::string::npos,
+        "decode attribution proposal bucket mismatch");
     expect(line.find("\"final_cache_position\":15") != std::string::npos,
         "decode attribution final cache mismatch");
     expect(line.find("\"wall_minus_gpu_ns\":50") != std::string::npos,
@@ -1444,7 +1456,7 @@ void test_runs_generate_chat_decode_diagnostics_only_when_requested_when_availab
     );
     expect(exit_code == EXIT_SUCCESS && error.str().empty(),
         "decode-diagnostic chat invocation failed");
-    expect(output.str().find("[ Decode: {\"schema_version\":2") != std::string::npos,
+    expect(output.str().find("[ Decode: {\"schema_version\":3") != std::string::npos,
         "requested decode attribution record is missing");
 }
 
