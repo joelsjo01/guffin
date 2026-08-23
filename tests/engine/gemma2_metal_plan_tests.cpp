@@ -112,6 +112,7 @@ using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::tensor_backend_is_available;
 using local_gguf_engine::tensor::backends::metal::MetalCommandContext;
+using local_gguf_engine::tensor::backends::metal::fill_shared_metal_buffer_u32;
 using local_gguf_engine::tensor::backends::metal::gemma2_decode_attention_partition_count;
 using local_gguf_engine::tests::TestCase;
 using local_gguf_engine::tests::TestFailure;
@@ -370,6 +371,48 @@ void expect_f32_matrix_close(
     }
 }
 
+void expect_f16_storage_close_absolute_relative(
+    const TensorStorage& actual,
+    const TensorStorage& expected,
+    float absolute_tolerance,
+    float relative_tolerance,
+    std::string_view message
+) {
+    expect(actual.descriptor() == expected.descriptor(),
+        std::string(message) + " descriptor mismatch");
+    expect(actual.descriptor().dtype == DType::f16,
+        std::string(message) + " dtype mismatch");
+    auto maximum_absolute_error = 0.0F;
+    auto maximum_relative_error = 0.0F;
+    auto within_bound = true;
+    for (std::size_t offset = 0U; offset < actual.bytes().size();
+         offset += sizeof(std::uint16_t)) {
+        std::uint16_t actual_bits = 0U;
+        std::uint16_t expected_bits = 0U;
+        std::memcpy(&actual_bits, actual.bytes().data() + offset, sizeof(actual_bits));
+        std::memcpy(&expected_bits, expected.bytes().data() + offset, sizeof(expected_bits));
+        const auto actual_value = f16_bits_to_f32(actual_bits);
+        const auto expected_value = f16_bits_to_f32(expected_bits);
+        if (!std::isfinite(actual_value) || !std::isfinite(expected_value)) {
+            within_bound = false;
+            continue;
+        }
+        const auto absolute_error = std::fabs(actual_value - expected_value);
+        const auto scale = std::max(std::fabs(actual_value), std::fabs(expected_value));
+        const auto relative_error = scale == 0.0F ? 0.0F : absolute_error / scale;
+        maximum_absolute_error = std::max(maximum_absolute_error, absolute_error);
+        maximum_relative_error = std::max(maximum_relative_error, relative_error);
+        if (absolute_error > absolute_tolerance + relative_tolerance * scale) {
+            within_bound = false;
+        }
+    }
+    expect(
+        within_bound,
+        std::string(message) + ": max_abs=" + std::to_string(maximum_absolute_error)
+            + ", max_rel=" + std::to_string(maximum_relative_error)
+    );
+}
+
 void write_cache_row(TensorStorage& cache, const TensorStorage& row, std::uint32_t position) {
     const auto row_bytes = row.descriptor().byte_count;
     const auto offset = static_cast<std::size_t>(position) * row_bytes;
@@ -467,6 +510,36 @@ std::size_t expected_kv_cache_byte_count(const Gemma2ModelConfig& config) {
     return bytes;
 }
 
+std::vector<float> read_backend_f32_row(
+    const local_gguf_engine::tensor::BackendBuffer& buffer,
+    std::uint32_t row
+) {
+    const auto storage = copy_tensor_from_backend(buffer);
+    expect(storage.descriptor().dtype == DType::f32
+            && storage.descriptor().shape.rank() == 2U
+            && row < storage.descriptor().shape.dimension(0U),
+        "backend F32 row descriptor mismatch");
+    const auto width = storage.descriptor().shape.dimension(1U);
+    std::vector<float> values(static_cast<std::size_t>(width));
+    for (std::uint64_t column = 0U; column < width; ++column) {
+        const std::array<std::uint64_t, 2> index {row, column};
+        values[static_cast<std::size_t>(column)] = read_f32(storage, index);
+    }
+    return values;
+}
+
+void expect_f32_rows_close(
+    std::span<const float> actual,
+    std::span<const float> expected,
+    float tolerance,
+    std::string_view message
+) {
+    expect(actual.size() == expected.size(), std::string(message) + " size mismatch");
+    for (std::size_t index = 0U; index < actual.size(); ++index) {
+        expect_close(actual[index], expected[index], tolerance, message);
+    }
+}
+
 std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
     const auto& prefill = plan.prefill_scratch();
     const auto& decode = plan.decode_scratch();
@@ -478,6 +551,8 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(prefill.raw_key)
         + backend_buffer_byte_count(prefill.query)
         + backend_buffer_byte_count(prefill.value)
+        + backend_buffer_byte_count(prefill.current_chunk_key)
+        + backend_buffer_byte_count(prefill.current_chunk_value)
         + backend_buffer_byte_count(prefill.attention_scores)
         + backend_buffer_byte_count(prefill.attention_probabilities)
         + backend_buffer_byte_count(prefill.attention_output)
@@ -565,6 +640,10 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
     constexpr std::size_t target_kv_bytes =
         (21ULL * 8192ULL + 21ULL * 4096ULL) * 8ULL * 256ULL * 2ULL * sizeof(std::uint16_t);
     expect(target_kv_bytes == 2'113'929'216ULL, "Gemma2 target KV byte formula mismatch");
+    constexpr std::size_t target_prefill_stage_bytes =
+        128ULL * 8ULL * (256ULL + 256ULL) * sizeof(std::uint16_t);
+    expect(target_prefill_stage_bytes == 1'048'576ULL,
+        "Gemma2 target wrapped-prefill stage byte formula mismatch");
     expect(plan.scratch_byte_count() == expected_scratch_byte_count(plan), "Gemma2 Metal scratch byte count mismatch");
     const auto& prefill = plan.prefill_scratch();
     const auto same_storage = [](const auto& left, const auto& right) {
@@ -578,6 +657,15 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
         "prefill hidden-width liveness aliases mismatch");
     expect(same_storage(prefill.feed_forward_gate, prefill.feed_forward_gated),
         "prefill gate/GELU liveness alias mismatch");
+    expect(prefill.current_chunk_key.descriptor().shape == Shape::from({128U, 1U, 256U})
+            && prefill.current_chunk_value.descriptor().shape == Shape::from({128U, 1U, 256U})
+            && prefill.current_chunk_key.descriptor().dtype == DType::f16
+            && prefill.current_chunk_value.descriptor().dtype == DType::f16,
+        "prefill wrapped-current-chunk stage layout mismatch");
+    expect(!same_storage(prefill.current_chunk_key, prefill.current_chunk_value)
+            && !same_storage(prefill.current_chunk_key, plan.kv_cache()[0].key)
+            && !same_storage(prefill.current_chunk_value, plan.kv_cache()[0].value),
+        "prefill wrapped-current-chunk stage must own distinct resident storage");
 
     expect(plan.weights().blocks.size() == 1, "Gemma2 Metal block weight count mismatch");
     expect(plan.kv_cache().size() == 1, "Gemma2 Metal KV layer count mismatch");
@@ -1436,155 +1524,155 @@ void test_gemma2_fused_rms_norm_add_matches_decode_width_when_available() {
     expect_f32_matrix_close(copy_tensor_from_backend(output), expected, 2.0e-5F, "fused RMSNorm-add parity");
 }
 
-void test_gemma2_metal_resident_prefill_splits_ring_boundaries_and_matches_incremental_when_available() {
+void test_gemma2_metal_resident_prefill_stages_wrapped_sliding_chunks_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
 
-    auto payload_store = tiny_gemma2_payload_store(true, 2);
+    auto payload_store = nonzero_tiny_gemma2_payload_store(2U);
     auto view = tiny_model_view(
-        tiny_gemma2_metadata(2, 2, 1, 256, 32),
+        tiny_gemma2_metadata(2U, 2U, 1U, 256U, 32U, 8U),
         std::move(payload_store.payloads)
     );
     const auto model = load_engine_model_from_gguf(view);
-    auto chunked_plan = create_gemma2_metal_model_plan(model);
-    auto incremental_plan = create_gemma2_metal_model_plan(model);
-    // The tiny eight-row ring forces boundaries at 8 and 16 while the same
-    // 23-token call still covers the small-batch projection tiers.
-    std::vector<std::uint32_t> prompt_token_ids(23);
-    for (std::size_t index = 0; index < prompt_token_ids.size(); ++index) {
-        prompt_token_ids[index] = static_cast<std::uint32_t>(index % 4U);
+    std::array<std::uint32_t, 13U> tokens {};
+    for (std::size_t index = 0U; index < tokens.size(); ++index) {
+        tokens[index] = static_cast<std::uint32_t>((index * 3U + 1U) % 4U);
     }
-    const auto embedding_scale = std::sqrt(
-        static_cast<float>(chunked_plan.config().embedding_length)
-    );
+    constexpr auto cache_pattern = std::uint32_t {0x35553555U};
+    constexpr auto stage_pattern = std::uint32_t {0x2aaa2aaaU};
+    const auto expect_u32_pattern = [](const auto& buffer, std::uint32_t pattern,
+                                       std::string_view message) {
+        const auto storage = copy_tensor_from_backend(buffer);
+        expect(storage.bytes().size() % sizeof(std::uint32_t) == 0U,
+            std::string(message) + " byte layout mismatch");
+        for (std::size_t offset = 0U; offset < storage.bytes().size();
+             offset += sizeof(std::uint32_t)) {
+            std::uint32_t actual = 0U;
+            std::memcpy(&actual, storage.bytes().data() + offset, sizeof(actual));
+            if (actual != pattern) {
+                throw TestFailure(std::string(message) + " was modified");
+            }
+        }
+    };
 
-    const auto chunked = run_gemma2_metal_resident_prefill(
-        chunked_plan,
-        std::span<const std::uint32_t>(prompt_token_ids),
-        0,
-        embedding_scale,
-        TokenSelectionRequest {}
-    );
-    const auto first = run_gemma2_metal_resident_prefill(
-        incremental_plan,
-        std::span<const std::uint32_t>(prompt_token_ids).first(16),
-        0,
-        embedding_scale,
-        std::nullopt
-    );
-    const auto last = run_gemma2_metal_resident_prefill(
-        incremental_plan,
-        std::span<const std::uint32_t>(prompt_token_ids).last(7),
-        16,
-        embedding_scale,
-        TokenSelectionRequest {}
-    );
+    const auto run_case = [&](std::uint32_t initial_token_count, std::string_view label) {
+        constexpr auto wrapped_token_count = std::uint32_t {5U};
+        auto candidate = create_gemma2_metal_model_plan(model);
+        auto scalar = create_gemma2_metal_model_plan(model);
+        const auto embedding_scale = std::sqrt(
+            static_cast<float>(candidate.config().embedding_length)
+        );
+        for (auto* plan : {&candidate, &scalar}) {
+            for (const auto& cache : plan->kv_cache()) {
+                fill_shared_metal_buffer_u32(cache.key, cache_pattern);
+                fill_shared_metal_buffer_u32(cache.value, cache_pattern);
+            }
+        }
+        const auto* stage_key_identity =
+            &backend_buffer_storage(candidate.prefill_scratch().current_chunk_key);
+        const auto* stage_value_identity =
+            &backend_buffer_storage(candidate.prefill_scratch().current_chunk_value);
+        fill_shared_metal_buffer_u32(candidate.prefill_scratch().current_chunk_key, stage_pattern);
+        fill_shared_metal_buffer_u32(candidate.prefill_scratch().current_chunk_value, stage_pattern);
 
-    expect(chunked.execution.chunk_count == 3U, "resident prefill ring-boundary chunk count mismatch");
-    expect(chunked.execution.command_buffer_count == 3U, "resident prefill command-buffer count mismatch");
-    expect(chunked.execution.commit_count == 3U, "resident prefill commit count mismatch");
-    expect(chunked.execution.synchronous_wait_count == 1U, "resident prefill wait count mismatch");
-    expect(
-        chunked.execution.transient_buffer_allocation_count == 0U,
-        "resident prefill transient allocation count mismatch"
-    );
-    expect(
-        chunked.execution.scheduled_layer_execution_count == 6U,
-        "resident prefill scheduled layer execution count mismatch"
-    );
-    expect(chunked.execution.kv_write_count == 6U, "resident prefill KV write count mismatch");
-    expect(chunked.execution.blit_encoder_count == 0U, "resident prefill must not use KV blits");
-    expect(chunked.execution.f16_projection_count > 0U, "prefill F16 projection family missing");
-    expect(chunked.execution.decode_attention_dispatch_count == 0U,
-        "prefill should not count decode-attention families");
-    expect(first.execution.chunk_count == 2U, "prefill must split at the 8-row ring boundary");
-    expect(first.execution.synchronous_wait_count == 1U, "exact-size resident prefill wait mismatch");
-    expect(chunked.candidates.has_value(), "resident prefill candidates missing");
-    expect(last.candidates.has_value(), "incremental resident prefill candidates missing");
+        const auto prefix = std::span<const std::uint32_t>(tokens).first(initial_token_count);
+        const auto candidate_prefix = run_gemma2_metal_resident_prefill(
+            candidate, prefix, 0U, embedding_scale
+        );
+        (void)run_gemma2_metal_resident_prefill(scalar, prefix, 0U, embedding_scale);
+        expect(candidate_prefix.execution.chunk_count == 1U
+                && candidate_prefix.execution.command_buffer_count == 1U
+                && candidate_prefix.execution.synchronous_wait_count == 1U
+                && candidate_prefix.execution.staged_kv_copy_dispatch_count == 0U
+                && candidate_prefix.execution.staged_kv_copy_logical_bytes == 0U,
+            std::string(label) + " pre-window path topology changed");
+        expect_u32_pattern(candidate.prefill_scratch().current_chunk_key, stage_pattern,
+            std::string(label) + " pre-window key stage");
+        expect_u32_pattern(candidate.prefill_scratch().current_chunk_value, stage_pattern,
+            std::string(label) + " pre-window value stage");
 
-    const auto chunked_logits = copy_tensor_from_backend(chunked.logits);
-    const auto incremental_logits = copy_tensor_from_backend(last.logits);
-    expect_f32_matrix_close(
-        chunked_logits,
-        incremental_logits,
-        1.0e-5F,
-        "resident prefill chunked logits parity"
-    );
-    expect(
-        chunked.candidates->values[0].token == last.candidates->values[0].token,
-        "resident prefill chunked selected token mismatch"
-    );
-    expect_close(
-        chunked.candidates->values[0].logit,
-        last.candidates->values[0].logit,
-        1.0e-5F,
-        "resident prefill chunked selected logit mismatch"
-    );
+        const auto wrapped = std::span<const std::uint32_t>(tokens)
+            .subspan(initial_token_count, wrapped_token_count);
+        const auto candidate_result = run_gemma2_metal_resident_prefill(
+            candidate, wrapped, initial_token_count, embedding_scale
+        );
+        const auto candidate_rows = copy_tensor_from_backend(
+            candidate.prefill_scratch().feed_forward_residual
+        );
+        std::vector<std::vector<float>> scalar_rows;
+        scalar_rows.reserve(wrapped_token_count);
+        auto scalar_logits = std::optional<TensorStorage> {};
+        for (std::uint32_t row = 0U; row < wrapped_token_count; ++row) {
+            const auto result = run_gemma2_metal_resident_decode_step(
+                scalar,
+                create_gemma2_metal_decode_schedule(scalar, initial_token_count + row),
+                wrapped[row],
+                embedding_scale
+            );
+            scalar_rows.push_back(read_backend_f32_row(
+                scalar.decode_scratch().feed_forward_residual, 0U
+            ));
+            scalar_logits = copy_tensor_from_backend(result.logits);
+        }
 
-    for (std::size_t layer = 0; layer < chunked_plan.kv_cache().size(); ++layer) {
-        const auto chunked_key = copy_tensor_from_backend(chunked_plan.kv_cache()[layer].key);
-        const auto incremental_key = copy_tensor_from_backend(incremental_plan.kv_cache()[layer].key);
-        const auto chunked_value = copy_tensor_from_backend(chunked_plan.kv_cache()[layer].value);
-        const auto incremental_value = copy_tensor_from_backend(incremental_plan.kv_cache()[layer].value);
-        expect(
-            std::equal(chunked_key.bytes().begin(), chunked_key.bytes().end(), incremental_key.bytes().begin()),
-            "resident prefill chunked key-cache parity mismatch"
-        );
-        expect(
-            std::equal(
-                chunked_value.bytes().begin(),
-                chunked_value.bytes().end(),
-                incremental_value.bytes().begin()
-            ),
-            "resident prefill chunked value-cache parity mismatch"
-        );
-    }
+        expect(candidate_result.execution.chunk_count == 1U
+                && candidate_result.execution.command_buffer_count == 1U
+                && candidate_result.execution.commit_count == 1U
+                && candidate_result.execution.synchronous_wait_count == 1U
+                && candidate_result.execution.compute_encoder_count == 1U,
+            std::string(label) + " wrapped prefill must use one submit and wait");
+        expect(candidate_result.execution.scheduled_layer_execution_count == 2U
+                && candidate_result.execution.kv_write_count == 2U
+                && candidate_result.execution.staged_kv_copy_dispatch_count == 1U,
+            std::string(label) + " wrapped prefill layer/copy accounting mismatch");
+        const auto expected_copy_bytes = static_cast<std::uint64_t>(wrapped_token_count)
+            * candidate.config().attention_head_count_kv
+            * (candidate.config().attention_key_length
+                + candidate.config().attention_value_length)
+            * sizeof(std::uint16_t) * 2U;
+        expect(candidate_result.execution.staged_kv_copy_logical_bytes == expected_copy_bytes
+                && candidate_result.execution.compute_dispatch_count
+                    == candidate_prefix.execution.compute_dispatch_count + 1U
+                && candidate_result.execution.blit_encoder_count == 0U
+                && candidate_result.execution.transient_buffer_allocation_count == 0U,
+            std::string(label) + " wrapped prefill dispatch/byte accounting mismatch");
+        expect(&backend_buffer_storage(candidate.prefill_scratch().current_chunk_key)
+                    == stage_key_identity
+                && &backend_buffer_storage(candidate.prefill_scratch().current_chunk_value)
+                    == stage_value_identity,
+            std::string(label) + " wrapped prefill replaced its resident stage");
 
-    try {
-        (void)run_gemma2_metal_resident_prefill(
-            chunked_plan,
-            std::span<const std::uint32_t>(),
-            0,
-            embedding_scale
-        );
-        throw TestFailure("resident prefill should reject an empty token span");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "Gemma2 resident Metal prefill token ids must not be empty",
-            "resident prefill empty-token error mismatch"
-        );
-    }
-    const std::array<std::uint32_t, 2> overflow_tokens {0, 1};
-    try {
-        (void)run_gemma2_metal_resident_prefill(
-            chunked_plan,
-            std::span<const std::uint32_t>(overflow_tokens),
-            31,
-            embedding_scale
-        );
-        throw TestFailure("resident prefill should reject a context overflow");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "Gemma2 resident Metal prefill range exceeds context length",
-            "resident prefill context-overflow error mismatch"
-        );
-    }
-    const std::array<std::uint32_t, 1> invalid_token {4};
-    try {
-        (void)run_gemma2_metal_resident_prefill(
-            chunked_plan,
-            std::span<const std::uint32_t>(invalid_token),
-            0,
-            embedding_scale
-        );
-        throw TestFailure("resident prefill should reject a token outside vocabulary");
-    } catch (const std::invalid_argument& error) {
-        expect(
-            std::string_view(error.what()) == "Gemma2 resident Metal prefill token is outside vocabulary",
-            "resident prefill vocabulary error mismatch"
-        );
-    }
+        for (std::uint32_t row = 0U; row < wrapped_token_count; ++row) {
+            std::vector<float> candidate_row(candidate.config().embedding_length);
+            for (std::uint32_t column = 0U;
+                 column < candidate.config().embedding_length; ++column) {
+                candidate_row[column] = read_f32(
+                    candidate_rows,
+                    std::array<std::uint64_t, 2> {row, column}
+                );
+            }
+            expect_f32_rows_close(candidate_row, scalar_rows[row], 3.0e-2F,
+                std::string(label) + " wrapped query row");
+        }
+        expect_f32_matrix_close(copy_tensor_from_backend(candidate_result.logits),
+            *scalar_logits, 3.0e-2F, std::string(label) + " final logits");
+        for (std::size_t layer = 0U; layer < candidate.kv_cache().size(); ++layer) {
+            expect_f16_storage_close_absolute_relative(
+                copy_tensor_from_backend(candidate.kv_cache()[layer].key),
+                copy_tensor_from_backend(scalar.kv_cache()[layer].key),
+                3.0e-2F, 2.0e-3F, std::string(label) + " key-cache parity"
+            );
+            expect_f16_storage_close_absolute_relative(
+                copy_tensor_from_backend(candidate.kv_cache()[layer].value),
+                copy_tensor_from_backend(scalar.kv_cache()[layer].value),
+                3.0e-2F, 2.0e-3F, std::string(label) + " value-cache parity"
+            );
+        }
+    };
+
+    run_case(6U, "first-wrap crossing");
+    run_case(8U, "start-after-wrap");
 }
 
 void test_gemma2_metal_plan_generation_append_matches_full_replay_when_available() {
@@ -2349,8 +2437,8 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available,
     },
     {
-        "Gemma2 Metal resident prefill splits ring boundaries and matches incremental when available",
-        test_gemma2_metal_resident_prefill_splits_ring_boundaries_and_matches_incremental_when_available,
+        "Gemma2 Metal resident prefill stages wrapped sliding chunks when available",
+        test_gemma2_metal_resident_prefill_stages_wrapped_sliding_chunks_when_available,
     },
     {
         "Gemma2 Metal plan generation append matches full replay when available",

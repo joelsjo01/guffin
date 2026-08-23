@@ -131,6 +131,9 @@ struct Gemma2MetalVerifierScratch {
 };
 
 inline constexpr std::uint32_t gemma2_metal_prefill_chunk_size = 128U;
+static_assert(
+    (gemma2_metal_prefill_chunk_size & (gemma2_metal_prefill_chunk_size - 1U)) == 0U
+);
 
 struct Gemma2MetalPrefillScratch {
     // Token IDs are staged by absolute cache position so consecutive command
@@ -143,6 +146,12 @@ struct Gemma2MetalPrefillScratch {
     tensor::BackendBuffer raw_key;
     tensor::BackendBuffer query;
     tensor::BackendBuffer value;
+    // Once a sliding ring wraps, publishing a multi-row chunk before its
+    // early queries run would overwrite old K/V that those queries still
+    // need. These F16 buffers retain the current chunk until attention has
+    // consumed the old ring, then one device copy publishes the live rows.
+    tensor::BackendBuffer current_chunk_key;
+    tensor::BackendBuffer current_chunk_value;
     tensor::BackendBuffer attention_scores;
     tensor::BackendBuffer attention_probabilities;
     tensor::BackendBuffer attention_output;

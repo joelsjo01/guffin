@@ -862,18 +862,15 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
     );
     std::size_t token_offset = 0;
     std::uint32_t selector_dispatch_count = 0;
+    auto staged_kv_copy_dispatch_count = std::uint32_t {0U};
+    auto staged_kv_copy_logical_bytes = std::uint64_t {0U};
     while (token_offset < prompt_token_ids.size()) {
         const auto chunk_cache_position =
             cache_position + static_cast<std::uint32_t>(token_offset);
-        // A submitted chunk may not wrap the exact sliding ring: later writes
-        // would otherwise overwrite old rows still needed by its early queries.
-        const auto rows_until_ring_boundary =
-            config.sliding_window - (chunk_cache_position & (config.sliding_window - 1U));
-        const auto chunk_token_count = static_cast<std::uint32_t>(std::min<std::size_t>({
+        const auto chunk_token_count = static_cast<std::uint32_t>(std::min<std::size_t>(
             gemma2_metal_prefill_chunk_size,
-            prompt_token_ids.size() - token_offset,
-            rows_until_ring_boundary,
-        }));
+            prompt_token_ids.size() - token_offset
+        ));
         const auto chunk_tokens = prompt_token_ids.subspan(token_offset, chunk_token_count);
         const auto schedule = create_gemma2_metal_prefill_schedule(
             plan,
@@ -899,6 +896,8 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
             const auto& attention = block.attention;
             const auto& feed_forward = block.feed_forward;
             const auto& cache = plan.kv_cache()[scheduled_layer.layer_index];
+            const auto wraps_sliding_ring = scheduled_layer.uses_sliding_window
+                && chunk_cache_position + chunk_token_count > config.sliding_window;
 
             command.encode_rms_norm(
                 scratch.feed_forward_residual,
@@ -935,51 +934,122 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
                 gemma2_rope_frequency_base,
                 chunk_token_count
             );
-            command.encode_gemma2_kv_cache_store(
-                scratch.raw_key,
-                scratch.value,
-                cache.key,
-                cache.value,
-                chunk_cache_position,
-                config.attention_head_count_kv,
-                head_dimension,
-                head_dimension,
-                gemma2_rope_frequency_base,
-                cache.row_mask,
-                chunk_token_count
-            );
-            command.encode_attention_scores(
-                scratch.query,
-                cache.key,
-                scratch.attention_scores,
-                chunk_cache_position,
-                config.attention_head_count,
-                config.attention_head_count_kv,
-                head_dimension,
-                scheduled_layer.attention_token_count,
-                attention_scale,
-                config.attention_logit_softcap,
-                cache.row_mask,
-                chunk_token_count
-            );
+            if (wraps_sliding_ring) {
+                command.encode_gemma2_kv_cache_store(
+                    scratch.raw_key,
+                    scratch.value,
+                    scratch.current_chunk_key,
+                    scratch.current_chunk_value,
+                    chunk_cache_position,
+                    config.attention_head_count_kv,
+                    head_dimension,
+                    head_dimension,
+                    gemma2_rope_frequency_base,
+                    gemma2_metal_prefill_chunk_size - 1U,
+                    chunk_token_count
+                );
+                command.encode_wrapped_prefill_attention_scores(
+                    scratch.query,
+                    cache.key,
+                    scratch.current_chunk_key,
+                    scratch.attention_scores,
+                    chunk_cache_position,
+                    config.attention_head_count,
+                    config.attention_head_count_kv,
+                    head_dimension,
+                    scheduled_layer.attention_token_count,
+                    attention_scale,
+                    config.attention_logit_softcap,
+                    cache.row_mask,
+                    chunk_token_count
+                );
+            } else {
+                command.encode_gemma2_kv_cache_store(
+                    scratch.raw_key,
+                    scratch.value,
+                    cache.key,
+                    cache.value,
+                    chunk_cache_position,
+                    config.attention_head_count_kv,
+                    head_dimension,
+                    head_dimension,
+                    gemma2_rope_frequency_base,
+                    cache.row_mask,
+                    chunk_token_count
+                );
+                command.encode_attention_scores(
+                    scratch.query,
+                    cache.key,
+                    scratch.attention_scores,
+                    chunk_cache_position,
+                    config.attention_head_count,
+                    config.attention_head_count_kv,
+                    head_dimension,
+                    scheduled_layer.attention_token_count,
+                    attention_scale,
+                    config.attention_logit_softcap,
+                    cache.row_mask,
+                    chunk_token_count
+                );
+            }
             command.encode_softmax(
                 scratch.attention_scores,
                 scratch.attention_probabilities,
                 chunk_token_count * config.attention_head_count,
                 scheduled_layer.attention_token_count
             );
-            command.encode_attention_values(
-                scratch.attention_probabilities,
-                cache.value,
-                scratch.attention_output,
-                chunk_cache_position,
-                config.attention_head_count,
-                config.attention_head_count_kv,
-                config.attention_value_length,
-                scheduled_layer.attention_token_count,
-                cache.row_mask,
-                chunk_token_count
-            );
+            if (wraps_sliding_ring) {
+                command.encode_wrapped_prefill_attention_values(
+                    scratch.attention_probabilities,
+                    cache.value,
+                    scratch.current_chunk_value,
+                    scratch.attention_output,
+                    chunk_cache_position,
+                    config.attention_head_count,
+                    config.attention_head_count_kv,
+                    config.attention_value_length,
+                    scheduled_layer.attention_token_count,
+                    cache.row_mask,
+                    chunk_token_count
+                );
+                // Tiny test rings may be narrower than a prefill chunk. Only
+                // its final live window can be copied without duplicate
+                // physical destinations in one dispatch.
+                const auto copy_token_count = std::min(
+                    chunk_token_count, cache.row_capacity
+                );
+                const auto copy_position_start = chunk_cache_position
+                    + chunk_token_count - copy_token_count;
+                command.encode_gemma2_kv_cache_copy(
+                    scratch.current_chunk_key,
+                    scratch.current_chunk_value,
+                    cache.key,
+                    cache.value,
+                    copy_position_start,
+                    copy_token_count,
+                    gemma2_metal_prefill_chunk_size - 1U,
+                    cache.row_mask
+                );
+                ++staged_kv_copy_dispatch_count;
+                staged_kv_copy_logical_bytes +=
+                    static_cast<std::uint64_t>(copy_token_count)
+                    * config.attention_head_count_kv
+                    * (config.attention_key_length + config.attention_value_length)
+                    * sizeof(std::uint16_t) * 2U;
+            } else {
+                command.encode_attention_values(
+                    scratch.attention_probabilities,
+                    cache.value,
+                    scratch.attention_output,
+                    chunk_cache_position,
+                    config.attention_head_count,
+                    config.attention_head_count_kv,
+                    config.attention_value_length,
+                    scheduled_layer.attention_token_count,
+                    cache.row_mask,
+                    chunk_token_count
+                );
+            }
             command.encode_matmul(
                 scratch.attention_output,
                 attention.output_weight,
@@ -1082,6 +1152,8 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
         .scheduled_layer_execution_count =
             static_cast<std::uint32_t>(plan.layers().size()) * chunk_count,
         .kv_write_count = static_cast<std::uint32_t>(plan.layers().size()) * chunk_count,
+        .staged_kv_copy_dispatch_count = staged_kv_copy_dispatch_count,
+        .staged_kv_copy_logical_bytes = staged_kv_copy_logical_bytes,
     };
     for (const auto& command : commands) {
         const auto stats = command.completion_stats();

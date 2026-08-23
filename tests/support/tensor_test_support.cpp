@@ -33,7 +33,8 @@ using local_gguf_engine::tensor::write_f16_from_f32;
 using local_gguf_engine::tensor::write_f32;
 
 void expect_close(float actual, float expected, float tolerance, std::string_view message) {
-    if (std::fabs(actual - expected) > tolerance) {
+    if (!std::isfinite(actual) || !std::isfinite(expected)
+        || std::fabs(actual - expected) > tolerance) {
         std::ostringstream stream;
         stream << std::setprecision(9) << message << ": expected " << expected << ", got " << actual;
         throw TestFailure(stream.str());

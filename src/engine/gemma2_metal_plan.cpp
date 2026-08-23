@@ -422,6 +422,12 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
         .raw_key = allocate_buffer(f32_descriptor({tokens, attention_key_width(config)}), allocated_byte_count),
         .query = allocate_buffer(f32_descriptor({tokens, attention_query_width(config)}), allocated_byte_count),
         .value = allocate_buffer(f32_descriptor({tokens, attention_value_width(config)}), allocated_byte_count),
+        .current_chunk_key = allocate_buffer(f16_descriptor({
+            tokens, config.attention_head_count_kv, config.attention_key_length,
+        }), allocated_byte_count),
+        .current_chunk_value = allocate_buffer(f16_descriptor({
+            tokens, config.attention_head_count_kv, config.attention_value_length,
+        }), allocated_byte_count),
         .attention_scores = attention_score_workspace,
         .attention_probabilities = attention_score_workspace,
         .attention_output = allocate_buffer(

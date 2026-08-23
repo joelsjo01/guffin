@@ -53,6 +53,8 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> causal_grouped_attention_values_pipeline = nil;
     id<MTLComputePipelineState> gemma2_prefill_attention_scores_pipeline = nil;
     id<MTLComputePipelineState> gemma2_prefill_attention_values_pipeline = nil;
+    id<MTLComputePipelineState> gemma2_wrapped_prefill_attention_scores_pipeline = nil;
+    id<MTLComputePipelineState> gemma2_wrapped_prefill_attention_values_pipeline = nil;
     id<MTLComputePipelineState> gemma2_decode_attention_pipeline = nil;
     id<MTLComputePipelineState> gemma2_decode_attention_reduce_pipeline = nil;
     id<MTLComputePipelineState> softmax_pipeline = nil;

@@ -19,6 +19,8 @@
 #include "local_gguf_engine/tensor/tensor.hpp"
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
+#include "../../src/tensor/backends/metal/metal_command_context.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -79,6 +81,8 @@ using local_gguf_engine::tensor::ops::softmax_f32;
 using local_gguf_engine::tensor::ops::softmax_f32_to_backend;
 using local_gguf_engine::tensor::ops::top_logit_f32;
 using local_gguf_engine::tensor::requantize_q6_k_gguf_weight_q4_k;
+using local_gguf_engine::tensor::backends::metal::fill_shared_metal_buffer_u32;
+using local_gguf_engine::tensor::backends::metal::MetalCommandContext;
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::expect_close;
 using local_gguf_engine::tests::reference_f32_quantized_gguf_weight_matmul;
@@ -1046,6 +1050,55 @@ void test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_
     }
 }
 
+void test_exact_16_k_quant_projection_overwrites_poison_at_real_tiny_widths_on_metal() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+
+    constexpr auto rows = std::uint64_t {16U};
+    constexpr auto shared = std::uint64_t {256U};
+    constexpr auto poison = std::uint32_t {0x7fc00000U};
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        for (const auto columns : {std::uint64_t {256U}, std::uint64_t {512U}}) {
+            auto left_values = tensor_f32_projection_values(rows, shared);
+            for (std::size_t index = 0U; index < left_values.size(); ++index) {
+                left_values[index] += static_cast<float>(index % 7U) * 0.00390625F;
+            }
+            const auto left = tensor_f32_matrix(rows, shared, left_values);
+            const auto right = dtype == DType::q4_k
+                ? tensor_q4_k_stress_gguf_weight_matrix(shared, columns, columns)
+                : tensor_q6_k_stress_gguf_weight_matrix(shared, columns, columns);
+            const auto expected = reference_f16_staged_quantized_gguf_weight_matmul(
+                left, right
+            );
+            const auto left_buffer = copy_tensor_to_backend(left, BackendKind::metal);
+            const auto right_buffer = copy_tensor_to_backend(right, BackendKind::metal);
+            const auto output = allocate_backend_buffer(
+                TensorDescriptor::from(Shape::from({rows, columns}), DType::f32),
+                BackendKind::metal
+            );
+            fill_shared_metal_buffer_u32(output, poison);
+
+            MetalCommandContext command("exact-16 K-quant poison overwrite parity");
+            command.encode_matmul(left_buffer, right_buffer, output, 16U);
+            const auto stats = command.commit_and_wait();
+            expect(
+                (dtype == DType::q4_k ? stats.q4_exact_16_projection_count
+                                      : stats.q6_exact_16_projection_count) == 1U,
+                "Metal exact-16 K-quant parity did not select the specialization"
+            );
+            const auto actual = copy_tensor_from_backend(output);
+            const auto absolute_tolerance = dtype == DType::q4_k ? 2.0F : 0.01F;
+            const auto relative_tolerance = dtype == DType::q4_k ? 2.0e-2F : 1.0e-5F;
+            expect_f32_matrix_close_absolute_relative(
+                actual,
+                expected,
+                absolute_tolerance,
+                relative_tolerance,
+                "Metal exact-16 K-quant poison-overwrite parity"
+            );
+        }
+    }
+}
+
 void test_matches_cpu_k_quant_decode_simd_boundaries_on_metal() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -1991,6 +2044,10 @@ const TestCase tensor_backend_tests[] {
     {
         "matches independent Q4_K and Q6_K small-batch and tiled projection on Metal",
         test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_metal,
+    },
+    {
+        "exact-16 K-quant projection overwrites poison at real tiny widths on Metal",
+        test_exact_16_k_quant_projection_overwrites_poison_at_real_tiny_widths_on_metal,
     },
     {
         "matches converted Q6_K weight on Q4_K Metal paths",

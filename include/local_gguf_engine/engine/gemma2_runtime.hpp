@@ -147,6 +147,10 @@ struct Gemma2MetalPrefillExecutionStats {
     std::uint32_t transient_buffer_allocation_count = 0;
     std::uint32_t scheduled_layer_execution_count = 0;
     std::uint32_t kv_write_count = 0;
+    // Wrapped sliding layers add one device copy after attention. Logical
+    // bytes count both the F16 stage read and resident-ring write.
+    std::uint32_t staged_kv_copy_dispatch_count = 0;
+    std::uint64_t staged_kv_copy_logical_bytes = 0;
     std::uint32_t selector_dispatch_count = 0;
     std::uint32_t compact_readback_bytes = 0;
     std::uint32_t candidate_count = 0;

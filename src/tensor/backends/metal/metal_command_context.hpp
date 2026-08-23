@@ -143,6 +143,21 @@ public:
         std::uint32_t cache_row_mask,
         std::uint32_t query_row_count = 0
     );
+    void encode_wrapped_prefill_attention_scores(
+        const BackendBuffer& query,
+        const BackendBuffer& key_cache,
+        const BackendBuffer& current_chunk_key,
+        const BackendBuffer& output,
+        std::uint32_t query_position_start,
+        std::uint32_t head_count,
+        std::uint32_t kv_head_count,
+        std::uint32_t key_length,
+        std::uint32_t attention_token_count,
+        float scale,
+        float logit_softcap,
+        std::uint32_t cache_row_mask,
+        std::uint32_t query_row_count = 0
+    );
     void encode_softmax(
         const BackendBuffer& input,
         const BackendBuffer& output,
@@ -152,6 +167,19 @@ public:
     void encode_attention_values(
         const BackendBuffer& probabilities,
         const BackendBuffer& value_cache,
+        const BackendBuffer& output,
+        std::uint32_t query_position_start,
+        std::uint32_t head_count,
+        std::uint32_t kv_head_count,
+        std::uint32_t value_length,
+        std::uint32_t attention_token_count,
+        std::uint32_t cache_row_mask,
+        std::uint32_t query_row_count = 0
+    );
+    void encode_wrapped_prefill_attention_values(
+        const BackendBuffer& probabilities,
+        const BackendBuffer& value_cache,
+        const BackendBuffer& current_chunk_value,
         const BackendBuffer& output,
         std::uint32_t query_position_start,
         std::uint32_t head_count,
@@ -231,5 +259,12 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// Deterministically initializes shared Metal storage before a diagnostic
+// command. It is intentionally outside command-buffer accounting.
+void fill_shared_metal_buffer_u32(
+    const BackendBuffer& buffer,
+    std::uint32_t pattern
+);
 
 }  // namespace local_gguf_engine::tensor::backends::metal

@@ -9,6 +9,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <cmath>
 #include <array>
 #include <cstddef>
@@ -140,6 +141,19 @@ struct GroupedAttentionScoreDimensions {
     float logit_softcap;
 };
 
+struct Gemma2WrappedPrefillAttentionScoreDimensions {
+    std::uint32_t query_rows;
+    std::uint32_t head_count;
+    std::uint32_t kv_head_count;
+    std::uint32_t key_length;
+    std::uint32_t attention_token_count;
+    std::uint32_t query_position_start;
+    std::uint32_t cache_row_mask;
+    std::uint32_t current_chunk_row_mask;
+    float scale;
+    float logit_softcap;
+};
+
 struct GroupedAttentionValueDimensions {
     std::uint32_t query_rows;
     std::uint32_t value_rows;
@@ -150,6 +164,20 @@ struct GroupedAttentionValueDimensions {
     std::uint32_t query_position_start;
     std::uint32_t cache_row_mask;
 };
+
+struct Gemma2WrappedPrefillAttentionValueDimensions {
+    std::uint32_t query_rows;
+    std::uint32_t head_count;
+    std::uint32_t kv_head_count;
+    std::uint32_t value_length;
+    std::uint32_t attention_token_count;
+    std::uint32_t query_position_start;
+    std::uint32_t cache_row_mask;
+    std::uint32_t current_chunk_row_mask;
+};
+
+static_assert(sizeof(Gemma2WrappedPrefillAttentionScoreDimensions) == 40U);
+static_assert(sizeof(Gemma2WrappedPrefillAttentionValueDimensions) == 32U);
 
 struct Gemma2DecodeAttentionDimensions {
     std::uint32_t cache_row_mask;
@@ -302,6 +330,27 @@ struct MetalCommandContext::Impl {
         if (owns_trace_capture) finish_trace_capture(false);
     }
 };
+
+void fill_shared_metal_buffer_u32(
+    const BackendBuffer& buffer,
+    std::uint32_t pattern
+) {
+    const auto byte_count = buffer.descriptor().byte_count;
+    if (byte_count % sizeof(std::uint32_t) != 0U
+        || byte_count / sizeof(std::uint32_t) > std::numeric_limits<std::size_t>::max()) {
+        throw std::invalid_argument(
+            "Metal diagnostic buffer must contain a whole size_t-addressable u32 range"
+        );
+    }
+    auto* words = static_cast<std::uint32_t*>(
+        metal_buffer_contents(storage(buffer))
+    );
+    std::fill_n(
+        words,
+        static_cast<std::size_t>(byte_count / sizeof(std::uint32_t)),
+        pattern
+    );
+}
 
 MetalCommandContext::MetalCommandContext(std::string_view label, bool concurrent_compute)
     : impl_(std::make_unique<Impl>()) {
@@ -741,6 +790,80 @@ void MetalCommandContext::encode_attention_scores(
     ++impl_->stats.compute_dispatch_count;
 }
 
+void MetalCommandContext::encode_wrapped_prefill_attention_scores(
+    const BackendBuffer& query,
+    const BackendBuffer& key_cache,
+    const BackendBuffer& current_chunk_key,
+    const BackendBuffer& output,
+    std::uint32_t query_position_start,
+    std::uint32_t head_count,
+    std::uint32_t kv_head_count,
+    std::uint32_t key_length,
+    std::uint32_t attention_token_count,
+    float scale,
+    float logit_softcap,
+    std::uint32_t cache_row_mask,
+    std::uint32_t query_row_count
+) {
+    const auto query_rows = query_row_count == 0U
+        ? query.descriptor().shape.dimension(0) : query_row_count;
+    const auto& cache = key_cache.descriptor();
+    const auto& current = current_chunk_key.descriptor();
+    if (cache.dtype != DType::f16 || current.dtype != DType::f16
+        || cache.shape.rank() != 3U || current.shape.rank() != 3U
+        || cache.shape.dimension(0) != static_cast<std::uint64_t>(cache_row_mask) + 1U
+        || current.shape.dimension(0) != engine::gemma2_metal_prefill_chunk_size
+        || current.shape.dimension(1) != kv_head_count
+        || current.shape.dimension(2) != key_length
+        || cache.shape.dimension(1) != current.shape.dimension(1)
+        || cache.shape.dimension(2) != current.shape.dimension(2)
+        || query_rows == 0U || query_rows > current.shape.dimension(0)
+        || kv_head_count == 0U || head_count == 0U || head_count % kv_head_count != 0U
+        || attention_token_count == 0U) {
+        throw std::invalid_argument(
+            "Metal Gemma 2 wrapped-prefill attention key layout is invalid"
+        );
+    }
+    (void)storage(key_cache);
+    (void)storage(current_chunk_key);
+    require_capacity(
+        query,
+        query_rows * head_count * key_length * sizeof(float),
+        "wrapped-prefill attention query"
+    );
+    require_capacity(
+        output,
+        query_rows * head_count * attention_token_count * sizeof(float),
+        "wrapped-prefill attention score output"
+    );
+    const Gemma2WrappedPrefillAttentionScoreDimensions dims {
+        .query_rows = u32(query_rows, "wrapped-prefill attention query rows"),
+        .head_count = head_count,
+        .kv_head_count = kv_head_count,
+        .key_length = key_length,
+        .attention_token_count = attention_token_count,
+        .query_position_start = query_position_start,
+        .cache_row_mask = cache_row_mask,
+        .current_chunk_row_mask = engine::gemma2_metal_prefill_chunk_size - 1U,
+        .scale = scale,
+        .logit_softcap = logit_softcap,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 wrapped prefill attention scores");
+    [encoder setComputePipelineState:impl_->state->gemma2_wrapped_prefill_attention_scores_pipeline];
+    bind_buffer(encoder, query, 0);
+    bind_buffer(encoder, key_cache, 1);
+    bind_buffer(encoder, current_chunk_key, 2);
+    bind_buffer(encoder, output, 3);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(
+                                      static_cast<NSUInteger>((attention_token_count + 7U) / 8U),
+                                      static_cast<NSUInteger>((head_count + 7U) / 8U),
+                                      static_cast<NSUInteger>((query_rows + 1U) / 2U)
+                                  )
+              threadsPerThreadgroup:MTLSizeMake(8, 8, 2)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
 void MetalCommandContext::encode_softmax(
     const BackendBuffer& input,
     const BackendBuffer& output,
@@ -803,6 +926,76 @@ void MetalCommandContext::encode_attention_values(
     bind_buffer(encoder, value_cache, 1);
     bind_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake(
+                                      static_cast<NSUInteger>((value_length + 7U) / 8U),
+                                      static_cast<NSUInteger>((head_count + 7U) / 8U),
+                                      static_cast<NSUInteger>((query_rows + 1U) / 2U)
+                                  )
+              threadsPerThreadgroup:MTLSizeMake(8, 8, 2)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_wrapped_prefill_attention_values(
+    const BackendBuffer& probabilities,
+    const BackendBuffer& value_cache,
+    const BackendBuffer& current_chunk_value,
+    const BackendBuffer& output,
+    std::uint32_t query_position_start,
+    std::uint32_t head_count,
+    std::uint32_t kv_head_count,
+    std::uint32_t value_length,
+    std::uint32_t attention_token_count,
+    std::uint32_t cache_row_mask,
+    std::uint32_t query_row_count
+) {
+    const auto query_rows = query_row_count == 0U
+        ? probabilities.descriptor().shape.dimension(0) : query_row_count;
+    const auto& cache = value_cache.descriptor();
+    const auto& current = current_chunk_value.descriptor();
+    if (cache.dtype != DType::f16 || current.dtype != DType::f16
+        || cache.shape.rank() != 3U || current.shape.rank() != 3U
+        || cache.shape.dimension(0) != static_cast<std::uint64_t>(cache_row_mask) + 1U
+        || current.shape.dimension(0) != engine::gemma2_metal_prefill_chunk_size
+        || current.shape.dimension(1) != kv_head_count
+        || current.shape.dimension(2) != value_length
+        || cache.shape.dimension(1) != current.shape.dimension(1)
+        || cache.shape.dimension(2) != current.shape.dimension(2)
+        || query_rows == 0U || query_rows > current.shape.dimension(0)
+        || kv_head_count == 0U || head_count == 0U || head_count % kv_head_count != 0U
+        || attention_token_count == 0U) {
+        throw std::invalid_argument(
+            "Metal Gemma 2 wrapped-prefill attention value layout is invalid"
+        );
+    }
+    (void)storage(value_cache);
+    (void)storage(current_chunk_value);
+    require_capacity(
+        probabilities,
+        query_rows * head_count * attention_token_count * sizeof(float),
+        "wrapped-prefill attention probabilities"
+    );
+    require_capacity(
+        output,
+        query_rows * head_count * value_length * sizeof(float),
+        "wrapped-prefill attention value output"
+    );
+    const Gemma2WrappedPrefillAttentionValueDimensions dims {
+        .query_rows = u32(query_rows, "wrapped-prefill attention query rows"),
+        .head_count = head_count,
+        .kv_head_count = kv_head_count,
+        .value_length = value_length,
+        .attention_token_count = attention_token_count,
+        .query_position_start = query_position_start,
+        .cache_row_mask = cache_row_mask,
+        .current_chunk_row_mask = engine::gemma2_metal_prefill_chunk_size - 1U,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 wrapped prefill attention values");
+    [encoder setComputePipelineState:impl_->state->gemma2_wrapped_prefill_attention_values_pipeline];
+    bind_buffer(encoder, probabilities, 0);
+    bind_buffer(encoder, value_cache, 1);
+    bind_buffer(encoder, current_chunk_value, 2);
+    bind_buffer(encoder, output, 3);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((value_length + 7U) / 8U),
                                       static_cast<NSUInteger>((head_count + 7U) / 8U),

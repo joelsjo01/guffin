@@ -14,6 +14,18 @@ runtime, define the smallest engine-owned proposer that fits the recovered
 memory, latency, and thermal budget, and define how target-aligned proposal data
 will be collected without adding work to ordinary production generation.
 
+Two independent correctness fixes discovered during later experimentation are
+retained on the Stage 4 line:
+
+- wrapped multi-row prefill now keeps current-chunk F16 K/V in a shared stage
+  while attention consumes the old sliding-ring rows, then publishes the live
+  window with one device copy; pre-window dispatch topology is unchanged;
+- shared numerical comparisons reject non-finite results, and an exact-16
+  Q4/Q6 Metal golden verifies that every output overwrites poisoned storage.
+
+These changes do not add a proposer, learned model, wider verifier, trace, or
+other speculative runtime surface.
+
 ## Retained Stage 4 implementation
 
 ### Session-local proposer

@@ -500,6 +500,14 @@ MatmulPipelineState::MatmulPipelineState() {
         @"causal_grouped_attention_values_f16_cache_kernel",
         "Gemma 2 F16-cache prefill attention values"
     );
+    gemma2_wrapped_prefill_attention_scores_pipeline = make_pipeline(
+        @"causal_grouped_attention_scores_f16_hybrid_kernel",
+        "Gemma 2 F16-cache wrapped prefill attention scores"
+    );
+    gemma2_wrapped_prefill_attention_values_pipeline = make_pipeline(
+        @"causal_grouped_attention_values_f16_hybrid_kernel",
+        "Gemma 2 F16-cache wrapped prefill attention values"
+    );
 
     id<MTLFunction> gemma2_decode_attention_function =
         [library newFunctionWithName:@"gemma2_decode_attention_f16_cache_kernel"];
