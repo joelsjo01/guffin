@@ -558,6 +558,26 @@ const char* gemma2_output_head_policy_name(Gemma2OutputHeadPolicy policy) noexce
     return "unknown";
 }
 
+Gemma2OutputHeadPolicy resolve_gemma2_output_head_policy(
+    const Gemma2ModelConfig& config,
+    const Gemma2ModelWeights& weights,
+    Gemma2OutputHeadPolicy requested_policy
+) {
+    switch (requested_policy) {
+        case Gemma2OutputHeadPolicy::f16:
+        case Gemma2OutputHeadPolicy::q8_0:
+            return requested_policy;
+        case Gemma2OutputHeadPolicy::automatic:
+            return is_retained_gemma2_9b_target(config, weights)
+                ? Gemma2OutputHeadPolicy::q8_0
+                : Gemma2OutputHeadPolicy::f16;
+    }
+
+    // Policy values cross CLI/configuration and evidence-artifact boundaries.
+    // Reject unknown identities instead of silently treating them as explicit.
+    throw std::invalid_argument("unknown Gemma2 output-head policy");
+}
+
 Gemma2MetalModelPlan::Gemma2MetalModelPlan(
     Gemma2ModelConfig config,
     Gemma2MetalModelWeightBuffers weights,
@@ -627,6 +647,10 @@ bool Gemma2MetalModelPlan::has_pending_verification() const noexcept {
     return has_pending_verification_;
 }
 
+bool Gemma2MetalModelPlan::pending_verification_completed() const noexcept {
+    return has_pending_verification_ && pending_verification_completed_;
+}
+
 std::uint32_t Gemma2MetalModelPlan::pending_verification_position() const {
     if (!has_pending_verification_) {
         throw std::logic_error("Gemma2 Metal plan has no pending verification");
@@ -643,12 +667,20 @@ void Gemma2MetalModelPlan::set_pending_verification(std::uint32_t cache_position
         throw std::logic_error("Gemma2 Metal plan already has a pending verification");
     }
     has_pending_verification_ = true;
+    pending_verification_completed_ = false;
     pending_verification_position_ = cache_position;
     provisionally_committed_token_count_ = 0U;
 }
 
+void Gemma2MetalModelPlan::mark_pending_verification_completed() {
+    if (!has_pending_verification_ || pending_verification_completed_) {
+        throw std::logic_error("Gemma2 Metal pending verification completion state is invalid");
+    }
+    pending_verification_completed_ = true;
+}
+
 void Gemma2MetalModelPlan::set_provisionally_committed_token_count(std::uint32_t token_count) {
-    if (!has_pending_verification_ || provisionally_committed_token_count_ != 0U
+    if (!pending_verification_completed() || provisionally_committed_token_count_ != 0U
         || token_count == 0U || token_count > 2U) {
         throw std::logic_error("Gemma2 Metal provisional verification state is invalid");
     }
@@ -656,7 +688,12 @@ void Gemma2MetalModelPlan::set_provisionally_committed_token_count(std::uint32_t
 }
 
 void Gemma2MetalModelPlan::clear_pending_verification() noexcept {
+    // A submitted verifier whose wait did not complete has uncertain K/V and
+    // backup contents. It is intentionally impossible to clear through the
+    // ordinary transaction API; destruction is the only safe recovery.
+    if (has_pending_verification_ && !pending_verification_completed_) return;
     has_pending_verification_ = false;
+    pending_verification_completed_ = false;
     pending_verification_position_ = 0U;
     provisionally_committed_token_count_ = 0U;
 }
@@ -759,11 +796,7 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     std::size_t scratch_byte_count = 0;
 
     const auto retained_target = is_retained_gemma2_9b_target(config, weights);
-    const auto resolved_policy = policy == Gemma2OutputHeadPolicy::automatic
-        ? (retained_target
-            ? Gemma2OutputHeadPolicy::q8_0
-            : Gemma2OutputHeadPolicy::f16)
-        : policy;
+    const auto resolved_policy = resolve_gemma2_output_head_policy(config, weights, policy);
     auto resident_weights = upload_model_weights(
         weights, uploaded_weight_byte_count, resolved_policy, retained_target
     );

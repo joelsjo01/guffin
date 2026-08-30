@@ -1,6 +1,6 @@
 CXX ?= c++
 MODE ?= debug
-ENGINE_BUILD := $(shell git rev-parse --short HEAD 2>/dev/null)$(shell test -z "$$(git status --porcelain 2>/dev/null)" || printf '%s' '-dirty')
+ENGINE_BUILD := $(shell git rev-parse HEAD 2>/dev/null)$(shell test -z "$$(git status --porcelain 2>/dev/null)" || printf '%s' '-dirty')
 
 BUILD_DIR := build/$(MODE)
 TEST_BINARY := $(BUILD_DIR)/local_gguf_engine_tests

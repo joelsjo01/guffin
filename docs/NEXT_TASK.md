@@ -8,13 +8,20 @@ The final thermally isolated candidate/baseline comparison improved aggregate
 generation time by 2.77%, won both turns, matched every selected-token hash and
 cache position, and did not regress TTFT or prompt throughput.
 
-The next baton is **Stage 5 proposer feasibility and data design**. Freeze the
-retained verifier/controller protocol. Before adding a learned or self-draft
-runtime, define the smallest engine-owned proposer that fits the recovered
-memory, latency, and thermal budget, and define how target-aligned proposal data
-will be collected without adding work to ordinary production generation.
+No Stage 5 or Stage 6 learned-speculation implementation is retained on this
+line. The complete experiments remain on their dedicated branches. None of the
+measured learned candidates cleared its predeclared representation and dynamic
+throughput gates, so `main` contains no learned drafter, trace format, trainer,
+wider controller, or experimental verifier.
 
-Two independent correctness fixes discovered during later experimentation are
+The next baton is **successor feasibility before another learned drafter**.
+Freeze the retained Stage 4 verifier/controller. First determine whether a
+dynamic small-vocabulary scorer and one true multi-token target invocation can
+jointly fit the measured acceptance and cost envelope. Do not collect another
+large corpus, train a recurrent cell, or add a production route before both
+diagnostic gates below pass.
+
+Independent correctness fixes discovered during later experimentation are
 retained on the Stage 4 line:
 
 - wrapped multi-row prefill now keeps current-chunk F16 K/V in a shared stage
@@ -22,6 +29,17 @@ retained on the Stage 4 line:
   window with one device copy; pre-window dispatch topology is unchanged;
 - shared numerical comparisons reject non-finite results, and an exact-16
   Q4/Q6 Metal golden verifies that every output overwrites poisoned storage.
+- the width-two verifier marks its K/V transaction pending before waiting for
+  submitted Metal work, rolls back both rows when completed candidate readback
+  fails, and otherwise leaves uncertain submitted work pending so later product
+  operations fail closed.
+
+Stage 5 also exposed that requested output-head policy `automatic` and its
+resolved production policy are different identities. The shared engine now
+owns explicit, validated policy resolution with stable enum values; experiment-
+specific fingerprints and artifact formats remain off `main`. On rebuild,
+build identity now embeds the complete Git object name rather than an ambiguous
+short prefix; the existing Make dependency behavior is otherwise unchanged.
 
 These changes do not add a proposer, learned model, wider verifier, trace, or
 other speculative runtime surface.
@@ -122,7 +140,7 @@ than the candidate.
 
 ## Final correctness evidence
 
-`bash scripts/ci.sh` passes with 21 Python tests and 327 C++/Metal tests.
+`bash scripts/ci.sh` passes with 21 Python tests and 330 C++/Metal tests.
 Deterministic coverage includes:
 
 - proposer longest-match, support, stable-tie, rebuild/incremental, bounds, and
@@ -193,33 +211,60 @@ verification. They belong in Stage 5 comparisons, not as unmeasured complexity
 inside the retained Stage 4 path. Approximate mismatch acceptance is excluded
 because exact seeded target output is an invariant.
 
-## Next baton: Stage 5 feasibility and target-aligned data
+The strongest untested successor is informed by
+[`ReDrafter`](https://arxiv.org/abs/2403.09919),
+[`DeepSpec/DSpark`](https://github.com/deepseek-ai/DeepSpec), and
+[`SpecVocab`](https://github.com/SamsungLabs/SpecVocab): keep semantic capacity
+in a small parallel or recurrent backbone, use rank 256 only for a Markov
+correction or vocabulary selector, score selected target-head rows accurately,
+and verify the complete proposed block in one target invocation. This exact
+combination has not been demonstrated for Gemma 2 9B Q4 on a base M4 Air.
 
-Do not modify the retained Stage 4 verifier/controller while comparing Stage 5
-proposers. The next slice is analytical and diagnostic-first:
+## Next baton: shortlist and verifier feasibility
 
-1. derive hard resident-memory and cycle-latency budgets from the current
-   7,534,041,088-byte weights, 2,113,929,216-byte K/V cache, 107,667,996-byte
-   scratch, peak RSS, and swap behavior;
-2. define comparable engine-owned candidates: a tiny recurrent/feature drafter,
-   a parallel masked-position drafter, and a lower-bit or heavily skipped
-   self-draft;
-3. define a bounded opt-in trace of target-aligned prefixes, proposals, target
-   tokens, acceptance, and workload class; ordinary production generation must
-   pay no trace overhead;
-4. score every candidate by committed tokens divided by complete cycle latency,
-   including proposal execution, verification, selection, rollback, memory,
-   startup, and thermals;
-5. include current retrieval alone and retrieval-plus-learned routing as
-   baselines; add width four only if measured acceptance clears its full-cycle
-   cost threshold;
-6. stop before training or adding a production drafter until one candidate has
-   a credible local memory/latency budget and a deterministic correctness plan.
+Do not modify the retained Stage 4 verifier/controller. Run the following gates
+in order so a product replay never depends on a drafter that has not been
+trained:
 
-The Stage 5 feasibility slice is complete when it leaves one recommended
-candidate (or a documented decision to keep retrieval alone), a concrete data
-schema, a memory/cycle budget, deterministic verification requirements, and a
-clean implementation baton.
+1. Establish a calibration-only dynamic-vocabulary upper bound on the existing
+   training/calibration conversations. Predeclare 2,048- and 4,096-row selectors
+   and evaluate both in one conversation-grouped cross-validation scan, scoring
+   selected target-head rows with the real sampling transforms. An arm passes
+   only if authoritative-token recall and preservation of the full-head
+   accepted-token result are each at least 95% globally and in every workload.
+   Freeze the smallest passing arm; if neither passes, close the path. Route
+   declines stay in the complete denominator. This screen is an upper bound,
+   not generalization evidence.
+2. Build the diagnostic one-invocation target verifier for the intended draft
+   block. It must include real attention bounds, output selection, K/V
+   transactions, every accepted prefix, stops, cache wrap, exceptions, and
+   poisoned-state parity. A composition of width-two calls is only a control.
+   After correctness passes, measure it under the thermal protocol and replay a
+   perfect proposal at every eligible origin. Pass only if the measured mean
+   verifier cost plus a reserved 2.0 ms complete draft/selector charge still
+   reaches 1.30x, while a stress replay using verifier p95 plus a 2.5 ms charge
+   remains above 1.25x. Report the resulting draft-cost budget, mean, p95,
+   early/middle/late windows, traffic, allocations, submissions, and waits.
+3. Only then train one bounded shallow-semantic plus rank-256 Markov pilot on
+   the existing training data. Before interpreting validation, require strict
+   causal tests, at least 99%/97%/95% memorized next-token agreement across the
+   three edges on a fixed 512-sequence cohort, TV at most 0.05, and a complete
+   Metal chain—including selection and readback—at or below 2.0 ms mean and
+   2.5 ms p95. Freeze architecture, weights, routing, and thresholds on pass.
+4. Evaluate the frozen pilot once on a newly collected, conversation-separated
+   diagnostic split. The old validation conversations have influenced design
+   decisions and are not admission evidence. Record the real joint accepted-
+   prefix distribution, selector misses, route declines, rollback, endpoints,
+   and every predeclared workload separately.
+5. Replay those fresh joint outcomes with measured costs. Pass only with at
+   least 1.30x point speedup over retained Stage 4, a one-sided conversation-
+   bootstrap 95% lower bound strictly above 1.25x, every workload's point
+   speedup at least 1.00x, and exact target-token, sampler, and K/V semantics.
+   An underpowered split cannot claim a pass. A miss closes this architecture;
+   a pass permits production integration and the canonical cooled benchmark.
+
+The feasibility work is complete when these gates either establish a credible
+joint path above 25% or close learned speculative decoding on this target.
 
 ## Invariants
 
@@ -234,5 +279,5 @@ clean implementation baton.
   explicit and tested.
 - Ordinary one-row decode remains the only fallback and is directly measurable
   with `--no-speculative`.
-- Stage 5 must not silently introduce an external inference runtime, model
+- Future speculation must not silently introduce an external inference runtime, model
   server, tensor framework, or remote dependency.

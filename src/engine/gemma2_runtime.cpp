@@ -19,6 +19,24 @@
 
 namespace local_gguf_engine::engine {
 
+struct Gemma2MetalVerificationStateAccess final {
+    static void set_pending(Gemma2MetalModelPlan& plan, std::uint32_t cache_position) {
+        plan.set_pending_verification(cache_position);
+    }
+
+    static void mark_completed(Gemma2MetalModelPlan& plan) {
+        plan.mark_pending_verification_completed();
+    }
+
+    static void set_provisional(Gemma2MetalModelPlan& plan, std::uint32_t token_count) {
+        plan.set_provisionally_committed_token_count(token_count);
+    }
+
+    static void clear(Gemma2MetalModelPlan& plan) noexcept {
+        plan.clear_pending_verification();
+    }
+};
+
 namespace {
 
 [[nodiscard]] std::size_t proposal_bucket_index(const RetrievalProposal& proposal) noexcept {
@@ -622,13 +640,33 @@ Gemma2MetalVerifierResult run_gemma2_metal_width_two_verifier(
         );
     }
 
-    const auto stats = command.commit_and_wait();
-    plan.set_pending_verification(verifier.cache_position());
-    auto selected_candidates = selection_requests.has_value()
-        ? std::optional<std::array<CompactTokenCandidates, 2>>(
-            command.read_token_candidates_width_two(plan.selection_workspace())
-        )
-        : std::nullopt;
+    static_cast<void>(command.commit());
+    Gemma2MetalVerificationStateAccess::set_pending(plan, verifier.cache_position());
+    auto completed = false;
+    metal::MetalCommandStats stats;
+    auto selected_candidates = std::optional<std::array<CompactTokenCandidates, 2>> {};
+    try {
+        stats = command.wait_until_completed();
+        Gemma2MetalVerificationStateAccess::mark_completed(plan);
+        completed = true;
+        if (selection_requests.has_value()) {
+            selected_candidates = command.read_token_candidates_width_two(
+                plan.selection_workspace()
+            );
+        }
+    } catch (...) {
+        if (completed) {
+            try {
+                (void)commit_gemma2_metal_width_two_verification(plan, 0U);
+            } catch (...) {
+                // Keep the transaction pending if restoration fails so every
+                // later product operation fails closed on the uncertain K/V.
+            }
+        }
+        // A wait failure also leaves the submitted transaction pending: the
+        // command's final K/V state is not safe to consume or overwrite.
+        throw;
+    }
     return Gemma2MetalVerifierResult {
         .logits = scratch.logits,
         .candidates = selected_candidates,
@@ -677,8 +715,8 @@ Gemma2MetalVerifierCommitResult commit_gemma2_metal_width_two_verification(
     Gemma2MetalModelPlan& plan,
     std::uint32_t accepted_token_count
 ) {
-    if (!plan.has_pending_verification()) {
-        throw std::logic_error("Gemma2 width-two commit requires pending verification");
+    if (!plan.pending_verification_completed()) {
+        throw std::logic_error("Gemma2 width-two commit requires completed verification");
     }
     if (plan.provisionally_committed_token_count() != 0U) {
         throw std::logic_error("Gemma2 width-two commit cannot replace a provisional commit");
@@ -714,7 +752,7 @@ Gemma2MetalVerifierCommitResult commit_gemma2_metal_width_two_verification(
             .gpu_duration_ns = stats.gpu_duration_ns,
         };
     }
-    plan.clear_pending_verification();
+    Gemma2MetalVerificationStateAccess::clear(plan);
     return Gemma2MetalVerifierCommitResult {
         .accepted_token_count = accepted_token_count,
         .execution = execution,
@@ -725,7 +763,7 @@ Gemma2MetalVerifierCommitResult provisionally_commit_gemma2_metal_width_two_veri
     Gemma2MetalModelPlan& plan,
     std::uint32_t accepted_token_count
 ) {
-    if (!plan.has_pending_verification()
+    if (!plan.pending_verification_completed()
         || plan.provisionally_committed_token_count() != 0U) {
         throw std::logic_error("Gemma2 provisional width-two commit requires an uncommitted verification");
     }
@@ -759,7 +797,7 @@ Gemma2MetalVerifierCommitResult provisionally_commit_gemma2_metal_width_two_veri
             .gpu_duration_ns = stats.gpu_duration_ns,
         };
     }
-    plan.set_provisionally_committed_token_count(accepted_token_count);
+    Gemma2MetalVerificationStateAccess::set_provisional(plan, accepted_token_count);
     return Gemma2MetalVerifierCommitResult {
         .accepted_token_count = accepted_token_count,
         .execution = execution,
@@ -770,7 +808,7 @@ Gemma2MetalVerifierCommitResult finalize_gemma2_metal_width_two_verification(
     Gemma2MetalModelPlan& plan,
     std::uint32_t retained_token_count
 ) {
-    if (!plan.has_pending_verification()
+    if (!plan.pending_verification_completed()
         || plan.provisionally_committed_token_count() == 0U) {
         throw std::logic_error("Gemma2 width-two finalize requires a provisional commit");
     }
@@ -806,7 +844,7 @@ Gemma2MetalVerifierCommitResult finalize_gemma2_metal_width_two_verification(
             .gpu_duration_ns = stats.gpu_duration_ns,
         };
     }
-    plan.clear_pending_verification();
+    Gemma2MetalVerificationStateAccess::clear(plan);
     return Gemma2MetalVerifierCommitResult {
         .accepted_token_count = retained_token_count,
         .execution = execution,

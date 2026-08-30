@@ -65,6 +65,7 @@ using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::run_gemma2_metal_resident_prefill;
 using local_gguf_engine::engine::run_gemma2_metal_resident_decode_step;
 using local_gguf_engine::engine::run_gemma2_metal_width_two_verifier;
+using local_gguf_engine::engine::resolve_gemma2_output_head_policy;
 using local_gguf_engine::engine::commit_gemma2_metal_width_two_verification;
 using local_gguf_engine::engine::provisionally_commit_gemma2_metal_width_two_verification;
 using local_gguf_engine::engine::finalize_gemma2_metal_width_two_verification;
@@ -760,6 +761,42 @@ void test_gemma2_q8_output_policy_preserves_f16_embedding_when_available() {
         "Gemma2 Q8 resident weight accounting mismatch");
     expect(plan.decode_scheduled_weight_bytes().output_head == expected_q8_bytes,
         "Gemma2 Q8 scheduled output bytes mismatch");
+}
+
+void test_gemma2_output_head_policy_resolution_is_explicit_and_validated() {
+    static_assert(static_cast<std::uint32_t>(Gemma2OutputHeadPolicy::automatic) == 0U);
+    static_assert(static_cast<std::uint32_t>(Gemma2OutputHeadPolicy::f16) == 1U);
+    static_assert(static_cast<std::uint32_t>(Gemma2OutputHeadPolicy::q8_0) == 2U);
+
+    auto payload_store = tiny_gemma2_payload_store();
+    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    const auto weights = bind_gemma2_model_weights(model);
+
+    expect(
+        resolve_gemma2_output_head_policy(
+            model.gemma2_config(), weights, Gemma2OutputHeadPolicy::automatic
+        ) == Gemma2OutputHeadPolicy::f16,
+        "automatic output-head policy should resolve to F16 for a non-retained model"
+    );
+    expect(
+        resolve_gemma2_output_head_policy(
+            model.gemma2_config(), weights, Gemma2OutputHeadPolicy::q8_0
+        ) == Gemma2OutputHeadPolicy::q8_0,
+        "explicit Q8 output-head policy should be preserved"
+    );
+
+    bool rejected = false;
+    try {
+        (void)resolve_gemma2_output_head_policy(
+            model.gemma2_config(),
+            weights,
+            static_cast<Gemma2OutputHeadPolicy>(999U)
+        );
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    expect(rejected, "unknown output-head policy should be rejected");
 }
 
 void test_gemma2_metal_plan_roundtrips_uploaded_borrowed_weight_when_available() {
@@ -1940,6 +1977,98 @@ void test_gemma2_width_two_verifier_matches_sequential_decode_and_commits_transa
     }
 }
 
+void test_gemma2_width_two_verifier_restores_kv_after_post_submit_candidate_failure_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+
+    auto payload_store = nonzero_tiny_gemma2_payload_store(2U);
+    auto view = tiny_model_view(
+        tiny_gemma2_metadata(2U, 2U, 1U, 256U, 16U, 8U),
+        std::move(payload_store.payloads)
+    );
+    const auto model = load_engine_model_from_gguf(view);
+    auto plan = create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::q8_0);
+    const auto embedding_scale = std::sqrt(static_cast<float>(plan.config().embedding_length));
+    const std::array<std::uint32_t, 2> prefix {0U, 1U};
+    (void)run_gemma2_metal_resident_prefill(plan, prefix, 0U, embedding_scale);
+
+    std::vector<TensorStorage> expected_keys;
+    std::vector<TensorStorage> expected_values;
+    expected_keys.reserve(plan.kv_cache().size());
+    expected_values.reserve(plan.kv_cache().size());
+    for (const auto& layer : plan.kv_cache()) {
+        expected_keys.push_back(copy_tensor_from_backend(layer.key));
+        expected_values.push_back(copy_tensor_from_backend(layer.value));
+    }
+
+    const auto invalid_history_token = plan.config().vocab_size;
+    const std::array<TokenSelectionRequest, 2> requests {{
+        TokenSelectionRequest {
+            .top_k = 1U,
+            .base_candidate_count = 2U,
+            .history_token_ids = {invalid_history_token},
+            .history_token_count = 1U,
+        },
+        TokenSelectionRequest {.top_k = 1U, .base_candidate_count = 1U},
+    }};
+    const std::array<std::uint32_t, 2> proposed {2U, 3U};
+
+    bool rejected = false;
+    try {
+        (void)run_gemma2_metal_width_two_verifier(
+            plan,
+            create_gemma2_metal_verifier_schedule(plan, 2U),
+            proposed,
+            embedding_scale,
+            requests
+        );
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    expect(rejected, "width-two candidate readback should reject an out-of-vocabulary history token");
+    expect(!plan.has_pending_verification(),
+        "completed width-two candidate failure should clear its restored transaction");
+
+    for (std::size_t layer = 0; layer < plan.kv_cache().size(); ++layer) {
+        const auto actual_key = copy_tensor_from_backend(plan.kv_cache()[layer].key);
+        const auto actual_value = copy_tensor_from_backend(plan.kv_cache()[layer].value);
+        expect(actual_key.descriptor() == expected_keys[layer].descriptor()
+                && std::equal(
+                    actual_key.bytes().begin(), actual_key.bytes().end(),
+                    expected_keys[layer].bytes().begin(), expected_keys[layer].bytes().end()
+                ),
+            "width-two candidate failure did not restore exact key-cache bytes");
+        expect(actual_value.descriptor() == expected_values[layer].descriptor()
+                && std::equal(
+                    actual_value.bytes().begin(), actual_value.bytes().end(),
+                    expected_values[layer].bytes().begin(), expected_values[layer].bytes().end()
+                ),
+            "width-two candidate failure did not restore exact value-cache bytes");
+    }
+
+    const std::array<TokenSelectionRequest, 2> valid_requests {{
+        TokenSelectionRequest {.top_k = 1U, .base_candidate_count = 1U},
+        TokenSelectionRequest {.top_k = 1U, .base_candidate_count = 1U},
+    }};
+    const auto recovered = run_gemma2_metal_width_two_verifier(
+        plan,
+        create_gemma2_metal_verifier_schedule(plan, 2U),
+        proposed,
+        embedding_scale,
+        valid_requests
+    );
+    expect(plan.has_pending_verification() && plan.pending_verification_completed(),
+        "width-two verifier should remain reusable after completed-result rollback");
+    expect(recovered.candidates.has_value()
+            && recovered.candidates->at(0).count == 1U
+            && recovered.candidates->at(1).count == 1U
+            && recovered.candidates->at(0).values[0].token < plan.config().vocab_size
+            && recovered.candidates->at(1).values[0].token < plan.config().vocab_size,
+        "width-two selector should remain reusable after GPU status rollback");
+    (void)commit_gemma2_metal_width_two_verification(plan, 0U);
+    expect(!plan.has_pending_verification(),
+        "reused width-two verifier transaction should discard cleanly");
+}
+
 void test_gemma2_speculative_controller_matches_seeded_baseline_and_rolls_back_callback_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) return;
     const auto make_plan = []() {
@@ -2409,6 +2538,10 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_gemma2_q8_output_policy_preserves_f16_embedding_when_available,
     },
     {
+        "Gemma2 output-head policy resolution is explicit and validated",
+        test_gemma2_output_head_policy_resolution_is_explicit_and_validated,
+    },
+    {
         "creates Gemma2 Metal schedules when available",
         test_creates_gemma2_metal_schedules_when_available,
     },
@@ -2451,6 +2584,10 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "Gemma2 width-two verifier matches sequential decode and commits transactionally when available",
         test_gemma2_width_two_verifier_matches_sequential_decode_and_commits_transactionally_when_available,
+    },
+    {
+        "Gemma2 width-two verifier restores KV after post-submit candidate failure when available",
+        test_gemma2_width_two_verifier_restores_kv_after_post_submit_candidate_failure_when_available,
     },
     {
         "Gemma2 speculative controller matches seeded baseline and rolls back callback when available",

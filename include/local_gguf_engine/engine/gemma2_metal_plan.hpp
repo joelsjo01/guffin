@@ -12,13 +12,18 @@
 
 namespace local_gguf_engine::engine {
 
-enum class Gemma2OutputHeadPolicy {
-    automatic,
-    f16,
-    q8_0,
+enum class Gemma2OutputHeadPolicy : std::uint32_t {
+    automatic = 0U,
+    f16 = 1U,
+    q8_0 = 2U,
 };
 
 [[nodiscard]] const char* gemma2_output_head_policy_name(Gemma2OutputHeadPolicy policy) noexcept;
+[[nodiscard]] Gemma2OutputHeadPolicy resolve_gemma2_output_head_policy(
+    const Gemma2ModelConfig& config,
+    const Gemma2ModelWeights& weights,
+    Gemma2OutputHeadPolicy requested_policy
+);
 
 struct Gemma2MetalAttentionWeightBuffers {
     tensor::BackendBuffer attention_norm_weight;
@@ -204,6 +209,8 @@ struct Gemma2MetalLayerSchedule {
     std::uint32_t second_attention_token_count = 0;
 };
 
+struct Gemma2MetalVerificationStateAccess;
+
 class Gemma2MetalModelPlan final {
 public:
     Gemma2MetalModelPlan(
@@ -239,13 +246,18 @@ public:
     [[nodiscard]] std::size_t scratch_byte_count() const noexcept;
     [[nodiscard]] std::array<std::uintptr_t, 4> allocation_identities() const noexcept;
     [[nodiscard]] bool has_pending_verification() const noexcept;
+    [[nodiscard]] bool pending_verification_completed() const noexcept;
     [[nodiscard]] std::uint32_t pending_verification_position() const;
     [[nodiscard]] std::uint32_t provisionally_committed_token_count() const noexcept;
+
+private:
+    friend struct Gemma2MetalVerificationStateAccess;
+
     void set_pending_verification(std::uint32_t cache_position);
+    void mark_pending_verification_completed();
     void set_provisionally_committed_token_count(std::uint32_t token_count);
     void clear_pending_verification() noexcept;
 
-private:
     Gemma2ModelConfig config_;
     Gemma2MetalModelWeightBuffers weights_;
     std::vector<Gemma2MetalKVCacheLayer> kv_cache_;
@@ -260,6 +272,7 @@ private:
     std::size_t kv_cache_byte_count_ = 0;
     std::size_t scratch_byte_count_ = 0;
     bool has_pending_verification_ = false;
+    bool pending_verification_completed_ = false;
     std::uint32_t pending_verification_position_ = 0;
     std::uint32_t provisionally_committed_token_count_ = 0;
 };
