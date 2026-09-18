@@ -1,6 +1,7 @@
 #pragma once
 
 #include "local_gguf_engine/model_format/gguf_tensor.hpp"
+#include "local_gguf_engine/runtime/sha256.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
 #include <cstdint>
@@ -61,19 +62,36 @@ struct EngineTensorView {
     tensor::TensorView view;
 };
 
+inline constexpr std::uint32_t engine_model_payload_receipt_version = 1U;
+
+// Computed only for prepared learned-mode plans. Ordinary target-only loading
+// deliberately avoids hashing a multi-gigabyte GGUF on every session start.
+struct EngineModelPayloadReceipt {
+    std::uint32_t version = engine_model_payload_receipt_version;
+    std::uint64_t whole_gguf_byte_count = 0U;
+    std::uint32_t source_tensor_count = 0U;
+    runtime::Sha256Digest whole_gguf;
+    runtime::Sha256Digest canonical_consumed_metadata;
+    runtime::Sha256Digest source_tensors;
+
+    constexpr bool operator==(const EngineModelPayloadReceipt&) const = default;
+};
+
 class EngineModel final {
 public:
     EngineModel(
         ModelArchitecture architecture,
         std::optional<std::string> name,
         Gemma2ModelConfig gemma2_config,
-        std::vector<EngineTensorView> tensor_views
+        std::vector<EngineTensorView> tensor_views,
+        std::optional<EngineModelPayloadReceipt> payload_receipt = std::nullopt
     );
 
     [[nodiscard]] ModelArchitecture architecture() const noexcept;
     [[nodiscard]] const std::optional<std::string>& name() const noexcept;
     [[nodiscard]] const Gemma2ModelConfig& gemma2_config() const noexcept;
     [[nodiscard]] const std::vector<EngineTensorView>& tensor_views() const noexcept;
+    [[nodiscard]] const std::optional<EngineModelPayloadReceipt>& payload_receipt() const noexcept;
     [[nodiscard]] const EngineTensorView* find_tensor_view(std::string_view name) const noexcept;
 
 private:
@@ -81,9 +99,14 @@ private:
     std::optional<std::string> name_;
     Gemma2ModelConfig gemma2_config_;
     std::vector<EngineTensorView> tensor_views_;
+    std::optional<EngineModelPayloadReceipt> payload_receipt_;
 };
 
 [[nodiscard]] std::string_view model_architecture_name(ModelArchitecture architecture) noexcept;
 [[nodiscard]] EngineModel load_engine_model_from_gguf(const model_format::GGUFModelView& model);
+[[nodiscard]] EngineModel load_verified_engine_model_from_gguf(
+    const model_format::GGUFModelView& model,
+    std::span<const std::uint8_t> whole_gguf_bytes
+);
 
 }  // namespace local_gguf_engine::engine

@@ -3,6 +3,7 @@
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/ops/reduction.hpp"
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
+#include "local_gguf_engine/engine/target_verifier.hpp"
 
 #include <cstdint>
 #include <array>
@@ -11,6 +12,16 @@
 #include <string_view>
 
 namespace local_gguf_engine::tensor::backends::metal {
+
+enum class RecurrentStage : std::uint32_t { linear, norm, embedding, join, update, sample, verifier_requests };
+void prepare_recurrent_pipelines();
+
+namespace draft_detail {
+struct TopKResult {
+    bool final_buffer_is_a = true;
+    std::uint32_t dispatch_count = 0U;
+};
+}
 
 struct MetalCommandStats {
     std::uint32_t command_buffer_count = 0;
@@ -50,6 +61,9 @@ struct MetalCommandStats {
 class MetalCommandContext final {
 public:
     explicit MetalCommandContext(std::string_view label, bool concurrent_compute = false);
+    // Reuses engine-owned host storage. Metal command buffers/encoders remain
+    // single-use driver objects; this is not a claim of zero driver allocation.
+    void restart();
     ~MetalCommandContext();
 
     MetalCommandContext(const MetalCommandContext&) = delete;
@@ -77,6 +91,50 @@ public:
         const BackendBuffer& output,
         std::uint32_t row_count = 0,
         std::uint64_t output_byte_offset = 0
+    );
+    void encode_verifier_matmul(
+        const BackendBuffer& input,
+        const BackendBuffer& weight,
+        const BackendBuffer& output,
+        std::uint32_t row_count
+    );
+    void encode_target_head_q8_rows(
+        const BackendBuffer& input,
+        std::uint32_t input_row_start,
+        const BackendBuffer& weight,
+        const BackendBuffer& logits_tile,
+        std::uint32_t row_count
+    );
+    void encode_feature_tap_copy(
+        const BackendBuffer& input,
+        std::uint32_t input_row_start,
+        const BackendBuffer& fused_output,
+        std::uint32_t output_column_start,
+        std::uint32_t row_count
+    );
+    void encode_feature_tap_store_f16(
+        const BackendBuffer& input,
+        std::uint32_t input_row_start,
+        const BackendBuffer& output,
+        std::uint32_t output_column_start,
+        std::uint32_t row_count
+    );
+    void encode_feature_scatter(
+        const BackendBuffer& source_f32,
+        const BackendBuffer& source_rows_u32,
+        const BackendBuffer& destination_rows_u32,
+        const BackendBuffer& destination,
+        const BackendBuffer& status_u32,
+        std::uint32_t row_count,
+        std::uint32_t width
+    );
+    void encode_f16_row_scatter(
+        const BackendBuffer& source,
+        const BackendBuffer& source_rows_u32,
+        const BackendBuffer& destination_rows_u32,
+        const BackendBuffer& destination,
+        const BackendBuffer& status_u32,
+        std::uint32_t row_count
     );
     void encode_rms_norm(
         const BackendBuffer& input,
@@ -205,6 +263,79 @@ public:
         std::uint32_t query_row = 0,
         std::uint32_t output_row = 0
     );
+    void encode_verifier_input_validation(
+        const BackendBuffer& actual_token_ids,
+        std::uint64_t actual_byte_offset,
+        const BackendBuffer& expected_token_ids,
+        const BackendBuffer& status,
+        std::uint32_t row_count,
+        std::uint32_t vocabulary_size
+    );
+    void encode_verifier_selection_requests(
+        const BackendBuffer& raw_requests,
+        std::uint64_t raw_byte_offset,
+        const BackendBuffer& resolved_requests,
+        const BackendBuffer& histories,
+        const BackendBuffer& status,
+        std::uint32_t row_count,
+        const engine::TokenSamplerOptions& options,
+        std::uint32_t vocabulary_size
+    );
+    void encode_verifier_rope(
+        const BackendBuffer& input,
+        const BackendBuffer& positions,
+        const BackendBuffer& output,
+        std::uint32_t row_count,
+        std::uint32_t head_count,
+        std::uint32_t head_dimension,
+        std::uint32_t rope_dimension_count,
+        float frequency_base
+    );
+    void encode_verifier_kv_store(
+        const BackendBuffer& raw_key,
+        const BackendBuffer& raw_value,
+        const BackendBuffer& positions,
+        const BackendBuffer& private_key,
+        const BackendBuffer& private_value,
+        std::uint32_t row_count,
+        std::uint32_t head_count,
+        std::uint32_t head_dimension,
+        std::uint32_t rope_dimension_count,
+        float frequency_base
+    );
+    void encode_verifier_attention(
+        const BackendBuffer& query,
+        const BackendBuffer& resident_key,
+        const BackendBuffer& resident_value,
+        const BackendBuffer& private_key,
+        const BackendBuffer& private_value,
+        const BackendBuffer& schedules,
+        std::uint64_t schedule_byte_offset,
+        const BackendBuffer& ancestors,
+        const BackendBuffer& output,
+        const BackendBuffer& partial_output,
+        const BackendBuffer& partial_maxima,
+        const BackendBuffer& partial_denominators,
+        std::uint32_t row_count,
+        std::uint32_t cache_row_mask,
+        std::uint32_t query_head_count,
+        std::uint32_t kv_head_count,
+        std::uint32_t key_dimension,
+        std::uint32_t value_dimension,
+        float scale,
+        float logit_softcap
+    );
+    void encode_verifier_kv_scatter(
+        const BackendBuffer& private_key,
+        const BackendBuffer& private_value,
+        const BackendBuffer& selected_nodes,
+        const BackendBuffer& resident_key,
+        const BackendBuffer& resident_value,
+        std::uint32_t destination_position,
+        std::uint32_t row_count,
+        std::uint32_t row_width,
+        std::uint32_t destination_row_mask
+    );
     void encode_add(
         const BackendBuffer& left,
         const BackendBuffer& right,
@@ -241,7 +372,114 @@ public:
         const std::array<engine::TokenSelectionRequest, 2>& requests,
         float softcap
     );
+    [[nodiscard]] std::uint32_t encode_target_token_candidates(
+        const BackendBuffer& logits_tile,
+        const engine::TargetSelectionWorkspace& workspace,
+        std::uint32_t first_request_row,
+        std::uint32_t row_count,
+        float softcap,
+        bool greedy_without_history
+    );
+    [[nodiscard]] draft_detail::TopKResult encode_draft_stable_top_k(
+        const BackendBuffer& scores,
+        const BackendBuffer& runs_a,
+        const BackendBuffer& runs_b,
+        const BackendBuffer& status,
+        std::uint32_t row_count,
+        std::uint32_t vocabulary_size,
+        std::uint32_t retain_count
+    );
+    void encode_draft_candidate_union(
+        const BackendBuffer& selected,
+        const BackendBuffer& transition_counts,
+        const BackendBuffer& transition_tokens,
+        const BackendBuffer& history_ids,
+        const BackendBuffer& history_counts,
+        const BackendBuffer& required_ids,
+        const BackendBuffer& required_counts,
+        const BackendBuffer& retrieval_ids,
+        const BackendBuffer& retrieval_counts,
+        const BackendBuffer& candidate_bits,
+        const BackendBuffer& tile_counts,
+        const BackendBuffer& tile_offsets,
+        const BackendBuffer& candidate_ids,
+        const BackendBuffer& candidate_counts,
+        const BackendBuffer& status,
+        std::uint32_t row_count,
+        std::uint32_t vocabulary_size,
+        std::uint32_t selector_count,
+        std::uint32_t transition_width,
+        bool full_vocabulary
+    );
+    void encode_draft_indexed_dot(
+        const BackendBuffer& states,
+        const BackendBuffer& weights,
+        const BackendBuffer& candidate_ids,
+        const BackendBuffer& candidate_counts,
+        const BackendBuffer& output,
+        const BackendBuffer& status,
+        std::uint32_t row_count,
+        std::uint32_t vocabulary_size,
+        std::uint32_t candidate_dispatch_width
+    );
+    void encode_draft_score_correction(
+        const BackendBuffer& scores,
+        const BackendBuffer& corrections,
+        const BackendBuffer& candidate_counts,
+        const BackendBuffer& status,
+        std::uint32_t row_count,
+        std::uint32_t candidate_stride,
+        std::uint32_t candidate_dispatch_width,
+        float softcap
+    );
+    void encode_draft_proposals(
+        const BackendBuffer& candidate_ids,
+        const BackendBuffer& candidate_counts,
+        const BackendBuffer& scores,
+        const BackendBuffer& exp_lut,
+        const BackendBuffer& draws,
+        const BackendBuffer& weights,
+        const BackendBuffer& results,
+        std::uint32_t row_count,
+        std::uint32_t candidate_stride,
+        float temperature
+    );
+    void encode_corrected_logsumexp(
+        const BackendBuffer& logits,
+        const BackendBuffer& logsumexp,
+        const BackendBuffer& status,
+        std::uint32_t row_count,
+        std::uint32_t vocabulary_size,
+        float temperature
+    );
+    void encode_corrected_rank_finalize(
+        const BackendBuffer& sorted,
+        const BackendBuffer& logsumexp,
+        const BackendBuffer& rank_entries,
+        const BackendBuffer& status,
+        std::uint32_t row_count,
+        std::uint32_t vocabulary_size,
+        std::uint32_t rank_width,
+        std::uint32_t output_row_start,
+        float temperature
+    );
+    void encode_arm_s_transition_scores(
+        const BackendBuffer& logits,
+        const BackendBuffer& logsumexp,
+        const BackendBuffer& child_token_ids,
+        std::uint32_t child_token_offset,
+        const BackendBuffer& probabilities,
+        const BackendBuffer& status,
+        std::uint32_t row_count,
+        std::uint32_t vocabulary_size,
+        std::uint32_t output_row_start
+    );
     void encode_memory_barrier();
+    void encode_recurrent_stage(
+        RecurrentStage stage, std::span<const BackendBuffer* const> buffers,
+        const std::array<std::uint32_t,4>& dimensions,
+        const std::array<float,4>& scalars = {}
+    );
     void push_debug_group(std::string_view label);
     void pop_debug_group();
 
@@ -254,6 +492,12 @@ public:
     ) const;
     [[nodiscard]] std::array<engine::CompactTokenCandidates, 2>
     read_token_candidates_width_two(const engine::Gemma2MetalSelectionWorkspace& workspace) const;
+    [[nodiscard]] std::uint32_t read_verifier_status(const BackendBuffer& status) const;
+    void read_target_token_candidates(
+        const engine::TargetSelectionWorkspace& workspace,
+        std::uint32_t first_row,
+        std::span<engine::CompactTokenCandidates> output
+    ) const;
 
 private:
     struct Impl;
@@ -265,6 +509,11 @@ private:
 void fill_shared_metal_buffer_u32(
     const BackendBuffer& buffer,
     std::uint32_t pattern
+);
+void read_shared_metal_buffer_bytes(
+    const BackendBuffer& buffer,
+    std::uint64_t byte_offset,
+    std::span<std::uint8_t> destination
 );
 
 }  // namespace local_gguf_engine::tensor::backends::metal

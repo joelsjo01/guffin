@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace local_gguf_engine::tensor::backends::metal {
 
@@ -56,6 +57,11 @@ private:
 [[nodiscard]] BackendBuffer allocate_metal_backend_buffer(const TensorDescriptor& descriptor);
 [[nodiscard]] TensorStorage copy_tensor_from_metal_backend(
     const detail::BackendBufferStorage& storage
+);
+[[nodiscard]] std::vector<std::uint8_t> copy_metal_backend_buffer_bytes(
+    const detail::BackendBufferStorage& storage,
+    std::size_t byte_offset,
+    std::size_t byte_count
 );
 
 }  // namespace local_gguf_engine::tensor::backends::metal

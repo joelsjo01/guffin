@@ -4,6 +4,9 @@
 #include "local_gguf_engine/tensor/tensor.hpp"
 
 #include <memory>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace local_gguf_engine::tensor {
 
@@ -54,6 +57,14 @@ private:
     runtime::BackendKind backend
 );
 [[nodiscard]] TensorStorage copy_tensor_from_backend(const BackendBuffer& buffer);
+// Reads only the requested bounded byte range. Offline trace collection uses
+// this to avoid materializing the unused tail of its fixed-capacity Metal
+// staging allocation.
+[[nodiscard]] std::vector<std::uint8_t> copy_backend_buffer_bytes(
+    const BackendBuffer& buffer,
+    std::size_t byte_offset,
+    std::size_t byte_count
+);
 [[nodiscard]] const detail::BackendBufferStorage& backend_buffer_storage(
     const BackendBuffer& buffer
 ) noexcept;

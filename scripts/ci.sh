@@ -10,8 +10,8 @@ if [[ ! -s "README.md" ]]; then
   exit 1
 fi
 
-if git ls-files | grep -E '\.(gguf|ggml|safetensors|pt|pth|onnx|bin)$' >/dev/null; then
-  echo "Model or weight files must not be committed." >&2
+if git ls-files | grep -E '\.(gguf|ggml|safetensors|pt|pth|onnx|bin|ckpt|npy|npz|parquet|arrow|lgweights|lgspec|lgspecbundle|lgtrace)$' >/dev/null; then
+  echo "Model, trace, artifact, or training-output files must not be committed." >&2
   exit 1
 fi
 

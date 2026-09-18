@@ -23,8 +23,10 @@ using local_gguf_engine::tensor::f16_bits_to_f32;
 using local_gguf_engine::tensor::f32_to_f16_bits;
 using local_gguf_engine::tensor::q4_k_block_view;
 using local_gguf_engine::tensor::q6_k_block_view;
+using local_gguf_engine::tensor::q8_0_block_view;
 using local_gguf_engine::tensor::Q4_KBlockView;
 using local_gguf_engine::tensor::Q6_KBlockView;
+using local_gguf_engine::tensor::Q8_0BlockView;
 using local_gguf_engine::tensor::read_f32;
 using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorDescriptor;
@@ -195,18 +197,21 @@ float read_quantized_gguf_weight_value(
     std::uint64_t column,
     std::uint64_t inner
 ) {
-    const auto blocks_per_column = storage.descriptor().shape.dimension(0) / Q4_KBlockView::element_count;
-    const auto block_index = column * blocks_per_column + (inner / Q4_KBlockView::element_count);
-    const auto element_index = static_cast<std::size_t>(inner % Q4_KBlockView::element_count);
+    const auto block_elements = storage.descriptor().dtype == DType::q8_0
+        ? Q8_0BlockView::element_count : Q4_KBlockView::element_count;
+    const auto blocks_per_column = storage.descriptor().shape.dimension(0) / block_elements;
+    const auto block_index = column * blocks_per_column + (inner / block_elements);
+    const auto element_index = static_cast<std::size_t>(inner % block_elements);
 
     switch (storage.descriptor().dtype) {
+        case DType::q8_0:
+            return q8_0_block_view(storage, block_index).dequantized_value(element_index);
         case DType::q4_k:
             return q4_k_block_view(storage, block_index).dequantized_value(element_index);
         case DType::q6_k:
             return q6_k_block_view(storage, block_index).dequantized_value(element_index);
         case DType::f32:
         case DType::f16:
-        case DType::q8_0:
             break;
     }
 

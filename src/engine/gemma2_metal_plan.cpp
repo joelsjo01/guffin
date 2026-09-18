@@ -1,12 +1,14 @@
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
+#include "local_gguf_engine/engine/speculative_artifact.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 
 #include <algorithm>
+#include <array>
 #include <initializer_list>
 #include <limits>
 #include <span>
@@ -23,6 +25,78 @@ using tensor::Shape;
 using tensor::TensorDescriptor;
 
 constexpr auto gemma_backend = BackendKind::metal;
+
+class ResidentPayloadHasher final {
+public:
+    explicit ResidentPayloadHasher(bool enabled) : enabled_(enabled) {
+        if (enabled_) {
+            constexpr std::string_view domain =
+                "local-gguf-engine/resident-target-payload/v1";
+            hash_.update(std::span<const std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(domain.data()), domain.size()
+            ));
+        }
+    }
+
+    void add(std::string_view label, tensor::TensorView view) {
+        if (!enabled_) return;
+        add_u64(label.size());
+        hash_.update(std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(label.data()), label.size()
+        ));
+        const auto& descriptor = view.descriptor();
+        add_u32(static_cast<std::uint32_t>(descriptor.dtype));
+        add_u32(static_cast<std::uint32_t>(descriptor.shape.rank()));
+        for (std::size_t index = 0U; index < descriptor.shape.rank(); ++index) {
+            add_u64(descriptor.shape.dimension(index));
+        }
+        add_u64(descriptor.byte_count);
+        hash_.update(view.bytes());
+        if (descriptor.byte_count > std::numeric_limits<std::uint64_t>::max() - bytes_) {
+            throw std::overflow_error("resident target receipt byte count overflow");
+        }
+        bytes_ += descriptor.byte_count;
+        if (allocations_ == std::numeric_limits<std::uint32_t>::max()) {
+            throw std::overflow_error("resident target receipt allocation count overflow");
+        }
+        ++allocations_;
+    }
+
+    [[nodiscard]] ResidentTargetPayloadReceipt finish() {
+        if (!enabled_ || allocations_ == 0U) {
+            throw std::logic_error("resident target payload receipt was not enabled or is empty");
+        }
+        return ResidentTargetPayloadReceipt {
+            .allocation_count = allocations_,
+            .byte_count = bytes_,
+            .bytes = hash_.finalize(),
+        };
+    }
+
+private:
+    void add_u32(std::uint32_t value) {
+        const std::array<std::uint8_t, 4> bytes {
+            static_cast<std::uint8_t>(value),
+            static_cast<std::uint8_t>(value >> 8U),
+            static_cast<std::uint8_t>(value >> 16U),
+            static_cast<std::uint8_t>(value >> 24U),
+        };
+        hash_.update(bytes);
+    }
+
+    void add_u64(std::uint64_t value) {
+        std::array<std::uint8_t, 8> bytes {};
+        for (std::size_t index = 0U; index < bytes.size(); ++index) {
+            bytes[index] = static_cast<std::uint8_t>(value >> (index * 8U));
+        }
+        hash_.update(bytes);
+    }
+
+    bool enabled_ = false;
+    runtime::Sha256 hash_;
+    std::uint32_t allocations_ = 0U;
+    std::uint64_t bytes_ = 0U;
+};
 
 void require_metal_available() {
     if (tensor::tensor_backend_is_available(gemma_backend)) {
@@ -113,8 +187,14 @@ void checked_add_decode_bytes(std::uint64_t& total, std::size_t byte_count) {
     return bytes;
 }
 
-[[nodiscard]] tensor::BackendBuffer upload_weight(tensor::TensorView view, std::size_t& uploaded_byte_count) {
+[[nodiscard]] tensor::BackendBuffer upload_weight(
+    tensor::TensorView view,
+    std::size_t& uploaded_byte_count,
+    ResidentPayloadHasher& hasher,
+    std::string_view label
+) {
     checked_add_bytes(uploaded_byte_count, view.bytes().size());
+    hasher.add(label, view);
     return tensor::copy_tensor_view_to_backend(view, gemma_backend);
 }
 
@@ -169,36 +249,45 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
 
 [[nodiscard]] Gemma2MetalAttentionWeightBuffers upload_attention_weights(
     const Gemma2AttentionWeights& weights,
-    std::size_t& uploaded_byte_count
+    std::size_t& uploaded_byte_count,
+    ResidentPayloadHasher& hasher,
+    std::uint32_t block_index
 ) {
+    const auto prefix = "blk." + std::to_string(block_index) + ".";
     return Gemma2MetalAttentionWeightBuffers {
-        .attention_norm_weight = upload_weight(weights.attention_norm_weight, uploaded_byte_count),
-        .post_attention_norm_weight = upload_weight(weights.post_attention_norm_weight, uploaded_byte_count),
-        .query_weight = upload_weight(weights.query_weight, uploaded_byte_count),
-        .key_weight = upload_weight(weights.key_weight, uploaded_byte_count),
-        .value_weight = upload_weight(weights.value_weight, uploaded_byte_count),
-        .output_weight = upload_weight(weights.output_weight, uploaded_byte_count),
+        .attention_norm_weight = upload_weight(weights.attention_norm_weight, uploaded_byte_count, hasher, prefix + "attn_norm.weight"),
+        .post_attention_norm_weight = upload_weight(weights.post_attention_norm_weight, uploaded_byte_count, hasher, prefix + "post_attention_norm.weight"),
+        .query_weight = upload_weight(weights.query_weight, uploaded_byte_count, hasher, prefix + "attn_q.weight"),
+        .key_weight = upload_weight(weights.key_weight, uploaded_byte_count, hasher, prefix + "attn_k.weight"),
+        .value_weight = upload_weight(weights.value_weight, uploaded_byte_count, hasher, prefix + "attn_v.weight"),
+        .output_weight = upload_weight(weights.output_weight, uploaded_byte_count, hasher, prefix + "attn_output.weight"),
     };
 }
 
 [[nodiscard]] Gemma2MetalFeedForwardWeightBuffers upload_feed_forward_weights(
     const Gemma2FeedForwardWeights& weights,
     std::size_t& uploaded_byte_count,
-    bool requantize_q6_down
+    bool requantize_q6_down,
+    ResidentPayloadHasher& hasher,
+    std::uint32_t block_index
 ) {
+    const auto prefix = "blk." + std::to_string(block_index) + ".";
     auto down_weight = [&]() {
         if (requantize_q6_down && weights.down_weight.descriptor().dtype == DType::q6_k) {
             auto quantized = tensor::requantize_q6_k_gguf_weight_q4_k(weights.down_weight);
             checked_add_bytes(uploaded_byte_count, quantized.descriptor().byte_count);
+            hasher.add(prefix + "ffn_down.weight:q6_k->q4_k", quantized.view());
             return tensor::copy_tensor_to_backend(quantized, gemma_backend);
         }
-        return upload_weight(weights.down_weight, uploaded_byte_count);
+        return upload_weight(
+            weights.down_weight, uploaded_byte_count, hasher, prefix + "ffn_down.weight"
+        );
     }();
     return Gemma2MetalFeedForwardWeightBuffers {
-        .feed_forward_norm_weight = upload_weight(weights.feed_forward_norm_weight, uploaded_byte_count),
-        .post_feed_forward_norm_weight = upload_weight(weights.post_feed_forward_norm_weight, uploaded_byte_count),
-        .gate_weight = upload_weight(weights.gate_weight, uploaded_byte_count),
-        .up_weight = upload_weight(weights.up_weight, uploaded_byte_count),
+        .feed_forward_norm_weight = upload_weight(weights.feed_forward_norm_weight, uploaded_byte_count, hasher, prefix + "ffn_norm.weight"),
+        .post_feed_forward_norm_weight = upload_weight(weights.post_feed_forward_norm_weight, uploaded_byte_count, hasher, prefix + "post_ffw_norm.weight"),
+        .gate_weight = upload_weight(weights.gate_weight, uploaded_byte_count, hasher, prefix + "ffn_gate.weight"),
+        .up_weight = upload_weight(weights.up_weight, uploaded_byte_count, hasher, prefix + "ffn_up.weight"),
         .down_weight = std::move(down_weight),
     };
 }
@@ -206,16 +295,22 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
 [[nodiscard]] std::vector<Gemma2MetalBlockWeightBuffers> upload_block_weights(
     const Gemma2ModelWeights& weights,
     std::size_t& uploaded_byte_count,
-    bool requantize_q6_down
+    bool requantize_q6_down,
+    ResidentPayloadHasher& hasher
 ) {
     std::vector<Gemma2MetalBlockWeightBuffers> blocks;
     blocks.reserve(weights.blocks.size());
 
-    for (const auto& block : weights.blocks) {
+    for (std::size_t block_index = 0U; block_index < weights.blocks.size(); ++block_index) {
+        const auto& block = weights.blocks[block_index];
         blocks.push_back(Gemma2MetalBlockWeightBuffers {
-            .attention = upload_attention_weights(block.attention, uploaded_byte_count),
+            .attention = upload_attention_weights(
+                block.attention, uploaded_byte_count, hasher,
+                static_cast<std::uint32_t>(block_index)
+            ),
             .feed_forward = upload_feed_forward_weights(
-                block.feed_forward, uploaded_byte_count, requantize_q6_down
+                block.feed_forward, uploaded_byte_count, requantize_q6_down,
+                hasher, static_cast<std::uint32_t>(block_index)
             ),
         });
     }
@@ -227,25 +322,35 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     const Gemma2ModelWeights& weights,
     std::size_t& uploaded_byte_count,
     Gemma2OutputHeadPolicy output_head_policy,
-    bool retained_target
+    bool retained_target,
+    ResidentPayloadHasher& hasher
 ) {
-    auto token_embedding_weight = upload_weight(weights.token_embedding_weight, uploaded_byte_count);
+    auto token_embedding_weight = upload_weight(
+        weights.token_embedding_weight, uploaded_byte_count, hasher, "token_embd.weight"
+    );
     auto output_weight = [&]() {
         if (output_head_policy == Gemma2OutputHeadPolicy::q8_0) {
             auto quantized = tensor::quantize_f16_gguf_weight_q8_0(weights.output_weight);
             checked_add_bytes(uploaded_byte_count, quantized.descriptor().byte_count);
+            hasher.add("output.weight:f16->q8_0", quantized.view());
             return tensor::copy_tensor_to_backend(quantized, gemma_backend);
         }
         return weights.output_weight.bytes().data() == weights.token_embedding_weight.bytes().data()
             ? token_embedding_weight
-            : upload_weight(weights.output_weight, uploaded_byte_count);
+            : upload_weight(
+                weights.output_weight, uploaded_byte_count, hasher, "output.weight"
+            );
     }();
 
     return Gemma2MetalModelWeightBuffers {
         .token_embedding_weight = token_embedding_weight,
-        .output_norm_weight = upload_weight(weights.output_norm_weight, uploaded_byte_count),
+        .output_norm_weight = upload_weight(
+            weights.output_norm_weight, uploaded_byte_count, hasher, "output_norm.weight"
+        ),
         .output_weight = std::move(output_weight),
-        .blocks = upload_block_weights(weights, uploaded_byte_count, retained_target),
+        .blocks = upload_block_weights(
+            weights, uploaded_byte_count, retained_target, hasher
+        ),
     };
 }
 
@@ -644,58 +749,97 @@ const Gemma2MetalVerifierScratch& Gemma2MetalModelPlan::verifier_scratch() const
 }
 
 bool Gemma2MetalModelPlan::has_pending_verification() const noexcept {
-    return has_pending_verification_;
+    return verification_state_ != VerifierTransactionState::idle;
 }
 
 bool Gemma2MetalModelPlan::pending_verification_completed() const noexcept {
-    return has_pending_verification_ && pending_verification_completed_;
+    return verification_state_ == VerifierTransactionState::completed
+        || verification_state_ == VerifierTransactionState::provisional;
+}
+
+VerifierTransactionState Gemma2MetalModelPlan::verification_state() const noexcept {
+    return verification_state_;
+}
+
+bool Gemma2MetalModelPlan::verification_poisoned() const noexcept {
+    return verification_state_ == VerifierTransactionState::poisoned;
 }
 
 std::uint32_t Gemma2MetalModelPlan::pending_verification_position() const {
-    if (!has_pending_verification_) {
+    if (!has_pending_verification()) {
         throw std::logic_error("Gemma2 Metal plan has no pending verification");
     }
     return pending_verification_position_;
+}
+
+std::uint32_t Gemma2MetalModelPlan::pending_verification_row_count() const {
+    if (!has_pending_verification()) {
+        throw std::logic_error("Gemma2 Metal plan has no pending verification");
+    }
+    return pending_verification_row_count_;
 }
 
 std::uint32_t Gemma2MetalModelPlan::provisionally_committed_token_count() const noexcept {
     return provisionally_committed_token_count_;
 }
 
-void Gemma2MetalModelPlan::set_pending_verification(std::uint32_t cache_position) {
-    if (has_pending_verification_) {
+void Gemma2MetalModelPlan::set_pending_verification(
+    std::uint32_t cache_position,
+    std::uint32_t row_count,
+    VerifierTransactionState state
+) {
+    if (has_pending_verification()) {
         throw std::logic_error("Gemma2 Metal plan already has a pending verification");
     }
-    has_pending_verification_ = true;
-    pending_verification_completed_ = false;
+    if (row_count == 0U || row_count > gemma2_metal_verifier_row_max
+        || (state != VerifierTransactionState::encoded
+            && state != VerifierTransactionState::submitted)) {
+        throw std::invalid_argument("Gemma2 Metal pending verification extent or state is invalid");
+    }
+    verification_state_ = state;
     pending_verification_position_ = cache_position;
+    pending_verification_row_count_ = row_count;
     provisionally_committed_token_count_ = 0U;
 }
 
+void Gemma2MetalModelPlan::mark_pending_verification_submitted() {
+    if (verification_state_ != VerifierTransactionState::encoded) {
+        throw std::logic_error("Gemma2 Metal encoded verification submit state is invalid");
+    }
+    verification_state_ = VerifierTransactionState::submitted;
+}
+
 void Gemma2MetalModelPlan::mark_pending_verification_completed() {
-    if (!has_pending_verification_ || pending_verification_completed_) {
+    if (verification_state_ != VerifierTransactionState::submitted) {
         throw std::logic_error("Gemma2 Metal pending verification completion state is invalid");
     }
-    pending_verification_completed_ = true;
+    verification_state_ = VerifierTransactionState::completed;
 }
 
 void Gemma2MetalModelPlan::set_provisionally_committed_token_count(std::uint32_t token_count) {
-    if (!pending_verification_completed() || provisionally_committed_token_count_ != 0U
-        || token_count == 0U || token_count > 2U) {
+    if (verification_state_ != VerifierTransactionState::completed
+        || provisionally_committed_token_count_ != 0U
+        || token_count == 0U || token_count > pending_verification_row_count_) {
         throw std::logic_error("Gemma2 Metal provisional verification state is invalid");
     }
     provisionally_committed_token_count_ = token_count;
+    verification_state_ = VerifierTransactionState::provisional;
 }
 
 void Gemma2MetalModelPlan::clear_pending_verification() noexcept {
     // A submitted verifier whose wait did not complete has uncertain K/V and
     // backup contents. It is intentionally impossible to clear through the
     // ordinary transaction API; destruction is the only safe recovery.
-    if (has_pending_verification_ && !pending_verification_completed_) return;
-    has_pending_verification_ = false;
-    pending_verification_completed_ = false;
+    if (verification_state_ == VerifierTransactionState::submitted
+        || verification_state_ == VerifierTransactionState::poisoned) return;
+    verification_state_ = VerifierTransactionState::idle;
     pending_verification_position_ = 0U;
+    pending_verification_row_count_ = 0U;
     provisionally_committed_token_count_ = 0U;
+}
+
+void Gemma2MetalModelPlan::poison_pending_verification() noexcept {
+    verification_state_ = VerifierTransactionState::poisoned;
 }
 
 const Gemma2MetalSelectionWorkspace& Gemma2MetalModelPlan::selection_workspace() const noexcept {
@@ -775,18 +919,13 @@ const std::vector<Gemma2MetalLayerSchedule>& Gemma2MetalSchedule::layers() const
     return layers_;
 }
 
-Gemma2MetalModelPlan create_gemma2_metal_model_plan(
-    const EngineModel& model,
-    Gemma2OutputHeadPolicy policy
-) {
-    const auto weights = bind_gemma2_model_weights(model);
-    return create_gemma2_metal_model_plan(model.gemma2_config(), weights, policy);
-}
+namespace {
 
-Gemma2MetalModelPlan create_gemma2_metal_model_plan(
+[[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan_impl(
     const Gemma2ModelConfig& config,
     const Gemma2ModelWeights& weights,
-    Gemma2OutputHeadPolicy policy
+    Gemma2OutputHeadPolicy policy,
+    ResidentTargetPayloadReceipt* receipt
 ) {
     require_metal_available();
     require_power_of_two_cache_layout(config);
@@ -797,8 +936,10 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
 
     const auto retained_target = is_retained_gemma2_9b_target(config, weights);
     const auto resolved_policy = resolve_gemma2_output_head_policy(config, weights, policy);
+    ResidentPayloadHasher resident_hasher(receipt != nullptr);
     auto resident_weights = upload_model_weights(
-        weights, uploaded_weight_byte_count, resolved_policy, retained_target
+        weights, uploaded_weight_byte_count, resolved_policy, retained_target,
+        resident_hasher
     );
     auto kv_cache = allocate_kv_cache(config, kv_cache_byte_count);
     auto prefill_scratch = allocate_prefill_scratch(config, scratch_byte_count);
@@ -808,7 +949,7 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     auto layers = make_layer_states(config);
     const auto scheduled_weight_bytes = decode_scheduled_weight_bytes(resident_weights, config);
 
-    return Gemma2MetalModelPlan(
+    auto plan = Gemma2MetalModelPlan(
         config,
         std::move(resident_weights),
         std::move(kv_cache),
@@ -823,6 +964,42 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
         kv_cache_byte_count,
         scratch_byte_count
     );
+    if (receipt != nullptr) *receipt = resident_hasher.finish();
+    return plan;
+}
+
+}  // namespace
+
+Gemma2MetalModelPlan create_gemma2_metal_model_plan(
+    const EngineModel& model,
+    Gemma2OutputHeadPolicy policy
+) {
+    const auto weights = bind_gemma2_model_weights(model);
+    return create_gemma2_metal_model_plan_impl(
+        model.gemma2_config(), weights, policy, nullptr
+    );
+}
+
+Gemma2MetalModelPlan create_gemma2_metal_model_plan(
+    const EngineModel& model,
+    Gemma2OutputHeadPolicy policy,
+    ResidentTargetPayloadReceipt& resident_receipt
+) {
+    const auto weights = bind_gemma2_model_weights(model);
+    auto receipt = ResidentTargetPayloadReceipt {};
+    auto plan = create_gemma2_metal_model_plan_impl(
+        model.gemma2_config(), weights, policy, &receipt
+    );
+    resident_receipt = receipt;
+    return plan;
+}
+
+Gemma2MetalModelPlan create_gemma2_metal_model_plan(
+    const Gemma2ModelConfig& config,
+    const Gemma2ModelWeights& weights,
+    Gemma2OutputHeadPolicy policy
+) {
+    return create_gemma2_metal_model_plan_impl(config, weights, policy, nullptr);
 }
 
 Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(

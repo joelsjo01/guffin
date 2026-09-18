@@ -4,6 +4,7 @@
 #include "metal_context.hpp"
 
 #include "local_gguf_engine/tensor/dtype.hpp"
+#include "local_gguf_engine/engine/draft_vocabulary_types.hpp"
 #include "local_gguf_engine/tensor/metal_trace_capture.hpp"
 
 #import <Foundation/Foundation.h>
@@ -223,10 +224,129 @@ struct TokenCandidateBatchMergeDimensions {
     std::uint32_t run_stride;
 };
 
+struct DraftTopKDimensions {
+    std::uint32_t rows;
+    std::uint32_t columns;
+    std::uint32_t retain_count;
+    std::uint32_t run_width;
+};
+
+struct DraftUnionDimensions {
+    std::uint32_t rows;
+    std::uint32_t vocabulary_size;
+    std::uint32_t selector_count;
+    std::uint32_t transition_width;
+    std::uint32_t tile_count;
+    std::uint32_t full_vocabulary;
+};
+
+struct DraftIndexedDimensions {
+    std::uint32_t rows;
+    std::uint32_t shared;
+    std::uint32_t vocabulary_size;
+    std::uint32_t candidate_stride;
+    float softcap;
+};
+
+struct DraftProposalDimensions {
+    std::uint32_t rows;
+    std::uint32_t candidate_stride;
+    float temperature;
+    std::uint32_t reserved;
+};
+
+struct CorrectedRankDimensions {
+    std::uint32_t rows;
+    std::uint32_t vocabulary_size;
+    std::uint32_t rank_width;
+    std::uint32_t output_row_start;
+    float temperature;
+};
+
 struct TokenCandidateResultHeader {
     std::uint32_t status;
     std::uint32_t count;
 };
+
+struct VerifierResolvedSelectionRow {
+    std::uint32_t top_k;
+    std::uint32_t base_candidate_count;
+    std::uint32_t history_count;
+    std::uint32_t reserved;
+    std::array<std::uint32_t, engine::token_sampler_max_repetition_window> history_token_ids;
+};
+
+struct VerifierRequestResolveDimensions {
+    std::uint32_t rows;
+    std::uint32_t vocabulary_size;
+    std::uint32_t top_k;
+    std::uint32_t repetition_enabled;
+};
+
+struct VerifierInputValidationDimensions {
+    std::uint32_t rows;
+    std::uint32_t vocabulary_size;
+};
+
+struct VerifierRoPEDimensions {
+    std::uint32_t rows;
+    std::uint32_t head_count;
+    std::uint32_t head_dimension;
+    std::uint32_t rope_dimension_count;
+    float frequency_base;
+};
+
+struct VerifierKVStoreDimensions {
+    std::uint32_t rows;
+    std::uint32_t head_count;
+    std::uint32_t head_dimension;
+    std::uint32_t rope_dimension_count;
+    float frequency_base;
+};
+
+struct VerifierAttentionDimensions {
+    std::uint32_t rows;
+    std::uint32_t cache_row_mask;
+    std::uint32_t query_head_count;
+    std::uint32_t kv_head_count;
+    std::uint32_t key_dimension;
+    std::uint32_t value_dimension;
+    float scale;
+    float logit_softcap;
+};
+
+struct VerifierKVScatterDimensions {
+    std::uint32_t rows;
+    std::uint32_t row_width;
+    std::uint32_t destination_position;
+    std::uint32_t destination_row_mask;
+};
+
+struct FeatureTapCopyDimensions {
+    std::uint32_t rows;
+    std::uint32_t input_columns;
+    std::uint32_t output_columns;
+    std::uint32_t input_row_start;
+    std::uint32_t output_column_start;
+};
+
+struct FeatureScatterDimensions {
+    std::uint32_t rows;
+    std::uint32_t width;
+    std::uint32_t source_row_capacity;
+    std::uint32_t destination_row_capacity;
+};
+
+struct TargetCandidateBatchDimensions {
+    std::uint32_t rows;
+    std::uint32_t columns;
+    std::uint32_t run_count;
+    std::uint32_t run_stride;
+    float softcap;
+};
+
+static_assert(sizeof(VerifierResolvedSelectionRow) == 272U);
+static_assert(sizeof(engine::VerifierDeviceSelectionRow) == 364U);
 
 [[nodiscard]] const MetalBackendBufferStorage& storage(const BackendBuffer& buffer) {
     return require_metal_backend_buffer(backend_buffer_storage(buffer));
@@ -287,6 +407,7 @@ std::uint32_t gemma2_decode_attention_partition_count(
 }
 
 struct MetalCommandContext::Impl {
+    std::string command_label;
     MatmulPipelineState* state = nullptr;
     id<MTLCommandBuffer> command_buffer = nil;
     id<MTLComputeCommandEncoder> active_compute_encoder = nil;
@@ -352,8 +473,24 @@ void fill_shared_metal_buffer_u32(
     );
 }
 
+void read_shared_metal_buffer_bytes(
+    const BackendBuffer& buffer,
+    std::uint64_t byte_offset,
+    std::span<std::uint8_t> destination
+) {
+    if (byte_offset > buffer.descriptor().byte_count
+        || destination.size() > buffer.descriptor().byte_count - byte_offset) {
+        throw std::out_of_range("Metal shared-buffer read exceeds its buffer");
+    }
+    std::memcpy(
+        destination.data(), metal_buffer_contents(storage(buffer), byte_offset),
+        destination.size()
+    );
+}
+
 MetalCommandContext::MetalCommandContext(std::string_view label, bool concurrent_compute)
     : impl_(std::make_unique<Impl>()) {
+    impl_->command_label = label;
     impl_->concurrent_compute = concurrent_compute;
     impl_->state = &shared_matmul_pipeline_state();
     impl_->owns_trace_capture = begin_trace_capture_if_armed(label, impl_->state->queue);
@@ -367,6 +504,26 @@ MetalCommandContext::MetalCommandContext(std::string_view label, bool concurrent
     const std::string owned_label(label);
     impl_->command_buffer.label = [NSString stringWithUTF8String:owned_label.c_str()];
     impl_->stats.command_buffer_count = 1;
+}
+
+void MetalCommandContext::restart() {
+    if (impl_->submitted && (!impl_->waited
+        || [impl_->command_buffer status] != MTLCommandBufferStatusCompleted)) {
+        throw std::logic_error("cannot reuse a pending or failed Metal command context");
+    }
+    impl_->end_compute_encoding();
+    if (impl_->owns_trace_capture) finish_trace_capture(false);
+    auto label = impl_->command_buffer.label;
+    impl_->command_buffer = [impl_->state->queue commandBuffer];
+    if (!impl_->command_buffer) throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+        "Metal resident command buffer renewal failed");
+    impl_->command_buffer.label = label;
+    impl_->stats = {};
+    impl_->stats.command_buffer_count = 1;
+    impl_->submitted = false;
+    impl_->waited = false;
+    impl_->debug_group_depth = 0;
+    impl_->owns_trace_capture = begin_trace_capture_if_armed(impl_->command_label, impl_->state->queue);
 }
 
 MetalCommandContext::~MetalCommandContext() = default;
@@ -438,7 +595,13 @@ void MetalCommandContext::encode_matmul(
     std::uint32_t row_count,
     std::uint64_t output_byte_offset
 ) {
-    const auto rows = row_count == 0U ? input.descriptor().shape.dimension(0) : row_count;
+    const auto input_rows = input.descriptor().shape.dimension(0);
+    const auto rows = row_count == 0U ? input_rows : row_count;
+    if (rows > input_rows) {
+        throw std::invalid_argument(
+            "Metal resident execution matmul explicit row count exceeds input rows"
+        );
+    }
     const auto shared = input.descriptor().shape.dimension(1);
     const auto columns = weight.descriptor().shape.dimension(1);
     if (shared != weight.descriptor().shape.dimension(0)) {
@@ -510,6 +673,298 @@ void MetalCommandContext::encode_matmul(
         [encoder dispatchThreadgroups:f16_dispatch.threadgroups
                   threadsPerThreadgroup:f16_dispatch.threads_per_threadgroup];
     }
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_verifier_matmul(
+    const BackendBuffer& input,
+    const BackendBuffer& weight,
+    const BackendBuffer& output,
+    std::uint32_t row_count
+) {
+    if (row_count == 0U || row_count > input.descriptor().shape.dimension(0)) {
+        throw std::invalid_argument("Metal verifier matmul row count is invalid");
+    }
+    const auto shared = input.descriptor().shape.dimension(1);
+    const auto columns = weight.descriptor().shape.dimension(1);
+    if (shared != weight.descriptor().shape.dimension(0)) {
+        throw std::invalid_argument("Metal verifier matmul inner dimensions do not match");
+    }
+    require_capacity(output,
+        static_cast<std::uint64_t>(row_count) * columns * sizeof(float),
+        "verifier matmul output");
+    const MatmulDimensions dims {
+        .rows = row_count,
+        .shared = u32(shared, "verifier matmul shared"),
+        .columns = u32(columns, "verifier matmul columns"),
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 target-verifier matmul");
+    id<MTLComputePipelineState> pipeline = nil;
+    if (weight.descriptor().dtype == DType::q4_k
+        || weight.descriptor().dtype == DType::q6_k) {
+        if (shared % 256U != 0U) {
+            throw std::invalid_argument("Metal verifier K-quant shared width must be 256-aligned");
+        }
+        const auto blocks = shared / 256U;
+        if (weight.descriptor().dtype == DType::q4_k) {
+            pipeline = blocks == 14U ? impl_->state->matmul_q4_k_packed_row_batch_14_pipeline
+                : blocks == 16U ? impl_->state->matmul_q4_k_packed_row_batch_16_pipeline
+                : impl_->state->matmul_q4_k_packed_row_batch_pipeline;
+            if (row_count == 1U) ++impl_->stats.q4_decode_projection_count;
+            else if (row_count <= 8U) ++impl_->stats.q4_small_batch_projection_count;
+            else ++impl_->stats.q4_generic_tiled_projection_count;
+        } else {
+            pipeline = blocks == 14U ? impl_->state->matmul_q6_k_packed_row_batch_14_pipeline
+                : blocks == 56U ? impl_->state->matmul_q6_k_packed_row_batch_56_pipeline
+                : impl_->state->matmul_q6_k_packed_row_batch_pipeline;
+            if (row_count == 1U) ++impl_->stats.q6_decode_projection_count;
+            else if (row_count <= 8U) ++impl_->stats.q6_small_batch_projection_count;
+            else ++impl_->stats.q6_generic_tiled_projection_count;
+        }
+        [encoder setComputePipelineState:pipeline];
+        bind_buffer(encoder, input, 0);
+        bind_buffer(encoder, weight, 1);
+        bind_buffer(encoder, output, 2);
+        [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+        [encoder dispatchThreadgroups:MTLSizeMake(
+                                          static_cast<NSUInteger>((columns + 3U) / 4U),
+                                          static_cast<NSUInteger>((row_count + 1U) / 2U),
+                                          1U
+                                      )
+                  threadsPerThreadgroup:MTLSizeMake(64U, 1U, 1U)];
+    } else {
+        pipeline = f16_matmul_pipeline(*impl_->state, weight.descriptor().dtype);
+        const auto dispatch = select_f16_matmul_dispatch(*impl_->state, row_count, columns);
+        ++impl_->stats.f16_projection_count;
+        [encoder setComputePipelineState:pipeline];
+        bind_buffer(encoder, input, 0);
+        bind_buffer(encoder, weight, 1);
+        bind_buffer(encoder, output, 2);
+        [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+        [encoder dispatchThreadgroups:dispatch.threadgroups
+                  threadsPerThreadgroup:dispatch.threads_per_threadgroup];
+    }
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_target_head_q8_rows(
+    const BackendBuffer& input,
+    std::uint32_t input_row_start,
+    const BackendBuffer& weight,
+    const BackendBuffer& logits_tile,
+    std::uint32_t row_count
+) {
+    if (weight.descriptor().dtype != DType::q8_0 || row_count == 0U
+        || row_count > engine::draft_vocabulary_external_state_max
+        || input_row_start > input.descriptor().shape.dimension(0)
+        || row_count > input.descriptor().shape.dimension(0) - input_row_start) {
+        throw std::invalid_argument("Metal target-head row tile is invalid");
+    }
+    const auto shared = input.descriptor().shape.dimension(1);
+    const auto columns = weight.descriptor().shape.dimension(1);
+    if (shared != weight.descriptor().shape.dimension(0) || shared % 32U != 0U) {
+        throw std::invalid_argument("Metal target-head Q8 layout is invalid");
+    }
+    require_capacity(logits_tile,
+        static_cast<std::uint64_t>(row_count) * columns * sizeof(float),
+        "target-head logits tile");
+    const MatmulDimensions dims {
+        .rows = row_count,
+        .shared = u32(shared, "target-head shared"),
+        .columns = u32(columns, "target-head columns"),
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 Q8 target-head row tile");
+    [encoder setComputePipelineState:shared == 3584U
+        ? impl_->state->target_head_q8_row_parallel_112_pipeline
+        : impl_->state->target_head_q8_row_parallel_pipeline];
+    bind_buffer(encoder, input, 0,
+        static_cast<std::uint64_t>(input_row_start) * shared * sizeof(float));
+    bind_buffer(encoder, weight, 1);
+    bind_buffer(encoder, logits_tile, 2);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake(
+                                      static_cast<NSUInteger>((columns + 3U) / 4U),
+                                      static_cast<NSUInteger>(row_count),
+                                      1U
+                                  )
+              threadsPerThreadgroup:MTLSizeMake(64U, 1U, 1U)];
+    ++impl_->stats.q8_decode_projection_count;
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_feature_tap_copy(
+    const BackendBuffer& input,
+    std::uint32_t input_row_start,
+    const BackendBuffer& fused_output,
+    std::uint32_t output_column_start,
+    std::uint32_t row_count
+) {
+    if (input.descriptor().dtype != DType::f32
+        || fused_output.descriptor().dtype != DType::f32
+        || input.descriptor().shape.rank() != 2U
+        || fused_output.descriptor().shape.rank() != 2U
+        || row_count == 0U
+        || input_row_start > input.descriptor().shape.dimension(0)
+        || row_count > input.descriptor().shape.dimension(0) - input_row_start) {
+        throw std::invalid_argument("Metal feature tap copy input is invalid");
+    }
+    const auto input_columns = input.descriptor().shape.dimension(1);
+    const auto output_columns = fused_output.descriptor().shape.dimension(1);
+    if (row_count > fused_output.descriptor().shape.dimension(0)
+        || output_column_start > output_columns
+        || input_columns > output_columns - output_column_start) {
+        throw std::invalid_argument("Metal feature tap copy output range is invalid");
+    }
+    const FeatureTapCopyDimensions dims {
+        .rows = row_count,
+        .input_columns = u32(input_columns, "feature tap input width"),
+        .output_columns = u32(output_columns, "feature tap fused width"),
+        .input_row_start = input_row_start,
+        .output_column_start = output_column_start,
+    };
+    auto encoder = impl_->compute_encoder("Target feature tap copy");
+    [encoder setComputePipelineState:impl_->state->feature_tap_copy_pipeline];
+    bind_buffer(encoder, input, 0);
+    bind_buffer(encoder, fused_output, 1);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
+    const auto elements = static_cast<std::uint64_t>(row_count) * input_columns;
+    [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(elements), 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_feature_tap_store_f16(
+    const BackendBuffer& input,
+    std::uint32_t input_row_start,
+    const BackendBuffer& output,
+    std::uint32_t output_column_start,
+    std::uint32_t row_count
+) {
+    if (input.descriptor().dtype != DType::f32
+        || output.descriptor().dtype != DType::f16
+        || input.descriptor().shape.rank() != 2U
+        || output.descriptor().shape.rank() != 2U
+        || row_count == 0U
+        || input_row_start > input.descriptor().shape.dimension(0)
+        || row_count > input.descriptor().shape.dimension(0) - input_row_start) {
+        throw std::invalid_argument("Metal trace feature tap input is invalid");
+    }
+    const auto input_columns = input.descriptor().shape.dimension(1);
+    const auto output_columns = output.descriptor().shape.dimension(1);
+    if (row_count > output.descriptor().shape.dimension(0)
+        || output_column_start > output_columns
+        || input_columns > output_columns - output_column_start) {
+        throw std::invalid_argument("Metal trace feature tap output range is invalid");
+    }
+    const FeatureTapCopyDimensions dims {
+        .rows = row_count,
+        .input_columns = u32(input_columns, "trace feature input width"),
+        .output_columns = u32(output_columns, "trace feature output width"),
+        .input_row_start = input_row_start,
+        .output_column_start = output_column_start,
+    };
+    auto encoder = impl_->compute_encoder("Trace target feature tap store");
+    [encoder setComputePipelineState:impl_->state->feature_tap_store_f16_pipeline];
+    bind_buffer(encoder, input, 0);
+    bind_buffer(encoder, output, 1);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
+    const auto elements = static_cast<std::uint64_t>(row_count) * input_columns;
+    [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(elements), 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_feature_scatter(
+    const BackendBuffer& source_f32,
+    const BackendBuffer& source_rows_u32,
+    const BackendBuffer& destination_rows_u32,
+    const BackendBuffer& destination,
+    const BackendBuffer& status_u32,
+    std::uint32_t row_count,
+    std::uint32_t width
+) {
+    if (source_f32.descriptor().dtype != DType::f32
+        || source_f32.descriptor().shape.rank() != 2U
+        || destination.descriptor().shape.rank() != 2U
+        || (destination.descriptor().dtype != DType::f32
+            && destination.descriptor().dtype != DType::f16)
+        || source_f32.descriptor().shape.dimension(1) != width
+        || destination.descriptor().shape.dimension(1) != width
+        || row_count == 0U
+        || row_count > source_rows_u32.descriptor().element_count
+        || row_count > destination_rows_u32.descriptor().element_count
+        || status_u32.descriptor().byte_count < sizeof(std::uint32_t)) {
+        throw std::invalid_argument("Metal feature scatter shape is invalid");
+    }
+    const FeatureScatterDimensions dims {
+        .rows = row_count,
+        .width = width,
+        .source_row_capacity = u32(
+            source_f32.descriptor().shape.dimension(0), "feature source row capacity"
+        ),
+        .destination_row_capacity = u32(
+            destination.descriptor().shape.dimension(0),
+            "feature destination row capacity"
+        ),
+    };
+    auto encoder = impl_->compute_encoder("Target feature scatter");
+    [encoder setComputePipelineState:destination.descriptor().dtype == DType::f16
+        ? impl_->state->feature_scatter_f16_pipeline
+        : impl_->state->feature_scatter_f32_pipeline];
+    bind_buffer(encoder, source_f32, 0);
+    bind_buffer(encoder, source_rows_u32, 1);
+    bind_buffer(encoder, destination_rows_u32, 2);
+    bind_buffer(encoder, destination, 3);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    bind_buffer(encoder, status_u32, 5);
+    const auto elements = static_cast<std::uint64_t>(row_count) * width;
+    [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(elements), 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_f16_row_scatter(
+    const BackendBuffer& source,
+    const BackendBuffer& source_rows_u32,
+    const BackendBuffer& destination_rows_u32,
+    const BackendBuffer& destination,
+    const BackendBuffer& status_u32,
+    std::uint32_t row_count
+) {
+    if (source.descriptor().dtype != DType::f16
+        || destination.descriptor().dtype != DType::f16
+        || source.descriptor().shape.rank() != 2U
+        || destination.descriptor().shape.rank() != 2U
+        || source.descriptor().shape.dimension(1)
+            != destination.descriptor().shape.dimension(1)
+        || row_count == 0U
+        || row_count > source_rows_u32.descriptor().element_count
+        || row_count > destination_rows_u32.descriptor().element_count
+        || status_u32.descriptor().byte_count < sizeof(std::uint32_t)) {
+        throw std::invalid_argument("Metal F16 row scatter shape is invalid");
+    }
+    const auto width = u32(source.descriptor().shape.dimension(1), "F16 row width");
+    const FeatureScatterDimensions dims {
+        .rows = row_count,
+        .width = width,
+        .source_row_capacity = u32(
+            source.descriptor().shape.dimension(0), "F16 source row capacity"
+        ),
+        .destination_row_capacity = u32(
+            destination.descriptor().shape.dimension(0), "F16 destination row capacity"
+        ),
+    };
+    auto encoder = impl_->compute_encoder("F16 row scatter");
+    [encoder setComputePipelineState:impl_->state->f16_row_scatter_pipeline];
+    bind_buffer(encoder, source, 0);
+    bind_buffer(encoder, source_rows_u32, 1);
+    bind_buffer(encoder, destination_rows_u32, 2);
+    bind_buffer(encoder, destination, 3);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    bind_buffer(encoder, status_u32, 5);
+    const auto elements = static_cast<std::uint64_t>(row_count) * width;
+    [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(elements), 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
     ++impl_->stats.compute_dispatch_count;
 }
 
@@ -1145,6 +1600,260 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     }
 }
 
+void MetalCommandContext::encode_verifier_input_validation(
+    const BackendBuffer& actual_token_ids,
+    std::uint64_t actual_byte_offset,
+    const BackendBuffer& expected_token_ids,
+    const BackendBuffer& status,
+    std::uint32_t row_count,
+    std::uint32_t vocabulary_size
+) {
+    if (row_count == 0U || vocabulary_size == 0U) {
+        throw std::invalid_argument("Metal verifier input validation extent is invalid");
+    }
+    require_capacity(actual_token_ids,
+        actual_byte_offset + static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t),
+        "verifier actual token IDs");
+    require_capacity(expected_token_ids,
+        static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t),
+        "verifier expected token IDs");
+    require_capacity(status, sizeof(std::uint32_t), "verifier input status");
+    const VerifierInputValidationDimensions dims {row_count, vocabulary_size};
+    auto encoder = impl_->compute_encoder("Gemma2 verifier input validation");
+    [encoder setComputePipelineState:impl_->state->verifier_input_validate_pipeline];
+    bind_buffer(encoder, actual_token_ids, 0, actual_byte_offset);
+    bind_buffer(encoder, expected_token_ids, 1);
+    bind_buffer(encoder, status, 2);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreads:MTLSizeMake(row_count, 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(std::min<std::uint32_t>(row_count, 256U), 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_verifier_selection_requests(
+    const BackendBuffer& raw_requests,
+    std::uint64_t raw_byte_offset,
+    const BackendBuffer& resolved_requests,
+    const BackendBuffer& histories,
+    const BackendBuffer& status,
+    std::uint32_t row_count,
+    const engine::TokenSamplerOptions& options,
+    std::uint32_t vocabulary_size
+) {
+    if (row_count == 0U || row_count > engine::VerifierRowMax
+        || options.top_k == 0U || options.top_k > engine::token_sampler_max_top_k
+        || options.repetition_window > engine::token_sampler_max_repetition_window
+        || !std::isfinite(options.repetition_penalty) || options.repetition_penalty <= 0.0F) {
+        throw std::invalid_argument("Metal verifier selection-request parameters are invalid");
+    }
+    require_capacity(raw_requests,
+        raw_byte_offset + static_cast<std::uint64_t>(row_count)
+            * sizeof(engine::VerifierDeviceSelectionRow),
+        "verifier raw selection requests");
+    require_capacity(resolved_requests,
+        static_cast<std::uint64_t>(row_count) * sizeof(VerifierResolvedSelectionRow),
+        "verifier resolved selection requests");
+    require_capacity(histories,
+        static_cast<std::uint64_t>(row_count)
+            * engine::token_sampler_max_repetition_window * sizeof(std::uint32_t),
+        "verifier selection histories");
+    const VerifierRequestResolveDimensions dims {
+        .rows = row_count,
+        .vocabulary_size = vocabulary_size,
+        .top_k = static_cast<std::uint32_t>(options.temperature == 0.0F ? 1U : options.top_k),
+        .repetition_enabled = options.repetition_penalty == 1.0F ? 0U : 1U,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 verifier request resolve");
+    [encoder setComputePipelineState:impl_->state->verifier_request_resolve_pipeline];
+    bind_buffer(encoder, raw_requests, 0, raw_byte_offset);
+    bind_buffer(encoder, resolved_requests, 1);
+    bind_buffer(encoder, histories, 2);
+    bind_buffer(encoder, status, 3);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    [encoder dispatchThreads:MTLSizeMake(row_count, 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(std::min<std::uint32_t>(row_count, 256U), 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_verifier_rope(
+    const BackendBuffer& input,
+    const BackendBuffer& positions,
+    const BackendBuffer& output,
+    std::uint32_t row_count,
+    std::uint32_t head_count,
+    std::uint32_t head_dimension,
+    std::uint32_t rope_dimension_count,
+    float frequency_base
+) {
+    if (row_count == 0U || head_count == 0U || head_dimension == 0U
+        || rope_dimension_count == 0U || rope_dimension_count > head_dimension
+        || (rope_dimension_count & 1U) != 0U || !std::isfinite(frequency_base)
+        || frequency_base <= 0.0F) {
+        throw std::invalid_argument("Metal verifier RoPE parameters are invalid");
+    }
+    const auto row_width = static_cast<std::uint64_t>(head_count) * head_dimension;
+    require_capacity(input, static_cast<std::uint64_t>(row_count) * row_width * sizeof(float),
+        "verifier RoPE input");
+    require_capacity(output, static_cast<std::uint64_t>(row_count) * row_width * sizeof(float),
+        "verifier RoPE output");
+    require_capacity(positions, static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t),
+        "verifier RoPE positions");
+    const VerifierRoPEDimensions dims {
+        row_count, head_count, head_dimension, rope_dimension_count, frequency_base,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 verifier query RoPE");
+    [encoder setComputePipelineState:impl_->state->verifier_rope_pipeline];
+    bind_buffer(encoder, input, 0);
+    bind_buffer(encoder, positions, 1);
+    bind_buffer(encoder, output, 2);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(row_width), row_count, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_verifier_kv_store(
+    const BackendBuffer& raw_key,
+    const BackendBuffer& raw_value,
+    const BackendBuffer& positions,
+    const BackendBuffer& private_key,
+    const BackendBuffer& private_value,
+    std::uint32_t row_count,
+    std::uint32_t head_count,
+    std::uint32_t head_dimension,
+    std::uint32_t rope_dimension_count,
+    float frequency_base
+) {
+    const auto row_width = static_cast<std::uint64_t>(head_count) * head_dimension;
+    if (row_count == 0U || row_width == 0U || rope_dimension_count > head_dimension
+        || (rope_dimension_count & 1U) != 0U) {
+        throw std::invalid_argument("Metal verifier private K/V parameters are invalid");
+    }
+    require_capacity(raw_key, static_cast<std::uint64_t>(row_count) * row_width * sizeof(float),
+        "verifier raw key");
+    require_capacity(raw_value, static_cast<std::uint64_t>(row_count) * row_width * sizeof(float),
+        "verifier raw value");
+    require_capacity(private_key, static_cast<std::uint64_t>(row_count) * row_width * sizeof(std::uint16_t),
+        "verifier private key");
+    require_capacity(private_value, static_cast<std::uint64_t>(row_count) * row_width * sizeof(std::uint16_t),
+        "verifier private value");
+    const VerifierKVStoreDimensions dims {
+        row_count, head_count, head_dimension, rope_dimension_count, frequency_base,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 verifier private K/V store");
+    [encoder setComputePipelineState:impl_->state->verifier_kv_store_pipeline];
+    bind_buffer(encoder, raw_key, 0);
+    bind_buffer(encoder, raw_value, 1);
+    bind_buffer(encoder, positions, 2);
+    bind_buffer(encoder, private_key, 3);
+    bind_buffer(encoder, private_value, 4);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
+    [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(row_width), row_count, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_verifier_attention(
+    const BackendBuffer& query,
+    const BackendBuffer& resident_key,
+    const BackendBuffer& resident_value,
+    const BackendBuffer& private_key,
+    const BackendBuffer& private_value,
+    const BackendBuffer& schedules,
+    std::uint64_t schedule_byte_offset,
+    const BackendBuffer& ancestors,
+    const BackendBuffer& output,
+    const BackendBuffer& partial_output,
+    const BackendBuffer& partial_maxima,
+    const BackendBuffer& partial_denominators,
+    std::uint32_t row_count,
+    std::uint32_t cache_row_mask,
+    std::uint32_t query_head_count,
+    std::uint32_t kv_head_count,
+    std::uint32_t key_dimension,
+    std::uint32_t value_dimension,
+    float scale,
+    float logit_softcap
+) {
+    if (row_count == 0U || kv_head_count == 0U
+        || query_head_count != 2U * kv_head_count
+        || key_dimension != value_dimension || key_dimension != 256U
+        || !std::isfinite(scale) || scale <= 0.0F
+        || !std::isfinite(logit_softcap) || logit_softcap <= 0.0F) {
+        throw std::invalid_argument("Metal verifier attention supports the exact Gemma2 grouped-head layout");
+    }
+    require_capacity(schedules,
+        schedule_byte_offset + static_cast<std::uint64_t>(row_count)
+            * sizeof(engine::VerifierRowAttention),
+        "verifier attention schedules");
+    const VerifierAttentionDimensions dims {
+        row_count, cache_row_mask, query_head_count, kv_head_count,
+        key_dimension, value_dimension, scale, logit_softcap,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 verifier tree attention");
+    [encoder setComputePipelineState:impl_->state->verifier_attention_pipeline];
+    bind_buffer(encoder, query, 0);
+    bind_buffer(encoder, resident_key, 1);
+    bind_buffer(encoder, resident_value, 2);
+    bind_buffer(encoder, private_key, 3);
+    bind_buffer(encoder, private_value, 4);
+    bind_buffer(encoder, schedules, 5, schedule_byte_offset);
+    bind_buffer(encoder, ancestors, 6);
+    bind_buffer(encoder, output, 7);
+    bind_buffer(encoder, partial_output, 8);
+    bind_buffer(encoder, partial_maxima, 9);
+    bind_buffer(encoder, partial_denominators, 10);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:11];
+    [encoder dispatchThreadgroups:MTLSizeMake(kv_head_count,
+                                      engine::gemma2_decode_attention_max_partitions,
+                                      row_count)
+              threadsPerThreadgroup:MTLSizeMake(128U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+    encode_memory_barrier();
+    encoder = impl_->compute_encoder("Gemma2 verifier tree attention reduction");
+    [encoder setComputePipelineState:impl_->state->verifier_attention_reduce_pipeline];
+    bind_buffer(encoder, partial_output, 0);
+    bind_buffer(encoder, partial_maxima, 1);
+    bind_buffer(encoder, partial_denominators, 2);
+    bind_buffer(encoder, schedules, 3, schedule_byte_offset);
+    bind_buffer(encoder, output, 4);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
+    [encoder dispatchThreadgroups:MTLSizeMake(kv_head_count, row_count, 1U)
+              threadsPerThreadgroup:MTLSizeMake(32U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_verifier_kv_scatter(
+    const BackendBuffer& private_key,
+    const BackendBuffer& private_value,
+    const BackendBuffer& selected_nodes,
+    const BackendBuffer& resident_key,
+    const BackendBuffer& resident_value,
+    std::uint32_t destination_position,
+    std::uint32_t row_count,
+    std::uint32_t row_width,
+    std::uint32_t destination_row_mask
+) {
+    if (row_count == 0U || row_count > engine::external_speculation_max_horizon + 1U
+        || row_width == 0U) {
+        throw std::invalid_argument("Metal verifier accepted-path scatter extent is invalid");
+    }
+    const VerifierKVScatterDimensions dims {
+        row_count, row_width, destination_position, destination_row_mask,
+    };
+    auto encoder = impl_->compute_encoder("Gemma2 verifier accepted-path K/V scatter");
+    [encoder setComputePipelineState:impl_->state->verifier_kv_scatter_pipeline];
+    bind_buffer(encoder, private_key, 0);
+    bind_buffer(encoder, private_value, 1);
+    bind_buffer(encoder, selected_nodes, 2);
+    bind_buffer(encoder, resident_key, 3);
+    bind_buffer(encoder, resident_value, 4);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
+    [encoder dispatchThreads:MTLSizeMake(row_width, row_count, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
 void MetalCommandContext::encode_add(
     const BackendBuffer& left,
     const BackendBuffer& right,
@@ -1430,6 +2139,638 @@ std::uint32_t MetalCommandContext::encode_token_candidates_width_two(
     return selector_dispatches + 1U;
 }
 
+std::uint32_t MetalCommandContext::encode_target_token_candidates(
+    const BackendBuffer& logits_tile,
+    const engine::TargetSelectionWorkspace& workspace,
+    std::uint32_t first_request_row,
+    std::uint32_t row_count,
+    float softcap,
+    bool greedy_without_history
+) {
+    if (row_count == 0U || row_count > workspace.batch_row_capacity
+        || row_count > engine::target_selection_batch_rows
+        || first_request_row > workspace.row_capacity
+        || row_count > workspace.row_capacity - first_request_row
+        || !std::isfinite(softcap) || softcap <= 0.0F) {
+        throw std::invalid_argument("Metal target-candidate row tile is invalid");
+    }
+    const auto columns = u32(
+        logits_tile.descriptor().shape.dimension(logits_tile.descriptor().shape.rank() - 1U),
+        "target-candidate columns"
+    );
+    const auto run_count = (columns + engine::gemma2_metal_selection_tile_size - 1U)
+        / engine::gemma2_metal_selection_tile_size;
+    const auto run_stride = run_count
+        * static_cast<std::uint32_t>(engine::token_sampler_max_base_candidates);
+    const TargetCandidateBatchDimensions dims {
+        row_count, columns, run_count, run_stride, softcap,
+    };
+    constexpr auto result_u32_stride = std::uint32_t {
+        2U + engine::token_sampler_max_candidates * 2U
+    };
+    constexpr std::array<std::uint32_t, 2> empty_header {0U, 0U};
+    for (std::uint32_t row = 0; row < row_count; ++row) {
+        write_u32s(workspace.compact_results,
+            (first_request_row + row) * result_u32_stride, empty_header);
+    }
+    const auto request_offset = static_cast<std::uint64_t>(first_request_row)
+        * sizeof(VerifierResolvedSelectionRow);
+    const auto history_offset = static_cast<std::uint64_t>(first_request_row)
+        * engine::token_sampler_max_repetition_window * sizeof(std::uint32_t);
+    const auto result_offset = static_cast<std::uint64_t>(first_request_row)
+        * result_u32_stride * sizeof(std::uint32_t);
+    if (greedy_without_history) {
+        auto encoder = impl_->compute_encoder("Gemma2 target-candidate top-1");
+        [encoder setComputePipelineState:impl_->state->target_candidate_batch_top1_pipeline];
+        bind_buffer(encoder, logits_tile, 0);
+        bind_buffer(encoder, workspace.compact_results, 1, result_offset);
+        [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
+        [encoder dispatchThreadgroups:MTLSizeMake(row_count, 1U, 1U)
+                  threadsPerThreadgroup:MTLSizeMake(512U, 1U, 1U)];
+        ++impl_->stats.compute_dispatch_count;
+        return 1U;
+    }
+
+    auto encoder = impl_->compute_encoder("Gemma2 target-candidate tile");
+    [encoder setComputePipelineState:impl_->state->target_candidate_batch_tile_pipeline];
+    bind_buffer(encoder, logits_tile, 0);
+    bind_buffer(encoder, workspace.resolved_request_staging, 1, request_offset);
+    bind_buffer(encoder, workspace.candidate_runs_a, 2);
+    bind_buffer(encoder, workspace.compact_results, 3, result_offset);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(run_count, row_count, 1U)
+              threadsPerThreadgroup:MTLSizeMake(512U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+    auto dispatches = std::uint32_t {1U};
+    auto input_is_a = true;
+    auto input_runs = run_count;
+    while (input_runs > 1U) {
+        encode_memory_barrier();
+        const auto output_runs = (input_runs + 1U) / 2U;
+        encoder = impl_->compute_encoder("Gemma2 target-candidate merge");
+        [encoder setComputePipelineState:impl_->state->target_candidate_batch_merge_pipeline];
+        bind_buffer(encoder,
+            input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 0);
+        bind_buffer(encoder, workspace.resolved_request_staging, 1, request_offset);
+        bind_buffer(encoder,
+            input_is_a ? workspace.candidate_runs_b : workspace.candidate_runs_a, 2);
+        [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+        [encoder setBytes:&input_runs length:sizeof(input_runs) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(output_runs, row_count, 1U)
+                  threadsPerThreadgroup:MTLSizeMake(1U, 1U, 1U)];
+        ++impl_->stats.compute_dispatch_count;
+        ++dispatches;
+        input_runs = output_runs;
+        input_is_a = !input_is_a;
+    }
+    encode_memory_barrier();
+    encoder = impl_->compute_encoder("Gemma2 target-candidate finalize");
+    [encoder setComputePipelineState:impl_->state->target_candidate_batch_finalize_pipeline];
+    bind_buffer(encoder, logits_tile, 0);
+    bind_buffer(encoder,
+        input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 1);
+    bind_buffer(encoder, workspace.resolved_request_staging, 2, request_offset);
+    bind_buffer(encoder, workspace.history_token_staging, 3, history_offset);
+    bind_buffer(encoder, workspace.compact_results, 4, result_offset);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
+    [encoder dispatchThreadgroups:MTLSizeMake(engine::token_sampler_max_candidates, row_count, 1U)
+              threadsPerThreadgroup:MTLSizeMake(1U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+    return dispatches + 1U;
+}
+
+void MetalCommandContext::encode_recurrent_stage(
+    RecurrentStage stage, std::span<const BackendBuffer* const> buffers,
+    const std::array<std::uint32_t,4>& dimensions, const std::array<float,4>& scalars
+) {
+    const auto index=static_cast<std::size_t>(stage);
+    if (index>=impl_->state->recurrent_pipelines.size()
+        || impl_->state->recurrent_pipelines[index]==nil) {
+        throw std::logic_error("recurrent pipelines were not prepared before execution");
+    }
+    const std::size_t expected = stage==RecurrentStage::linear ? 5U
+        : (stage==RecurrentStage::norm || stage==RecurrentStage::embedding || stage==RecurrentStage::sample) ? 4U : 3U;
+    if (buffers.size()!=expected) throw std::invalid_argument("recurrent stage buffer count");
+    for (auto* buffer:buffers) {
+        if (!buffer || buffer->backend()!=runtime::BackendKind::metal) {
+            throw std::invalid_argument("recurrent stage requires Metal buffers");
+        }
+    }
+    const std::uint64_t x=dimensions[0], y=dimensions[1], z=dimensions[2];
+    auto capacity=[&](std::size_t i,std::uint64_t n) {
+        require_capacity(*buffers[i],n,"recurrent stage buffer");
+    };
+    if (stage==RecurrentStage::verifier_requests) {
+        if (x==0 || x>23) throw std::invalid_argument("recurrent verifier horizon");
+        capacity(0,91*4);capacity(1,(x+1)*4);capacity(2,(x+1)*91*4);
+    } else if (stage==RecurrentStage::sample) {
+        if (x>=23 || y==0 || y>256 || !std::isfinite(scalars[0]) || scalars[0]<=0
+            || !(scalars[1]>0 && scalars[1]<=1) || !(scalars[2]>=0 && scalars[2]<=1)) {
+            throw std::invalid_argument("recurrent sampler dimensions or scalars");
+        }
+        capacity(0,y*8);capacity(1,(x+1)*8);capacity(2,(x+2)*4);capacity(3,4);
+    } else {
+        if (x==0 || x>8192) throw std::invalid_argument("recurrent stage width");
+        if (stage==RecurrentStage::linear) {
+            if (y==0 || y>4096 || z>23 || dimensions[3]>3) {
+                throw std::invalid_argument("recurrent linear dimensions");
+            }
+            capacity(0,x*4);capacity(1,x*y*4);capacity(2,(dimensions[3]&1U)?y*4:0);capacity(3,(z+y)*4);
+            capacity(4,4);
+        } else if (stage==RecurrentStage::embedding) {
+            if (y==0 || y>262144 || z>=23) throw std::invalid_argument("recurrent embedding dimensions");
+            capacity(0,x*y*2);capacity(1,(z+1)*4);capacity(2,x*4);capacity(3,4);
+        } else {
+            capacity(0,x*4);capacity(1,x*4);capacity(2,x*(stage==RecurrentStage::join?8:4));
+            if(stage==RecurrentStage::norm) capacity(3,4);
+        }
+    }
+    auto encoder=impl_->compute_encoder("Learned recurrent stage");
+    [encoder setComputePipelineState:impl_->state->recurrent_pipelines[index]];
+    for (std::size_t i=0;i<buffers.size();++i) {
+        if (!buffers[i]) throw std::invalid_argument("null recurrent stage buffer");
+        bind_buffer(encoder,*buffers[i],static_cast<NSUInteger>(i));
+    }
+    [encoder setBytes:dimensions.data() length:sizeof(dimensions) atIndex:buffers.size()];
+    if (stage==RecurrentStage::sample) {
+        [encoder setBytes:scalars.data() length:sizeof(scalars) atIndex:5];
+    }
+    const auto groups=stage==RecurrentStage::linear ? dimensions[1]
+        : (stage==RecurrentStage::norm || stage==RecurrentStage::sample
+           || stage==RecurrentStage::verifier_requests) ? 1U
+        : (dimensions[0]+255U)/256U;
+    const auto threads=stage==RecurrentStage::sample ? 1U
+        : (stage==RecurrentStage::linear || stage==RecurrentStage::norm) ? 32U : 256U;
+    [encoder dispatchThreadgroups:MTLSizeMake(groups,1,1)
+              threadsPerThreadgroup:MTLSizeMake(threads,1,1)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+draft_detail::TopKResult MetalCommandContext::encode_draft_stable_top_k(
+    const BackendBuffer& scores,
+    const BackendBuffer& runs_a,
+    const BackendBuffer& runs_b,
+    const BackendBuffer& status,
+    std::uint32_t row_count,
+    std::uint32_t vocabulary_size,
+    std::uint32_t retain_count
+) {
+    if (row_count == 0U || vocabulary_size == 0U || retain_count == 0U
+        || retain_count > vocabulary_size || vocabulary_size > 262'144U) {
+        throw std::invalid_argument("Metal draft top-k dimensions are invalid");
+    }
+    require_capacity(scores,
+        static_cast<std::uint64_t>(row_count) * vocabulary_size * sizeof(float),
+        "draft top-k scores");
+    const auto pair_bytes = static_cast<std::uint64_t>(row_count)
+        * vocabulary_size * 2U * sizeof(std::uint32_t);
+    require_capacity(runs_a, pair_bytes, "draft top-k run A");
+    require_capacity(runs_b, pair_bytes, "draft top-k run B");
+    require_capacity(status, sizeof(std::uint32_t), "draft top-k status");
+    DraftTopKDimensions dims {
+        .rows = row_count,
+        .columns = vocabulary_size,
+        .retain_count = retain_count,
+        .run_width = 512U,
+    };
+    auto encoder = impl_->compute_encoder("Draft stable top-k tiles");
+    [encoder setComputePipelineState:impl_->state->draft_topk_tile_pipeline];
+    bind_buffer(encoder, scores, 0);
+    bind_buffer(encoder, runs_a, 1);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
+    bind_buffer(encoder, status, 3);
+    [encoder dispatchThreadgroups:MTLSizeMake((vocabulary_size + 511U) / 512U, row_count, 1U)
+              threadsPerThreadgroup:MTLSizeMake(512U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+    auto result = draft_detail::TopKResult {.final_buffer_is_a = true, .dispatch_count = 1U};
+    while (dims.run_width < vocabulary_size) {
+        encode_memory_barrier();
+        encoder = impl_->compute_encoder("Draft stable top-k merge");
+        [encoder setComputePipelineState:impl_->state->draft_topk_merge_pipeline];
+        bind_buffer(encoder, result.final_buffer_is_a ? runs_a : runs_b, 0);
+        bind_buffer(encoder, result.final_buffer_is_a ? runs_b : runs_a, 1);
+        [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(vocabulary_size, row_count, 1U)
+              threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+        ++impl_->stats.compute_dispatch_count;
+        ++result.dispatch_count;
+        result.final_buffer_is_a = !result.final_buffer_is_a;
+        if (dims.run_width > std::numeric_limits<std::uint32_t>::max() / 2U) break;
+        dims.run_width *= 2U;
+    }
+    return result;
+}
+
+void MetalCommandContext::encode_draft_candidate_union(
+    const BackendBuffer& selected,
+    const BackendBuffer& transition_counts,
+    const BackendBuffer& transition_tokens,
+    const BackendBuffer& history_ids,
+    const BackendBuffer& history_counts,
+    const BackendBuffer& required_ids,
+    const BackendBuffer& required_counts,
+    const BackendBuffer& retrieval_ids,
+    const BackendBuffer& retrieval_counts,
+    const BackendBuffer& candidate_bits,
+    const BackendBuffer& tile_counts,
+    const BackendBuffer& tile_offsets,
+    const BackendBuffer& candidate_ids,
+    const BackendBuffer& candidate_counts,
+    const BackendBuffer& status,
+    std::uint32_t row_count,
+    std::uint32_t vocabulary_size,
+    std::uint32_t selector_count,
+    std::uint32_t transition_width,
+    bool full_vocabulary
+) {
+    if (row_count == 0U || vocabulary_size == 0U || vocabulary_size > 262'144U
+        || selector_count == 0U || selector_count > vocabulary_size
+        || transition_width > 64U) {
+        throw std::invalid_argument("Metal draft candidate-union dimensions are invalid");
+    }
+    const auto tile_count = (vocabulary_size + 511U) / 512U;
+    const auto bit_words = (vocabulary_size + 31U) / 32U;
+    const DraftUnionDimensions dims {
+        row_count, vocabulary_size, selector_count, transition_width, tile_count,
+        full_vocabulary ? 1U : 0U,
+    };
+    require_capacity(selected,
+        static_cast<std::uint64_t>(row_count) * vocabulary_size * 8U,
+        "draft selected candidates");
+    for (const auto* ids : {&history_ids, &required_ids, &retrieval_ids}) {
+        require_capacity(*ids,
+            static_cast<std::uint64_t>(row_count) * 64U * sizeof(std::uint32_t),
+            "draft auxiliary ids");
+    }
+    for (const auto* counts : {&history_counts, &required_counts, &retrieval_counts}) {
+        require_capacity(*counts,
+            static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t),
+            "draft auxiliary counts");
+    }
+    require_capacity(candidate_bits,
+        static_cast<std::uint64_t>(row_count) * bit_words * sizeof(std::uint32_t),
+        "draft candidate bits");
+    require_capacity(tile_counts,
+        static_cast<std::uint64_t>(row_count) * tile_count * sizeof(std::uint32_t),
+        "draft candidate tile counts");
+    require_capacity(tile_offsets,
+        static_cast<std::uint64_t>(row_count) * tile_count * sizeof(std::uint32_t),
+        "draft candidate tile offsets");
+    require_capacity(candidate_ids,
+        static_cast<std::uint64_t>(row_count) * vocabulary_size * sizeof(std::uint32_t),
+        "draft candidate ids");
+    require_capacity(candidate_counts,
+        static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t),
+        "draft candidate counts");
+    if (transition_width != 0U) {
+        require_capacity(transition_counts,
+            static_cast<std::uint64_t>(vocabulary_size) * sizeof(std::uint32_t),
+            "draft transition counts");
+        require_capacity(transition_tokens,
+            static_cast<std::uint64_t>(vocabulary_size) * transition_width
+                * sizeof(std::uint32_t),
+            "draft transition tokens");
+    }
+
+    const auto clear_buffer = [&](const BackendBuffer& buffer, std::uint32_t count,
+                                  const char* label) {
+        auto encoder = impl_->compute_encoder(label);
+        [encoder setComputePipelineState:impl_->state->draft_clear_u32_pipeline];
+        bind_buffer(encoder, buffer, 0);
+        [encoder setBytes:&count length:sizeof(count) atIndex:1];
+        [encoder dispatchThreads:MTLSizeMake(count, 1U, 1U)
+              threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+        ++impl_->stats.compute_dispatch_count;
+    };
+    clear_buffer(candidate_bits, row_count * bit_words, "Draft candidate bitset clear");
+    encode_memory_barrier();
+    auto encoder = impl_->compute_encoder("Draft selector and transition union");
+    [encoder setComputePipelineState:impl_->state->draft_union_mark_selector_pipeline];
+    bind_buffer(encoder, selected, 0);
+    bind_buffer(encoder, transition_counts, 1);
+    bind_buffer(encoder, transition_tokens, 2);
+    bind_buffer(encoder, candidate_bits, 3);
+    bind_buffer(encoder, status, 4);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
+    [encoder dispatchThreads:MTLSizeMake(selector_count, row_count, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+
+    encoder = impl_->compute_encoder("Draft history control retrieval union");
+    [encoder setComputePipelineState:impl_->state->draft_union_mark_aux_pipeline];
+    bind_buffer(encoder, history_ids, 0);
+    bind_buffer(encoder, history_counts, 1);
+    bind_buffer(encoder, required_ids, 2);
+    bind_buffer(encoder, required_counts, 3);
+    bind_buffer(encoder, retrieval_ids, 4);
+    bind_buffer(encoder, retrieval_counts, 5);
+    bind_buffer(encoder, candidate_bits, 6);
+    bind_buffer(encoder, status, 7);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:8];
+    [encoder dispatchThreads:MTLSizeMake(64U, row_count, 3U)
+          threadsPerThreadgroup:MTLSizeMake(64U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+    encode_memory_barrier();
+
+    encoder = impl_->compute_encoder("Draft candidate union tile counts");
+    [encoder setComputePipelineState:impl_->state->draft_union_count_tiles_pipeline];
+    bind_buffer(encoder, candidate_bits, 0);
+    bind_buffer(encoder, tile_counts, 1);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
+    [encoder dispatchThreadgroups:MTLSizeMake(tile_count, row_count, 1U)
+          threadsPerThreadgroup:MTLSizeMake(512U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+    encode_memory_barrier();
+
+    encoder = impl_->compute_encoder("Draft candidate union tile scan");
+    [encoder setComputePipelineState:impl_->state->draft_union_scan_tiles_pipeline];
+    bind_buffer(encoder, tile_counts, 0);
+    bind_buffer(encoder, tile_offsets, 1);
+    bind_buffer(encoder, candidate_counts, 2);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake(row_count, 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(1U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+    encode_memory_barrier();
+
+    encoder = impl_->compute_encoder("Draft candidate union stable scatter");
+    [encoder setComputePipelineState:impl_->state->draft_union_scatter_pipeline];
+    bind_buffer(encoder, candidate_bits, 0);
+    bind_buffer(encoder, tile_offsets, 1);
+    bind_buffer(encoder, candidate_ids, 2);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake(tile_count, row_count, 1U)
+          threadsPerThreadgroup:MTLSizeMake(512U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_draft_indexed_dot(
+    const BackendBuffer& states,
+    const BackendBuffer& weights,
+    const BackendBuffer& candidate_ids,
+    const BackendBuffer& candidate_counts,
+    const BackendBuffer& output,
+    const BackendBuffer& status,
+    std::uint32_t row_count,
+    std::uint32_t vocabulary_size,
+    std::uint32_t candidate_dispatch_width
+) {
+    if (row_count == 0U || candidate_dispatch_width == 0U
+        || candidate_dispatch_width > vocabulary_size
+        || states.descriptor().shape.rank() != 2U
+        || weights.descriptor().shape.rank() != 2U
+        || states.descriptor().shape.dimension(1) != weights.descriptor().shape.dimension(0)
+        || weights.descriptor().shape.dimension(1) != vocabulary_size) {
+        throw std::invalid_argument("Metal draft indexed-dot dimensions are invalid");
+    }
+    const auto shared = u32(states.descriptor().shape.dimension(1), "draft indexed width");
+    if ((weights.descriptor().dtype == DType::q8_0 && shared % 32U != 0U)
+        || ((weights.descriptor().dtype == DType::q4_k
+                || weights.descriptor().dtype == DType::q6_k)
+            && shared % 256U != 0U)) {
+        throw std::invalid_argument("Metal draft indexed packed width is invalid");
+    }
+    require_capacity(candidate_ids,
+        static_cast<std::uint64_t>(row_count) * vocabulary_size * sizeof(std::uint32_t),
+        "draft indexed candidate ids");
+    require_capacity(candidate_counts,
+        static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t),
+        "draft indexed candidate counts");
+    require_capacity(output,
+        static_cast<std::uint64_t>(row_count) * vocabulary_size * sizeof(float),
+        "draft indexed scores");
+    id<MTLComputePipelineState> pipeline = nil;
+    switch (weights.descriptor().dtype) {
+        case DType::f16: pipeline = impl_->state->draft_indexed_f16_pipeline; break;
+        case DType::q8_0: pipeline = impl_->state->draft_indexed_q8_pipeline; break;
+        case DType::q6_k: pipeline = impl_->state->draft_indexed_q6_pipeline; break;
+        case DType::q4_k: pipeline = impl_->state->draft_indexed_q4_pipeline; break;
+        case DType::f32:
+            throw std::invalid_argument("Metal draft indexed F32 table is not registered");
+    }
+    const DraftIndexedDimensions dims {
+        row_count, shared, vocabulary_size, vocabulary_size, 0.0F,
+    };
+    auto encoder = impl_->compute_encoder("Draft indexed packed-column score");
+    [encoder setComputePipelineState:pipeline];
+    bind_buffer(encoder, states, 0);
+    bind_buffer(encoder, weights, 1);
+    bind_buffer(encoder, candidate_ids, 2);
+    bind_buffer(encoder, candidate_counts, 3);
+    bind_buffer(encoder, output, 4);
+    bind_buffer(encoder, status, 5);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:6];
+    [encoder dispatchThreadgroups:MTLSizeMake(candidate_dispatch_width, row_count, 1U)
+          threadsPerThreadgroup:MTLSizeMake(32U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_draft_score_correction(
+    const BackendBuffer& scores,
+    const BackendBuffer& corrections,
+    const BackendBuffer& candidate_counts,
+    const BackendBuffer& status,
+    std::uint32_t row_count,
+    std::uint32_t candidate_stride,
+    std::uint32_t candidate_dispatch_width,
+    float softcap
+) {
+    if (row_count == 0U || candidate_stride == 0U
+        || candidate_dispatch_width == 0U || candidate_dispatch_width > candidate_stride
+        || !std::isfinite(softcap) || softcap <= 0.0F) {
+        throw std::invalid_argument("Metal draft score-correction dimensions are invalid");
+    }
+    const auto bytes = static_cast<std::uint64_t>(row_count)
+        * candidate_stride * sizeof(float);
+    require_capacity(scores, bytes, "draft corrected scores");
+    require_capacity(corrections, bytes, "draft correction input");
+    const DraftIndexedDimensions dims {
+        row_count, 0U, 0U, candidate_stride, softcap,
+    };
+    auto encoder = impl_->compute_encoder("Draft selected-token correction");
+    [encoder setComputePipelineState:impl_->state->draft_score_correct_pipeline];
+    bind_buffer(encoder, scores, 0);
+    bind_buffer(encoder, corrections, 1);
+    bind_buffer(encoder, candidate_counts, 2);
+    bind_buffer(encoder, status, 3);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    [encoder dispatchThreads:MTLSizeMake(candidate_dispatch_width, row_count, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_draft_proposals(
+    const BackendBuffer& candidate_ids,
+    const BackendBuffer& candidate_counts,
+    const BackendBuffer& scores,
+    const BackendBuffer& exp_lut,
+    const BackendBuffer& draws,
+    const BackendBuffer& weights,
+    const BackendBuffer& results,
+    std::uint32_t row_count,
+    std::uint32_t candidate_stride,
+    float temperature
+) {
+    if (row_count == 0U || candidate_stride == 0U
+        || !std::isfinite(temperature) || temperature <= 0.0F) {
+        throw std::invalid_argument("Metal draft proposal dimensions are invalid");
+    }
+    const auto candidate_bytes = static_cast<std::uint64_t>(row_count)
+        * candidate_stride * sizeof(std::uint32_t);
+    require_capacity(candidate_ids, candidate_bytes, "draft proposal ids");
+    require_capacity(scores, candidate_bytes, "draft proposal scores");
+    require_capacity(weights, candidate_bytes, "draft proposal weights");
+    require_capacity(candidate_counts,
+        static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t),
+        "draft proposal counts");
+    require_capacity(draws, static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t),
+        "draft proposal draws");
+    require_capacity(exp_lut, 4'097U * sizeof(std::uint32_t), "draft proposal LUT");
+    require_capacity(results, static_cast<std::uint64_t>(row_count) * 24U,
+        "draft proposal results");
+    const auto clear_words = row_count * 6U;
+    auto encoder = impl_->compute_encoder("Draft proposal result clear");
+    [encoder setComputePipelineState:impl_->state->draft_clear_u32_pipeline];
+    bind_buffer(encoder, results, 0);
+    [encoder setBytes:&clear_words length:sizeof(clear_words) atIndex:1];
+    [encoder dispatchThreads:MTLSizeMake(clear_words, 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+    encode_memory_barrier();
+    const DraftProposalDimensions dims {row_count, candidate_stride, temperature, 0U};
+    encoder = impl_->compute_encoder("Draft artifact-bound proposal transform");
+    [encoder setComputePipelineState:impl_->state->draft_proposal_pipeline];
+    bind_buffer(encoder, candidate_ids, 0);
+    bind_buffer(encoder, candidate_counts, 1);
+    bind_buffer(encoder, scores, 2);
+    bind_buffer(encoder, exp_lut, 3);
+    bind_buffer(encoder, draws, 4);
+    bind_buffer(encoder, weights, 5);
+    bind_buffer(encoder, results, 6);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:7];
+    [encoder dispatchThreadgroups:MTLSizeMake(row_count, 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_corrected_logsumexp(
+    const BackendBuffer& logits,
+    const BackendBuffer& logsumexp,
+    const BackendBuffer& status,
+    std::uint32_t row_count,
+    std::uint32_t vocabulary_size,
+    float temperature
+) {
+    if (row_count == 0U || row_count > 23U || vocabulary_size == 0U
+        || !std::isfinite(temperature) || temperature <= 0.0F) {
+        throw std::invalid_argument("Metal corrected-head logsumexp dimensions are invalid");
+    }
+    require_capacity(logits,
+        static_cast<std::uint64_t>(row_count) * vocabulary_size * sizeof(float),
+        "corrected-head logits");
+    require_capacity(logsumexp,
+        static_cast<std::uint64_t>(row_count) * sizeof(float),
+        "corrected-head logsumexp");
+    const CorrectedRankDimensions dims {
+        row_count, vocabulary_size, 0U, 0U, temperature,
+    };
+    auto encoder = impl_->compute_encoder("Corrected full-vocabulary logsumexp");
+    [encoder setComputePipelineState:impl_->state->corrected_logsumexp_pipeline];
+    bind_buffer(encoder, logits, 0);
+    bind_buffer(encoder, logsumexp, 1);
+    bind_buffer(encoder, status, 2);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake(row_count, 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_corrected_rank_finalize(
+    const BackendBuffer& sorted,
+    const BackendBuffer& logsumexp,
+    const BackendBuffer& rank_entries,
+    const BackendBuffer& status,
+    std::uint32_t row_count,
+    std::uint32_t vocabulary_size,
+    std::uint32_t rank_width,
+    std::uint32_t output_row_start,
+    float temperature
+) {
+    if (row_count == 0U || vocabulary_size == 0U || rank_width == 0U
+        || rank_width > vocabulary_size || !std::isfinite(temperature)
+        || temperature <= 0.0F) {
+        throw std::invalid_argument("Metal corrected-head rank dimensions are invalid");
+    }
+    require_capacity(sorted,
+        static_cast<std::uint64_t>(row_count) * vocabulary_size * 8U,
+        "corrected-head sorted candidates");
+    require_capacity(logsumexp,
+        static_cast<std::uint64_t>(row_count) * sizeof(float),
+        "corrected-head logsumexp");
+    const auto last_row = static_cast<std::uint64_t>(output_row_start) + row_count;
+    require_capacity(rank_entries, last_row * rank_width * 8U,
+        "corrected-head rank entries");
+    const CorrectedRankDimensions dims {
+        row_count, vocabulary_size, rank_width, output_row_start, temperature,
+    };
+    auto encoder = impl_->compute_encoder("Corrected stable log-probability ranks");
+    [encoder setComputePipelineState:impl_->state->corrected_rank_finalize_pipeline];
+    bind_buffer(encoder, sorted, 0);
+    bind_buffer(encoder, logsumexp, 1);
+    bind_buffer(encoder, rank_entries, 2);
+    bind_buffer(encoder, status, 3);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
+    [encoder dispatchThreads:MTLSizeMake(rank_width, row_count, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_arm_s_transition_scores(
+    const BackendBuffer& logits,
+    const BackendBuffer& logsumexp,
+    const BackendBuffer& child_token_ids,
+    std::uint32_t child_token_offset,
+    const BackendBuffer& probabilities,
+    const BackendBuffer& status,
+    std::uint32_t row_count,
+    std::uint32_t vocabulary_size,
+    std::uint32_t output_row_start
+) {
+    if (row_count == 0U || vocabulary_size == 0U) {
+        throw std::invalid_argument("Metal Arm-S transition-score dimensions are invalid");
+    }
+    require_capacity(logits,
+        static_cast<std::uint64_t>(row_count) * vocabulary_size * sizeof(float),
+        "Arm-S early-exit logits");
+    require_capacity(logsumexp, static_cast<std::uint64_t>(row_count) * sizeof(float),
+        "Arm-S early-exit logsumexp");
+    require_capacity(child_token_ids,
+        (static_cast<std::uint64_t>(child_token_offset) + row_count) * sizeof(std::uint32_t),
+        "Arm-S child token IDs");
+    require_capacity(probabilities,
+        (static_cast<std::uint64_t>(output_row_start) + row_count) * sizeof(float),
+        "Arm-S transition probabilities");
+    const CorrectedRankDimensions dims {
+        row_count, vocabulary_size, 0U, child_token_offset, 1.0F,
+    };
+    // The kernel uses output_row_start as both the child-token and output
+    // offset. Current Arm-S execution advances them together.
+    if (child_token_offset != output_row_start) {
+        throw std::invalid_argument("Metal Arm-S child/output offsets must match");
+    }
+    auto encoder = impl_->compute_encoder("Arm-S normalized transition scores");
+    [encoder setComputePipelineState:impl_->state->arm_s_transition_score_pipeline];
+    bind_buffer(encoder, logits, 0);
+    bind_buffer(encoder, logsumexp, 1);
+    bind_buffer(encoder, child_token_ids, 2);
+    bind_buffer(encoder, probabilities, 3);
+    bind_buffer(encoder, status, 4);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
+    [encoder dispatchThreads:MTLSizeMake(row_count, 1U, 1U)
+          threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
 void MetalCommandContext::encode_memory_barrier() {
     auto encoder = impl_->compute_encoder("Gemma2 dependency barrier");
     [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
@@ -1608,6 +2949,55 @@ MetalCommandContext::read_token_candidates_width_two(
         std::memcpy(output[row].values.data(), row_bytes + sizeof(header), output[row].readback_bytes);
     }
     return output;
+}
+
+std::uint32_t MetalCommandContext::read_verifier_status(const BackendBuffer& status) const {
+    if (!impl_->submitted || [impl_->command_buffer status] < MTLCommandBufferStatusCompleted) {
+        throw std::logic_error("Metal verifier status cannot be read before completion");
+    }
+    const auto* bytes = static_cast<const std::byte*>(metal_buffer_contents(storage(status)));
+    std::uint32_t value = 0;
+    std::memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
+void MetalCommandContext::read_target_token_candidates(
+    const engine::TargetSelectionWorkspace& workspace,
+    std::uint32_t first_row,
+    std::span<engine::CompactTokenCandidates> output
+) const {
+    if (!impl_->submitted || [impl_->command_buffer status] < MTLCommandBufferStatusCompleted) {
+        throw std::logic_error("Metal target candidates cannot be read before completion");
+    }
+    if (first_row > workspace.row_capacity || output.size() > workspace.row_capacity - first_row) {
+        throw std::invalid_argument("Metal target candidate readback extent is invalid");
+    }
+    constexpr auto result_byte_stride = sizeof(TokenCandidateResultHeader)
+        + engine::token_sampler_max_candidates * sizeof(engine::TokenLogit);
+    const auto* bytes = static_cast<const std::byte*>(
+        metal_buffer_contents(storage(workspace.compact_results))
+    );
+    for (std::size_t row = 0; row < output.size(); ++row) {
+        const auto* row_bytes = bytes + (first_row + row) * result_byte_stride;
+        TokenCandidateResultHeader header {};
+        std::memcpy(&header, row_bytes, sizeof(header));
+        if (header.status != 0U) {
+            const auto detail = (header.status & 2U) != 0U
+                ? "history token is outside vocabulary"
+                : "logit must be finite after softcap";
+            throw std::invalid_argument(
+                "Metal target-candidate row " + std::to_string(first_row + row)
+                    + " " + detail
+            );
+        }
+        if (header.count == 0U || header.count > engine::token_sampler_max_candidates) {
+            throw std::runtime_error("Metal target-candidate result count is invalid");
+        }
+        output[row].count = header.count;
+        output[row].readback_bytes = header.count * sizeof(engine::TokenLogit);
+        std::memcpy(output[row].values.data(), row_bytes + sizeof(header),
+            output[row].readback_bytes);
+    }
 }
 
 }  // namespace local_gguf_engine::tensor::backends::metal

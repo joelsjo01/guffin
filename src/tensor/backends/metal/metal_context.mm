@@ -1,8 +1,53 @@
 #include "metal_context.hpp"
+#include "learned_recurrent_kernels.hpp"
+#include <mutex>
 
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+#include "metal_test_hooks.hpp"
+
+#include <atomic>
+#endif
 #include <stdexcept>
 
 namespace local_gguf_engine::tensor::backends::metal {
+
+void prepare_recurrent_pipelines() {
+    static_cast<void>(metal_device_or_throw());
+    static std::once_flag once;
+    std::call_once(once, [] {
+        auto& state=shared_matmul_pipeline_state();
+        MTLCompileOptions* options=[MTLCompileOptions new];
+        options.mathMode=MTLMathModeSafe;
+        options.mathFloatingPointFunctions=MTLMathFloatingPointFunctionsPrecise;
+        NSError* error=nil;
+        auto library=[state.device newLibraryWithSource:
+            [NSString stringWithUTF8String:learned_recurrent_kernel_source]
+            options:options error:&error];
+        if (!library) throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+            "recurrent library: "+ns_error_message(error,"compile failed"));
+        NSArray<NSString*>* names=@[@"recurrent_linear",@"recurrent_norm",@"recurrent_embedding",
+                                    @"recurrent_join",@"recurrent_update",@"recurrent_sample",
+                                    @"recurrent_verifier_requests"];
+        std::array<id<MTLComputePipelineState>,7> ready {};
+        for (NSUInteger i=0;i<ready.size();++i) {
+            auto function=[library newFunctionWithName:names[i]];
+            ready[i]=[state.device newComputePipelineStateWithFunction:function error:&error];
+            if (!ready[i] || ready[i].threadExecutionWidth!=32 || ready[i].maxTotalThreadsPerThreadgroup<256) {
+                throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                    "recurrent pipeline: "+ns_error_message(error,"unsupported device"));
+            }
+        }
+        state.recurrent_pipelines=ready;
+    });
+}
+
+namespace {
+
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+std::atomic_bool metal_device_unavailable_for_testing {false};
+#endif
+
+}  // namespace
 
 std::string ns_error_message(NSError* error, const char* fallback) {
     if (error == nil) {
@@ -30,9 +75,20 @@ runtime::BackendError metal_error(
 }
 
 id<MTLDevice> system_metal_device() noexcept {
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+    if (metal_device_unavailable_for_testing.load(std::memory_order_acquire)) {
+        return nil;
+    }
+#endif
     static id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     return device;
 }
+
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+void set_metal_device_unavailable_for_testing(bool unavailable) noexcept {
+    metal_device_unavailable_for_testing.store(unavailable, std::memory_order_release);
+}
+#endif
 
 id<MTLDevice> metal_device_or_throw() {
     id<MTLDevice> device = system_metal_device();
@@ -202,13 +258,33 @@ MatmulPipelineState::MatmulPipelineState() {
     matmul_q8_0_width_two_112_pipeline = make_specialized_pipeline(
         @"matmul_f32_q8_0_width_two_kernel", 4, 112, "Q8_0 112-block width-two matmul"
     );
+    target_head_q8_row_parallel_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q8_0_target_rows_kernel", 4, 0,
+        "Q8_0 target-head row-parallel matmul"
+    );
+    target_head_q8_row_parallel_112_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q8_0_target_rows_kernel", 4, 112,
+        "Q8_0 112-block target-head row-parallel matmul"
+    );
+    feature_tap_copy_pipeline = make_pipeline(
+        @"feature_tap_copy_f32_kernel", "feature tap copy"
+    );
+    feature_tap_store_f16_pipeline = make_pipeline(
+        @"feature_tap_store_f16_kernel", "F16 trace feature tap store"
+    );
+    feature_scatter_f32_pipeline = make_pipeline(
+        @"feature_scatter_f32_kernel", "F32 feature scatter"
+    );
+    feature_scatter_f16_pipeline = make_pipeline(
+        @"feature_scatter_f16_kernel", "F16 feature scatter"
+    );
+    f16_row_scatter_pipeline = make_pipeline(
+        @"f16_row_scatter_kernel", "F16 row scatter"
+    );
 
     matmul_q4_k_tiled_pipeline = make_tiled_pipeline(0, false, "Q4_K tiled matmul");
     matmul_q4_k_tiled_exact_16_pipeline =
         make_tiled_pipeline(0, true, "Q4_K exact 16-row tiled matmul");
-    matmul_q4_k_small_batch_pipeline = make_specialized_pipeline(
-        @"matmul_f32_kquant_small_batch_kernel", 2, 0, "Q4_K packed small-batch matmul"
-    );
     matmul_q4_k_width_two_pipeline = make_specialized_pipeline(
         @"matmul_f32_q4_k_packed_width_two_kernel", 0, 0, "Q4_K packed width-two matmul"
     );
@@ -219,21 +295,19 @@ MatmulPipelineState::MatmulPipelineState() {
         @"matmul_f32_q4_k_packed_width_two_kernel", 0, 16, "Q4_K 16-block width-two matmul"
     );
 
-    matvec_q4_k_packed_pipeline =
-        make_specialized_pipeline(@"matvec_f32_q4_k_packed_kernel", 0, 0, "Q4_K packed decode matvec");
-    matvec_q4_k_packed_14_pipeline = make_specialized_pipeline(
-        @"matvec_f32_q4_k_packed_kernel", 0, 14, "Q4_K 14-block packed decode matvec"
+    matmul_q4_k_packed_row_batch_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q4_k_packed_row_batch_kernel", 0, 0, "Q4_K packed row-batch matmul"
     );
-    matvec_q4_k_packed_16_pipeline = make_specialized_pipeline(
-        @"matvec_f32_q4_k_packed_kernel", 0, 16, "Q4_K 16-block packed decode matvec"
+    matmul_q4_k_packed_row_batch_14_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q4_k_packed_row_batch_kernel", 0, 14, "Q4_K 14-block packed row-batch matmul"
+    );
+    matmul_q4_k_packed_row_batch_16_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q4_k_packed_row_batch_kernel", 0, 16, "Q4_K 16-block packed row-batch matmul"
     );
 
     matmul_q6_k_tiled_pipeline = make_tiled_pipeline(1, false, "Q6_K tiled matmul");
     matmul_q6_k_tiled_exact_16_pipeline =
         make_tiled_pipeline(1, true, "Q6_K exact 16-row tiled matmul");
-    matmul_q6_k_small_batch_pipeline = make_specialized_pipeline(
-        @"matmul_f32_kquant_small_batch_kernel", 2, 1, "Q6_K packed small-batch matmul"
-    );
     matmul_q6_k_width_two_pipeline = make_specialized_pipeline(
         @"matmul_f32_q6_k_packed_width_two_kernel", 1, 0, "Q6_K packed width-two matmul"
     );
@@ -244,13 +318,14 @@ MatmulPipelineState::MatmulPipelineState() {
         @"matmul_f32_q6_k_packed_width_two_kernel", 1, 56, "Q6_K 56-block width-two matmul"
     );
 
-    matvec_q6_k_packed_pipeline =
-        make_specialized_pipeline(@"matvec_f32_q6_k_packed_kernel", 1, 0, "Q6_K packed decode matvec");
-    matvec_q6_k_packed_14_pipeline = make_specialized_pipeline(
-        @"matvec_f32_q6_k_packed_kernel", 1, 14, "Q6_K 14-block packed decode matvec"
+    matmul_q6_k_packed_row_batch_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q6_k_packed_row_batch_kernel", 1, 0, "Q6_K packed row-batch matmul"
     );
-    matvec_q6_k_packed_56_pipeline = make_specialized_pipeline(
-        @"matvec_f32_q6_k_packed_kernel", 1, 56, "Q6_K 56-block packed decode matvec"
+    matmul_q6_k_packed_row_batch_14_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q6_k_packed_row_batch_kernel", 1, 14, "Q6_K 14-block packed row-batch matmul"
+    );
+    matmul_q6_k_packed_row_batch_56_pipeline = make_specialized_pipeline(
+        @"matmul_f32_q6_k_packed_row_batch_kernel", 1, 56, "Q6_K 56-block packed row-batch matmul"
     );
 
     id<MTLFunction> matmul_add_function =
@@ -549,6 +624,25 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    verifier_rope_pipeline = make_pipeline(
+        @"verifier_rope_f32_by_positions_kernel", "target verifier query RoPE"
+    );
+    verifier_kv_store_pipeline = make_pipeline(
+        @"verifier_kv_store_f16_kernel", "target verifier private K/V store"
+    );
+    verifier_attention_pipeline = make_pipeline(
+        @"verifier_attention_f16_cache_kernel", "target verifier tree attention"
+    );
+    verifier_attention_reduce_pipeline = make_pipeline(
+        @"verifier_attention_reduce_f32_kernel", "target verifier tree attention reduction"
+    );
+    verifier_kv_scatter_pipeline = make_pipeline(
+        @"verifier_kv_scatter_f16_kernel", "target verifier accepted-path K/V scatter"
+    );
+    verifier_input_validate_pipeline = make_pipeline(
+        @"verifier_input_validate_u32_kernel", "target verifier device input validation"
+    );
+
     id<MTLFunction> softmax_function = [library newFunctionWithName:@"softmax_f32_kernel"];
     if (softmax_function == nil) {
         throw metal_error(
@@ -607,10 +701,83 @@ MatmulPipelineState::MatmulPipelineState() {
     token_candidate_batch_top1_pipeline = make_candidate_pipeline(
         @"token_candidate_batch_top1_f32_kernel", "Metal batched token-candidate top-1 pipeline creation failed"
     );
+    verifier_request_resolve_pipeline = make_candidate_pipeline(
+        @"verifier_selection_request_resolve_kernel",
+        "Metal verifier selection-request resolver pipeline creation failed"
+    );
+    target_candidate_batch_tile_pipeline = make_candidate_pipeline(
+        @"target_candidate_batch_tile_f32_kernel",
+        "Metal target-candidate batch tile pipeline creation failed"
+    );
+    target_candidate_batch_merge_pipeline = make_candidate_pipeline(
+        @"target_candidate_batch_merge_f32_kernel",
+        "Metal target-candidate batch merge pipeline creation failed"
+    );
+    target_candidate_batch_finalize_pipeline = make_candidate_pipeline(
+        @"target_candidate_batch_finalize_f32_kernel",
+        "Metal target-candidate batch finalization pipeline creation failed"
+    );
+    target_candidate_batch_top1_pipeline = make_candidate_pipeline(
+        @"target_candidate_batch_top1_f32_kernel",
+        "Metal target-candidate batch top-1 pipeline creation failed"
+    );
+    draft_topk_tile_pipeline = make_candidate_pipeline(
+        @"draft_topk_tile_f32_kernel", "Metal draft top-k tile pipeline creation failed"
+    );
+    draft_topk_merge_pipeline = make_candidate_pipeline(
+        @"draft_topk_merge_f32_kernel", "Metal draft top-k merge pipeline creation failed"
+    );
+    draft_clear_u32_pipeline = make_candidate_pipeline(
+        @"draft_clear_u32_kernel", "Metal draft clear pipeline creation failed"
+    );
+    draft_union_mark_selector_pipeline = make_candidate_pipeline(
+        @"draft_union_mark_selector_kernel", "Metal draft selector-union pipeline creation failed"
+    );
+    draft_union_mark_aux_pipeline = make_candidate_pipeline(
+        @"draft_union_mark_aux_kernel", "Metal draft auxiliary-union pipeline creation failed"
+    );
+    draft_union_count_tiles_pipeline = make_candidate_pipeline(
+        @"draft_union_count_tiles_kernel", "Metal draft union tile-count pipeline creation failed"
+    );
+    draft_union_scan_tiles_pipeline = make_candidate_pipeline(
+        @"draft_union_scan_tiles_kernel", "Metal draft union scan pipeline creation failed"
+    );
+    draft_union_scatter_pipeline = make_candidate_pipeline(
+        @"draft_union_scatter_kernel", "Metal draft union scatter pipeline creation failed"
+    );
+    draft_indexed_f16_pipeline = make_candidate_pipeline(
+        @"draft_indexed_f16_kernel", "Metal draft indexed-F16 pipeline creation failed"
+    );
+    draft_indexed_q8_pipeline = make_candidate_pipeline(
+        @"draft_indexed_q8_kernel", "Metal draft indexed-Q8 pipeline creation failed"
+    );
+    draft_indexed_q6_pipeline = make_candidate_pipeline(
+        @"draft_indexed_q6_kernel", "Metal draft indexed-Q6 pipeline creation failed"
+    );
+    draft_indexed_q4_pipeline = make_candidate_pipeline(
+        @"draft_indexed_q4_kernel", "Metal draft indexed-Q4 pipeline creation failed"
+    );
+    draft_score_correct_pipeline = make_candidate_pipeline(
+        @"draft_score_correct_kernel", "Metal draft correction pipeline creation failed"
+    );
+    draft_proposal_pipeline = make_candidate_pipeline(
+        @"draft_proposal_kernel", "Metal draft proposal pipeline creation failed"
+    );
+    corrected_logsumexp_pipeline = make_candidate_pipeline(
+        @"corrected_logsumexp_kernel", "Metal corrected-head logsumexp pipeline creation failed"
+    );
+    corrected_rank_finalize_pipeline = make_candidate_pipeline(
+        @"corrected_rank_finalize_kernel", "Metal corrected-head rank pipeline creation failed"
+    );
+    arm_s_transition_score_pipeline = make_candidate_pipeline(
+        @"arm_s_transition_score_kernel", "Metal Arm-S transition-score pipeline creation failed"
+    );
     if (token_candidate_tile_pipeline.maxTotalThreadsPerThreadgroup < 512U
         || token_candidate_top1_pipeline.maxTotalThreadsPerThreadgroup < 512U
         || token_candidate_batch_tile_pipeline.maxTotalThreadsPerThreadgroup < 512U
-        || token_candidate_batch_top1_pipeline.maxTotalThreadsPerThreadgroup < 512U) {
+        || token_candidate_batch_top1_pipeline.maxTotalThreadsPerThreadgroup < 512U
+        || target_candidate_batch_tile_pipeline.maxTotalThreadsPerThreadgroup < 512U
+        || target_candidate_batch_top1_pipeline.maxTotalThreadsPerThreadgroup < 512U) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
             "Metal token-candidate selection requires 512 threads per threadgroup"
@@ -627,6 +794,13 @@ MatmulPipelineState::MatmulPipelineState() {
 }
 
 MatmulPipelineState& shared_matmul_pipeline_state() {
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+    // A previously initialized process-lifetime state must not bypass the
+    // injected unavailable-device boundary.
+    if (metal_device_unavailable_for_testing.load(std::memory_order_acquire)) {
+        static_cast<void>(metal_device_or_throw());
+    }
+#endif
     static MatmulPipelineState state;
     return state;
 }
@@ -695,20 +869,25 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
     id<MTLComputePipelineState> pipeline = nil;
     std::uint64_t row_tile = 1;
     std::uint64_t threads = 64;
-    if (rows == 1) {
+    const bool packed_row_batch = rows == 1U || (rows >= 3U && rows <= 8U);
+    if (packed_row_batch) {
+        // One threadgroup-grid row owns one activation row. This is the same
+        // packed kernel for scalar decode and 3-8 row tails, so worker mapping
+        // and floating-point accumulation order cannot drift by batch width.
+        row_tile = 1;
         const auto blocks = shared / 256;
         if (dtype == DType::q4_k) {
             pipeline = blocks == 14
-                ? state.matvec_q4_k_packed_14_pipeline
+                ? state.matmul_q4_k_packed_row_batch_14_pipeline
                 : blocks == 16
-                    ? state.matvec_q4_k_packed_16_pipeline
-                    : state.matvec_q4_k_packed_pipeline;
+                    ? state.matmul_q4_k_packed_row_batch_16_pipeline
+                    : state.matmul_q4_k_packed_row_batch_pipeline;
         } else {
             pipeline = blocks == 14
-                ? state.matvec_q6_k_packed_14_pipeline
+                ? state.matmul_q6_k_packed_row_batch_14_pipeline
                 : blocks == 56
-                    ? state.matvec_q6_k_packed_56_pipeline
-                    : state.matvec_q6_k_packed_pipeline;
+                    ? state.matmul_q6_k_packed_row_batch_56_pipeline
+                    : state.matmul_q6_k_packed_row_batch_pipeline;
         }
     } else if (rows == 2) {
         row_tile = 2;
@@ -722,12 +901,6 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
                 : blocks == 56 ? state.matmul_q6_k_width_two_56_pipeline
                 : state.matmul_q6_k_width_two_pipeline;
         }
-    } else if (rows <= 8) {
-        row_tile = 4;
-        threads = 64;
-        pipeline = dtype == DType::q4_k
-            ? state.matmul_q4_k_small_batch_pipeline
-            : state.matmul_q6_k_small_batch_pipeline;
     } else {
         const bool exact_16 = rows == 16 && columns % 64 == 0;
         row_tile = exact_16 ? 16 : 32;
@@ -749,8 +922,7 @@ QuantizedMatmulDispatch select_quantized_matmul_dispatch(
         .pipeline = pipeline,
         .threadgroups = MTLSizeMake(
             static_cast<NSUInteger>(
-                rows <= 2 ? (columns + 3) / 4
-                : rows <= 8 ? (columns + 1) / 2
+                rows <= 8 ? (columns + 3) / 4
                 : (columns + 63) / 64
             ),
             static_cast<NSUInteger>((rows + row_tile - 1) / row_tile),

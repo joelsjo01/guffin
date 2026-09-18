@@ -9,6 +9,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -120,6 +121,35 @@ def decode_attribution(evaluated, cached, decoded, initial_cache, attention_toke
 
 
 class QuickBenchmarkScriptTests(unittest.TestCase):
+    def test_complete_generation_metrics_fail_closed(self):
+        record = decode_attribution(12, 0, 2, 0)
+        record.update(schema_version=4, generation_completion_ns=10_000_000_000,
+                      full_turn_ns=11_000_000_000, first_text_ns=1_000_000_000, learned_owned_bytes=1000,
+                      learned_horizon=3, learned_cycles=1, learned_accepted_edges=2,
+                      learned_numeric_refusals=0, learned_draft_ns=100,
+                      learned_draft_gpu_ns=90, learned_target_gpu_ns=1000,
+                      learned_cycle_ns=1200,
+                      scheduled_bytes_basis="one_row_equivalent_not_physical_bandwidth")
+        turn = dict(evaluated=12, cached=0, decoded=2, decode_attribution=record)
+        QUICK.validate_decode_attribution(turn, "First")
+        for field, value in (("generation_completion_ns", 0), ("full_turn_ns", 1),
+                             ("first_text_ns", 12_000_000_000),
+                             ("learned_owned_bytes", True), ("learned_cycles", -1),
+                             ("learned_accepted_edges", 4), ("scheduled_bytes_basis", None)):
+            bad = copy.deepcopy(turn)
+            bad["decode_attribution"][field] = value
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                QUICK.validate_decode_attribution(bad, "First")
+
+    def test_recurrent_chat_flags_reach_real_executable(self):
+        with mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
+                mock.patch.object(QUICK, "parse_local", return_value=[]) as parse:
+            QUICK.run_local_chat("engine", "model", 0, recurrent_weights="weights", retrieval=False)
+            command = run.call_args.args[0]
+            self.assertEqual(command[-3:], ["--development-recurrent-weights", "weights", "--no-retrieval"])
+            self.assertNotIn("--no-speculative", command)
+            parse.assert_called_once_with("outerr")
+
     def test_human_report_labels_captured_stream_mode(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

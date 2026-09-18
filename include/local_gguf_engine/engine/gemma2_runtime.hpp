@@ -1,5 +1,6 @@
 #pragma once
 
+#include "local_gguf_engine/engine/feature_bank.hpp"
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
@@ -63,6 +64,13 @@ struct Gemma2GenerationMetrics {
     std::uint32_t speculative_fallback_count = 0;
     std::uint32_t speculative_rollback_count = 0;
     std::uint64_t proposer_duration_ns = 0;
+    std::uint32_t learned_cycle_count = 0;
+    std::uint32_t learned_accepted_edge_count = 0;
+    std::uint32_t learned_numeric_refusal_count = 0;
+    std::uint64_t learned_draft_duration_ns = 0;
+    std::uint64_t learned_draft_gpu_ns = 0;
+    std::uint64_t learned_target_gpu_ns = 0;
+    std::uint64_t learned_cycle_duration_ns = 0;
     // FNV-1a over each selected uint32 token in little-endian byte order.
     // This is diagnostic evidence, not a cryptographic identity.
     std::uint64_t selected_token_hash = 0;
@@ -217,13 +225,40 @@ struct Gemma2MetalGeneratedTokenEvent {
 
 using Gemma2MetalGeneratedTokenCallback =
     std::function<Gemma2MetalTokenStreamDecision(const Gemma2MetalGeneratedTokenEvent&)>;
+
+struct Gemma2TargetSelectionTraceEvent {
+    std::uint32_t target_position = 0U;
+    std::uint32_t input_token_id = 0U;
+    std::uint32_t selected_token_id = 0U;
+    std::uint32_t remaining_token_budget = 0U;
+    bool terminal = false;
+    TokenSamplerOptions sampler_options;
+    TokenSelectionRequest request;
+    SamplerCheckpoint sampler_pre;
+    SamplerTicket draw_ticket;
+    SamplerCheckpoint sampler_post;
+    std::span<const TokenLogit> compact_candidates;
+};
+
+using Gemma2TargetSelectionTraceCallback =
+    std::function<void(const Gemma2TargetSelectionTraceEvent&)>;
+
+struct Gemma2GenerationTraceBinding {
+    FeatureSinkBinding feature_sink;
+    Gemma2TargetSelectionTraceCallback on_target_selection;
+};
+struct Gemma2ExecutionReceipt {
+    bool completion_unknown = false;
+};
 [[nodiscard]] Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
     Gemma2MetalModelPlan& plan,
     const Gemma2MetalSchedule& decode,
     std::uint32_t token_id,
     float embedding_scale,
     std::optional<TokenSelectionRequest> selection_request = std::nullopt,
-    Gemma2MetalDecodeOutputMode output_mode = Gemma2MetalDecodeOutputMode::logits
+    Gemma2MetalDecodeOutputMode output_mode = Gemma2MetalDecodeOutputMode::logits,
+    FeatureSinkBinding feature_sink = {},
+    Gemma2ExecutionReceipt* completion = nullptr
 );
 
 [[nodiscard]] Gemma2MetalVerifierResult run_gemma2_metal_width_two_verifier(
@@ -257,7 +292,9 @@ void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan);
     std::span<const std::uint32_t> prompt_token_ids,
     std::uint32_t cache_position,
     float embedding_scale,
-    std::optional<TokenSelectionRequest> selection_request = std::nullopt
+    std::optional<TokenSelectionRequest> selection_request = std::nullopt,
+    FeatureSinkBinding feature_sink = {},
+    Gemma2ExecutionReceipt* completion = nullptr
 );
 
 [[nodiscard]] Gemma2MetalWarmupStats warm_up_gemma2_metal_plan(
@@ -283,6 +320,17 @@ void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan);
     const Gemma2MonotonicClock& clock = {}
 );
 
+class RecurrentChatPlan;
+// Borrowed, preallocated turn storage. Updated only once the selected token's
+// K/V is recoverable, before any irreversible callback for that token.
+struct Gemma2GenerationCommitJournal {
+    std::span<std::uint32_t> token_storage;
+    std::uint32_t count = 0;
+    std::uint32_t cached_token_count = 0;
+    SamplerCheckpoint sampler;
+    Gemma2ExecutionReceipt completion;
+    void record(std::uint32_t token, std::uint32_t cached, const TokenSampler& authoritative);
+};
 [[nodiscard]] Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
     Gemma2MetalModelPlan& plan,
     std::span<const std::uint32_t> prompt_token_ids,
@@ -292,7 +340,10 @@ void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan);
     TokenSampler& sampler,
     const Gemma2MetalGeneratedTokenCallback& on_token = {},
     const Gemma2MonotonicClock& clock = {},
-    RetrievalProposer* proposer = nullptr
+    RetrievalProposer* proposer = nullptr,
+    const Gemma2GenerationTraceBinding* trace = nullptr,
+    RecurrentChatPlan* learned = nullptr,
+    Gemma2GenerationCommitJournal* journal = nullptr
 );
 
 }  // namespace local_gguf_engine::engine

@@ -5,6 +5,16 @@
 *.pt
 *.pth
 *.onnx
+*.ckpt
+*.h5
+*.npy
+*.npz
+*.parquet
+*.arrow
+*.lgweights
+*.lgspec
+*.lgspecbundle
+*.lgtrace
 
 models/*
 !models/.gitkeep
@@ -23,5 +33,9 @@ cmake-build-*/
 
 benchmarks/results/*
 !benchmarks/results/.gitkeep
+
+artifacts/learned_speculation/*
+training/outputs/*
+traces/learned_speculation/*
 
 *.log

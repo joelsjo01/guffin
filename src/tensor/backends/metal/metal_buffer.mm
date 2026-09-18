@@ -173,4 +173,25 @@ TensorStorage copy_tensor_from_metal_backend(const detail::BackendBufferStorage&
     }
 }
 
+std::vector<std::uint8_t> copy_metal_backend_buffer_bytes(
+    const detail::BackendBufferStorage& storage,
+    std::size_t byte_offset,
+    std::size_t byte_count
+) {
+    @autoreleasepool {
+        const auto& metal_storage = require_metal_backend_buffer(storage);
+        if (byte_offset > metal_storage.descriptor().byte_count
+            || byte_count > metal_storage.descriptor().byte_count - byte_offset) {
+            throw std::out_of_range("Metal backend byte readback exceeds buffer");
+        }
+        std::vector<std::uint8_t> output(byte_count);
+        if (byte_count != 0U) {
+            std::memcpy(
+                output.data(), metal_buffer_contents(metal_storage, byte_offset), byte_count
+            );
+        }
+        return output;
+    }
+}
+
 }  // namespace local_gguf_engine::tensor::backends::metal

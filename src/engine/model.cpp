@@ -4,6 +4,9 @@
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <string>
@@ -20,6 +23,82 @@ using model_format::GGUFMetadataEntry;
 using model_format::GGUFMetadataSection;
 using model_format::GGUFMetadataValueType;
 using model_format::view_gguf_tensor_payload;
+
+void hash_u32(runtime::Sha256& hash, std::uint32_t value) {
+    const std::array<std::uint8_t, 4> bytes {
+        static_cast<std::uint8_t>(value),
+        static_cast<std::uint8_t>(value >> 8U),
+        static_cast<std::uint8_t>(value >> 16U),
+        static_cast<std::uint8_t>(value >> 24U),
+    };
+    hash.update(bytes);
+}
+
+void hash_u64(runtime::Sha256& hash, std::uint64_t value) {
+    std::array<std::uint8_t, 8> bytes {};
+    for (std::size_t index = 0U; index < bytes.size(); ++index) {
+        bytes[index] = static_cast<std::uint8_t>(value >> (index * 8U));
+    }
+    hash.update(bytes);
+}
+
+void hash_string(runtime::Sha256& hash, std::string_view value) {
+    hash_u64(hash, value.size());
+    hash.update(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(value.data()), value.size()
+    ));
+}
+
+[[nodiscard]] runtime::Sha256Digest hash_consumed_metadata(
+    ModelArchitecture architecture,
+    const std::optional<std::string>& name,
+    const Gemma2ModelConfig& config
+) {
+    runtime::Sha256 hash;
+    hash_string(hash, "local-gguf-engine/consumed-model-metadata/v1");
+    hash_u32(hash, static_cast<std::uint32_t>(architecture));
+    hash_u32(hash, name.has_value() ? 1U : 0U);
+    if (name.has_value()) hash_string(hash, *name);
+    for (const auto value : {
+             config.context_length, config.embedding_length, config.block_count,
+             config.feed_forward_length, config.attention_head_count,
+             config.attention_head_count_kv, config.attention_key_length,
+             config.attention_value_length, config.sliding_window, config.vocab_size,
+         }) {
+        hash_u32(hash, value);
+    }
+    hash_u32(hash, std::bit_cast<std::uint32_t>(config.rms_norm_epsilon));
+    hash_u32(hash, std::bit_cast<std::uint32_t>(config.attention_logit_softcap));
+    hash_u32(hash, std::bit_cast<std::uint32_t>(config.final_logit_softcap));
+    hash_u32(hash, config.uses_tied_output_weight ? 1U : 0U);
+    return hash.finalize();
+}
+
+[[nodiscard]] runtime::Sha256Digest hash_source_tensors(
+    const std::vector<EngineTensorView>& tensors
+) {
+    std::vector<const EngineTensorView*> ordered;
+    ordered.reserve(tensors.size());
+    for (const auto& tensor : tensors) ordered.push_back(&tensor);
+    std::sort(ordered.begin(), ordered.end(), [](const auto* left, const auto* right) {
+        return left->name < right->name;
+    });
+    runtime::Sha256 hash;
+    hash_string(hash, "local-gguf-engine/source-tensors/v1");
+    hash_u32(hash, static_cast<std::uint32_t>(ordered.size()));
+    for (const auto* tensor : ordered) {
+        hash_string(hash, tensor->name);
+        const auto& descriptor = tensor->view.descriptor();
+        hash_u32(hash, static_cast<std::uint32_t>(descriptor.dtype));
+        hash_u32(hash, static_cast<std::uint32_t>(descriptor.shape.rank()));
+        for (std::size_t dimension = 0U; dimension < descriptor.shape.rank(); ++dimension) {
+            hash_u64(hash, descriptor.shape.dimension(dimension));
+        }
+        hash_u64(hash, descriptor.byte_count);
+        hash.update(tensor->view.bytes());
+    }
+    return hash.finalize();
+}
 
 [[nodiscard]] std::string error_message(EngineModelErrorCode code, std::string_view detail) {
     std::string message;
@@ -270,12 +349,14 @@ EngineModel::EngineModel(
     ModelArchitecture architecture,
     std::optional<std::string> name,
     Gemma2ModelConfig gemma2_config,
-    std::vector<EngineTensorView> tensor_views
+    std::vector<EngineTensorView> tensor_views,
+    std::optional<EngineModelPayloadReceipt> payload_receipt
 )
     : architecture_(architecture),
       name_(std::move(name)),
       gemma2_config_(gemma2_config),
-      tensor_views_(std::move(tensor_views)) {}
+      tensor_views_(std::move(tensor_views)),
+      payload_receipt_(std::move(payload_receipt)) {}
 
 ModelArchitecture EngineModel::architecture() const noexcept {
     return architecture_;
@@ -291,6 +372,10 @@ const Gemma2ModelConfig& EngineModel::gemma2_config() const noexcept {
 
 const std::vector<EngineTensorView>& EngineModel::tensor_views() const noexcept {
     return tensor_views_;
+}
+
+const std::optional<EngineModelPayloadReceipt>& EngineModel::payload_receipt() const noexcept {
+    return payload_receipt_;
 }
 
 const EngineTensorView* EngineModel::find_tensor_view(std::string_view name) const noexcept {
@@ -328,6 +413,34 @@ EngineModel load_engine_model_from_gguf(const model_format::GGUFModelView& model
         name,
         gemma2_config,
         std::move(tensor_views)
+    );
+}
+
+EngineModel load_verified_engine_model_from_gguf(
+    const model_format::GGUFModelView& model,
+    std::span<const std::uint8_t> whole_gguf_bytes
+) {
+    if (whole_gguf_bytes.empty()) {
+        throw EngineModelError(EngineModelErrorCode::invalid_tensor, "empty whole-GGUF receipt input");
+    }
+    const auto architecture = parse_architecture(model.directory.metadata);
+    const auto name = optional_metadata_string(model.directory.metadata, "general.name");
+    const auto gemma2_config = load_gemma2_config(model);
+    auto tensor_views = load_unique_tensor_views(model);
+    if (tensor_views.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw EngineModelError(EngineModelErrorCode::invalid_tensor, "source tensor receipt count");
+    }
+    EngineModelPayloadReceipt receipt {
+        .whole_gguf_byte_count = whole_gguf_bytes.size(),
+        .source_tensor_count = static_cast<std::uint32_t>(tensor_views.size()),
+        .whole_gguf = runtime::sha256(whole_gguf_bytes),
+        .canonical_consumed_metadata = hash_consumed_metadata(
+            architecture, name, gemma2_config
+        ),
+        .source_tensors = hash_source_tensors(tensor_views),
+    };
+    return EngineModel(
+        architecture, name, gemma2_config, std::move(tensor_views), receipt
     );
 }
 

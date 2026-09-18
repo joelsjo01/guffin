@@ -2,6 +2,7 @@
 """Benchmark the real local two-turn chat product and local kernels."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -79,8 +80,24 @@ def parse_local(output):
 
 def validate_decode_attribution(turn, name):
     record = turn.get("decode_attribution")
-    if not isinstance(record, dict) or record.get("schema_version") != 3:
+    if not isinstance(record, dict) or record.get("schema_version") not in (3, 4):
         raise RuntimeError(f"local {name} decode attribution schema mismatch")
+    if record["schema_version"] == 4:
+        for field in ("generation_completion_ns", "full_turn_ns", "first_text_ns", "learned_owned_bytes",
+                      "learned_horizon", "learned_cycles", "learned_accepted_edges",
+                      "learned_numeric_refusals", "learned_draft_ns", "learned_draft_gpu_ns",
+                      "learned_target_gpu_ns", "learned_cycle_ns"):
+            value = record.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RuntimeError(f"local {name} invalid complete-path metric {field}")
+        if not 0 < record["generation_completion_ns"] <= record["full_turn_ns"]:
+            raise RuntimeError(f"local {name} invalid complete-path clock ordering")
+        if record["first_text_ns"] > record["full_turn_ns"]:
+            raise RuntimeError(f"local {name} invalid first-text clock ordering")
+        if record["learned_accepted_edges"] > record["learned_cycles"] * record["learned_horizon"]:
+            raise RuntimeError(f"local {name} learned accepted-prefix count exceeds capacity")
+        if record.get("scheduled_bytes_basis") != "one_row_equivalent_not_physical_bandwidth":
+            raise RuntimeError(f"local {name} scheduled-byte interpretation is missing")
     token_hash = record.get("selected_token_hash")
     if not isinstance(token_hash, str) or len(token_hash) != 16 \
             or any(character not in "0123456789abcdef" for character in token_hash):
@@ -175,7 +192,7 @@ def validate_decode_attribution(turn, name):
         raise RuntimeError(f"local {name} scheduled byte total mismatch")
 
 
-def run_local_chat(binary, model, cooldown, speculative=True):
+def run_local_chat(binary, model, cooldown, speculative=True, recurrent_weights=None, retrieval=True):
     if cooldown:
         print(f"cooling down for {cooldown:g}s before local chat...", file=sys.stderr)
         time.sleep(cooldown)
@@ -185,6 +202,10 @@ def run_local_chat(binary, model, cooldown, speculative=True):
     ]
     if not speculative:
         command.append("--no-speculative")
+    if recurrent_weights:
+        command.extend(["--development-recurrent-weights", recurrent_weights])
+    if not retrieval:
+        command.append("--no-retrieval")
     stdout, stderr = run_process(
         command,
         "[ Detail:",
@@ -365,7 +386,15 @@ def print_human(local, kernels, terminal_rendered):
     stream_mode = "terminal alternate screen" if terminal_rendered else "captured pipes"
     print(f"chat streams: {stream_mode}; fixed 5s input pause between turns")
     print_turn_table("local-gguf-engine", local)
+    for turn in local:
+        record = turn["decode_attribution"]
+        if record.get("schema_version") == 4:
+            complete_tps = turn["decoded"] * 1e9 / record["generation_completion_ns"]
+            print(f"{turn['name']} complete generation: {complete_tps:.2f} t/s "
+                  "(includes final K/V, callbacks and result assembly)")
+            print(f"{turn['name']} first visible text: {record['first_text_ns'] / 1e9:.6f}s")
     print("\nProduction decode attribution (same chat path; logical scheduled weight bytes)")
+    print("Scheduled GB/s below is a one-row-equivalent accounting rate, not physical bandwidth.")
     print("Turn       GPU/token ms  Wall/token ms  Residual/token ms  Scheduled GB/s  Dispatch/token  Attention tokens")
     for turn in local:
         record = turn["decode_attribution"]
@@ -404,12 +433,24 @@ def main():
     parser.add_argument("--cooldown", type=float, default=DEFAULT_COOLDOWN_SECONDS)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--no-speculative", action="store_true")
+    parser.add_argument("--no-retrieval", action="store_true")
+    parser.add_argument("--development-recurrent-weights")
     args = parser.parse_args()
     if args.cooldown < 0:
         parser.error("cooldown must be nonnegative")
+    if args.no_speculative and args.development_recurrent_weights:
+        parser.error("requested recurrent weights conflict with --no-speculative")
+    weights_digest = None
+    if args.development_recurrent_weights:
+        with open(args.development_recurrent_weights, "rb") as source:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+            weights_digest = digest.hexdigest()
 
     terminal_rendered = sys.stderr.isatty()
-    local = run_local_chat(args.local, args.model, args.cooldown, not args.no_speculative)
+    local = run_local_chat(args.local, args.model, args.cooldown, not args.no_speculative,
+                           args.development_recurrent_weights, not args.no_retrieval)
     if args.cooldown:
         print(f"cooling down for {args.cooldown:g}s before kernel diagnostics...", file=sys.stderr)
         time.sleep(args.cooldown)
@@ -426,11 +467,15 @@ def main():
             "local_startup_warmup_decode_tokens": 1,
             "local_startup_warmup_verifier_tokens": 2,
             "speculative_decode": not args.no_speculative,
+            "retrieval_decode": not args.no_speculative and not args.no_retrieval,
+            "development_recurrent_weights_sha256": weights_digest,
+            "learned_policy": "weights_only_always_propose" if weights_digest else None,
+            "primary_generation_clock": "generation_completion_ns",
             "cooldown_seconds": args.cooldown,
             "inter_turn_pause_seconds": INTER_TURN_PAUSE_SECONDS,
             "terminal_rendered": terminal_rendered,
             "chat_stream_mode": "terminal_alternate_screen" if terminal_rendered else "captured_pipes",
-            "decode_attribution_schema": 3,
+            "decode_attribution_schema": 4,
             "kernel_diagnostic_schema": KERNEL_SCHEMA_VERSION,
             "local_executable": os.path.realpath(args.local),
             "kernel_executable": os.path.realpath(args.kernels),

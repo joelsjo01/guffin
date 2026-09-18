@@ -1,5 +1,7 @@
 #include "quick_benchmark_tests.hpp"
 
+#include "local_gguf_engine/benchmarks/corrected_vocabulary_benchmark.hpp"
+#include "local_gguf_engine/benchmarks/feature_capture_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/quick_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/immutable_weight_benchmark.hpp"
 
@@ -223,7 +225,65 @@ void test_quick_kernel_benchmark_rejects_empty_model_path() {
     expect(rejected, "quick kernel benchmark should reject empty model path");
 }
 
-const std::array<TestCase, 9> kTests {{
+void test_feature_capture_benchmark_rejects_empty_model_path() {
+    bool rejected = false;
+    try {
+        static_cast<void>(benchmarks::run_feature_capture_benchmark("", false));
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    expect(rejected, "feature capture benchmark should reject empty model path");
+}
+
+void test_corrected_vocabulary_workload_names_roundtrip() {
+    using W = engine::CorrectedVocabularyWorkload;
+    constexpr std::array workloads {
+        W::treeflash_released_h15_m16_top16,
+        W::treeflash_h15_m64_top16,
+        W::treeflash_h15_m64_top64,
+        W::treeflash_h15_m64_full_v_lazy,
+        W::treeflash_paper_h16_m64_full_v_lazy,
+        W::treeflash_code_h16_m64_full_v_lazy,
+        W::arm_s_cross_root_excluded,
+        W::arm_s_cross_root_included,
+        W::arm_s_deep_gamma23_k1,
+        W::arm_s_threshold_gamma4_k3,
+        W::arm_s_post_walk_selected_anchor,
+    };
+    for (const auto workload : workloads) {
+        const auto name = benchmarks::corrected_vocabulary_workload_name(workload);
+        expect(benchmarks::parse_corrected_vocabulary_workload(name) == workload,
+            "corrected-vocabulary workload name did not roundtrip");
+    }
+    auto rejected = false;
+    try {
+        static_cast<void>(benchmarks::parse_corrected_vocabulary_workload("invented"));
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    expect(rejected, "unknown corrected-vocabulary workload was accepted");
+}
+
+void test_phase4_benchmarks_reject_empty_model_paths() {
+    auto corrected_rejected = false;
+    try {
+        static_cast<void>(benchmarks::run_corrected_vocabulary_benchmark(
+            "", engine::CorrectedVocabularyWorkload::treeflash_released_h15_m16_top16
+        ));
+    } catch (const std::invalid_argument&) {
+        corrected_rejected = true;
+    }
+    expect(corrected_rejected, "corrected-vocabulary benchmark accepted an empty model path");
+    auto shape_rejected = false;
+    try {
+        static_cast<void>(benchmarks::run_draft_vocabulary_shape_benchmark(""));
+    } catch (const std::invalid_argument&) {
+        shape_rejected = true;
+    }
+    expect(shape_rejected, "draft-vocabulary shape benchmark accepted an empty model path");
+}
+
+const std::array<TestCase, 12> kTests {{
     {"immutable weight policy parsing and labels", test_immutable_weight_policy_parsing_and_labels},
     {"immutable weight policy accounting", test_immutable_weight_policy_accounting},
     {"no-copy mapping constraint validation", test_no_copy_mapping_constraint_validation},
@@ -233,6 +293,12 @@ const std::array<TestCase, 9> kTests {{
     {"quick kernel measurement rejects invalid inputs", test_quick_kernel_measurement_rejects_invalid_inputs},
     {"quick kernel statistics reject non-finite values", test_quick_kernel_statistics_reject_non_finite_values},
     {"quick kernel benchmark rejects empty model path", test_quick_kernel_benchmark_rejects_empty_model_path},
+    {"feature capture benchmark rejects empty model path",
+        test_feature_capture_benchmark_rejects_empty_model_path},
+    {"corrected vocabulary workload names roundtrip",
+        test_corrected_vocabulary_workload_names_roundtrip},
+    {"Phase 4 benchmarks reject empty model paths",
+        test_phase4_benchmarks_reject_empty_model_paths},
 }};
 
 }  // namespace

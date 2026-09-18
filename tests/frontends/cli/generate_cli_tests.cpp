@@ -11,6 +11,8 @@
 #include "local_gguf_engine/tensor/metal_trace_capture.hpp"
 
 #include "tensor_test_support.hpp"
+#include "../../../src/engine/target_verifier_test_hooks.hpp"
+#include "../../../src/engine/prepared_plan_test_hooks.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -201,7 +203,7 @@ void test_formats_and_validates_chat_decode_attribution() {
         .total = 21U,
     };
     const auto line = format_chat_decode_attribution_line(metrics);
-    expect(line.starts_with("[ Decode: {\"schema_version\":3"),
+    expect(line.starts_with("[ Decode: {\"schema_version\":4"),
         "decode attribution prefix mismatch");
     expect(line.find("\"selected_token_hash\":\"0000000000001234\"") != std::string::npos,
         "decode attribution selected-token hash mismatch");
@@ -957,14 +959,14 @@ void test_gemma2_chat_session_records_deterministic_turn_metrics_when_available(
     const auto second = session.generate_user_turn("Hello");
 
     expect(streamed == "Hello", "Gemma2 measured turn stream mismatch");
-    expect(first.metrics.generation.prefill_started_ns == 110U, "Gemma2 measured prefill start mismatch");
-    expect(first.metrics.generation.prefill_completed_ns == 120U, "Gemma2 measured prefill completion mismatch");
-    expect(first.metrics.generation.first_token_selected_ns == 140U, "Gemma2 measured selection boundary mismatch");
-    expect(first.metrics.generation.last_token_selected_ns == 140U, "Gemma2 measured final selection boundary mismatch");
-    expect(first.metrics.generation.decode_started_ns == 150U, "Gemma2 measured decode start mismatch");
-    expect(first.metrics.generation.decode_completed_ns == 160U, "Gemma2 measured decode completion mismatch");
+    expect(first.metrics.generation.prefill_started_ns == 120U, "Gemma2 measured prefill start mismatch");
+    expect(first.metrics.generation.prefill_completed_ns == 130U, "Gemma2 measured prefill completion mismatch");
+    expect(first.metrics.generation.first_token_selected_ns == 150U, "Gemma2 measured selection boundary mismatch");
+    expect(first.metrics.generation.last_token_selected_ns == 150U, "Gemma2 measured final selection boundary mismatch");
+    expect(first.metrics.generation.decode_started_ns == 160U, "Gemma2 measured decode start mismatch");
+    expect(first.metrics.generation.decode_completed_ns == 170U, "Gemma2 measured decode completion mismatch");
     expect(
-        first.metrics.generation.generation_completed_ns == 270U,
+        first.metrics.generation.generation_completed_ns == 290U,
         "Gemma2 measured runtime completion mismatch: actual="
             + std::to_string(first.metrics.generation.generation_completed_ns)
     );
@@ -977,6 +979,12 @@ void test_gemma2_chat_session_records_deterministic_turn_metrics_when_available(
     expect(first.metrics.generation_duration_ns == 1'000U,
         "Gemma2 measured llama-compatible generation duration mismatch");
     expect(first.metrics.generation.decode_duration_ns == 10U, "Gemma2 measured decode duration mismatch");
+    expect(first.metrics.generation_completion_duration_ns == 170U,
+        "complete generation clock must include terminal KV and callback time");
+    expect(first.metrics.full_turn_duration_ns == 200U,
+        "full-turn clock must include preparation through text finalization");
+    expect(first.metrics.first_text_duration_ns == 80U,
+        "first-text clock must include target K/V work before visible delivery");
     expect(first.metrics.generation.newly_evaluated_prompt_token_count == first.appended_token_count,
         "Gemma2 measured prompt token count mismatch");
     expect(first.metrics.generation.generated_token_count == 1U, "Gemma2 measured generated count mismatch");
@@ -1456,7 +1464,7 @@ void test_runs_generate_chat_decode_diagnostics_only_when_requested_when_availab
     );
     expect(exit_code == EXIT_SUCCESS && error.str().empty(),
         "decode-diagnostic chat invocation failed");
-    expect(output.str().find("[ Decode: {\"schema_version\":3") != std::string::npos,
+    expect(output.str().find("[ Decode: {\"schema_version\":4") != std::string::npos,
         "requested decode attribution record is missing");
 }
 
@@ -1861,7 +1869,240 @@ void test_rejects_generate_invalid_backend_option() {
     );
 }
 
+// Native weights-only fixture: the target and draft share a tied F16 head.
+// Positive/negative target projections give deterministic full-match/mismatch
+// controls. These tiny weights are correctness fixtures, never speed evidence.
+std::vector<std::uint8_t> chat_recurrent_fixture_weights(
+    const std::filesystem::path& model_path, bool mismatch, std::uint32_t horizon = 3U
+) {
+    namespace engine = local_gguf_engine::engine;
+    auto file = read_file_backed_gguf_model(model_path);
+    auto model = engine::load_verified_engine_model_from_gguf(file.view(), file.bytes());
+    engine::ResidentTargetPayloadReceipt resident;
+    auto target = engine::create_gemma2_metal_model_plan(model, engine::Gemma2OutputHeadPolicy::q8_0, resident);
+    engine::SpeculativeArtifactDescriptor descriptor;
+    descriptor.schema_version = 3;
+    descriptor.kind = engine::SpeculativeArtifactKind::trained_candidate;
+    descriptor.artifact_id = 1;
+    descriptor.target.model = *model.payload_receipt();
+    descriptor.target.resident = resident;
+    descriptor.target.config = model.gemma2_config();
+    descriptor.target.output_head_policy = static_cast<std::uint32_t>(target.output_head_policy());
+    auto& spec = descriptor.recurrent;
+    spec.version = 1; spec.width = 16; spec.horizon = horizon; spec.top_k = 1;
+    spec.temperature = 0.8F; spec.top_p = 0.95F; spec.min_p = 0.05F;
+    spec.provenance.fill(local_gguf_engine::runtime::sha256(std::array<std::uint8_t,1>{1}));
+    const std::array<std::array<unsigned,2>,10> shapes {{{16,256},{1,16},{16,256},
+        {16,32},{1,16},{16,32},{1,16},{256,16},{1,16},{1,1}}};
+    std::vector<std::uint8_t> payload;
+    for (std::size_t t = 0; t < shapes.size(); ++t) {
+        auto& weight = spec.tensors[t];
+        weight.rows = shapes[t][0]; weight.columns = shapes[t][1]; weight.offset = payload.size();
+        weight.bytes = std::uint64_t(weight.rows) * weight.columns * 4;
+        for (unsigned i = 0; i < weight.rows * weight.columns; ++i) {
+            const auto value = t == 1 || t == 6 ? 1.0F : t == 7 && i == 0 ? (mismatch ? -1.0F : 1.0F) : 0.0F;
+            append_f32(payload, value);
+        }
+        weight.digest = local_gguf_engine::runtime::sha256(
+            std::span<const std::uint8_t>(payload).subspan(weight.offset, weight.bytes));
+    }
+    return engine::encode_recurrent_weights_artifact(descriptor, payload);
+}
+
+void test_live_recurrent_chat_transactions() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    namespace engine = local_gguf_engine::engine;
+    auto tensors = tiny_gemma2_generate_cli_tensors_for_forced_token(5);
+    tensors.erase(std::find_if(tensors.begin(), tensors.end(), [](const auto& t) {return t.name == "output.weight";}));
+    std::vector<float> embedding(256U * 110U, 0.0F);
+    for (unsigned token = 0; token < 110; ++token) embedding[token] = token == 5 ? 1.0F : 0.1F;
+    replace_tiny_tensor(tensors, "token_embd.weight", tensor_f16_gguf_matrix(256, 110, embedding));
+    // Nonzero, position-sensitive K/V makes rollback parity observable even
+    // though the zero attention output keeps token 5 authoritative.
+    replace_tiny_tensor(tensors, "blk.0.attn_norm.weight", tensor_f32_vector(std::vector<float>(256, 1.0F)));
+    replace_tiny_tensor(tensors, "blk.0.attn_k.weight",
+        local_gguf_engine::tests::tensor_q4_k_gguf_weight_matrix(256, 256, 3));
+    replace_tiny_tensor(tensors, "blk.0.attn_v.weight",
+        local_gguf_engine::tests::tensor_q6_k_gguf_weight_matrix(256, 256, 7));
+    const auto bytes = write_tiny_gguf_bytes(tiny_gemma2_generate_cli_metadata(128), tensors);
+    TempBinaryFile model("recurrent-chat-target", bytes);
+    std::string state_boundary = "initial generation";
+    const auto exact_state = [&](const Gemma2ChatSession& actual, const Gemma2ChatSession& expected) {
+        expect(actual.sampler_for_testing().checkpoint().same_state(expected.sampler_for_testing().checkpoint()),
+            "learned chat changed exact RNG/history state");
+        expect(actual.cached_token_count() == expected.cached_token_count(), "learned logical cache mismatch");
+        const auto& a = actual.plan_for_testing().kv_cache();
+        const auto& b = expected.plan_for_testing().kv_cache();
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            for (bool keys : {false, true}) {
+                const auto& ab = keys ? a[i].key : a[i].value;
+                const auto& bb = keys ? b[i].key : b[i].value;
+                const auto av = local_gguf_engine::tensor::copy_backend_buffer_bytes(ab, 0, ab.descriptor().byte_count);
+                const auto bv = local_gguf_engine::tensor::copy_backend_buffer_bytes(bb, 0, bb.descriptor().byte_count);
+                const auto active = std::min<std::size_t>(actual.cached_token_count(), a[i].row_capacity)
+                    * (av.size() / a[i].row_capacity);
+                const auto different = std::mismatch(av.begin(), av.begin() + static_cast<std::ptrdiff_t>(active), bv.begin());
+                expect(different.first == av.begin() + static_cast<std::ptrdiff_t>(active),
+                    state_boundary + (keys ? " learned key-cache bytes differ at " : " learned value-cache bytes differ at ")
+                    + std::to_string(different.first - av.begin()));
+            }
+        }
+    };
+    for (bool mismatch : {false, true}) {
+        state_boundary = mismatch ? "initial mismatch" : "initial match";
+        TempBinaryFile weights("recurrent-chat-weights", chat_recurrent_fixture_weights(model.path(), mismatch));
+        Gemma2ChatSessionOptions options {.max_new_tokens = 9,
+            .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+            .context_shift = true, .retrieval_decode = false,
+            .development_recurrent_weights = weights.path(),
+            .sampler = {.temperature = 0.8F, .top_k = 1, .seed = 19}};
+        auto ordinary_options = options;
+        ordinary_options.development_recurrent_weights.reset();
+        ordinary_options.speculative_decode = false;
+        Gemma2ChatSession baseline(read_file_backed_gguf_model(model.path()), ordinary_options);
+        Gemma2ChatSession learned(read_file_backed_gguf_model(model.path()), options);
+        const auto reference = baseline.generate_user_turn("Hello");
+        const auto actual = learned.generate_user_turn("Hello");
+        expect(actual.selected_token_ids == reference.selected_token_ids,
+            "live learned chat changed target-defined tokens");
+        expect(actual.metrics.generation.learned_cycle_count > 0, "live learned route was not executed");
+        expect((actual.metrics.generation.learned_accepted_edge_count > 0) != mismatch,
+            "live fixture did not exercise intended match/mismatch path");
+        expect(actual.cached_token_count == reference.cached_token_count, "live learned cache position mismatch");
+        exact_state(learned, baseline);
+        expect(learned.regenerate_last_turn().selected_token_ids == reference.selected_token_ids,
+            "live learned regeneration changed target RNG/tokens");
+        state_boundary = "regeneration";
+        exact_state(learned, baseline);
+        for (unsigned depth = 1; depth <= 4; ++depth) {
+            state_boundary = "throwing callback " + std::to_string(depth);
+            learned.clear(); baseline.clear();
+            baseline.set_max_new_tokens(depth);
+            const auto prefix = baseline.generate_user_turn("Hello");
+            unsigned callbacks = 0;
+            bool threw = false;
+            try {
+                static_cast<void>(learned.generate_user_turn("Hello", [&](std::string_view) {
+                    if (++callbacks == depth) throw std::runtime_error("user callback fault");
+                }));
+            } catch (const std::runtime_error&) { threw = true; }
+            expect(threw && callbacks == depth && !learned.poisoned(), "callback fault was lost or poisoned a known completion");
+            expect(learned.message_count() == 2 && learned.cached_token_count() == prefix.cached_token_count,
+                "throwing callback did not retain exactly its durable prefix");
+            exact_state(learned, baseline);
+            baseline.set_max_new_tokens(9);
+            expect(learned.generate_user_turn("Hello").selected_token_ids
+                == baseline.generate_user_turn("Hello").selected_token_ids,
+                "continuation after callback fault changed target tokens");
+            exact_state(learned, baseline);
+        }
+        // Repeated turns cross both the sliding ring and the context-shift
+        // boundary. The same native route must also honor cancellation.
+        learned.clear(); baseline.clear();
+        for (unsigned turn = 0; turn < 8; ++turn) {
+            state_boundary = "context turn " + std::to_string(turn);
+            expect(learned.generate_user_turn("Hello").selected_token_ids
+                == baseline.generate_user_turn("Hello").selected_token_ids,
+                "learned context shifting changed target tokens");
+            exact_state(learned, baseline);
+            state_boundary = "wrapped regeneration " + std::to_string(turn);
+            static_cast<void>(learned.regenerate_last_turn());
+            exact_state(learned, baseline);
+        }
+        for (unsigned depth = 1; depth <= 4; ++depth) {
+            state_boundary = "stopping callback " + std::to_string(depth);
+            learned.clear(); baseline.clear();
+            baseline.set_max_new_tokens(depth);
+            static_cast<void>(baseline.generate_user_turn("Hello"));
+            unsigned callbacks = 0;
+            static_cast<void>(learned.generate_user_turn("Hello", Gemma2ChatTurnOptions {
+                .on_text_delta = [&](std::string_view) { ++callbacks; },
+                .should_stop = [&] { return callbacks >= depth; },
+            }));
+            expect(callbacks == depth, "learned callback cancellation exceeded its prefix");
+            exact_state(learned, baseline);
+        }
+        baseline.set_max_new_tokens(9);
+        learned.clear();
+        auto bad_sampler = options.sampler; bad_sampler.temperature = 0.7F;
+        bool refused = false;
+        try { learned.set_sampler_options(bad_sampler); } catch (const std::invalid_argument&) { refused = true; }
+        expect(refused && !learned.poisoned(), "incompatible sampler was silently accepted");
+        learned.reset();
+        expect(learned.generate_user_turn("Hello").selected_token_ids == reference.selected_token_ids,
+            "authenticated reset changed recurrent route behavior");
+        // Before any generation, regeneration validation failure must leave
+        // the previous assistant turn and exact cache/sampler available.
+        const auto prior_cache = learned.cached_token_count();
+        learned.set_max_new_tokens(1000);
+        refused = false;
+        try { static_cast<void>(learned.regenerate_last_turn()); }
+        catch (const Gemma2ChatContextError&) { refused = true; }
+        expect(refused && learned.message_count() == 2 && learned.cached_token_count() == prior_cache,
+            "failed regeneration destroyed the previous turn");
+        learned.set_max_new_tokens(9);
+        if (!mismatch) {
+            for (auto point : {engine::TargetVerifierFailurePoint::encode,
+                               engine::TargetVerifierFailurePoint::wait,
+                               engine::TargetVerifierFailurePoint::finalize}) {
+                learned.reset(); baseline.clear();
+                static_cast<void>(learned.generate_user_turn("Hello"));
+                static_cast<void>(baseline.generate_user_turn("Hello"));
+                engine::set_target_verifier_failure_for_testing(point);
+                bool failed = false;
+                try { static_cast<void>(learned.generate_user_turn("Hello")); }
+                catch (const std::exception&) { failed = true; }
+                engine::clear_target_verifier_failure_for_testing();
+                expect(failed, "live verifier failure was swallowed");
+                if (point == engine::TargetVerifierFailurePoint::encode) {
+                    state_boundary = "pre-submit recovery";
+                    expect(!learned.poisoned(), "known pre-submit failure poisoned chat");
+                    exact_state(learned, baseline);
+                } else {
+                    expect(learned.poisoned(), "uncertain verifier completion remained usable");
+                    bool clear_refused = false;
+                    try { learned.clear(); } catch (const std::exception&) { clear_refused = true; }
+                    expect(clear_refused, "clear bypassed poisoned residency");
+                }
+            }
+            learned.reset();
+            expect(!learned.poisoned(), "authenticated reset did not replace poisoned residency");
+            baseline.clear();
+            static_cast<void>(baseline.generate_user_turn("Hello"));
+            static_cast<void>(learned.generate_user_turn("Hello"));
+            learned.set_max_new_tokens(113); // forces eviction of the prior turn
+            engine::set_prepared_plan_failure_for_testing(engine::PreparedPlanFailurePoint::prefill_encode, 0);
+            bool failed = false;
+            try { static_cast<void>(learned.generate_user_turn("Hello")); }
+            catch (const std::exception&) { failed = true; }
+            engine::clear_prepared_plan_failure_for_testing();
+            expect(failed && !learned.poisoned() && learned.message_count() == baseline.message_count(),
+                "failed context-shift prefill lost the pre-turn state");
+            state_boundary = "context-shift prefill failure";
+            exact_state(learned, baseline);
+        }
+    }
+}
+
+void test_recurrent_cli_rejects_missing_and_conflicting_configuration() {
+    const auto bytes = tiny_gemma2_generate_cli_gguf_bytes();
+    TempBinaryFile model("recurrent-chat-cli-invalid", bytes);
+    for (const auto& args : std::vector<std::vector<std::string>> {
+        {"--development-recurrent-weights"},
+        {"--development-recurrent-weights", "/missing-recurrent-weights"},
+        {"--development-recurrent-weights", "/missing-recurrent-weights", "--no-speculative"},
+        {"--development-recurrent-weights", "one", "--development-recurrent-weights", "two"},
+    }) {
+        std::ostringstream output, error;
+        expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) != 0,
+            "malformed learned CLI request silently fell back to Stage 4");
+        expect(!error.str().empty(), "malformed learned CLI omitted explanation");
+    }
+}
+
 const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
+    {"live learned chat preserves target tokens and callback transaction boundaries", test_live_recurrent_chat_transactions},
+    {"learned chat CLI fails closed on missing and conflicting configuration", test_recurrent_cli_rejects_missing_and_conflicting_configuration},
     {
         "formats chat timing line from runtime metrics",
         test_formats_chat_timing_line_from_runtime_metrics,

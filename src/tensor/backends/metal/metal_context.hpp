@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <array>
 
 namespace local_gguf_engine::tensor::backends::metal {
 
@@ -19,21 +20,21 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> matvec_q8_0_packed_112_pipeline = nil;
     id<MTLComputePipelineState> matmul_q8_0_width_two_pipeline = nil;
     id<MTLComputePipelineState> matmul_q8_0_width_two_112_pipeline = nil;
-    id<MTLComputePipelineState> matvec_q4_k_packed_pipeline = nil;
-    id<MTLComputePipelineState> matvec_q4_k_packed_14_pipeline = nil;
-    id<MTLComputePipelineState> matvec_q4_k_packed_16_pipeline = nil;
+    id<MTLComputePipelineState> target_head_q8_row_parallel_pipeline = nil;
+    id<MTLComputePipelineState> target_head_q8_row_parallel_112_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q4_k_packed_row_batch_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q4_k_packed_row_batch_14_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q4_k_packed_row_batch_16_pipeline = nil;
     id<MTLComputePipelineState> matmul_q4_k_tiled_pipeline = nil;
     id<MTLComputePipelineState> matmul_q4_k_tiled_exact_16_pipeline = nil;
-    id<MTLComputePipelineState> matmul_q4_k_small_batch_pipeline = nil;
     id<MTLComputePipelineState> matmul_q4_k_width_two_pipeline = nil;
     id<MTLComputePipelineState> matmul_q4_k_width_two_14_pipeline = nil;
     id<MTLComputePipelineState> matmul_q4_k_width_two_16_pipeline = nil;
-    id<MTLComputePipelineState> matvec_q6_k_packed_pipeline = nil;
-    id<MTLComputePipelineState> matvec_q6_k_packed_14_pipeline = nil;
-    id<MTLComputePipelineState> matvec_q6_k_packed_56_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q6_k_packed_row_batch_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q6_k_packed_row_batch_14_pipeline = nil;
+    id<MTLComputePipelineState> matmul_q6_k_packed_row_batch_56_pipeline = nil;
     id<MTLComputePipelineState> matmul_q6_k_tiled_pipeline = nil;
     id<MTLComputePipelineState> matmul_q6_k_tiled_exact_16_pipeline = nil;
-    id<MTLComputePipelineState> matmul_q6_k_small_batch_pipeline = nil;
     id<MTLComputePipelineState> matmul_q6_k_width_two_pipeline = nil;
     id<MTLComputePipelineState> matmul_q6_k_width_two_14_pipeline = nil;
     id<MTLComputePipelineState> matmul_q6_k_width_two_56_pipeline = nil;
@@ -57,6 +58,12 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> gemma2_wrapped_prefill_attention_values_pipeline = nil;
     id<MTLComputePipelineState> gemma2_decode_attention_pipeline = nil;
     id<MTLComputePipelineState> gemma2_decode_attention_reduce_pipeline = nil;
+    id<MTLComputePipelineState> verifier_rope_pipeline = nil;
+    id<MTLComputePipelineState> verifier_kv_store_pipeline = nil;
+    id<MTLComputePipelineState> verifier_attention_pipeline = nil;
+    id<MTLComputePipelineState> verifier_attention_reduce_pipeline = nil;
+    id<MTLComputePipelineState> verifier_kv_scatter_pipeline = nil;
+    id<MTLComputePipelineState> verifier_input_validate_pipeline = nil;
     id<MTLComputePipelineState> softmax_pipeline = nil;
     id<MTLComputePipelineState> token_candidate_tile_pipeline = nil;
     id<MTLComputePipelineState> token_candidate_merge_pipeline = nil;
@@ -66,6 +73,34 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> token_candidate_batch_merge_pipeline = nil;
     id<MTLComputePipelineState> token_candidate_batch_finalize_pipeline = nil;
     id<MTLComputePipelineState> token_candidate_batch_top1_pipeline = nil;
+    id<MTLComputePipelineState> verifier_request_resolve_pipeline = nil;
+    id<MTLComputePipelineState> target_candidate_batch_tile_pipeline = nil;
+    id<MTLComputePipelineState> target_candidate_batch_merge_pipeline = nil;
+    id<MTLComputePipelineState> target_candidate_batch_finalize_pipeline = nil;
+    id<MTLComputePipelineState> target_candidate_batch_top1_pipeline = nil;
+    id<MTLComputePipelineState> feature_tap_copy_pipeline = nil;
+    id<MTLComputePipelineState> feature_tap_store_f16_pipeline = nil;
+    id<MTLComputePipelineState> feature_scatter_f32_pipeline = nil;
+    id<MTLComputePipelineState> feature_scatter_f16_pipeline = nil;
+    id<MTLComputePipelineState> f16_row_scatter_pipeline = nil;
+    id<MTLComputePipelineState> draft_topk_tile_pipeline = nil;
+    id<MTLComputePipelineState> draft_topk_merge_pipeline = nil;
+    id<MTLComputePipelineState> draft_clear_u32_pipeline = nil;
+    id<MTLComputePipelineState> draft_union_mark_selector_pipeline = nil;
+    id<MTLComputePipelineState> draft_union_mark_aux_pipeline = nil;
+    id<MTLComputePipelineState> draft_union_count_tiles_pipeline = nil;
+    id<MTLComputePipelineState> draft_union_scan_tiles_pipeline = nil;
+    id<MTLComputePipelineState> draft_union_scatter_pipeline = nil;
+    id<MTLComputePipelineState> draft_indexed_f16_pipeline = nil;
+    id<MTLComputePipelineState> draft_indexed_q8_pipeline = nil;
+    id<MTLComputePipelineState> draft_indexed_q6_pipeline = nil;
+    id<MTLComputePipelineState> draft_indexed_q4_pipeline = nil;
+    id<MTLComputePipelineState> draft_score_correct_pipeline = nil;
+    id<MTLComputePipelineState> draft_proposal_pipeline = nil;
+    id<MTLComputePipelineState> corrected_logsumexp_pipeline = nil;
+    id<MTLComputePipelineState> corrected_rank_finalize_pipeline = nil;
+    id<MTLComputePipelineState> arm_s_transition_score_pipeline = nil;
+    std::array<id<MTLComputePipelineState>, 7> recurrent_pipelines {};
     id<MTLCommandQueue> queue = nil;
 
     MatmulPipelineState();
@@ -94,6 +129,7 @@ struct F16MatmulDispatch {
 [[nodiscard]] id<MTLDevice> system_metal_device() noexcept;
 [[nodiscard]] id<MTLDevice> metal_device_or_throw();
 [[nodiscard]] MatmulPipelineState& shared_matmul_pipeline_state();
+void prepare_recurrent_pipelines();
 [[nodiscard]] F16MatmulDispatch select_f16_matmul_dispatch(
     MatmulPipelineState& state,
     std::uint64_t rows,

@@ -78,6 +78,7 @@ struct Gemma2MetalKVCacheLayer {
 inline constexpr std::uint32_t gemma2_decode_attention_max_partitions = 32U;
 inline constexpr std::uint32_t gemma2_decode_attention_query_heads = 16U;
 inline constexpr std::uint32_t gemma2_decode_attention_head_dimension = 256U;
+inline constexpr std::uint32_t gemma2_metal_verifier_row_max = 1'025U;
 
 struct Gemma2MetalDecodeScratch {
     // The decode executor treats these buffers as a fixed liveness map. Raw
@@ -202,6 +203,15 @@ enum class Gemma2MetalScratchOwnership {
     resident_verifier,
 };
 
+enum class VerifierTransactionState : std::uint8_t {
+    idle,
+    encoded,
+    submitted,
+    completed,
+    provisional,
+    poisoned,
+};
+
 struct Gemma2MetalLayerSchedule {
     std::uint32_t layer_index = 0;
     bool uses_sliding_window = false;
@@ -210,6 +220,7 @@ struct Gemma2MetalLayerSchedule {
 };
 
 struct Gemma2MetalVerificationStateAccess;
+struct ResidentTargetPayloadReceipt;
 
 class Gemma2MetalModelPlan final {
 public:
@@ -247,16 +258,25 @@ public:
     [[nodiscard]] std::array<std::uintptr_t, 4> allocation_identities() const noexcept;
     [[nodiscard]] bool has_pending_verification() const noexcept;
     [[nodiscard]] bool pending_verification_completed() const noexcept;
+    [[nodiscard]] VerifierTransactionState verification_state() const noexcept;
+    [[nodiscard]] bool verification_poisoned() const noexcept;
     [[nodiscard]] std::uint32_t pending_verification_position() const;
+    [[nodiscard]] std::uint32_t pending_verification_row_count() const;
     [[nodiscard]] std::uint32_t provisionally_committed_token_count() const noexcept;
 
 private:
     friend struct Gemma2MetalVerificationStateAccess;
 
-    void set_pending_verification(std::uint32_t cache_position);
+    void set_pending_verification(
+        std::uint32_t cache_position,
+        std::uint32_t row_count,
+        VerifierTransactionState state = VerifierTransactionState::submitted
+    );
+    void mark_pending_verification_submitted();
     void mark_pending_verification_completed();
     void set_provisionally_committed_token_count(std::uint32_t token_count);
     void clear_pending_verification() noexcept;
+    void poison_pending_verification() noexcept;
 
     Gemma2ModelConfig config_;
     Gemma2MetalModelWeightBuffers weights_;
@@ -271,9 +291,9 @@ private:
     std::size_t uploaded_weight_byte_count_ = 0;
     std::size_t kv_cache_byte_count_ = 0;
     std::size_t scratch_byte_count_ = 0;
-    bool has_pending_verification_ = false;
-    bool pending_verification_completed_ = false;
+    VerifierTransactionState verification_state_ = VerifierTransactionState::idle;
     std::uint32_t pending_verification_position_ = 0;
+    std::uint32_t pending_verification_row_count_ = 0;
     std::uint32_t provisionally_committed_token_count_ = 0;
 };
 
@@ -326,6 +346,11 @@ private:
 [[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const EngineModel& model,
     Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic
+);
+[[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
+    const EngineModel& model,
+    Gemma2OutputHeadPolicy policy,
+    ResidentTargetPayloadReceipt& resident_receipt
 );
 [[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const Gemma2ModelConfig& config,

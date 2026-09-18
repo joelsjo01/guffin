@@ -1,6 +1,11 @@
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
+#include "local_gguf_engine/engine/recurrent_chat.hpp"
+
+#include "feature_bank_runtime.hpp"
+#include "gemma2_verification_state_access.hpp"
+#include "prepared_plan_test_hooks.hpp"
 
 #include "../tensor/backends/metal/metal_command_context.hpp"
 #include "../tensor/backends/metal_backend.hpp"
@@ -18,24 +23,6 @@
 #include <vector>
 
 namespace local_gguf_engine::engine {
-
-struct Gemma2MetalVerificationStateAccess final {
-    static void set_pending(Gemma2MetalModelPlan& plan, std::uint32_t cache_position) {
-        plan.set_pending_verification(cache_position);
-    }
-
-    static void mark_completed(Gemma2MetalModelPlan& plan) {
-        plan.mark_pending_verification_completed();
-    }
-
-    static void set_provisional(Gemma2MetalModelPlan& plan, std::uint32_t token_count) {
-        plan.set_provisionally_committed_token_count(token_count);
-    }
-
-    static void clear(Gemma2MetalModelPlan& plan) noexcept {
-        plan.clear_pending_verification();
-    }
-};
 
 namespace {
 
@@ -193,6 +180,26 @@ void accumulate_decode_stats(
     total.decode_attention_token_count += value.decode_attention_token_count;
 }
 
+void accumulate_verifier_stats(Gemma2MetalDecodeExecutionStats& total,
+                              const TargetVerifierExecutionStats& value) {
+#define ADD(field) total.field += value.field
+    ADD(command_buffer_count); ADD(commit_count); ADD(synchronous_wait_count);
+    ADD(compute_encoder_count); ADD(compute_dispatch_count); ADD(blit_encoder_count);
+    ADD(memory_barrier_count); ADD(transient_buffer_allocation_count);
+    ADD(selector_dispatch_count); ADD(compact_readback_bytes); ADD(gpu_duration_ns);
+    ADD(q4_decode_projection_count); ADD(q8_decode_projection_count);
+    ADD(q8_width_two_projection_count); ADD(q4_small_batch_projection_count);
+    ADD(q4_width_two_projection_count); ADD(q4_exact_16_projection_count);
+    ADD(q4_generic_tiled_projection_count); ADD(q6_decode_projection_count);
+    ADD(q6_small_batch_projection_count); ADD(q6_width_two_projection_count);
+    ADD(q6_exact_16_projection_count); ADD(q6_generic_tiled_projection_count);
+    ADD(f16_projection_count);
+#undef ADD
+    total.decode_attention_dispatch_count += value.attention_dispatch_count;
+    total.decode_attention_partition_count += value.attention_partition_count;
+    total.decode_attention_token_count += value.attention_token_count;
+}
+
 [[nodiscard]] Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
     Gemma2MetalModelPlan& plan,
     std::span<const std::uint32_t> prompt_token_ids,
@@ -202,7 +209,10 @@ void accumulate_decode_stats(
     TokenSampler& sampler,
     const Gemma2MetalGeneratedTokenCallback& on_token,
     const Gemma2MonotonicClock& clock,
-    RetrievalProposer* proposer
+    RetrievalProposer* proposer,
+    const Gemma2GenerationTraceBinding* trace,
+    RecurrentChatPlan* learned,
+    Gemma2GenerationCommitJournal* journal
 );
 
 }  // namespace
@@ -213,7 +223,9 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
     std::uint32_t token_id,
     float embedding_scale,
     std::optional<TokenSelectionRequest> selection_request,
-    Gemma2MetalDecodeOutputMode output_mode
+    Gemma2MetalDecodeOutputMode output_mode,
+    FeatureSinkBinding feature_sink,
+    Gemma2ExecutionReceipt* completion
 ) {
     if (plan.has_pending_verification()) {
         throw std::logic_error("Gemma2 resident decode cannot run with pending verification");
@@ -237,6 +249,17 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
     metal::MetalCommandContext command("Gemma2 resident decode", true);
     const auto& config = plan.config();
     const auto& scratch = plan.decode_scratch();
+    const std::array<std::uint32_t, 1U> feature_positions {decode.cache_position()};
+    const std::array<std::uint32_t, 1U> feature_token_ids {token_id};
+    const auto capture_features = feature_sink_bound(feature_sink);
+    auto submission_attempted = false;
+
+    try {
+    if (capture_features) {
+        FeatureSinkRuntimeAccess::begin_capture(
+            feature_sink, command, feature_positions, feature_token_ids, 1U
+        );
+    }
 
     command.write_u32(scratch.token_id_staging, token_id);
     // feed_forward_residual is the layer-to-layer residual ping-pong endpoint;
@@ -250,6 +273,12 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
     );
     command.encode_memory_barrier();
     command.pop_debug_group();
+    if (capture_features) {
+        FeatureSinkRuntimeAccess::encode_tap(
+            feature_sink, command, FeatureTapStage::embedding_residual, 0U,
+            scratch.feed_forward_residual, 0U, 1U
+        );
+    }
 
     const auto head_dimension = config.attention_key_length;
     const auto attention_scale = 1.0F / std::sqrt(static_cast<float>(head_dimension));
@@ -375,9 +404,19 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
         );
         command.encode_memory_barrier();
         command.pop_debug_group();
+        if (capture_features) {
+            FeatureSinkRuntimeAccess::encode_tap(
+                feature_sink, command, FeatureTapStage::layer_residual,
+                static_cast<std::uint16_t>(scheduled_layer.layer_index),
+                scratch.feed_forward_residual, 0U, 1U
+            );
+        }
     }
 
-    if (output_mode == Gemma2MetalDecodeOutputMode::logits) {
+    const auto capture_final = capture_features && FeatureSinkRuntimeAccess::needs_tap(
+        feature_sink, FeatureTapStage::final_normalized, 0U
+    );
+    if (output_mode == Gemma2MetalDecodeOutputMode::logits || capture_final) {
         command.push_debug_group("Final norm and output head");
         command.encode_rms_norm(
             scratch.feed_forward_residual,
@@ -386,8 +425,18 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             config.rms_norm_epsilon
         );
         command.encode_memory_barrier();
-        command.encode_matmul(scratch.normalized_hidden, plan.weights().output_weight, scratch.logits);
-        command.encode_memory_barrier();
+        if (capture_final) {
+            FeatureSinkRuntimeAccess::encode_tap(
+                feature_sink, command, FeatureTapStage::final_normalized, 0U,
+                scratch.normalized_hidden, 0U, 1U
+            );
+        }
+        if (output_mode == Gemma2MetalDecodeOutputMode::logits) {
+            command.encode_matmul(
+                scratch.normalized_hidden, plan.weights().output_weight, scratch.logits
+            );
+            command.encode_memory_barrier();
+        }
         command.pop_debug_group();
     }
     std::uint32_t selector_dispatch_count = 0;
@@ -399,7 +448,16 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
         command.pop_debug_group();
     }
 
-    const auto metal_stats = command.commit_and_wait();
+    submission_attempted = true;
+    static_cast<void>(command.commit());
+    if (completion) completion->completion_unknown = true;
+    const auto metal_stats = command.wait_until_completed();
+    if (completion) completion->completion_unknown = false;
+    if (capture_features) {
+        FeatureSinkRuntimeAccess::complete_capture(
+            feature_sink, command, feature_positions, 1U
+        );
+    }
     auto candidates = selection_request.has_value()
         ? std::optional<CompactTokenCandidates>(command.read_token_candidates(plan.selection_workspace()))
         : std::nullopt;
@@ -444,6 +502,17 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
             .decode_attention_token_count = metal_stats.decode_attention_token_count,
         },
     };
+    } catch (...) {
+        if (capture_features) {
+            if (submission_attempted) {
+                FeatureSinkRuntimeAccess::poison(feature_sink);
+                Gemma2MetalVerificationStateAccess::poison(plan);
+            } else {
+                FeatureSinkRuntimeAccess::abort_unsubmitted(feature_sink);
+            }
+        }
+        throw;
+    }
 }
 
 Gemma2MetalVerifierResult run_gemma2_metal_width_two_verifier(
@@ -867,7 +936,9 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
     std::span<const std::uint32_t> prompt_token_ids,
     std::uint32_t cache_position,
     float embedding_scale,
-    std::optional<TokenSelectionRequest> selection_request
+    std::optional<TokenSelectionRequest> selection_request,
+    FeatureSinkBinding feature_sink,
+    Gemma2ExecutionReceipt* completion
 ) {
     if (plan.has_pending_verification()) {
         throw std::logic_error("Gemma2 resident prefill cannot run with pending verification");
@@ -902,6 +973,12 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
     std::uint32_t selector_dispatch_count = 0;
     auto staged_kv_copy_dispatch_count = std::uint32_t {0U};
     auto staged_kv_copy_logical_bytes = std::uint64_t {0U};
+    const auto capture_features = feature_sink_bound(feature_sink);
+    std::array<std::uint32_t, gemma2_metal_prefill_chunk_size> feature_positions {};
+    auto completed_feature_chunks = std::uint32_t {0U};
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+    auto chunk_index = std::uint32_t {0U};
+#endif
     while (token_offset < prompt_token_ids.size()) {
         const auto chunk_cache_position =
             cache_position + static_cast<std::uint32_t>(token_offset);
@@ -918,6 +995,24 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
         const bool final_chunk = token_offset + chunk_token_count == prompt_token_ids.size();
 
         metal::MetalCommandContext command("Gemma2 resident prefill chunk");
+        auto submission_attempted = false;
+        try {
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+        inject_prepared_plan_failure_for_testing(
+            PreparedPlanFailurePoint::prefill_encode, chunk_index
+        );
+#endif
+        if (capture_features) {
+            for (std::uint32_t row = 0U; row < chunk_token_count; ++row) {
+                feature_positions[row] = chunk_cache_position + row;
+            }
+            FeatureSinkRuntimeAccess::begin_capture(
+                feature_sink, command,
+                std::span<const std::uint32_t>(feature_positions).first(chunk_token_count),
+                chunk_tokens,
+                chunk_token_count
+            );
+        }
         command.write_u32s(scratch.token_id_staging, chunk_cache_position, chunk_tokens);
         command.encode_embedding(
             scratch.token_id_staging,
@@ -927,6 +1022,12 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
             chunk_cache_position,
             chunk_token_count
         );
+        if (capture_features) {
+            FeatureSinkRuntimeAccess::encode_tap(
+                feature_sink, command, FeatureTapStage::embedding_residual, 0U,
+                scratch.feed_forward_residual, 0U, chunk_token_count
+            );
+        }
 
         for (std::size_t offset = 0; offset < schedule.layers().size(); ++offset) {
             const auto& scheduled_layer = schedule.layers()[offset];
@@ -1151,8 +1252,32 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
                 scratch.feed_forward_residual,
                 chunk_token_count * hidden_elements_per_token
             );
+            if (capture_features) {
+                FeatureSinkRuntimeAccess::encode_tap(
+                    feature_sink, command, FeatureTapStage::layer_residual,
+                    static_cast<std::uint16_t>(scheduled_layer.layer_index),
+                    scratch.feed_forward_residual, 0U, chunk_token_count
+                );
+            }
         }
 
+        const auto capture_final = capture_features && FeatureSinkRuntimeAccess::needs_tap(
+            feature_sink, FeatureTapStage::final_normalized, 0U
+        );
+        if (capture_final) {
+            command.encode_rms_norm(
+                scratch.feed_forward_residual,
+                plan.weights().output_norm_weight,
+                scratch.normalized_hidden,
+                config.rms_norm_epsilon,
+                chunk_token_count
+            );
+            command.encode_memory_barrier();
+            FeatureSinkRuntimeAccess::encode_tap(
+                feature_sink, command, FeatureTapStage::final_normalized, 0U,
+                scratch.normalized_hidden, 0U, chunk_token_count
+            );
+        }
         if (final_chunk) {
             command.encode_rms_norm(
                 scratch.feed_forward_residual,
@@ -1178,12 +1303,59 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
             }
         }
 
-        static_cast<void>(command.commit());
+        if (capture_features) {
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+            inject_prepared_plan_failure_for_testing(
+                PreparedPlanFailurePoint::prefill_commit, chunk_index
+            );
+#endif
+            submission_attempted = true;
+            static_cast<void>(command.commit());
+            if (completion) completion->completion_unknown = true;
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+            inject_prepared_plan_failure_for_testing(
+                PreparedPlanFailurePoint::prefill_wait, chunk_index
+            );
+#endif
+            static_cast<void>(command.wait_until_completed());
+            if (completion) completion->completion_unknown = false;
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+            inject_prepared_plan_failure_for_testing(
+                PreparedPlanFailurePoint::prefill_completion, chunk_index
+            );
+#endif
+            FeatureSinkRuntimeAccess::complete_capture(
+                feature_sink, command,
+                std::span<const std::uint32_t>(feature_positions).first(chunk_token_count),
+                chunk_token_count
+            );
+            ++completed_feature_chunks;
+        } else {
+            submission_attempted = true;
+            static_cast<void>(command.commit());
+            if (completion) completion->completion_unknown = true;
+        }
         commands.push_back(std::move(command));
         token_offset += chunk_token_count;
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+        ++chunk_index;
+#endif
+        } catch (...) {
+            if (capture_features) {
+                if (submission_attempted || completed_feature_chunks != 0U) {
+                    FeatureSinkRuntimeAccess::poison(feature_sink);
+                    Gemma2MetalVerificationStateAccess::poison(plan);
+                } else {
+                    FeatureSinkRuntimeAccess::abort_unsubmitted(feature_sink);
+                }
+            }
+            throw;
+        }
     }
 
-    static_cast<void>(commands.back().wait_until_completed());
+    if (!capture_features) {
+        static_cast<void>(commands.back().wait_until_completed());
+    }
     const auto chunk_count = static_cast<std::uint32_t>(commands.size());
     Gemma2MetalPrefillExecutionStats execution {
         .chunk_count = chunk_count,
@@ -1219,6 +1391,7 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
         execution.decode_attention_token_count += stats.decode_attention_token_count;
     }
 
+    if (completion) completion->completion_unknown = false;
     auto candidates = selection_request.has_value()
         ? std::optional<CompactTokenCandidates>(commands.back().read_token_candidates(plan.selection_workspace()))
         : std::nullopt;
@@ -1336,6 +1509,9 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_argmax_tokens_with_plan(
         sampler,
         on_token,
         clock,
+        nullptr,
+        nullptr,
+        nullptr,
         nullptr
     );
 }
@@ -1351,7 +1527,10 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
     TokenSampler& sampler,
     const Gemma2MetalGeneratedTokenCallback& on_token,
     const Gemma2MonotonicClock& clock,
-    RetrievalProposer* proposer
+    RetrievalProposer* proposer,
+    const Gemma2GenerationTraceBinding* trace,
+    RecurrentChatPlan* learned,
+    Gemma2GenerationCommitJournal* journal
 ) {
     require_gemma2_metal_plan_generation_inputs(
         plan.config(),
@@ -1359,6 +1538,16 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         cache_position,
         max_new_tokens
     );
+    if (trace != nullptr
+        && (!feature_sink_bound(trace->feature_sink) || !trace->on_target_selection)) {
+        throw std::invalid_argument("Gemma2 generation trace binding is incomplete");
+    }
+    if (trace != nullptr && (proposer != nullptr || learned != nullptr)) {
+        throw std::invalid_argument(
+            "Gemma2 training trace requires ordinary target decoding, not retrieval speculation"
+        );
+    }
+    if (learned != nullptr) learned->validate_sampler(sampler.options());
 
     const auto prompt_token_count = checked_prompt_token_count(prompt_token_ids);
     Gemma2GenerationMetrics metrics {
@@ -1371,7 +1560,9 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         prompt_token_ids,
         cache_position,
         embedding_scale,
-        sampler.selection_request()
+        sampler.selection_request(),
+        trace != nullptr ? trace->feature_sink : FeatureSinkBinding {},
+        journal ? &journal->completion : nullptr
     );
     metrics.prefill_completed_ns = monotonic_now_ns(clock);
     metrics.prompt_evaluation_duration_ns = elapsed_ns(
@@ -1399,9 +1590,15 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
     auto preview_sampler = sampler;
 
     std::optional<std::uint32_t> pending_selected_token;
+    auto candidate_origin_position = cache_position + prompt_token_count - 1U;
+    auto candidate_origin_token = prompt_token_ids.back();
+    if (learned != nullptr) learned->publish_prefill_origin(candidate_origin_position);
     while (selected_token_ids.size() < max_new_tokens) {
         const bool using_pending_token = pending_selected_token.has_value();
         const auto selection_started_ns = monotonic_now_ns(clock);
+        const auto sampler_pre = sampler.checkpoint();
+        const auto selection_request = sampler.selection_request();
+        const auto draw_ticket = sampler.preview_ticket(0U);
         const auto selected_token_id = using_pending_token
             ? *pending_selected_token
             : sampler.sample(std::span<const TokenLogit>(candidates.values).first(candidates.count));
@@ -1425,6 +1622,28 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         if (!using_pending_token) {
             sampler.observe_tokens(std::span<const std::uint32_t>(&selected_token_id, 1U));
         }
+        if (trace != nullptr) {
+            if (using_pending_token) {
+                throw std::logic_error("pending speculative token reached ordinary training trace");
+            }
+            trace->on_target_selection(Gemma2TargetSelectionTraceEvent {
+                .target_position = candidate_origin_position,
+                .input_token_id = candidate_origin_token,
+                .selected_token_id = selected_token_id,
+                .remaining_token_budget = static_cast<std::uint32_t>(
+                    max_new_tokens - selected_token_ids.size()
+                ),
+                .terminal = token_is_stop(selected_token_id, stop_token_ids)
+                    || selected_token_ids.size() == max_new_tokens,
+                .sampler_options = sampler.options(),
+                .request = selection_request,
+                .sampler_pre = sampler_pre,
+                .draw_ticket = draw_ticket,
+                .sampler_post = sampler.checkpoint(),
+                .compact_candidates = std::span<const TokenLogit>(candidates.values)
+                    .first(candidates.count),
+            });
+        }
         if (proposer != nullptr) {
             proposer->observe(selected_token_id);
         }
@@ -1440,7 +1659,8 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
             const auto proposal_completed_ns = monotonic_now_ns(clock);
             metrics.proposer_duration_ns += elapsed_ns(proposal_started_ns, proposal_completed_ns);
         }
-        if (proposer != nullptr && verifier_can_fit && retrieval_proposal_is_profitable(proposal)) {
+        if (proposer != nullptr && verifier_can_fit && retrieval_proposal_is_profitable(proposal)
+            && !(learned != nullptr && using_pending_token)) {
             const std::array<TokenSelectionRequest, 2> requests {
                 sampler.selection_request(),
                 sampler.selection_request_after_observing(proposal.token_id),
@@ -1497,6 +1717,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
                 );
                 cached_token_count += 2U;
                 generated_token_ids.push_back(selected_token_id);
+                if (journal) journal->record(selected_token_id, cached_token_count - 1U, sampler);
                 bool stop_after_first = false;
                 try {
                     if (on_token) {
@@ -1532,6 +1753,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
                 selected_token_ids.push_back(next_target_token);
                 proposer->observe(next_target_token);
                 candidates = verified.candidates->at(1);
+                if (journal) journal->record(next_target_token, cached_token_count, sampler);
                 if (token_is_stop(next_target_token, stop_token_ids)) {
                     stop_token_id = next_target_token;
                     metrics.stop_reason = Gemma2GenerationStopReason::stop_token;
@@ -1556,6 +1778,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
                 metrics.decode_token_count += 2U;
                 if (stop_token_id.has_value()
                     || metrics.stop_reason == Gemma2GenerationStopReason::callback_stop) break;
+                if (learned != nullptr) learned->publish_retrieval_origin(1U, cached_token_count - 1U);
                 continue;
             }
 
@@ -1567,6 +1790,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
             metrics.decode_duration_ns += elapsed_ns(decode_started_ns, decode_completed_ns);
             ++metrics.decode_token_count;
             generated_token_ids.push_back(selected_token_id);
+            if (journal) journal->record(selected_token_id, cached_token_count, sampler);
             if (on_token && on_token(Gemma2MetalGeneratedTokenEvent {
                     .token_id = selected_token_id,
                     .generated_token_count = generated_token_ids.size(),
@@ -1582,6 +1806,68 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         }
         if (proposer != nullptr && verifier_can_fit) {
             ++metrics.speculative_fallback_count;
+        }
+
+        // Weights-only always-propose development control, after the frozen
+        // retrieval gate. A mismatch carry follows ordinary target decode;
+        // it is never sampled again or recursively redrafted before caching.
+        if (learned != nullptr && !using_pending_token && remaining > 0U
+            && !token_is_stop(selected_token_id, stop_token_ids)
+            && learned->horizon() + 1U <= plan.config().context_length - cached_token_count) {
+            const auto begin = monotonic_now_ns(clock);
+            if (metrics.decode_token_count == 0U) metrics.decode_started_ns = begin;
+            const auto on_committed = [&](const RecurrentCommittedToken& token) {
+                    if (token.depth != 0U) {
+                        selected_token_ids.push_back(token.token_id);
+                        if (proposer != nullptr) proposer->observe(token.token_id);
+                        metrics.last_token_selected_ns = monotonic_now_ns(clock);
+                    }
+                    if (journal) journal->record(token.token_id, token.cached_token_count, sampler);
+                    if (token.stop_token) return Gemma2MetalTokenStreamDecision::continue_generation;
+                    generated_token_ids.push_back(token.token_id);
+                    return on_token ? on_token(Gemma2MetalGeneratedTokenEvent {
+                        .token_id = token.token_id,
+                        .generated_token_count = generated_token_ids.size(),
+                        .cached_token_count = token.cached_token_count,
+                    }) : Gemma2MetalTokenStreamDecision::continue_generation;
+                };
+            const auto cycle = learned->run(plan, sampler, selected_token_id, cached_token_count,
+                remaining + 1U, stop_token_ids, on_committed);
+            const auto end = monotonic_now_ns(clock);
+            metrics.decode_completed_ns = end;
+            const auto duration = elapsed_ns(begin, end);
+            metrics.learned_cycle_duration_ns += duration;
+            metrics.decode_duration_ns += duration;
+            accumulate_decode_stats(decode_execution, cycle.draft.execution);
+            accumulate_verifier_stats(decode_execution, cycle.target);
+            accumulate_decode_stats(decode_execution, cycle.endpoint);
+            metrics.compact_readback_bytes += cycle.draft.execution.compact_readback_bytes;
+            metrics.selector_dispatch_count += cycle.draft.execution.selector_dispatch_count;
+            metrics.learned_draft_duration_ns += cycle.draft.wall_duration_ns;
+            metrics.learned_draft_gpu_ns += cycle.draft.gpu_duration_ns;
+            if (cycle.draft.status != 0U) {
+                ++metrics.learned_numeric_refusal_count;
+            } else {
+                ++metrics.learned_cycle_count;
+                metrics.learned_accepted_edge_count += cycle.accepted_edges;
+                metrics.learned_target_gpu_ns += cycle.target.gpu_duration_ns;
+                metrics.compact_readback_bytes += cycle.target.compact_readback_bytes;
+                metrics.selector_dispatch_count += cycle.target.selector_dispatch_count;
+                metrics.decode_token_count += cycle.retained_rows;
+                cached_token_count += cycle.retained_rows;
+                if (cycle.carry) pending_selected_token = cycle.carry;
+                if (cycle.has_next_candidates) candidates = cycle.next_candidates;
+                if (cycle.stop_token) {
+                    stop_token_id = cycle.stop_token;
+                    metrics.stop_reason = Gemma2GenerationStopReason::stop_token;
+                    break;
+                }
+                if (cycle.callback_stopped) {
+                    metrics.stop_reason = Gemma2GenerationStopReason::callback_stop;
+                    break;
+                }
+                continue;
+            }
         }
 
         const auto decode = create_gemma2_metal_decode_schedule(plan, cached_token_count);
@@ -1601,7 +1887,9 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
                 : std::nullopt,
             needs_next_candidate
                 ? Gemma2MetalDecodeOutputMode::logits
-                : Gemma2MetalDecodeOutputMode::kv_only
+                : Gemma2MetalDecodeOutputMode::kv_only,
+            trace != nullptr ? trace->feature_sink : FeatureSinkBinding {},
+            journal ? &journal->completion : nullptr
         );
         const auto decode_completed_ns = monotonic_now_ns(clock);
         metrics.decode_completed_ns = decode_completed_ns;
@@ -1611,6 +1899,9 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         cached_token_count = decode.total_kv_token_count();
         if (decode_step.candidates.has_value()) {
             candidates = *decode_step.candidates;
+            candidate_origin_position = decode.cache_position();
+            candidate_origin_token = selected_token_id;
+            if (learned != nullptr) learned->publish_decode_origin(candidate_origin_position);
             metrics.compact_readback_bytes += decode_step.execution.compact_readback_bytes;
             metrics.selector_dispatch_count += decode_step.execution.selector_dispatch_count;
             metrics.max_candidate_count = std::max(
@@ -1620,6 +1911,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
             throw std::runtime_error("Gemma2 Metal decode omitted compact token candidates");
         }
 
+        if (journal) journal->record(selected_token_id, cached_token_count, sampler);
         if (token_is_stop(selected_token_id, stop_token_ids)) {
             stop_token_id = selected_token_id;
             metrics.stop_reason = Gemma2GenerationStopReason::stop_token;
@@ -1668,6 +1960,17 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
 
 }  // namespace
 
+void Gemma2GenerationCommitJournal::record(
+    std::uint32_t token, std::uint32_t cached, const TokenSampler& authoritative
+) {
+    if (count >= token_storage.size() || (count && cached != cached_token_count + 1U)) {
+        throw std::logic_error("generation commit journal capacity or cache discontinuity");
+    }
+    token_storage[count++] = token;
+    cached_token_count = cached;
+    sampler = authoritative.checkpoint();
+}
+
 Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
     Gemma2MetalModelPlan& plan,
     std::span<const std::uint32_t> prompt_token_ids,
@@ -1677,7 +1980,10 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
     TokenSampler& sampler,
     const Gemma2MetalGeneratedTokenCallback& on_token,
     const Gemma2MonotonicClock& clock,
-    RetrievalProposer* proposer
+    RetrievalProposer* proposer,
+    const Gemma2GenerationTraceBinding* trace,
+    RecurrentChatPlan* learned,
+    Gemma2GenerationCommitJournal* journal
 ) {
     return generate_gemma2_metal_tokens_with_plan_impl(
         plan,
@@ -1688,7 +1994,10 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_sampled_tokens_with_plan(
         sampler,
         on_token,
         clock,
-        proposer
+        proposer,
+        trace,
+        learned,
+        journal
     );
 }
 

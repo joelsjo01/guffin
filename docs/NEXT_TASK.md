@@ -2,6 +2,345 @@
 
 ## Active baton
 
+Execution status: Phases 2 through 4 are complete. The user has completed the
+first three-seed H3 full-vocabulary training control and verified its Phase-6
+weights export/native recurrent Metal chain. The user-authorized H3 live-chat
+integration is now at its verification handoff: native session execution and
+full CI pass, and the cooled canonical screen preserves tokens but is slower
+than Stage 4. This remains a weights-only development route, not a selected or
+admitted learned policy. Stop here for user review; do not start training,
+policy fitting or another optimization. The wider Phase-5, Phase-6 and Phase-7
+candidate registries are not complete.
+The earlier attempt to generate Phase 0 attestation, simulation, and
+evidence-receipt machinery was removed because it did not advance the
+production decoder. The source identities, candidate distinctions, capacities,
+and experimental rules specified here remain the contract; they are recorded
+when their corresponding implementation or measurement becomes real rather
+than through a parallel administrative framework.
+
+The Phase-5 handoff now owns authenticated source/split manifests, exact
+near-duplicate clustering, split-receipt validation, trace-corpus identity,
+causal horizon/window validation across context generations, and resumable
+fixed-cell training with exact accumulation boundaries and atomic checkpoints.
+The trace collector binds its exact executable and Metal-source identities.
+The pinned public-corpus builder authenticates eight upstream source files,
+then deterministically converts 3,200 conversations and 4,314 user turns with
+exactly 400 conversations per primary workload. It retains 600 multi-turn
+conversations, balanced summarization/translation and function-call/JSON-mode
+controls, 25 non-English language groups, repeated-document turns, explicit
+caps plus natural stops, and 26 prompts of at least 8 KiB. Exact and near
+duplicates reduce to 2,746 source components before the immutable split.
+The initial three-seed H3 Arm-R full-vocabulary/F16 control is registered. Its
+pre-training audit now binds the exact production common-draw proposal law,
+paper-supported D-PACE alpha 0.5, sampler-stratified source-cluster
+interleaving, packed 16-origin MPS execution, a fixed validation cadence, and
+hierarchical equal-cluster/equal-conversation/equal-seed checkpoint selection
+on exact accepted prefix. Checkpoints are immutable and crash-resumable. The
+trainer validates the tied Gemma head and required taps before accelerator
+allocation and fails closed on an undersized or mismatched corpus, unavailable
+device, stale checkpoint, incompatible cell, or unimplemented target-integrated
+Arm-S execution. Exact CPU/production-sampler equations and real MPS
+forward/backward checks cover the active objective; the deliberately undersized
+smoke corpus is still refused before allocation.
+
+Phase 5 is not complete. The first 112 GB prefix corpus is preserved as valid
+trace evidence, but it cannot supply the frozen balanced H3 training
+membership: several workload/seed cells are below 2,500 origins and the
+rare-non-English validation partition has no eligible origin. It must not be
+used for this control. A new authenticated `collect-balanced` mode selects
+whole conversation-by-five-seed-by-all-turn products until every workload/seed
+has at least 2,500 H3 training origins and every workload has at least ten
+validation source clusters. It captures only the final-normalized tap required
+by these three cells, reducing feature payload by 44x without changing their
+inputs. The user completed that collection: 2,415 traces, 100,000 balanced
+training origins and 83,340 validation origins for the H3 control. All three
+seeds completed six epochs / 37,500 optimizer updates; their best hierarchical
+accepted-prefix scores are 0.8020660572, 0.8019270632 and 0.7907627908 of three.
+These are offline learned-proposal results, not measured generation speed.
+Learned/quantized selectors,
+the exact Arm-S differentiable target-top-block executor, the remaining
+registered family objectives, and bundle-router training remain implementation
+work after that control. None is silently substituted by the full-vocabulary
+control.
+
+### H3 weights-only native handoff
+
+The three completed checkpoints are exported as schema-3, nonselectable
+weights-only artifacts under `artifacts/learned_speculation/phase6-h3-v2/`
+(`seed1.lgweights`, `seed2.lgweights`, `seed3.lgweights`). Each contains
+26,222,596 bytes of unchanged F32 master weights, bounded tensor digests and
+target/training provenance. The native inspector independently authenticates
+them. Existing training outputs and schema-2 fixtures are preserved.
+
+`Gemma2SpeculativePlan` owns recurrent weights, semantic state and fixed GPU
+scratch, aliases the existing resident F16 tied table, preserves the trained
+F16 feature-capture / BF16 recurrence boundaries, and performs the complete
+dependent full-vocabulary chain in one command submission. Intermediate token
+IDs remain on device. A separate precise Metal library and outward-interval
+sampler fail closed on uncertain decisions without modifying the target's
+existing kernels or authoritative sampler. The weights-only development API
+does not create a selected chat policy or consume the target RNG.
+
+The first two eligible origins (29 and 30) of development trace
+`h3-final-balanced-v1/00000000000000001094.lgtrace` were run for all three
+trained seeds on the real M4. All six chains matched the independent C++ CPU
+equations exactly: 64,512 BF16 target-state values, 18 proposals and 18
+confidence values. A cancellation error in the initial F32 reduction was
+fixed with compensated accumulation, not a widened tolerance. The independent
+PyTorch/MPS comparison initially matched tokens/confidences but differed in
+two state values per origin; bit-for-bit MPS-kernel equivalence is **not**
+claimed. Its exact internal GEMM reduction order is not pinned. The strict
+`--device mps` diagnostic remains available and must not be relaxed to hide
+those differences; the native arithmetic is checked against explicit CPU
+equations, not advertised as an opaque MPS kernel reproduction.
+
+The six corrected release component calls took 57.382–65.721 ms per H3 chain,
+including full-V scoring/selection, synchronization and compact completion;
+each reported 68 dispatches and zero transient GPU-buffer allocations. Owned
+drafter storage is 31,428,988 bytes, excluding aliased target storage. These
+are recorded-input component diagnostics, without thermal isolation, not
+live-chat throughput, achieved physical-bandwidth measurements or architecture
+admission evidence. Target execution, live transactions/callbacks, feature
+collection and startup are outside these component timings. Per-submission
+command wrappers are still constructed by the existing command context; the
+buffer counter is not a proof of zero host/driver allocations.
+
+Verification: `MAKEFLAGS=-B bash scripts/ci.sh` passed a clean rebuild and all
+408 C++ tests. All 101 Python tests passed separately in `.stage5a-venv`,
+including the real MPS cases (the system-Python CI run skips unavailable
+offline dependencies). Coverage includes all seven declared chain horizons,
+malformed weights, source mutation, capacity/position overflow, stale epochs,
+nonfinite device arithmetic/poison, unavailable Metal, BF16 cancellation and
+432 additional sampler-transform/draw decisions against CPU equations.
+
+The user approved continuing from this weights-only handoff into the live
+integration slice below. Fitted policies, broader trained numeric coverage and
+embedded golden bundles remain open. The wider candidate requirements below
+are unchanged. No family is admitted or rejected by this H3 control, and
+Stage 4 remains the default selectable path.
+
+Reproduce the independent trained-seed check (use the matching checkpoint and
+weights file for seeds 2/3):
+
+```sh
+make MODE=release speculation-draft
+.stage5a-venv/bin/python scripts/speculation_draft_parity.py \
+  --model models/gemma-2-9b-Q4.gguf \
+  --weights artifacts/learned_speculation/phase6-h3-v2/seed1.lgweights \
+  --checkpoint training/outputs/phase5-r-h3-fullv/R-direct-recurrent-transfer-5357c332c313673a9117.pt \
+  --trace traces/learned_speculation/h3-final-balanced-v1/00000000000000001094.lgtrace \
+  --executable build/release/local-gguf-speculation-draft \
+  --origins 2 --device equations
+```
+
+### H3 live chat integration
+
+The explicit `--development-recurrent-weights` route prepares the authenticated
+target and drafter together. It uses live normalized target features, opaque
+sampler tickets, device-built hypothetical histories, a validated chain graph,
+and an independent H+1-row target verifier. The shared pure controller owns
+callback, sampler adoption, accepted-prefix, carry and endpoint decisions.
+The existing retrieval gate runs first unless `--no-retrieval` is requested;
+`--no-speculative` disables all speculation and conflicts with requested
+weights. Missing, malformed or incompatible weights/sampling configuration is
+an error, not a silent Stage-4 fallback. Numeric proposal uncertainty is an
+explicitly counted conservative refusal before target mutation.
+
+Session preparation is opaque rather than publicly assembled from unrelated
+components. Reset rebuilds from the authenticated open source, releases the
+old residency first, and preserves poison if rebuilding fails. The session
+stages messages/context eviction until a durable token receipt exists;
+throwing callbacks retain exactly their committed prefix without redelivery.
+Unknown completion or failed reconciliation poisons the session. A bounded
+cache execution ledger preserves original prefill/decode boundaries during
+exceptional reconstruction: reclassifying old decoded tokens as one prefill
+was found to change rounded K/V. Regeneration also reconstructs a retained
+prefix when its sliding-cache rows were overwritten by the removed turn.
+Neither recovery path samples tokens or serves as a speculative fast path.
+
+The native learned graph/request/ticket/scratch and command-context host
+storage are persistent. All learned kernels and the full verifier topology
+are warmed during setup. Single-use Metal driver command buffers/encoders and
+legacy ordinary/Stage-4 host wrappers are not claimed allocation-free.
+Schema-4 diagnostics keep legacy selection timing separately and add complete
+post-prefill generation time, full-turn time, and user-turn-entry to first
+nonempty text delivery. Scheduled-weight-byte rates are explicitly accounting
+estimates, never physical-bandwidth measurements.
+
+Verification: `MODE=release bash scripts/ci.sh` rebuilt the native executables
+and passed all 412 C++ tests plus the 103-test Python discovery (56 offline
+dependency skips in system Python). All 103 Python tests passed separately in
+`.stage5a-venv`, including real MPS checks. New live-chat tests exercise full
+H3 acceptance and mismatch, exact sampler/RNG/history and nonzero K/V bytes,
+every H3 callback stop/throw depth, cached continuation, context shifting,
+wrapped regeneration, known-complete recovery, uncertain-completion poison,
+reset, sampler incompatibility and malformed CLI configuration. The native
+drafter tests cover device-built histories through H23 and stale/foreign
+sampler tickets; the pure controller tests cover resumable callbacks at H3
+and H23. No tolerance or workload was weakened. This is not exhaustive
+failure-injection coverage for every future family/bundle or source-exact
+PyTorch/MPS reduction equivalence.
+
+Run the explicit development control (no Python environment is needed):
+
+```sh
+make MODE=release generate
+build/release/local-gguf-generate models/gemma-2-9b-Q4.gguf \
+  --chat --seed 42 --decode-diagnostics \
+  --development-recurrent-weights artifacts/learned_speculation/phase6-h3-v2/seed1.lgweights
+```
+
+Omit the weights flag for Stage 4; add `--no-retrieval` to the weights command
+for learned-only execution. The artifact requires its trained sampler
+transforms (temperature 0.8, top-k 40, top-p 0.95, min-p 0.05, repetition
+penalty 1/window 64); changing the seed remains supported. This integration
+does not fit a policy, retrain weights, admit/reject a family, or complete the
+other registered chain/tree/beam/block/multi-stream implementations.
+
+#### Live chat screen, 2026-09-17
+
+One fresh Stage-4 process followed by one fresh seed-1 H3 retrieval-first
+process, each after 240 seconds idle, ran the unchanged canonical prompts,
+seed 42, five-second inter-turn pause and natural stops. The primary rate
+below uses complete post-prefill generation time, including terminal K/V,
+callbacks, synchronization and result assembly. Neither kernel probes nor
+training ran alongside them.
+
+| Mode / turn | Selected tokens | Complete generation seconds | Tokens/s | First visible text seconds |
+| --- | ---: | ---: | ---: | ---: |
+| Stage 4 / first | 276 | 16.891184208 | 16.34 | 0.230236083 |
+| Stage 4 / follow-up | 322 | 20.234480792 | 15.91 | 0.751264250 |
+| H3 hybrid / first | 276 | 33.852367458 | 8.15 | 0.393357250 |
+| H3 hybrid / follow-up | 322 | 38.364425125 | 8.39 | 0.637752583 |
+
+Aggregate throughput was **16.1075 versus 8.2806 tokens/s**. Both runs matched
+selected-token hashes `49080569719b1cea` / `369b09d9b01ff1e1` and final cache
+positions 292 / 633. H3 made 246 successful learned cycles, accepted 90 draft
+edges (0.366 per cycle), and conservatively refused one uncertain numeric
+proposal. Draft execution cost 13.626 seconds wall / 13.552 seconds GPU;
+target verification/commit cost 42.051 seconds GPU. Ordinary carries,
+retrieval, endpoint work and host work are also charged in complete time.
+This observed online acceptance is not the offline validation score and does
+not redefine that score. No routing parameter was fitted on these prompts.
+
+Additional owned learned plan storage was 64,737,100 bytes; both routes
+reported zero transient Metal-buffer allocations. Measured child peak RSS
+was 8.380 GiB for Stage 4 and 9.675 GiB for H3, including startup and mapped/
+shared resources, not just owned learned buffers. The larger working-set
+observation must not be replaced by the 64.7 MB allocation ledger. Driver/
+host allocations are not covered by that zero-buffer counter.
+
+This is a development screen, **not** clean sealed retention or a family
+rejection. System memory pressure was present: Stage-4 swap usage changed
+2027.56 to 2196.81 MiB (618 swap-in / 11,856 swap-out pages); H3 changed
+2124.75 to 2104.50 MiB (1,458 / 240 pages), with 16 KiB pages. Compressor
+occupancy also grew during both runs. These are system-wide observations,
+not engine-only traffic. `pmset` reported no recorded thermal/performance
+warning before/after either run, which is not a frequency trace or proof of
+thermal stationarity. First-selection TTFT was 0.168445 / 0.678283 seconds
+for Stage 4 and 0.167615 / 0.399478 for H3; prompt rates were 95.0 / 28.0 and
+95.5 / 47.6 tokens/s respectively. The prompt variation reinforces the
+memory/system-state limitation. No actual physical-bandwidth, compute-pressure
+or heat-soaked retention claim is made. The observed development control does
+not meet the speed gate and must not replace default Stage 4.
+
+Raw local reports/transcripts are ignored under
+`benchmarks/results/h3-chat-hKCzsG/` (`stage4.json`, `seed1-hybrid.json` and
+their `.log` files). Both used executable SHA-256
+`4590cd927b92b37847539b322192596020e937216eaffa94a304abf6aebe06b3`;
+the H3 weights SHA-256 was
+`d323ebca6927964fc6b44e86843c5cfe9da1fbd4920ce75e6bea5f578bd5072b`.
+The screen called `quick_benchmark.run_local_chat` with the enforced cooldown
+outside that function to capture pre/post system observations. It used the
+canonical process driver unchanged and omitted the separate kernel probes.
+
+The Phase 2 target substrate now owns validated fixed-capacity proposal graphs,
+sampler tickets, target transactions, private speculative K/V, device-resident
+proposal/history inputs, causal chain/conditional/forest/repeated-root masks,
+accepted-path scatter, the ordinary target-only K/V endpoint, and compact
+production-Q8 full-vocabulary selection. The typed target shape registry has
+1,246 entries and preserves paper, executable-code, transfer, and diagnostic
+identities separately. Deterministic coverage reaches every registered horizon,
+transaction/failure state, 513/1,025-row and high-rank forest boundaries, and
+the declared builder maxima without clipping.
+
+Final one-shot live Gemma 2 9B Q4 perfect/scripted ceiling checks, including
+controller and commit costs, measured 1.387x for the exact 24-row/H23 single
+invocation, 1.420x for the exact H23 three-tile conditional schedule, 1.386x
+for an exact 17-row prefix-closed forest, and 0.474x for the exact 12-row
+ReDrafter-MLX repeated-root W3 batch. The 1,025-row path also executed live;
+its earlier faster but numerically non-admissible head produced an optimistic
+0.023x ceiling, so it is retained only as a favorable upper-speed exclusion
+diagnostic. These are target-topology ceilings, not learned-drafter or chat-path
+speed claims.
+
+The Phase 3 substrate now owns authenticated whole-GGUF, consumed-metadata,
+source-tensor, resident-target, artifact, and trace identities; atomic prepared
+target/fixture-plan construction; fixed-capacity shared, layer-wise, and hybrid
+feature banks; eager and lazy Metal projection; typed target-p/draft-(p+1)
+provenance; independent linear/tree draft caches; and the sole target/feature/
+draft verification transaction. Capture is wired through all target execution
+routes, including every multi-command prefill chunk, with exact rollback or
+public poison on injected failures. The bounded trace writer streams through an
+atomic partial file and the reader/auditor/CLI reject malformed, non-causal,
+over-capacity, or unauthenticated data.
+
+A one-shot release measurement on the real Gemma 2 9B Q4 target used one
+16-token warm-up and one 128-token prefill. Capture off measured 839.662 ms wall
+and 838.801 ms GPU (152.442 prompt tokens/s); capture on measured 841.807 ms
+wall and 840.662 ms GPU (152.054 prompt tokens/s), with 128/128 rows captured/
+projected, one command, one wait, and 22,306,316 feature bytes resident. Both
+runs produced the exact logits SHA-256
+`71b80278d1fcd3a10352ea338ecd9ad340003c95b2775de197c7c670ecb5d106`.
+This is the Phase 3 component-cost/correctness screen, not a thermal-isolated
+retention decision or an end-to-end learned-decoder speed result.
+
+The Phase 4 substrate now owns schema-v2 authenticated selector/candidate/
+transition/proposal/rank-8 tensors; fixed-capacity Metal plans; specialized
+1/3/4/7/8/15/16/23-state full-vocabulary scans in F16/Q8_0/Q6_K/Q4_K; stable
+1K-through-128K top-k and full-V selection; device transition/history/control/
+retrieval unions and stable deduplication; indexed packed-column target scoring
+without a k-by-3,584 expansion; target-space up projection, final RMSNorm,
+softcap, correction scores, and an integer-LUT common-draw proposal transform.
+Malformed artifacts, padding, capacities, device inputs, non-finite arithmetic,
+and unavailable Metal fail closed. Numerically uncertain proposal bins invoke
+the declared conservative fallback instead of making an unverified decision.
+
+Corrected target-Q8 scoring is tiled over the real 256K head without a dense
+rows-by-vocabulary allocation. The exact TreeFlash 240/960/961/1,024 physical
+row ledgers, all required cached-rank capacities, and Arm-S 160/165/552/605 plus
+post-walk controls are bound. TreeFlash's released heap ordering has an
+independent CPU constructor golden. Arm-S has the separately labeled local
+bias-free rank-8 early-exit interpretation, exact prefix pruning, and
+fixed-capacity compact builders for the 3,872/3,993/14,641-node controls. The
+lossless paper threshold, exact rank-8 projection algebra, adapter sharing, and
+the Shared Table-3 root/count/cap/tie interaction remain unresolved source
+fields; no source-exact Arm-S claim is made.
+
+One-shot real-model component measurements on Gemma 2 9B Q4 found:
+
+- fixture-weight recurrent-per-edge selector/candidate/proposal scoring for 23
+  states: 37.735 ms wall and 31.383 ms GPU across 23 submissions;
+- the identical 23 states in one parallel batch: 25.117 ms wall and 24.786 ms
+  GPU, with the exact same proposal SHA-256 and 12 identical conservative
+  numeric fallbacks in each shape;
+- the local rank-8 Arm-S early-exit fixture over all 120 raw edges: 1,057.547
+  ms wall and 1,057.264 ms GPU, including 120 real target-Q8 head rows;
+- TreeFlash released H15/M16/topK16: 240 physical head rows, 220,200,960,000
+  MACs, 2,188.668 ms wall and 2,180.548 ms GPU; and
+- the Arm-S root-inclusive cross-mode control: 121 separately charged raw
+  lower rows, 33 upper main plus 132 stream head rows, 151,388,160,000 head
+  MACs, 1,498.313 ms wall and 1,491.795 ms GPU, with a valid 3,993-node compact
+  next tree.
+
+These are production-kernel component timings with live target features and
+real resident target weights. The drafter weights are deterministic fixtures,
+the runs were not thermal-isolated retention comparisons, and none is a
+trained-model, end-to-end generation-speed, or family-exclusion result. The
+full repository CI passes 399 C++ tests. The Python runner discovers 34 tests
+(four Torch-dependent tests skip under the system interpreter); all 34 pass in
+the pinned Phase-5 virtual environment.
+
 Build and evaluate a **full-fidelity, engine-owned learned speculative decoder**
 for Gemma 2 9B Q4 on this base M4 MacBook Air. The registered external-drafter
 proposal horizons are H=3, 4, 7, 8, 15, 16, and 23 future edges, corresponding
@@ -1539,6 +1878,14 @@ weight by the **unsmoothed** `-log q_j`. The generalized product control derives
 weights from this engine's expected useful prefix after stop/budget/callback
 survival and is labeled `controller-PACE`; it is not reported as reproduction
 evidence for D-PACE.
+
+The initial H3 Arm-R control is explicitly a Gemma-local complete
+interpretation rather than a D-PACE reproduction: it uses the paper-supported
+alpha and detached position-weight equation over this project's registered
+KL/classification terms, alongside separately weighted common-draw and
+confidence terms. Those compound weights, the optimizer rate, width, and
+initialization are empirical frozen control choices whose quality is decided by
+the three training seeds, not attributed to the paper.
 
 Likewise, an entropy-order-only curriculum is retained only as an ablation.
 The faithful [EDSD](https://aclanthology.org/2026.acl-long.2145/) control bundles

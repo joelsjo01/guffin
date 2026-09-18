@@ -68,6 +68,203 @@ struct TokenCandidateResult {
     TokenCandidate candidates[token_candidate_max_count];
 };
 
+constant uint verifier_history_capacity = 64;
+constant uint verifier_suffix_capacity = 23;
+constant uint verifier_max_partitions = 32;
+
+struct VerifierDeviceSelectionRow {
+    uint history_token_ids[64];
+    uint suffix_token_ids[23];
+    uint history_head;
+    uint history_length;
+    uint history_window_limit;
+    uint suffix_count;
+};
+
+struct VerifierResolvedSelectionRow {
+    uint top_k;
+    uint base_candidate_count;
+    uint history_count;
+    uint reserved;
+    uint history_token_ids[64];
+};
+
+struct VerifierRequestResolveDimensions {
+    uint rows;
+    uint vocabulary_size;
+    uint top_k;
+    uint repetition_enabled;
+};
+
+struct VerifierInputValidationDimensions {
+    uint rows;
+    uint vocabulary_size;
+};
+
+struct VerifierRoPEDimensions {
+    uint rows;
+    uint head_count;
+    uint head_dimension;
+    uint rope_dimension_count;
+    float frequency_base;
+};
+
+struct VerifierKVStoreDimensions {
+    uint rows;
+    uint head_count;
+    uint head_dimension;
+    uint rope_dimension_count;
+    float frequency_base;
+};
+
+struct VerifierAttentionRow {
+    uint base_first_position;
+    uint base_token_count;
+    uint ancestor_offset;
+    uint ancestor_count;
+};
+
+struct VerifierAttentionDimensions {
+    uint rows;
+    uint cache_row_mask;
+    uint query_head_count;
+    uint kv_head_count;
+    uint key_dimension;
+    uint value_dimension;
+    float scale;
+    float logit_softcap;
+};
+
+struct VerifierKVScatterDimensions {
+    uint rows;
+    uint row_width;
+    uint destination_position;
+    uint destination_row_mask;
+};
+
+struct FeatureTapCopyDimensions {
+    uint rows;
+    uint input_columns;
+    uint output_columns;
+    uint input_row_start;
+    uint output_column_start;
+};
+
+struct FeatureScatterDimensions {
+    uint rows;
+    uint width;
+    uint source_row_capacity;
+    uint destination_row_capacity;
+};
+
+kernel void feature_tap_copy_f32_kernel(
+    const device float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant FeatureTapCopyDimensions& dims [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = dims.rows * dims.input_columns;
+    if (gid >= total) return;
+    const uint row = gid / dims.input_columns;
+    const uint column = gid - row * dims.input_columns;
+    output[row * dims.output_columns + dims.output_column_start + column] =
+        input[(dims.input_row_start + row) * dims.input_columns + column];
+}
+
+kernel void feature_tap_store_f16_kernel(
+    const device float* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant FeatureTapCopyDimensions& dims [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = dims.rows * dims.input_columns;
+    if (gid >= total) return;
+    const uint row = gid / dims.input_columns;
+    const uint column = gid - row * dims.input_columns;
+    output[row * dims.output_columns + dims.output_column_start + column] =
+        half(input[(dims.input_row_start + row) * dims.input_columns + column]);
+}
+
+kernel void feature_scatter_f32_kernel(
+    const device float* source [[buffer(0)]],
+    const device uint* source_rows [[buffer(1)]],
+    const device uint* destination_rows [[buffer(2)]],
+    device float* destination [[buffer(3)]],
+    constant FeatureScatterDimensions& dims [[buffer(4)]],
+    device atomic_uint* status [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = dims.rows * dims.width;
+    if (gid >= total) return;
+    const uint entry = gid / dims.width;
+    const uint column = gid - entry * dims.width;
+    const uint source_row = source_rows[entry];
+    const uint destination_row = destination_rows[entry];
+    if (source_row >= dims.source_row_capacity
+        || destination_row >= dims.destination_row_capacity) {
+        atomic_store_explicit(status, 1U, memory_order_relaxed);
+        return;
+    }
+    destination[destination_row * dims.width + column] =
+        source[source_row * dims.width + column];
+}
+
+kernel void feature_scatter_f16_kernel(
+    const device float* source [[buffer(0)]],
+    const device uint* source_rows [[buffer(1)]],
+    const device uint* destination_rows [[buffer(2)]],
+    device half* destination [[buffer(3)]],
+    constant FeatureScatterDimensions& dims [[buffer(4)]],
+    device atomic_uint* status [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = dims.rows * dims.width;
+    if (gid >= total) return;
+    const uint entry = gid / dims.width;
+    const uint column = gid - entry * dims.width;
+    const uint source_row = source_rows[entry];
+    const uint destination_row = destination_rows[entry];
+    if (source_row >= dims.source_row_capacity
+        || destination_row >= dims.destination_row_capacity) {
+        atomic_store_explicit(status, 1U, memory_order_relaxed);
+        return;
+    }
+    destination[destination_row * dims.width + column] =
+        half(source[source_row * dims.width + column]);
+}
+
+kernel void f16_row_scatter_kernel(
+    const device half* source [[buffer(0)]],
+    const device uint* source_rows [[buffer(1)]],
+    const device uint* destination_rows [[buffer(2)]],
+    device half* destination [[buffer(3)]],
+    constant FeatureScatterDimensions& dims [[buffer(4)]],
+    device atomic_uint* status [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = dims.rows * dims.width;
+    if (gid >= total) return;
+    const uint entry = gid / dims.width;
+    const uint column = gid - entry * dims.width;
+    const uint source_row = source_rows[entry];
+    const uint destination_row = destination_rows[entry];
+    if (source_row >= dims.source_row_capacity
+        || destination_row >= dims.destination_row_capacity) {
+        atomic_store_explicit(status, 1U, memory_order_relaxed);
+        return;
+    }
+    destination[destination_row * dims.width + column] =
+        source[source_row * dims.width + column];
+}
+
+struct TargetCandidateBatchDimensions {
+    uint rows;
+    uint columns;
+    uint run_count;
+    uint run_stride;
+    float softcap;
+};
+
 constant ushort q4_k_decode_block_count [[function_constant(0)]];
 constant ushort q6_k_decode_block_count [[function_constant(1)]];
 constant ushort kquant_tiled_dtype [[function_constant(2)]];
@@ -279,6 +476,68 @@ kernel void matmul_f32_q8_0_width_two_kernel(
     }
 }
 
+// Each workgroup owns one target row and four vocabulary columns. All rows are
+// dispatched together, so the verifier remains a single device-side full-V
+// operation rather than a host-driven row loop. Keeping the inner expression,
+// block traversal, and SIMD reduction literally identical to the Stage-4
+// matvec is required for bitwise target-logit identity: sharing one decoded
+// weight across several row accumulators lets the Metal compiler reassociate
+// the products by a few ulps, which can change a boundary sampler decision.
+// The output is still immediately compacted and reused, so a 1,025-row
+// verifier never materializes rows-by-vocabulary.
+kernel void matmul_f32_q8_0_target_rows_kernel(
+    const device float* left [[buffer(0)]],
+    const device uchar* right [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulDimensions& dims [[buffer(3)]],
+    uint2 threadgroup_index [[threadgroup_position_in_grid]],
+    ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint row = threadgroup_index.y;
+    const uint first_column = threadgroup_index.x * 4 + uint(simdgroup_index) * 2;
+    const uint second_column = first_column + 1;
+    const uint blocks_per_column = q8_0_decode_block_count == 0
+        ? dims.shared / 32 : uint(q8_0_decode_block_count);
+    const uint column_stride = blocks_per_column * 34;
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+    if (row < dims.rows && first_column < dims.columns) {
+        const device uchar* first_bytes = right + first_column * column_stride;
+        const device uchar* second_bytes = second_column < dims.columns
+            ? right + second_column * column_stride : first_bytes;
+        for (uint block = 0; block < blocks_per_column; ++block) {
+            const float activation = left[
+                row * dims.shared + block * 32 + uint(lane)
+            ];
+            const uint block_offset = block * 34;
+            const half first_scale =
+                *reinterpret_cast<const device half*>(first_bytes + block_offset);
+            const char first_quant =
+                as_type<char>(first_bytes[block_offset + 2 + uint(lane)]);
+            first_sum += activation * float(first_scale) * float(first_quant);
+            if (second_column < dims.columns) {
+                const half second_scale =
+                    *reinterpret_cast<const device half*>(second_bytes + block_offset);
+                const char second_quant =
+                    as_type<char>(second_bytes[block_offset + 2 + uint(lane)]);
+                second_sum += activation * float(second_scale) * float(second_quant);
+            }
+        }
+    }
+
+    first_sum = simd_sum(first_sum);
+    second_sum = simd_sum(second_sum);
+    if (lane == 0) {
+        if (row < dims.rows && first_column < dims.columns) {
+            output[row * dims.columns + first_column] = first_sum;
+        }
+        if (row < dims.rows && second_column < dims.columns) {
+            output[row * dims.columns + second_column] = second_sum;
+        }
+    }
+}
+
 struct block_q4_k {
     half d;
     half dmin;
@@ -361,68 +620,6 @@ inline void dequantize_q6_k_16(
         values[item][1] = (factor / 256.0f) * float(quants & 0xff00) - minimum;
         values[item][2] = (factor / 65536.0f) * float(quants & 0xff0000) - minimum;
         values[item][3] = (factor / 16777216.0f) * float(quants & 0xff000000) - minimum;
-    }
-}
-
-// Each SIMD group owns one output column and each lane decodes a packed
-// 16-value fragment. Four activation rows share that fragment through vector
-// dots; rows 5-8 form a second threadgroup row tile, keeping register use
-// bounded instead of growing a per-lane row array.
-kernel void matmul_f32_kquant_small_batch_kernel(
-    const device float* left [[buffer(0)]],
-    const device uchar* right [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant MatmulDimensions& dims [[buffer(3)]],
-    uint2 threadgroup_index [[threadgroup_position_in_grid]],
-    ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
-    ushort lane [[thread_index_in_simdgroup]]
-) {
-    const uint column = threadgroup_index.x * 2 + uint(simdgroup_index);
-    const uint first_row = threadgroup_index.y * 4;
-    const uint blocks_per_column = dims.shared / 256;
-    float sums[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-
-    if (column < dims.columns) {
-        const uint fragment_count = blocks_per_column * 16;
-        for (uint fragment_index = uint(lane); fragment_index < fragment_count; fragment_index += 32) {
-            float4x4 weights;
-            if (kquant_tiled_dtype == 0) {
-                const device block_q4_k* blocks = reinterpret_cast<const device block_q4_k*>(right)
-                    + column * blocks_per_column;
-                dequantize_q4_k_16(
-                    blocks + fragment_index / 16, short(fragment_index & 15), weights
-                );
-            } else {
-                const device block_q6_k* blocks = reinterpret_cast<const device block_q6_k*>(right)
-                    + column * blocks_per_column;
-                dequantize_q6_k_16(
-                    blocks + fragment_index / 16, short(fragment_index & 15), weights
-                );
-            }
-
-#pragma clang loop unroll(full)
-            for (short row_offset = 0; row_offset < 4; ++row_offset) {
-                const uint row = first_row + uint(row_offset);
-                if (row < dims.rows) {
-                    const device float4x4* activation =
-                        reinterpret_cast<const device float4x4*>(left + row * dims.shared);
-                    const float4x4 values = activation[fragment_index];
-                    sums[row_offset] += dot(weights[0], values[0])
-                        + dot(weights[1], values[1])
-                        + dot(weights[2], values[2])
-                        + dot(weights[3], values[3]);
-                }
-            }
-        }
-    }
-
-#pragma clang loop unroll(full)
-    for (short row_offset = 0; row_offset < 4; ++row_offset) {
-        sums[row_offset] = simd_sum(sums[row_offset]);
-        const uint row = first_row + uint(row_offset);
-        if (lane == 0 && column < dims.columns && row < dims.rows) {
-            output[row * dims.columns + column] = sums[row_offset];
-        }
     }
 }
 
@@ -575,21 +772,22 @@ kernel void matmul_f32_kquant_tiled_kernel(
     }
 }
 
-// Decode has one activation row. Four 8-lane workers cover four blocks while
-// each SIMD group reuses its activation registers for two adjacent columns.
-// The function constant is nonzero for production Gemma widths, allowing Metal
-// to specialize the block loop while the zero variant preserves arbitrary
-// valid backend shapes.
-kernel void matvec_f32_q4_k_packed_kernel(
+// Each threadgroup owns two activation rows for a four-column output tile.
+// Both rows traverse the same packed columns in one workgroup so those bytes
+// remain cache-local. Every row keeps the retained scalar worker assignment,
+// block traversal, arithmetic order, and SIMD reduction.
+kernel void matmul_f32_q4_k_packed_row_batch_kernel(
     const device float* left [[buffer(0)]],
     const device uchar* right [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant MatmulDimensions& dims [[buffer(3)]],
-    uint threadgroup_index [[threadgroup_position_in_grid]],
+    uint2 threadgroup_index [[threadgroup_position_in_grid]],
     ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
     ushort lane [[thread_index_in_simdgroup]]
 ) {
-    const uint first_column = (threadgroup_index * 4) + uint(simdgroup_index) * 2;
+    constexpr ushort row_tile = 2;
+    const uint first_row = threadgroup_index.y * uint(row_tile);
+    const uint first_column = (threadgroup_index.x * 4) + uint(simdgroup_index) * 2;
     const uint second_column = first_column + 1;
     const ushort block_worker = lane / 8;
     const ushort worker_lane = lane % 8;
@@ -600,93 +798,109 @@ kernel void matvec_f32_q4_k_packed_kernel(
         : uint(q4_k_decode_block_count);
     const uint column_stride = blocks_per_column * 144;
     const uint adjacent_stride = second_column < dims.columns ? column_stride : 0;
-    float sums[2] = {0.0f, 0.0f};
+    float sums[row_tile * 2] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-    if (first_column < dims.columns) {
-        const device uchar* first_column_bytes = right + first_column * column_stride;
-        const device float* activation = left
-            + uint(block_worker) * 256 + 64 * uint(quant_half) + 8 * uint(pair_index);
-        float activation_low[16];
-        float activation_high[16];
-        ushort packed_scales[4];
-        thread const uchar* scales = reinterpret_cast<thread const uchar*>(packed_scales);
-
-        for (uint block = uint(block_worker); block < blocks_per_column; block += 4) {
-            float4 activation_sums = float4(0.0f);
+    if (first_row < dims.rows && first_column < dims.columns) {
 #pragma clang loop unroll(full)
-            for (ushort item = 0; item < 8; ++item) {
-                activation_low[item] = activation[item];
-                activation_sums[0] += activation_low[item];
-                activation_low[item + 8] = activation[item + 32];
-                activation_sums[1] += activation_low[item + 8];
-                activation_high[item] = activation[item + 128];
-                activation_sums[2] += activation_high[item];
-                activation_high[item + 8] = activation[item + 160];
-                activation_sums[3] += activation_high[item + 8];
-            }
-
-            const device uchar* block_bytes = first_column_bytes + block * 144;
-            const device ushort* scale_words =
-                reinterpret_cast<const device ushort*>(block_bytes + 4) + quant_half;
-            const device ushort* quants =
-                reinterpret_cast<const device ushort*>(block_bytes + 16)
-                + 16 * quant_half + 4 * pair_index;
-            const device half* factors = reinterpret_cast<const device half*>(block_bytes);
-
+        for (ushort row_offset = 0; row_offset < row_tile; ++row_offset) {
+            const uint row = first_row + uint(row_offset);
+            if (row >= dims.rows) continue;
+            const device uchar* first_column_bytes = right + first_column * column_stride;
+            const device float* activation = left + row * dims.shared
+                + uint(block_worker) * 256 + 64 * uint(quant_half) + 8 * uint(pair_index);
+            float activation_low[16];
+            float activation_high[16];
+            ushort packed_scales[4];
+            thread const uchar* scales =
+                reinterpret_cast<thread const uchar*>(packed_scales);
+            for (uint block = uint(block_worker); block < blocks_per_column; block += 4) {
+                float4 activation_sums = float4(0.0f);
 #pragma clang loop unroll(full)
-            for (ushort output_index = 0; output_index < 2; ++output_index) {
-                packed_scales[0] = scale_words[0] & 0x3f3f;
-                packed_scales[1] = scale_words[2] & 0x3f3f;
-                packed_scales[2] = ((scale_words[4] >> 0) & 0x0f0f)
-                    | ((scale_words[0] & 0xc0c0) >> 2);
-                packed_scales[3] = ((scale_words[4] >> 4) & 0x0f0f)
-                    | ((scale_words[2] & 0xc0c0) >> 2);
-
-                const device ushort* high_quants = quants + 32;
-                float4 low_accumulator = float4(0.0f);
-                float4 high_accumulator = float4(0.0f);
-#pragma clang loop unroll(full)
-                for (ushort item = 0; item < 4; ++item) {
-                    low_accumulator[0] += activation_low[2 * item] * (quants[item] & 0x000f);
-                    low_accumulator[1] += activation_low[2 * item + 1] * (quants[item] & 0x0f00);
-                    low_accumulator[2] += activation_low[2 * item + 8] * (quants[item] & 0x00f0);
-                    low_accumulator[3] += activation_low[2 * item + 9] * (quants[item] & 0xf000);
-                    high_accumulator[0] += activation_high[2 * item] * (high_quants[item] & 0x000f);
-                    high_accumulator[1] += activation_high[2 * item + 1] * (high_quants[item] & 0x0f00);
-                    high_accumulator[2] += activation_high[2 * item + 8] * (high_quants[item] & 0x00f0);
-                    high_accumulator[3] += activation_high[2 * item + 9] * (high_quants[item] & 0xf000);
+                for (ushort item = 0; item < 8; ++item) {
+                    activation_low[item] = activation[item];
+                    activation_sums[0] += activation_low[item];
+                    activation_low[item + 8] = activation[item + 32];
+                    activation_sums[1] += activation_low[item + 8];
+                    activation_high[item] = activation[item + 128];
+                    activation_sums[2] += activation_high[item];
+                    activation_high[item + 8] = activation[item + 160];
+                    activation_sums[3] += activation_high[item + 8];
                 }
-
-                sums[output_index] += float(factors[0]) * (
-                        (low_accumulator[0] + low_accumulator[1] / 256.0f) * scales[0]
-                        + (low_accumulator[2] + low_accumulator[3] / 256.0f) * scales[1] / 16.0f
-                        + (high_accumulator[0] + high_accumulator[1] / 256.0f) * scales[4]
-                        + (high_accumulator[2] + high_accumulator[3] / 256.0f) * scales[5] / 16.0f
-                    ) - float(factors[1]) * (
-                        activation_sums[0] * scales[2]
-                        + activation_sums[1] * scales[3]
-                        + activation_sums[2] * scales[6]
-                        + activation_sums[3] * scales[7]
-                    );
-
-                quants += adjacent_stride / 2;
-                scale_words += adjacent_stride / 2;
-                factors += adjacent_stride / 2;
+                const device uchar* block_bytes = first_column_bytes + block * 144;
+                const device ushort* scale_words =
+                    reinterpret_cast<const device ushort*>(block_bytes + 4) + quant_half;
+                const device ushort* quants =
+                    reinterpret_cast<const device ushort*>(block_bytes + 16)
+                    + 16 * quant_half + 4 * pair_index;
+                const device half* factors = reinterpret_cast<const device half*>(block_bytes);
+#pragma clang loop unroll(full)
+                for (ushort output_index = 0; output_index < 2; ++output_index) {
+                    packed_scales[0] = scale_words[0] & 0x3f3f;
+                    packed_scales[1] = scale_words[2] & 0x3f3f;
+                    packed_scales[2] = ((scale_words[4] >> 0) & 0x0f0f)
+                        | ((scale_words[0] & 0xc0c0) >> 2);
+                    packed_scales[3] = ((scale_words[4] >> 4) & 0x0f0f)
+                        | ((scale_words[2] & 0xc0c0) >> 2);
+                    const device ushort* high_quants = quants + 32;
+                    float4 low_accumulator = float4(0.0f);
+                    float4 high_accumulator = float4(0.0f);
+#pragma clang loop unroll(full)
+                    for (ushort item = 0; item < 4; ++item) {
+                        low_accumulator[0] += activation_low[2 * item]
+                            * (quants[item] & 0x000f);
+                        low_accumulator[1] += activation_low[2 * item + 1]
+                            * (quants[item] & 0x0f00);
+                        low_accumulator[2] += activation_low[2 * item + 8]
+                            * (quants[item] & 0x00f0);
+                        low_accumulator[3] += activation_low[2 * item + 9]
+                            * (quants[item] & 0xf000);
+                        high_accumulator[0] += activation_high[2 * item]
+                            * (high_quants[item] & 0x000f);
+                        high_accumulator[1] += activation_high[2 * item + 1]
+                            * (high_quants[item] & 0x0f00);
+                        high_accumulator[2] += activation_high[2 * item + 8]
+                            * (high_quants[item] & 0x00f0);
+                        high_accumulator[3] += activation_high[2 * item + 9]
+                            * (high_quants[item] & 0xf000);
+                    }
+                    sums[2 * row_offset + output_index] += float(factors[0]) * (
+                            (low_accumulator[0] + low_accumulator[1] / 256.0f) * scales[0]
+                            + (low_accumulator[2] + low_accumulator[3] / 256.0f)
+                                * scales[1] / 16.0f
+                            + (high_accumulator[0] + high_accumulator[1] / 256.0f)
+                                * scales[4]
+                            + (high_accumulator[2] + high_accumulator[3] / 256.0f)
+                                * scales[5] / 16.0f
+                        ) - float(factors[1]) * (
+                            activation_sums[0] * scales[2]
+                            + activation_sums[1] * scales[3]
+                            + activation_sums[2] * scales[6]
+                            + activation_sums[3] * scales[7]
+                        );
+                    quants += adjacent_stride / 2;
+                    scale_words += adjacent_stride / 2;
+                    factors += adjacent_stride / 2;
+                }
+                activation += 4 * 256;
             }
-            activation += 4 * 256;
         }
     }
 
 #pragma clang loop unroll(full)
-    for (ushort output_index = 0; output_index < 2; ++output_index) {
-        sums[output_index] = simd_sum(sums[output_index]);
+    for (ushort index = 0; index < row_tile * 2; ++index) {
+        sums[index] = simd_sum(sums[index]);
     }
     if (lane == 0) {
-        if (first_column < dims.columns) {
-            output[first_column] = sums[0];
-        }
-        if (second_column < dims.columns) {
-            output[second_column] = sums[1];
+#pragma clang loop unroll(full)
+        for (ushort row_offset = 0; row_offset < row_tile; ++row_offset) {
+            const uint row = first_row + uint(row_offset);
+            if (row >= dims.rows) continue;
+            if (first_column < dims.columns) {
+                output[row * dims.columns + first_column] = sums[2 * row_offset];
+            }
+            if (second_column < dims.columns) {
+                output[row * dims.columns + second_column] = sums[2 * row_offset + 1];
+            }
         }
     }
 }
@@ -794,21 +1008,22 @@ kernel void matmul_f32_q4_k_packed_width_two_kernel(
 }
 
 )metal";
-constexpr const char* metal_kernel_source_tail = R"metal(
+constexpr const char* metal_kernel_source_tail_a = R"metal(
 
-// Lane pairs walk two Q6_K blocks concurrently. Each lane caches the sixteen
-// activation values needed for four quantization regions, then advances the
-// packed block pointers by one complete column for the adjacent output.
-kernel void matvec_f32_q6_k_packed_kernel(
+// Q6_K uses the same two-row cache-local tile and exact per-row reduction
+// contract as Q4_K above.
+kernel void matmul_f32_q6_k_packed_row_batch_kernel(
     const device float* left [[buffer(0)]],
     const device uchar* right [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant MatmulDimensions& dims [[buffer(3)]],
-    uint threadgroup_index [[threadgroup_position_in_grid]],
+    uint2 threadgroup_index [[threadgroup_position_in_grid]],
     ushort simdgroup_index [[simdgroup_index_in_threadgroup]],
     ushort lane [[thread_index_in_simdgroup]]
 ) {
-    const uint first_column = (threadgroup_index * 4) + uint(simdgroup_index) * 2;
+    constexpr ushort row_tile = 2;
+    const uint first_row = threadgroup_index.y * uint(row_tile);
+    const uint first_column = (threadgroup_index.x * 4) + uint(simdgroup_index) * 2;
     const uint second_column = first_column + 1;
     const ushort block_parity = lane % 2;
     const ushort block_lane = lane / 2;
@@ -821,69 +1036,82 @@ kernel void matvec_f32_q6_k_packed_kernel(
         : uint(q6_k_decode_block_count);
     const uint column_stride = blocks_per_column * 210;
     const uint adjacent_stride = second_column < dims.columns ? column_stride : 0;
-    float sums[2] = {0.0f, 0.0f};
+    float sums[row_tile * 2] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-    if (first_column < dims.columns) {
-        const device uchar* first_column_bytes = right + first_column * column_stride;
-        for (uint block = uint(block_parity); block < blocks_per_column; block += 2) {
-            const device uchar* block_bytes = first_column_bytes + block * 210;
-            const device uchar* low0 = block_bytes + 64 * half_block + lane_offset;
-            const device uchar* low1 = low0 + 32;
-            const device uchar* high = block_bytes + 128 + 32 * half_block + lane_offset;
-            const device int8_t* scales =
-                reinterpret_cast<const device int8_t*>(block_bytes + 192) + scale_offset;
-            const device half* factor = reinterpret_cast<const device half*>(block_bytes + 208);
-            const device float* activation = left + block * 256 + 128 * half_block + lane_offset;
-            float activation_values[16];
+    if (first_row < dims.rows && first_column < dims.columns) {
 #pragma clang loop unroll(full)
-            for (ushort item = 0; item < 4; ++item) {
-                activation_values[4 * item] = activation[item];
-                activation_values[4 * item + 1] = activation[item + 32];
-                activation_values[4 * item + 2] = activation[item + 64];
-                activation_values[4 * item + 3] = activation[item + 96];
-            }
-
-#pragma clang loop unroll(full)
-            for (ushort output_index = 0; output_index < 2; ++output_index) {
-                float4 accumulator = float4(0.0f);
+        for (ushort row_offset = 0; row_offset < row_tile; ++row_offset) {
+            const uint row = first_row + uint(row_offset);
+            if (row >= dims.rows) continue;
+            const device uchar* first_column_bytes = right + first_column * column_stride;
+            for (uint block = uint(block_parity); block < blocks_per_column; block += 2) {
+                const device uchar* block_bytes = first_column_bytes + block * 210;
+                const device uchar* low0 = block_bytes + 64 * half_block + lane_offset;
+                const device uchar* low1 = low0 + 32;
+                const device uchar* high = block_bytes + 128 + 32 * half_block + lane_offset;
+                const device int8_t* scales =
+                    reinterpret_cast<const device int8_t*>(block_bytes + 192) + scale_offset;
+                const device half* factor =
+                    reinterpret_cast<const device half*>(block_bytes + 208);
+                const device float* activation = left + row * dims.shared
+                    + block * 256 + 128 * half_block + lane_offset;
+                float activation_values[16];
 #pragma clang loop unroll(full)
                 for (ushort item = 0; item < 4; ++item) {
-                    const uchar high_value = high[item];
-                    accumulator[0] += activation_values[4 * item]
-                        * (int((low0[item] & 0x0f) | ((high_value & 0x03) << 4)) - 32);
-                    accumulator[1] += activation_values[4 * item + 1]
-                        * (int((low1[item] & 0x0f) | ((high_value & 0x0c) << 2)) - 32);
-                    accumulator[2] += activation_values[4 * item + 2]
-                        * (int((low0[item] >> 4) | (high_value & 0x30)) - 32);
-                    accumulator[3] += activation_values[4 * item + 3]
-                        * (int((low1[item] >> 4) | ((high_value & 0xc0) >> 2)) - 32);
+                    activation_values[4 * item] = activation[item];
+                    activation_values[4 * item + 1] = activation[item + 32];
+                    activation_values[4 * item + 2] = activation[item + 64];
+                    activation_values[4 * item + 3] = activation[item + 96];
                 }
-                sums[output_index] += float(factor[0]) * (
-                    accumulator[0] * float(scales[0])
-                    + accumulator[1] * float(scales[2])
-                    + accumulator[2] * float(scales[4])
-                    + accumulator[3] * float(scales[6])
-                );
-
-                low0 += adjacent_stride;
-                low1 += adjacent_stride;
-                high += adjacent_stride;
-                scales += adjacent_stride;
-                factor += adjacent_stride / 2;
+#pragma clang loop unroll(full)
+                for (ushort output_index = 0; output_index < 2; ++output_index) {
+                    float4 accumulator = float4(0.0f);
+#pragma clang loop unroll(full)
+                    for (ushort item = 0; item < 4; ++item) {
+                        const uchar high_value = high[item];
+                        accumulator[0] += activation_values[4 * item]
+                            * (int((low0[item] & 0x0f)
+                                | ((high_value & 0x03) << 4)) - 32);
+                        accumulator[1] += activation_values[4 * item + 1]
+                            * (int((low1[item] & 0x0f)
+                                | ((high_value & 0x0c) << 2)) - 32);
+                        accumulator[2] += activation_values[4 * item + 2]
+                            * (int((low0[item] >> 4) | (high_value & 0x30)) - 32);
+                        accumulator[3] += activation_values[4 * item + 3]
+                            * (int((low1[item] >> 4)
+                                | ((high_value & 0xc0) >> 2)) - 32);
+                    }
+                    sums[2 * row_offset + output_index] += float(factor[0]) * (
+                        accumulator[0] * float(scales[0])
+                        + accumulator[1] * float(scales[2])
+                        + accumulator[2] * float(scales[4])
+                        + accumulator[3] * float(scales[6])
+                    );
+                    low0 += adjacent_stride;
+                    low1 += adjacent_stride;
+                    high += adjacent_stride;
+                    scales += adjacent_stride;
+                    factor += adjacent_stride / 2;
+                }
             }
         }
     }
 
 #pragma clang loop unroll(full)
-    for (ushort output_index = 0; output_index < 2; ++output_index) {
-        sums[output_index] = simd_sum(sums[output_index]);
+    for (ushort index = 0; index < row_tile * 2; ++index) {
+        sums[index] = simd_sum(sums[index]);
     }
     if (lane == 0) {
-        if (first_column < dims.columns) {
-            output[first_column] = sums[0];
-        }
-        if (second_column < dims.columns) {
-            output[second_column] = sums[1];
+#pragma clang loop unroll(full)
+        for (ushort row_offset = 0; row_offset < row_tile; ++row_offset) {
+            const uint row = first_row + uint(row_offset);
+            if (row >= dims.rows) continue;
+            if (first_column < dims.columns) {
+                output[row * dims.columns + first_column] = sums[2 * row_offset];
+            }
+            if (second_column < dims.columns) {
+                output[row * dims.columns + second_column] = sums[2 * row_offset + 1];
+            }
         }
     }
 }
@@ -1452,6 +1680,177 @@ kernel void gemma2_kv_cache_copy_f16_kernel(
     destination_value[destination_index] = source_value[source_index];
 }
 
+kernel void verifier_input_validate_u32_kernel(
+    const device uint* actual [[buffer(0)]],
+    const device uint* expected [[buffer(1)]],
+    device atomic_uint* status [[buffer(2)]],
+    constant VerifierInputValidationDimensions& dims [[buffer(3)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= dims.rows) return;
+    if (actual[row] >= dims.vocabulary_size || actual[row] != expected[row]) {
+        atomic_fetch_or_explicit(status, 1u, memory_order_relaxed);
+    }
+}
+
+kernel void verifier_selection_request_resolve_kernel(
+    const device VerifierDeviceSelectionRow* raw [[buffer(0)]],
+    device VerifierResolvedSelectionRow* resolved [[buffer(1)]],
+    device uint* histories [[buffer(2)]],
+    device atomic_uint* status [[buffer(3)]],
+    constant VerifierRequestResolveDimensions& dims [[buffer(4)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= dims.rows) return;
+    const VerifierDeviceSelectionRow request = raw[row];
+    VerifierResolvedSelectionRow output;
+    output.top_k = dims.top_k;
+    output.base_candidate_count = dims.top_k;
+    output.history_count = 0;
+    output.reserved = 0;
+    if (request.history_window_limit > verifier_history_capacity
+        || request.history_length > request.history_window_limit
+        || request.suffix_count > verifier_suffix_capacity
+        || (request.history_length == 0 && request.history_head != 0)
+        || (request.history_length > 0
+            && request.history_head >= request.history_window_limit)) {
+        atomic_fetch_or_explicit(status, 2u, memory_order_relaxed);
+        resolved[row] = output;
+        return;
+    }
+
+    uint chronological[64];
+    uint length = request.history_length;
+    for (uint index = 0; index < length; ++index) {
+        const uint token = request.history_token_ids[
+            (request.history_head + index) % request.history_window_limit
+        ];
+        chronological[index] = token;
+        if (token >= dims.vocabulary_size) {
+            atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+        }
+    }
+    for (uint index = 0; index < request.suffix_count; ++index) {
+        const uint token = request.suffix_token_ids[index];
+        if (token >= dims.vocabulary_size) {
+            atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+        }
+        if (request.history_window_limit == 0) continue;
+        if (length < request.history_window_limit) chronological[length++] = token;
+        else {
+            for (uint move = 1; move < length; ++move) chronological[move - 1] = chronological[move];
+            chronological[length - 1] = token;
+        }
+    }
+    if (dims.repetition_enabled != 0) {
+        for (uint index = 0; index < length; ++index) {
+            const uint token = chronological[index];
+            if (token >= dims.vocabulary_size) {
+                atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+                continue;
+            }
+            bool duplicate = false;
+            for (uint prior = 0; prior < output.history_count; ++prior) {
+                duplicate = duplicate || output.history_token_ids[prior] == token;
+            }
+            if (!duplicate) output.history_token_ids[output.history_count++] = token;
+        }
+    }
+    output.base_candidate_count = output.top_k + output.history_count;
+    for (uint index = 0; index < output.history_count; ++index) {
+        histories[row * verifier_history_capacity + index] = output.history_token_ids[index];
+    }
+    resolved[row] = output;
+}
+
+kernel void verifier_rope_f32_by_positions_kernel(
+    const device float* input [[buffer(0)]],
+    const device uint* positions [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant VerifierRoPEDimensions& dims [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint column = gid.x;
+    const uint row = gid.y;
+    const uint row_width = dims.head_count * dims.head_dimension;
+    if (row >= dims.rows || column >= row_width) return;
+    const uint row_offset = row * row_width;
+    const uint head_column = column % dims.head_dimension;
+    const uint input_index = row_offset + column;
+    if (head_column >= dims.rope_dimension_count) {
+        output[input_index] = input[input_index];
+        return;
+    }
+    const uint half_dimension = dims.rope_dimension_count / 2;
+    const uint pair_column = head_column % half_dimension;
+    const uint head_first_column = column - head_column;
+    const uint first_index = row_offset + head_first_column + pair_column;
+    const uint second_index = first_index + half_dimension;
+    const float first = input[first_index];
+    const float second = input[second_index];
+    const float angle = rope_angle(
+        positions[row], pair_column * 2, dims.rope_dimension_count, dims.frequency_base
+    );
+    const float angle_cos = cos(angle);
+    const float angle_sin = sin(angle);
+    output[input_index] = head_column < half_dimension
+        ? first * angle_cos - second * angle_sin
+        : first * angle_sin + second * angle_cos;
+}
+
+kernel void verifier_kv_store_f16_kernel(
+    const device float* raw_key [[buffer(0)]],
+    const device float* raw_value [[buffer(1)]],
+    const device uint* positions [[buffer(2)]],
+    device half* private_key [[buffer(3)]],
+    device half* private_value [[buffer(4)]],
+    constant VerifierKVStoreDimensions& dims [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint column = gid.x;
+    const uint row = gid.y;
+    const uint row_width = dims.head_count * dims.head_dimension;
+    if (row >= dims.rows || column >= row_width) return;
+    const uint head_column = column % dims.head_dimension;
+    const uint source_index = row * row_width + column;
+    float rotated = raw_key[source_index];
+    if (head_column < dims.rope_dimension_count) {
+        const uint half_dimension = dims.rope_dimension_count / 2;
+        const uint pair_column = head_column % half_dimension;
+        const uint head_first = column - head_column;
+        const uint first_index = row * row_width + head_first + pair_column;
+        const uint second_index = first_index + half_dimension;
+        const float first = raw_key[first_index];
+        const float second = raw_key[second_index];
+        const float angle = rope_angle(
+            positions[row], pair_column * 2, dims.rope_dimension_count,
+            dims.frequency_base
+        );
+        rotated = head_column < half_dimension
+            ? first * cos(angle) - second * sin(angle)
+            : first * sin(angle) + second * cos(angle);
+    }
+    private_key[source_index] = half(rotated);
+    private_value[source_index] = half(raw_value[source_index]);
+}
+
+kernel void verifier_kv_scatter_f16_kernel(
+    const device half* private_key [[buffer(0)]],
+    const device half* private_value [[buffer(1)]],
+    const device uint* selected_nodes [[buffer(2)]],
+    device half* resident_key [[buffer(3)]],
+    device half* resident_value [[buffer(4)]],
+    constant VerifierKVScatterDimensions& dims [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.y >= dims.rows || gid.x >= dims.row_width) return;
+    const uint source = selected_nodes[gid.y] * dims.row_width + gid.x;
+    const uint destination = ((dims.destination_position + gid.y) & dims.destination_row_mask)
+        * dims.row_width + gid.x;
+    resident_key[destination] = private_key[source];
+    resident_value[destination] = private_value[source];
+}
+
 kernel void causal_grouped_attention_scores_f32_kernel(
     const device float* query [[buffer(0)]],
     const device float* key [[buffer(1)]],
@@ -1587,6 +1986,9 @@ kernel void causal_grouped_attention_scores_f16_hybrid_kernel(
 // SIMD groups stream disjoint 32-token blocks; a lane owns eight adjacent head
 // elements as two float4 values. K/V therefore enter the shader once per
 // grouped pair, while both online-softmax states remain register resident.
+)metal";
+constexpr const char* metal_kernel_source_tail_b = R"metal(
+
 kernel void gemma2_decode_attention_f16_cache_kernel(
     const device float4* query [[buffer(0)]],
     const device half4* key [[buffer(1)]],
@@ -1771,6 +2173,229 @@ kernel void gemma2_decode_attention_reduce_f32_kernel(
             merged_maximum = new_maximum;
         }
         const uint output_vector = query_head * vectors_per_head + vector_lane;
+        output[output_vector] = merged_0 / merged_denominator;
+        output[output_vector + 1] = merged_1 / merged_denominator;
+    }
+}
+
+inline uint verifier_partition_count_for_tokens(uint token_count) {
+    return token_count <= 256 ? 1 : token_count <= 512 ? 2
+        : token_count <= 1024 ? 4 : token_count <= 2048 ? 8
+        : token_count <= 4096 ? 16 : 32;
+}
+
+// The loop and partition reduction intentionally mirror scalar decode. Only
+// logical-token lookup differs: committed prefix rows come from the resident
+// ring and the causal tree suffix comes from an explicit ancestor list.
+kernel void verifier_attention_f16_cache_kernel(
+    const device float4* query [[buffer(0)]],
+    const device half4* resident_key [[buffer(1)]],
+    const device half4* resident_value [[buffer(2)]],
+    const device half4* private_key [[buffer(3)]],
+    const device half4* private_value [[buffer(4)]],
+    const device VerifierAttentionRow* schedules [[buffer(5)]],
+    const device uint* ancestors [[buffer(6)]],
+    device float4* output [[buffer(7)]],
+    device float4* partial_output [[buffer(8)]],
+    device float* partial_maxima [[buffer(9)]],
+    device float* partial_denominators [[buffer(10)]],
+    constant VerifierAttentionDimensions& dims [[buffer(11)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    ushort simd_group [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint kv_head = group.x;
+    const uint partition = group.y;
+    const uint row = group.z;
+    if (row >= dims.rows) return;
+    const VerifierAttentionRow schedule = schedules[row];
+    const uint attention_count = schedule.base_token_count + schedule.ancestor_count;
+    const uint partition_count = verifier_partition_count_for_tokens(attention_count);
+    if (partition >= partition_count) return;
+    const uint first_query_head = kv_head * 2;
+    const uint second_query_head = first_query_head + 1;
+    const uint vector_lane = uint(lane) * 2;
+    const uint vectors_per_head = dims.key_dimension / 4;
+    const uint cache_vectors_per_row = dims.kv_head_count * vectors_per_head;
+    const uint query_row_base = row * dims.query_head_count * vectors_per_head;
+    const float4 query_first_0 = query[query_row_base
+        + first_query_head * vectors_per_head + vector_lane];
+    const float4 query_first_1 = query[query_row_base
+        + first_query_head * vectors_per_head + vector_lane + 1];
+    const float4 query_second_0 = query[query_row_base
+        + second_query_head * vectors_per_head + vector_lane];
+    const float4 query_second_1 = query[query_row_base
+        + second_query_head * vectors_per_head + vector_lane + 1];
+
+    float maximum_first = -INFINITY;
+    float maximum_second = -INFINITY;
+    float denominator_first = 0.0f;
+    float denominator_second = 0.0f;
+    float4 accumulated_first_0 = 0.0f;
+    float4 accumulated_first_1 = 0.0f;
+    float4 accumulated_second_0 = 0.0f;
+    float4 accumulated_second_1 = 0.0f;
+    const uint first_block = partition * 4 + uint(simd_group);
+    const uint block_stride = partition_count * 4;
+    const uint block_count = (attention_count + 31) / 32;
+    for (uint block = first_block; block < block_count; block += block_stride) {
+        const uint token_begin = block * 32;
+        const uint token_end = min(token_begin + 32, attention_count);
+        for (uint token = token_begin; token < token_end; ++token) {
+            bool from_private = token >= schedule.base_token_count;
+            uint source_row = from_private
+                ? ancestors[schedule.ancestor_offset + token - schedule.base_token_count]
+                : (schedule.base_first_position + token) & dims.cache_row_mask;
+            const device half4* keys = from_private ? private_key : resident_key;
+            const device half4* values = from_private ? private_value : resident_value;
+            const uint cache_vector = source_row * cache_vectors_per_row
+                + kv_head * vectors_per_head + vector_lane;
+            const float4 key_0 = float4(keys[cache_vector]);
+            const float4 key_1 = float4(keys[cache_vector + 1]);
+            float score_first = simd_sum(dot(query_first_0, key_0) + dot(query_first_1, key_1));
+            float score_second = simd_sum(dot(query_second_0, key_0) + dot(query_second_1, key_1));
+            score_first = precise::tanh((score_first * dims.scale) / dims.logit_softcap)
+                * dims.logit_softcap;
+            score_second = precise::tanh((score_second * dims.scale) / dims.logit_softcap)
+                * dims.logit_softcap;
+            const float new_maximum_first = max(maximum_first, score_first);
+            const float new_maximum_second = max(maximum_second, score_second);
+            const float old_scale_first = denominator_first == 0.0f
+                ? 0.0f : exp(maximum_first - new_maximum_first);
+            const float old_scale_second = denominator_second == 0.0f
+                ? 0.0f : exp(maximum_second - new_maximum_second);
+            const float new_scale_first = exp(score_first - new_maximum_first);
+            const float new_scale_second = exp(score_second - new_maximum_second);
+            const float4 value_0 = float4(values[cache_vector]);
+            const float4 value_1 = float4(values[cache_vector + 1]);
+            accumulated_first_0 = accumulated_first_0 * old_scale_first + value_0 * new_scale_first;
+            accumulated_first_1 = accumulated_first_1 * old_scale_first + value_1 * new_scale_first;
+            accumulated_second_0 = accumulated_second_0 * old_scale_second + value_0 * new_scale_second;
+            accumulated_second_1 = accumulated_second_1 * old_scale_second + value_1 * new_scale_second;
+            denominator_first = denominator_first * old_scale_first + new_scale_first;
+            denominator_second = denominator_second * old_scale_second + new_scale_second;
+            maximum_first = new_maximum_first;
+            maximum_second = new_maximum_second;
+        }
+    }
+
+    threadgroup float4 shared_output[8 * 64];
+    threadgroup float shared_maxima[8];
+    threadgroup float shared_denominators[8];
+    const uint first_state = uint(simd_group) * 2;
+    const uint second_state = first_state + 1;
+    shared_output[first_state * 64 + vector_lane] = accumulated_first_0;
+    shared_output[first_state * 64 + vector_lane + 1] = accumulated_first_1;
+    shared_output[second_state * 64 + vector_lane] = accumulated_second_0;
+    shared_output[second_state * 64 + vector_lane + 1] = accumulated_second_1;
+    if (lane == 0) {
+        shared_maxima[first_state] = maximum_first;
+        shared_maxima[second_state] = maximum_second;
+        shared_denominators[first_state] = denominator_first;
+        shared_denominators[second_state] = denominator_second;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_group != 0) return;
+    for (uint paired_head = 0; paired_head < 2; ++paired_head) {
+        float merged_maximum = -INFINITY;
+        float merged_denominator = 0.0f;
+        float4 merged_0 = 0.0f;
+        float4 merged_1 = 0.0f;
+        for (uint source_simd = 0; source_simd < 4; ++source_simd) {
+            const uint state = source_simd * 2 + paired_head;
+            const float source_denominator = shared_denominators[state];
+            if (source_denominator == 0.0f) continue;
+            const float source_maximum = shared_maxima[state];
+            const float4 source_0 = shared_output[state * 64 + vector_lane];
+            const float4 source_1 = shared_output[state * 64 + vector_lane + 1];
+            if (merged_denominator == 0.0f) {
+                merged_maximum = source_maximum;
+                merged_denominator = source_denominator;
+                merged_0 = source_0;
+                merged_1 = source_1;
+            } else {
+                const float new_maximum = max(merged_maximum, source_maximum);
+                const float old_scale = exp(merged_maximum - new_maximum);
+                const float source_scale = exp(source_maximum - new_maximum);
+                merged_0 = merged_0 * old_scale + source_0 * source_scale;
+                merged_1 = merged_1 * old_scale + source_1 * source_scale;
+                merged_denominator = merged_denominator * old_scale
+                    + source_denominator * source_scale;
+                merged_maximum = new_maximum;
+            }
+        }
+        const uint query_head = first_query_head + paired_head;
+        const uint output_vector = (row * dims.query_head_count + query_head)
+            * vectors_per_head + vector_lane;
+        if (partition_count == 1) {
+            output[output_vector] = merged_0 / merged_denominator;
+            output[output_vector + 1] = merged_1 / merged_denominator;
+        } else {
+            const uint scalar = (row * verifier_max_partitions + partition)
+                * dims.query_head_count + query_head;
+            const uint partial_vector = scalar * vectors_per_head + vector_lane;
+            partial_output[partial_vector] = merged_0;
+            partial_output[partial_vector + 1] = merged_1;
+            if (lane == 0) {
+                partial_maxima[scalar] = merged_maximum;
+                partial_denominators[scalar] = merged_denominator;
+            }
+        }
+    }
+}
+
+kernel void verifier_attention_reduce_f32_kernel(
+    const device float4* partial_output [[buffer(0)]],
+    const device float* partial_maxima [[buffer(1)]],
+    const device float* partial_denominators [[buffer(2)]],
+    const device VerifierAttentionRow* schedules [[buffer(3)]],
+    device float4* output [[buffer(4)]],
+    constant VerifierAttentionDimensions& dims [[buffer(5)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint kv_head = group.x;
+    const uint row = group.y;
+    if (row >= dims.rows) return;
+    const uint attention_count = schedules[row].base_token_count + schedules[row].ancestor_count;
+    const uint partition_count = verifier_partition_count_for_tokens(attention_count);
+    if (partition_count == 1) return;
+    const uint vectors_per_head = dims.value_dimension / 4;
+    const uint vector_lane = uint(lane) * 2;
+    const uint first_query_head = kv_head * 2;
+    for (uint paired_head = 0; paired_head < 2; ++paired_head) {
+        const uint query_head = first_query_head + paired_head;
+        float merged_maximum = -INFINITY;
+        float merged_denominator = 0.0f;
+        float4 merged_0 = 0.0f;
+        float4 merged_1 = 0.0f;
+        for (uint partition = 0; partition < partition_count; ++partition) {
+            const uint scalar = (row * verifier_max_partitions + partition)
+                * dims.query_head_count + query_head;
+            const float source_denominator = partial_denominators[scalar];
+            if (source_denominator == 0.0f) continue;
+            const uint source_vector = scalar * vectors_per_head + vector_lane;
+            const float source_maximum = partial_maxima[scalar];
+            const float4 source_0 = partial_output[source_vector];
+            const float4 source_1 = partial_output[source_vector + 1];
+            if (merged_denominator == 0.0f) {
+                merged_maximum = source_maximum;
+                merged_denominator = source_denominator;
+                merged_0 = source_0;
+                merged_1 = source_1;
+            } else {
+                const float new_maximum = max(merged_maximum, source_maximum);
+                const float old_scale = exp(merged_maximum - new_maximum);
+                const float source_scale = exp(source_maximum - new_maximum);
+                merged_0 = merged_0 * old_scale + source_0 * source_scale;
+                merged_1 = merged_1 * old_scale + source_1 * source_scale;
+                merged_denominator = merged_denominator * old_scale
+                    + source_denominator * source_scale;
+                merged_maximum = new_maximum;
+            }
+        }
+        const uint output_vector = (row * dims.query_head_count + query_head)
+            * vectors_per_head + vector_lane;
         output[output_vector] = merged_0 / merged_denominator;
         output[output_vector + 1] = merged_1 / merged_denominator;
     }
@@ -2212,12 +2837,775 @@ kernel void token_candidate_batch_top1_f32_kernel(
     }
 }
 
+kernel void target_candidate_batch_tile_f32_kernel(
+    const device float* logits [[buffer(0)]],
+    const device VerifierResolvedSelectionRow* requests [[buffer(1)]],
+    device TokenCandidate* runs [[buffer(2)]],
+    device TokenCandidateResult* results [[buffer(3)]],
+    constant TargetCandidateBatchDimensions& dims [[buffer(4)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    const uint row = group.y;
+    if (row >= dims.rows) return;
+    const uint retain_count = min(dims.columns, requests[row].base_candidate_count);
+    threadgroup TokenCandidate tile[token_candidate_tile_size];
+    const uint token = group.x * token_candidate_tile_size + tid;
+    TokenCandidate candidate = {uint(-1), -INFINITY};
+    if (token < dims.columns) {
+        const float transformed = dims.softcap
+            * tanh(logits[row * dims.columns + token] / dims.softcap);
+        if (isfinite(transformed)) candidate = {token, transformed};
+        else atomic_fetch_or_explicit(&results[row].status, 1u, memory_order_relaxed);
+    }
+    tile[tid] = candidate;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint width = 2; width <= token_candidate_tile_size; width <<= 1) {
+        for (uint stride = width >> 1; stride > 0; stride >>= 1) {
+            const uint other = tid ^ stride;
+            if (other > tid) {
+                const bool best_first = (tid & width) == 0;
+                const bool other_better = token_candidate_better(tile[other], tile[tid]);
+                const bool self_better = token_candidate_better(tile[tid], tile[other]);
+                if ((best_first && other_better) || (!best_first && self_better)) {
+                    const TokenCandidate temporary = tile[tid];
+                    tile[tid] = tile[other];
+                    tile[other] = temporary;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    if (tid < retain_count) {
+        runs[row * dims.run_stride + group.x * retain_count + tid] = tile[tid];
+    }
+}
+
+kernel void target_candidate_batch_merge_f32_kernel(
+    const device TokenCandidate* input [[buffer(0)]],
+    const device VerifierResolvedSelectionRow* requests [[buffer(1)]],
+    device TokenCandidate* output [[buffer(2)]],
+    constant TargetCandidateBatchDimensions& dims [[buffer(3)]],
+    constant uint& input_run_count [[buffer(4)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    const uint output_run = position.x;
+    const uint row = position.y;
+    if (row >= dims.rows) return;
+    const uint retain_count = min(dims.columns, requests[row].base_candidate_count);
+    const uint row_offset = row * dims.run_stride;
+    const uint left_run = output_run * 2;
+    if (left_run >= input_run_count) return;
+    const uint right_run = left_run + 1;
+    uint left = 0;
+    uint right = 0;
+    for (uint index = 0; index < retain_count; ++index) {
+        TokenCandidate selected = {uint(-1), -INFINITY};
+        if (right_run < input_run_count) {
+            const TokenCandidate left_value = left < retain_count
+                ? input[row_offset + left_run * retain_count + left]
+                : TokenCandidate{uint(-1), -INFINITY};
+            const TokenCandidate right_value = right < retain_count
+                ? input[row_offset + right_run * retain_count + right]
+                : TokenCandidate{uint(-1), -INFINITY};
+            if (left >= retain_count
+                || (right < retain_count && token_candidate_better(right_value, left_value))) {
+                selected = right_value;
+                ++right;
+            } else {
+                selected = left_value;
+                ++left;
+            }
+        } else {
+            selected = input[row_offset + left_run * retain_count + left++];
+        }
+        output[row_offset + output_run * retain_count + index] = selected;
+    }
+}
+
+kernel void target_candidate_batch_finalize_f32_kernel(
+    const device float* logits [[buffer(0)]],
+    const device TokenCandidate* final_runs [[buffer(1)]],
+    const device VerifierResolvedSelectionRow* requests [[buffer(2)]],
+    const device uint* history [[buffer(3)]],
+    device TokenCandidateResult* results [[buffer(4)]],
+    constant TargetCandidateBatchDimensions& dims [[buffer(5)]],
+    uint2 position [[thread_position_in_grid]]
+) {
+    const uint index = position.x;
+    const uint row = position.y;
+    if (row >= dims.rows) return;
+    const VerifierResolvedSelectionRow request = requests[row];
+    const uint retain_count = min(dims.columns, request.base_candidate_count);
+    const uint count = retain_count + request.history_count;
+    if (index == 0) results[row].count = count;
+    if (index < retain_count) {
+        results[row].candidates[index] = final_runs[row * dims.run_stride + index];
+    } else if (index < count) {
+        const uint token = history[row * verifier_history_capacity + index - retain_count];
+        if (token >= dims.columns) {
+            atomic_fetch_or_explicit(&results[row].status, 2u, memory_order_relaxed);
+            results[row].candidates[index] = {uint(-1), -INFINITY};
+        } else {
+            const float transformed = dims.softcap
+                * tanh(logits[row * dims.columns + token] / dims.softcap);
+            if (!isfinite(transformed)) {
+                atomic_fetch_or_explicit(&results[row].status, 1u, memory_order_relaxed);
+            }
+            results[row].candidates[index] = {token, transformed};
+        }
+    }
+}
+
+kernel void target_candidate_batch_top1_f32_kernel(
+    const device float* logits [[buffer(0)]],
+    device TokenCandidateResult* results [[buffer(1)]],
+    constant TargetCandidateBatchDimensions& dims [[buffer(2)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    if (row >= dims.rows) return;
+    threadgroup TokenCandidate best[token_candidate_tile_size];
+    TokenCandidate local = {uint(-1), -INFINITY};
+    for (uint token = tid; token < dims.columns; token += token_candidate_tile_size) {
+        const float transformed = dims.softcap
+            * tanh(logits[row * dims.columns + token] / dims.softcap);
+        if (!isfinite(transformed)) {
+            atomic_fetch_or_explicit(&results[row].status, 1u, memory_order_relaxed);
+        } else {
+            const TokenCandidate candidate = {token, transformed};
+            if (token_candidate_better(candidate, local)) local = candidate;
+        }
+    }
+    best[tid] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = token_candidate_tile_size >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride && token_candidate_better(best[tid + stride], best[tid])) {
+            best[tid] = best[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        results[row].count = 1;
+        results[row].candidates[0] = best[0];
+    }
+}
+
+)metal";
+constexpr const char* metal_kernel_source_tail_c = R"metal(
+
+// Phase-4 draft selection keeps one pair slot per vocabulary item. Each
+// merge pass writes its retained prefix at the start of the same logical run,
+// so storage is O(H*V), independent of k, rather than O(H*k*ceil(V/512)).
+struct DraftTopKDimensions {
+    uint rows;
+    uint columns;
+    uint retain_count;
+    uint run_width;
+};
+
+kernel void draft_topk_tile_f32_kernel(
+    const device float* scores [[buffer(0)]],
+    device TokenCandidate* output [[buffer(1)]],
+    constant DraftTopKDimensions& dims [[buffer(2)]],
+    device atomic_uint* status [[buffer(3)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    threadgroup TokenCandidate tile[token_candidate_tile_size];
+    const uint token = group.x * token_candidate_tile_size + tid;
+    TokenCandidate value = {uint(-1), -INFINITY};
+    if (group.y < dims.rows && token < dims.columns) {
+        const float score = scores[group.y * dims.columns + token];
+        if (isfinite(score)) value = {token, score};
+        else atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+    }
+    tile[tid] = value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint width = 2u; width <= token_candidate_tile_size; width <<= 1u) {
+        for (uint stride = width >> 1u; stride > 0u; stride >>= 1u) {
+            const uint other = tid ^ stride;
+            if (other > tid) {
+                const bool ascending = (tid & width) != 0u;
+                const bool other_better = token_candidate_better(tile[other], tile[tid]);
+                const bool self_better = token_candidate_better(tile[tid], tile[other]);
+                if ((!ascending && other_better) || (ascending && self_better)) {
+                    const TokenCandidate swap = tile[tid];
+                    tile[tid] = tile[other];
+                    tile[other] = swap;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    const uint run_count = min(dims.retain_count, token_candidate_tile_size);
+    if (tid < run_count && group.x * token_candidate_tile_size + tid < dims.columns) {
+        output[group.y * dims.columns + group.x * token_candidate_tile_size + tid] = tile[tid];
+    }
+}
+
+kernel void draft_topk_merge_f32_kernel(
+    const device TokenCandidate* input [[buffer(0)]],
+    device TokenCandidate* output [[buffer(1)]],
+    constant DraftTopKDimensions& dims [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.y >= dims.rows || gid.x >= dims.columns) return;
+    const uint merged_width = dims.run_width * 2u;
+    const uint group = gid.x / merged_width;
+    const uint rank = gid.x - group * merged_width;
+    const uint base = group * merged_width;
+    const uint remaining_a = base < dims.columns ? dims.columns - base : 0u;
+    const uint len_a = min(min(dims.run_width, dims.retain_count), remaining_a);
+    const uint second = base + dims.run_width;
+    const uint remaining_b = second < dims.columns ? dims.columns - second : 0u;
+    const uint len_b = min(min(dims.run_width, dims.retain_count), remaining_b);
+    const uint output_count = min(dims.retain_count, len_a + len_b);
+    if (rank >= output_count) return;
+
+    const device TokenCandidate* a = input + gid.y * dims.columns + base;
+    const device TokenCandidate* b = input + gid.y * dims.columns + second;
+    int low = int(rank > len_b ? rank - len_b : 0u);
+    int high = int(min(rank, len_a));
+    while (low <= high) {
+        const int probe = (low + high) >> 1;
+        const uint i_probe = uint(probe);
+        const uint j_probe = rank - i_probe;
+        if (i_probe > 0u && j_probe < len_b
+            && token_candidate_better(b[j_probe], a[i_probe - 1u])) {
+            high = probe - 1;
+        } else if (j_probe > 0u && i_probe < len_a
+            && token_candidate_better(a[i_probe], b[j_probe - 1u])) {
+            low = probe + 1;
+        } else {
+            low = probe;
+            break;
+        }
+    }
+    const uint i = uint(low);
+    const uint j = rank - i;
+    const TokenCandidate chosen = i >= len_a ? b[j]
+        : j >= len_b ? a[i]
+        : token_candidate_better(b[j], a[i]) ? b[j] : a[i];
+    output[gid.y * dims.columns + base + rank] = chosen;
+}
+
+struct DraftUnionDimensions {
+    uint rows;
+    uint vocabulary_size;
+    uint selector_count;
+    uint transition_width;
+    uint tile_count;
+    uint full_vocabulary;
+};
+
+kernel void draft_clear_u32_kernel(
+    device uint* output [[buffer(0)]],
+    constant uint& count [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid < count) output[gid] = 0u;
+}
+
+kernel void draft_union_mark_selector_kernel(
+    const device TokenCandidate* selected [[buffer(0)]],
+    const device uint* transition_counts [[buffer(1)]],
+    const device uint* transition_tokens [[buffer(2)]],
+    device atomic_uint* bits [[buffer(3)]],
+    device atomic_uint* status [[buffer(4)]],
+    constant DraftUnionDimensions& dims [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.y >= dims.rows || gid.x >= dims.selector_count) return;
+    const uint token = dims.full_vocabulary != 0u
+        ? gid.x : selected[gid.y * dims.vocabulary_size + gid.x].token;
+    if (token >= dims.vocabulary_size) {
+        atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        return;
+    }
+    atomic_fetch_or_explicit(
+        bits + gid.y * ((dims.vocabulary_size + 31u) / 32u) + token / 32u,
+        1u << (token & 31u), memory_order_relaxed
+    );
+    if (dims.transition_width == 0u) return;
+    const uint count = transition_counts[token];
+    if (count > dims.transition_width) {
+        atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        return;
+    }
+    for (uint edge = 0u; edge < count; ++edge) {
+        const uint next = transition_tokens[token * dims.transition_width + edge];
+        if (next >= dims.vocabulary_size) {
+            atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        } else {
+            atomic_fetch_or_explicit(
+                bits + gid.y * ((dims.vocabulary_size + 31u) / 32u) + next / 32u,
+                1u << (next & 31u), memory_order_relaxed
+            );
+        }
+    }
+}
+
+kernel void draft_union_mark_aux_kernel(
+    const device uint* history_ids [[buffer(0)]],
+    const device uint* history_counts [[buffer(1)]],
+    const device uint* required_ids [[buffer(2)]],
+    const device uint* required_counts [[buffer(3)]],
+    const device uint* retrieval_ids [[buffer(4)]],
+    const device uint* retrieval_counts [[buffer(5)]],
+    device atomic_uint* bits [[buffer(6)]],
+    device atomic_uint* status [[buffer(7)]],
+    constant DraftUnionDimensions& dims [[buffer(8)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.y >= dims.rows || gid.x >= 64u || gid.z >= 3u) return;
+    const device uint* ids = gid.z == 0u ? history_ids
+        : gid.z == 1u ? required_ids : retrieval_ids;
+    const device uint* counts = gid.z == 0u ? history_counts
+        : gid.z == 1u ? required_counts : retrieval_counts;
+    const uint count = counts[gid.y];
+    if (count > 64u) {
+        atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        return;
+    }
+    if (gid.x >= count) return;
+    const uint token = ids[gid.y * 64u + gid.x];
+    if (token >= dims.vocabulary_size) {
+        atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        return;
+    }
+    atomic_fetch_or_explicit(
+        bits + gid.y * ((dims.vocabulary_size + 31u) / 32u) + token / 32u,
+        1u << (token & 31u), memory_order_relaxed
+    );
+}
+
+kernel void draft_union_count_tiles_kernel(
+    const device atomic_uint* bits [[buffer(0)]],
+    device uint* tile_counts [[buffer(1)]],
+    constant DraftUnionDimensions& dims [[buffer(2)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    threadgroup uint flags[512];
+    const uint token = group.x * 512u + tid;
+    uint present = 0u;
+    if (group.y < dims.rows && token < dims.vocabulary_size) {
+        const uint word = atomic_load_explicit(
+            bits + group.y * ((dims.vocabulary_size + 31u) / 32u) + token / 32u,
+            memory_order_relaxed
+        );
+        present = (word >> (token & 31u)) & 1u;
+    }
+    flags[tid] = present;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 256u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) flags[tid] += flags[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0u && group.y < dims.rows) {
+        tile_counts[group.y * dims.tile_count + group.x] = flags[0];
+    }
+}
+
+kernel void draft_union_scan_tiles_kernel(
+    const device uint* tile_counts [[buffer(0)]],
+    device uint* tile_offsets [[buffer(1)]],
+    device uint* candidate_counts [[buffer(2)]],
+    constant DraftUnionDimensions& dims [[buffer(3)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    if (row >= dims.rows || tid != 0u) return;
+    uint offset = 0u;
+    for (uint tile = 0u; tile < dims.tile_count; ++tile) {
+        tile_offsets[row * dims.tile_count + tile] = offset;
+        offset += tile_counts[row * dims.tile_count + tile];
+    }
+    candidate_counts[row] = offset;
+}
+
+kernel void draft_union_scatter_kernel(
+    const device atomic_uint* bits [[buffer(0)]],
+    const device uint* tile_offsets [[buffer(1)]],
+    device uint* candidate_ids [[buffer(2)]],
+    constant DraftUnionDimensions& dims [[buffer(3)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    threadgroup uint prefix[512];
+    const uint token = group.x * 512u + tid;
+    uint present = 0u;
+    if (group.y < dims.rows && token < dims.vocabulary_size) {
+        const uint word = atomic_load_explicit(
+            bits + group.y * ((dims.vocabulary_size + 31u) / 32u) + token / 32u,
+            memory_order_relaxed
+        );
+        present = (word >> (token & 31u)) & 1u;
+    }
+    prefix[tid] = present;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint offset = 1u; offset < 512u; offset <<= 1u) {
+        const uint addend = tid >= offset ? prefix[tid - offset] : 0u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        prefix[tid] += addend;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (present != 0u) {
+        const uint local = prefix[tid] - 1u;
+        const uint destination = tile_offsets[group.y * dims.tile_count + group.x] + local;
+        candidate_ids[group.y * dims.vocabulary_size + destination] = token;
+    }
+}
+
+struct DraftIndexedDimensions {
+    uint rows;
+    uint shared;
+    uint vocabulary_size;
+    uint candidate_stride;
+    float softcap;
+};
+
+inline float draft_q4_value(const device uchar* block, uint index) {
+    const device half* factors = reinterpret_cast<const device half*>(block);
+    const device uchar* scales = block + 4u;
+    const uint group = index / 32u;
+    uchar scale;
+    uchar minimum;
+    if (group < 4u) {
+        scale = scales[group] & 63u;
+        minimum = scales[group + 4u] & 63u;
+    } else {
+        scale = (scales[group + 4u] & 15u) | ((scales[group - 4u] & 192u) >> 2u);
+        minimum = (scales[group + 4u] >> 4u) | ((scales[group] & 192u) >> 2u);
+    }
+    const uint super_base = (index / 64u) * 32u;
+    const uint within = index % 64u;
+    const uchar packed = block[16u + super_base + (within % 32u)];
+    const uint quant = within < 32u ? packed & 15u : packed >> 4u;
+    return float(factors[0]) * float(scale) * float(quant)
+        - float(factors[1]) * float(minimum);
+}
+
+inline float draft_q6_value(const device uchar* block, uint index) {
+    const uint half_base = (index / 128u) * 64u;
+    const uint in_half = index % 128u;
+    const uint lane = in_half % 32u;
+    const uint low_plane = ((in_half / 32u) % 2u) * 32u;
+    const uchar low_byte = block[half_base + low_plane + lane];
+    const uint low = in_half < 64u ? low_byte & 15u : low_byte >> 4u;
+    const uchar high_byte = block[128u + (index / 128u) * 32u + lane];
+    const uint high = (high_byte >> ((in_half / 32u) * 2u)) & 3u;
+    const int quant = int(low | (high << 4u)) - 32;
+    const char scale = as_type<char>(block[192u + index / 16u]);
+    const half factor = *reinterpret_cast<const device half*>(block + 208u);
+    return float(factor) * float(scale) * float(quant);
+}
+
+inline float draft_indexed_weight(
+    const device uchar* weights,
+    uint format,
+    uint shared,
+    uint token,
+    uint index
+) {
+    if (format == 0u) {
+        const device half* values = reinterpret_cast<const device half*>(weights);
+        return float(values[token * shared + index]);
+    }
+    if (format == 1u) {
+        const uint blocks = shared / 32u;
+        const device uchar* block = weights + (token * blocks + index / 32u) * 34u;
+        const half scale = *reinterpret_cast<const device half*>(block);
+        return float(scale) * float(as_type<char>(block[2u + index % 32u]));
+    }
+    if (format == 2u) {
+        const uint blocks = shared / 256u;
+        const device uchar* block = weights + (token * blocks + index / 256u) * 210u;
+        return draft_q6_value(block, index % 256u);
+    }
+    const uint blocks = shared / 256u;
+    const device uchar* block = weights + (token * blocks + index / 256u) * 144u;
+    return draft_q4_value(block, index % 256u);
+}
+
+inline void draft_indexed_dot_body(
+    const device float* states,
+    const device uchar* weights,
+    const device uint* candidate_ids,
+    const device uint* candidate_counts,
+    device float* output,
+    device atomic_uint* status,
+    constant DraftIndexedDimensions& dims,
+    uint format,
+    uint2 group,
+    ushort lane
+) {
+    const uint candidate = group.x;
+    const uint row = group.y;
+    if (row >= dims.rows || candidate >= candidate_counts[row]) return;
+    const uint token = candidate_ids[row * dims.candidate_stride + candidate];
+    if (token >= dims.vocabulary_size) {
+        if (lane == 0u) atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        return;
+    }
+    float sum = 0.0f;
+    for (uint index = uint(lane); index < dims.shared; index += 32u) {
+        sum += states[row * dims.shared + index]
+            * draft_indexed_weight(weights, format, dims.shared, token, index);
+    }
+    sum = simd_sum(sum);
+    if (lane == 0u) output[row * dims.candidate_stride + candidate] = sum;
+}
+
+#define DRAFT_INDEXED_KERNEL(NAME, FORMAT) \
+kernel void NAME( \
+    const device float* states [[buffer(0)]], \
+    const device uchar* weights [[buffer(1)]], \
+    const device uint* candidate_ids [[buffer(2)]], \
+    const device uint* candidate_counts [[buffer(3)]], \
+    device float* output [[buffer(4)]], \
+    device atomic_uint* status [[buffer(5)]], \
+    constant DraftIndexedDimensions& dims [[buffer(6)]], \
+    uint2 group [[threadgroup_position_in_grid]], \
+    ushort lane [[thread_index_in_simdgroup]]) { \
+    draft_indexed_dot_body(states, weights, candidate_ids, candidate_counts, \
+        output, status, dims, FORMAT, group, lane); \
+}
+
+DRAFT_INDEXED_KERNEL(draft_indexed_f16_kernel, 0u)
+DRAFT_INDEXED_KERNEL(draft_indexed_q8_kernel, 1u)
+DRAFT_INDEXED_KERNEL(draft_indexed_q6_kernel, 2u)
+DRAFT_INDEXED_KERNEL(draft_indexed_q4_kernel, 3u)
+
+kernel void draft_score_correct_kernel(
+    device float* scores [[buffer(0)]],
+    const device float* corrections [[buffer(1)]],
+    const device uint* candidate_counts [[buffer(2)]],
+    device atomic_uint* status [[buffer(3)]],
+    constant DraftIndexedDimensions& dims [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.y >= dims.rows || gid.x >= candidate_counts[gid.y]) return;
+    const uint index = gid.y * dims.candidate_stride + gid.x;
+    const float raw = scores[index];
+    const float correction = corrections[index];
+    if (!isfinite(raw) || !isfinite(correction) || !isfinite(dims.softcap)
+        || dims.softcap <= 0.0f) {
+        atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        scores[index] = NAN;
+        return;
+    }
+    scores[index] = dims.softcap * precise::tanh(raw / dims.softcap) + correction;
+}
+
+struct DraftProposalDimensions {
+    uint rows;
+    uint candidate_stride;
+    float temperature;
+    uint reserved;
+};
+
+struct DraftProposalResultMetal {
+    atomic_uint status;
+    uint token;
+    ulong total_weight;
+    uint selected_rank;
+};
+
+kernel void draft_proposal_kernel(
+    const device uint* candidate_ids [[buffer(0)]],
+    const device uint* candidate_counts [[buffer(1)]],
+    const device float* scores [[buffer(2)]],
+    const device uint* exp_lut [[buffer(3)]],
+    const device uint* draws [[buffer(4)]],
+    device uint* weights [[buffer(5)]],
+    device DraftProposalResultMetal* results [[buffer(6)]],
+    constant DraftProposalDimensions& dims [[buffer(7)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    if (row >= dims.rows) return;
+    const uint count = candidate_counts[row];
+    if (count == 0u || count > dims.candidate_stride
+        || !isfinite(dims.temperature) || dims.temperature <= 0.0f) {
+        if (tid == 0u) atomic_fetch_max_explicit(&results[row].status, 2u, memory_order_relaxed);
+        return;
+    }
+    threadgroup float maxima[256];
+    threadgroup ulong lane_sums[256];
+    threadgroup ulong lane_offsets[256];
+    const uint chunk = (count + 255u) / 256u;
+    const uint begin = min(tid * chunk, count);
+    const uint end = min(begin + chunk, count);
+    float maximum = -INFINITY;
+    for (uint index = begin; index < end; ++index) {
+        const float score = scores[row * dims.candidate_stride + index];
+        if (!isfinite(score)) {
+            atomic_fetch_max_explicit(&results[row].status, 1u, memory_order_relaxed);
+        } else {
+            maximum = max(maximum, score);
+        }
+    }
+    maxima[tid] = maximum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) maxima[tid] = max(maxima[tid], maxima[tid + stride]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    ulong local_sum = 0u;
+    for (uint index = begin; index < end; ++index) {
+        const float scaled = ((maxima[0] - scores[row * dims.candidate_stride + index])
+            / dims.temperature) * 256.0f;
+        const float base = floor(scaled);
+        const float fraction = scaled - base;
+        if (!isfinite(scaled) || (scaled < 4096.0f
+            && abs(fraction - 0.5f) <= (1.0f / 4096.0f))) {
+            atomic_fetch_max_explicit(&results[row].status, 1u, memory_order_relaxed);
+            weights[row * dims.candidate_stride + index] = 0u;
+        } else {
+            const uint bin = scaled >= 4096.0f ? 4096u : uint(base + 0.5f);
+            const uint weight = exp_lut[bin];
+            weights[row * dims.candidate_stride + index] = weight;
+            local_sum += ulong(weight);
+        }
+    }
+    lane_sums[tid] = local_sum;
+    lane_offsets[tid] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        ulong offset = 0u;
+        for (uint lane_index = 0u; lane_index < 256u; ++lane_index) {
+            const ulong value = lane_offsets[lane_index];
+            lane_offsets[lane_index] = offset;
+            offset += value;
+        }
+        results[row].total_weight = offset;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint proposal_status = atomic_load_explicit(&results[row].status, memory_order_relaxed);
+    const ulong total = results[row].total_weight;
+    if (proposal_status != 0u || total == 0u) {
+        if (tid == 0u && total == 0u) {
+            atomic_fetch_max_explicit(&results[row].status, 1u, memory_order_relaxed);
+        }
+        return;
+    }
+    const ulong draw = ulong(draws[row]);
+    const ulong threshold = draw * (total >> 32u)
+        + ((draw * (total & 0xffffffffu)) >> 32u);
+    if (threshold < lane_offsets[tid] || threshold >= lane_offsets[tid] + lane_sums[tid]) return;
+    ulong cumulative = lane_offsets[tid];
+    for (uint index = begin; index < end; ++index) {
+        cumulative += ulong(weights[row * dims.candidate_stride + index]);
+        if (cumulative > threshold) {
+            results[row].token = candidate_ids[row * dims.candidate_stride + index];
+            results[row].selected_rank = index;
+            return;
+        }
+    }
+}
+
+struct CorrectedRankDimensions {
+    uint rows;
+    uint vocabulary_size;
+    uint rank_width;
+    uint output_row_start;
+    float temperature;
+};
+
+kernel void corrected_logsumexp_kernel(
+    const device float* logits [[buffer(0)]],
+    device float* logsumexp [[buffer(1)]],
+    device atomic_uint* status [[buffer(2)]],
+    constant CorrectedRankDimensions& dims [[buffer(3)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    if (row >= dims.rows) return;
+    threadgroup float partial[256];
+    float maximum = -INFINITY;
+    for (uint token = tid; token < dims.vocabulary_size; token += 256u) {
+        const float value = logits[row * dims.vocabulary_size + token] / dims.temperature;
+        if (!isfinite(value)) atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        else maximum = max(maximum, value);
+    }
+    partial[tid] = maximum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) partial[tid] = max(partial[tid], partial[tid + stride]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const float row_maximum = partial[0];
+    float sum = 0.0f;
+    for (uint token = tid; token < dims.vocabulary_size; token += 256u) {
+        sum += precise::exp(logits[row * dims.vocabulary_size + token]
+            / dims.temperature - row_maximum);
+    }
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0u) {
+        const float value = row_maximum + precise::log(partial[0]);
+        if (!isfinite(value)) atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        logsumexp[row] = value;
+    }
+}
+
+kernel void corrected_rank_finalize_kernel(
+    const device TokenCandidate* sorted [[buffer(0)]],
+    const device float* logsumexp [[buffer(1)]],
+    device TokenCandidate* ranks [[buffer(2)]],
+    device atomic_uint* status [[buffer(3)]],
+    constant CorrectedRankDimensions& dims [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.y >= dims.rows || gid.x >= dims.rank_width) return;
+    TokenCandidate value = sorted[gid.y * dims.vocabulary_size + gid.x];
+    value.logit = value.logit / dims.temperature - logsumexp[gid.y];
+    if (value.token == uint(-1) || !isfinite(value.logit)) {
+        atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        return;
+    }
+    ranks[(dims.output_row_start + gid.y) * dims.rank_width + gid.x] = value;
+}
+
+kernel void arm_s_transition_score_kernel(
+    const device float* logits [[buffer(0)]],
+    const device float* logsumexp [[buffer(1)]],
+    const device uint* child_tokens [[buffer(2)]],
+    device float* probabilities [[buffer(3)]],
+    device atomic_uint* status [[buffer(4)]],
+    constant CorrectedRankDimensions& dims [[buffer(5)]],
+    uint row [[thread_position_in_grid]]
+) {
+    if (row >= dims.rows) return;
+    const uint token = child_tokens[dims.output_row_start + row];
+    if (token >= dims.vocabulary_size) {
+        atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        return;
+    }
+    const float probability = precise::exp(
+        logits[row * dims.vocabulary_size + token] - logsumexp[row]
+    );
+    if (!isfinite(probability)) {
+        atomic_fetch_max_explicit(status, 2u, memory_order_relaxed);
+        return;
+    }
+    probabilities[dims.output_row_start + row] = probability;
+}
+
 )metal";
 
 }  // namespace
 
 const char* metal_kernel_source() noexcept {
-    static const std::string source = std::string(metal_kernel_source_head) + metal_kernel_source_tail;
+    static const std::string source = std::string(metal_kernel_source_head)
+        + metal_kernel_source_tail_a + metal_kernel_source_tail_b
+        + metal_kernel_source_tail_c;
     return source.c_str();
 }
 

@@ -20,6 +20,7 @@
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
 #include "../../src/tensor/backends/metal/metal_command_context.hpp"
+#include "../../src/tensor/backends/metal/metal_test_hooks.hpp"
 
 #include <algorithm>
 #include <array>
@@ -83,6 +84,9 @@ using local_gguf_engine::tensor::ops::top_logit_f32;
 using local_gguf_engine::tensor::requantize_q6_k_gguf_weight_q4_k;
 using local_gguf_engine::tensor::backends::metal::fill_shared_metal_buffer_u32;
 using local_gguf_engine::tensor::backends::metal::MetalCommandContext;
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+using local_gguf_engine::tensor::backends::metal::set_metal_device_unavailable_for_testing;
+#endif
 using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::expect_close;
 using local_gguf_engine::tests::reference_f32_quantized_gguf_weight_matmul;
@@ -1022,8 +1026,8 @@ void test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_
                 relative_tolerance,
                 "Metal backend-buffer K-quant selected numerical-contract parity"
             );
-            if (test_case.rows == 2U) {
-                for (std::uint64_t row = 0; row < 2U; ++row) {
+            if (small_batch) {
+                for (std::uint64_t row = 0; row < test_case.rows; ++row) {
                     const auto row_begin = static_cast<std::size_t>(row * shared);
                     const auto row_input = tensor_f32_matrix(
                         1U,
@@ -1041,13 +1045,143 @@ void test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_
                         expect(
                             read_f32(tensor_output, batched_index)
                                 == read_f32(row_output, row_index),
-                            "Metal K-quant width-two packed decode-order parity"
+                            "Metal K-quant small-batch packed decode-order parity"
+                        );
+                        expect(
+                            read_f32(backend_output, batched_index)
+                                == read_f32(row_output, row_index),
+                            "Metal resident K-quant small-batch packed decode-order parity"
                         );
                     }
                 }
             }
         }
     }
+}
+
+void test_rejects_explicit_metal_matmul_rows_beyond_input_before_encoding() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+
+    constexpr auto input_rows = std::uint64_t {3U};
+    constexpr auto requested_rows = std::uint32_t {4U};
+    constexpr auto shared = std::uint64_t {256U};
+    constexpr auto columns = std::uint64_t {5U};
+    constexpr auto poison = std::uint32_t {0x7fc00000U};
+    const auto input_values = tensor_f32_projection_values(input_rows, shared);
+    const auto input = tensor_f32_matrix(input_rows, shared, input_values);
+
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        const auto weight = dtype == DType::q4_k
+            ? tensor_q4_k_stress_gguf_weight_matrix(shared, columns, requested_rows)
+            : tensor_q6_k_stress_gguf_weight_matrix(shared, columns, requested_rows);
+        const auto input_buffer = copy_tensor_to_backend(input, BackendKind::metal);
+        const auto weight_buffer = copy_tensor_to_backend(weight, BackendKind::metal);
+        const auto output = allocate_backend_buffer(
+            TensorDescriptor::from(Shape::from({requested_rows, columns}), DType::f32),
+            BackendKind::metal
+        );
+        fill_shared_metal_buffer_u32(output, poison);
+
+        MetalCommandContext command("invalid explicit K-quant matmul row count");
+        try {
+            command.encode_matmul(
+                input_buffer,
+                weight_buffer,
+                output,
+                requested_rows
+            );
+            throw TestFailure("Metal matmul should reject a row count beyond the input");
+        } catch (const std::invalid_argument& error) {
+            expect(
+                std::string_view(error.what())
+                    == "Metal resident execution matmul explicit row count exceeds input rows",
+                "Metal matmul excessive-row diagnostic mismatch"
+            );
+        }
+
+        // Submitting the otherwise-empty command buffer exposes whether the
+        // rejected operation created an encoder or dispatched any GPU work.
+        const auto stats = command.commit_and_wait();
+        expect(stats.compute_encoder_count == 0U, "invalid Metal matmul encoded GPU work");
+        expect(stats.compute_dispatch_count == 0U, "invalid Metal matmul dispatched GPU work");
+        const auto untouched = copy_tensor_from_backend(output);
+        for (std::uint64_t row = 0; row < requested_rows; ++row) {
+            for (std::uint64_t column = 0; column < columns; ++column) {
+                const std::array<std::uint64_t, 2> index {row, column};
+                expect(
+                    std::isnan(read_f32(untouched, index)),
+                    "invalid Metal matmul modified its output"
+                );
+            }
+        }
+    }
+}
+
+void test_force_injected_unavailable_metal_small_batch_paths() {
+#if !defined(LOCAL_GGUF_ENGINE_TESTING)
+    throw TestFailure("Metal unavailable-device fault injection is absent from the test build");
+#else
+    class ScopedUnavailableMetalDevice final {
+    public:
+        ScopedUnavailableMetalDevice() {
+            set_metal_device_unavailable_for_testing(true);
+        }
+        ~ScopedUnavailableMetalDevice() {
+            set_metal_device_unavailable_for_testing(false);
+        }
+        ScopedUnavailableMetalDevice(const ScopedUnavailableMetalDevice&) = delete;
+        ScopedUnavailableMetalDevice& operator=(const ScopedUnavailableMetalDevice&) = delete;
+    };
+
+    const auto availability_before_injection = tensor_backend_is_available(BackendKind::metal);
+    {
+        const ScopedUnavailableMetalDevice unavailable;
+        expect(
+            !tensor_backend_is_available(BackendKind::metal),
+            "injected unavailable Metal device still reported available"
+        );
+        expect(
+            tensor_backend_unavailable_reason(BackendKind::metal)
+                == "Metal backend unavailable: no system default Metal device",
+            "injected unavailable Metal reason mismatch"
+        );
+
+        constexpr auto shared = std::uint64_t {256U};
+        constexpr auto columns = std::uint64_t {3U};
+        for (const auto rows : {std::uint64_t {3U}, std::uint64_t {8U}}) {
+            const auto input_values = tensor_f32_projection_values(rows, shared);
+            const auto input = tensor_f32_matrix(rows, shared, input_values);
+            for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+                const auto weight = dtype == DType::q4_k
+                    ? tensor_q4_k_stress_gguf_weight_matrix(shared, columns, rows)
+                    : tensor_q6_k_stress_gguf_weight_matrix(shared, columns, rows);
+                try {
+                    static_cast<void>(matmul_f32_quantized_gguf_weight(
+                        input,
+                        weight,
+                        BackendKind::metal
+                    ));
+                    throw TestFailure(
+                        "forced-unavailable Metal small-batch matmul should fail closed"
+                    );
+                } catch (const BackendError& error) {
+                    expect(
+                        error.code() == BackendErrorCode::unavailable_metal_device,
+                        "forced-unavailable Metal small-batch error code mismatch"
+                    );
+                    expect(
+                        error.backend() == BackendKind::metal,
+                        "forced-unavailable Metal small-batch backend mismatch"
+                    );
+                }
+            }
+        }
+    }
+    expect(
+        tensor_backend_is_available(BackendKind::metal) == availability_before_injection,
+        "Metal availability was not restored after fault injection"
+    );
+#endif
 }
 
 void test_exact_16_k_quant_projection_overwrites_poison_at_real_tiny_widths_on_metal() {
@@ -2044,6 +2178,14 @@ const TestCase tensor_backend_tests[] {
     {
         "matches independent Q4_K and Q6_K small-batch and tiled projection on Metal",
         test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_metal,
+    },
+    {
+        "rejects explicit Metal matmul rows beyond input before encoding",
+        test_rejects_explicit_metal_matmul_rows_beyond_input_before_encoding,
+    },
+    {
+        "force-injected unavailable Metal rejects 3-8-row K-quant paths",
+        test_force_injected_unavailable_metal_small_batch_paths,
     },
     {
         "exact-16 K-quant projection overwrites poison at real tiny widths on Metal",

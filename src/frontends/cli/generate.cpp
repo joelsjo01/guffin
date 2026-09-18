@@ -128,6 +128,7 @@ void write_generate_usage(std::ostream& error) {
           << " [--reverse-prompt TEXT] [--context-shift]"
           << " [--output-head f16|q8_0]"
           << " [--no-speculative]"
+          << " [--no-retrieval] [--development-recurrent-weights <path>]"
           << " [--decode-diagnostics] [--metal-capture PATH]"
           << '\n';
 }
@@ -340,6 +341,8 @@ struct ParsedChatCommand {
     bool sampled_modifier_requested = false;
     bool decode_diagnostics = false;
     bool speculative_decode = true;
+    bool retrieval_decode = true;
+    std::optional<std::filesystem::path> development_recurrent_weights;
     engine::Gemma2OutputHeadPolicy output_head_policy = engine::Gemma2OutputHeadPolicy::automatic;
     std::optional<std::string> metal_capture_path;
 };
@@ -403,6 +406,20 @@ private:
         }
         if (option == "--no-speculative") {
             command.speculative_decode = false;
+            continue;
+        }
+        if (option == "--no-retrieval") {
+            command.retrieval_decode = false;
+            continue;
+        }
+        if (option == "--development-recurrent-weights") {
+            if (command.development_recurrent_weights || index + 1 >= argc
+                || std::string_view(argv[index + 1]).empty()
+                || std::string_view(argv[index + 1]).starts_with("--")) {
+                error << "error: --development-recurrent-weights requires one weights file\n";
+                return false;
+            }
+            command.development_recurrent_weights = argv[++index];
             continue;
         }
         if (option == "--output-head") {
@@ -680,6 +697,8 @@ int run_generate_chat(
             .output_head_policy = command.output_head_policy,
             .context_shift = command.context_shift,
             .speculative_decode = command.speculative_decode,
+            .retrieval_decode = command.retrieval_decode,
+            .development_recurrent_weights = command.development_recurrent_weights,
             .reverse_stop_strings = command.reverse_stop_strings,
             .sampler = command.sampler,
         }
@@ -687,6 +706,9 @@ int run_generate_chat(
     ScopedMetalTraceArm metal_trace(command.metal_capture_path);
 
     output << "local-gguf-engine chat\n";
+    if (command.development_recurrent_weights) {
+        output << "development recurrent weights: always-propose control; no admitted routing policy\n";
+    }
     output << "commands: /exit /quit /clear /reset /regen /tokens /read <path>\n";
     output << "multiline: end a line with \\\n";
 
@@ -814,7 +836,7 @@ std::string format_chat_timing_detail_line(const engine::Gemma2ChatTurnMetrics& 
 }
 
 std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetrics& metrics) {
-    constexpr std::uint32_t schema_version = 3U;
+    constexpr std::uint32_t schema_version = 4U;
     const auto decode_tokens = static_cast<std::uint64_t>(metrics.generation.decode_token_count);
     const auto checked_multiply = [](std::uint64_t left, std::uint64_t right, const char* name) {
         if (left != 0U && right > std::numeric_limits<std::uint64_t>::max() / left) {
@@ -886,6 +908,19 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"gpu_ns\":" << execution.gpu_duration_ns
          << ",\"selection_ns\":" << metrics.generation.selection_duration_ns
          << ",\"proposer_ns\":" << metrics.generation.proposer_duration_ns
+         << ",\"generation_completion_ns\":" << metrics.generation_completion_duration_ns
+         << ",\"full_turn_ns\":" << metrics.full_turn_duration_ns
+         << ",\"first_text_ns\":" << metrics.first_text_duration_ns
+         << ",\"learned_owned_bytes\":" << metrics.learned_owned_byte_count
+         << ",\"learned_horizon\":" << metrics.learned_horizon
+         << ",\"scheduled_bytes_basis\":\"one_row_equivalent_not_physical_bandwidth\""
+         << ",\"learned_cycles\":" << metrics.generation.learned_cycle_count
+         << ",\"learned_accepted_edges\":" << metrics.generation.learned_accepted_edge_count
+         << ",\"learned_numeric_refusals\":" << metrics.generation.learned_numeric_refusal_count
+         << ",\"learned_draft_ns\":" << metrics.generation.learned_draft_duration_ns
+         << ",\"learned_draft_gpu_ns\":" << metrics.generation.learned_draft_gpu_ns
+         << ",\"learned_target_gpu_ns\":" << metrics.generation.learned_target_gpu_ns
+         << ",\"learned_cycle_ns\":" << metrics.generation.learned_cycle_duration_ns
          << ",\"speculative_cycles\":" << metrics.generation.speculative_cycle_count
          << ",\"speculative_matches\":" << metrics.generation.speculative_second_token_match_count
          << ",\"speculative_misses\":" << metrics.generation.speculative_second_token_miss_count

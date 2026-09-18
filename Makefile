@@ -7,23 +7,44 @@ TEST_BINARY := $(BUILD_DIR)/local_gguf_engine_tests
 GGUF_INSPECT_BINARY := $(BUILD_DIR)/gguf-inspect
 GENERATE_BINARY := $(BUILD_DIR)/local-gguf-generate
 BENCHMARK_BINARY := $(BUILD_DIR)/local-gguf-bench
+SPECULATION_TRACE_BINARY := $(BUILD_DIR)/local-gguf-speculation-trace
+SPECULATION_DRAFT_BINARY := $(BUILD_DIR)/local-gguf-speculation-draft
 
 ENGINE_SOURCES := \
+	src/benchmarks/corrected_vocabulary_benchmark.cpp \
+	src/benchmarks/feature_capture_benchmark.cpp \
 	src/benchmarks/immutable_weight_benchmark.mm \
 	src/benchmarks/output_head_benchmark.cpp \
 	src/benchmarks/quick_benchmark.cpp \
+	src/benchmarks/target_verifier_benchmark.cpp \
 	src/benchmarks/width_two_verifier_benchmark.cpp \
 	src/engine/gemma2_chat_session.cpp \
+	src/engine/feature_bank.cpp \
+	src/engine/draft_vocabulary.cpp \
 	src/engine/gemma2_model.cpp \
 	src/engine/gemma2_metal_plan.cpp \
 	src/engine/gemma2_reference.cpp \
 	src/engine/gemma2_runtime.cpp \
+	src/engine/gemma2_speculative_runtime.mm \
+	src/engine/learned_recurrent.cpp \
+	src/engine/recurrent_chat.mm \
 	src/engine/model.cpp \
+	src/engine/prepared_gemma2_plan.cpp \
+	src/engine/prepared_plan_test_hooks.cpp \
 	src/engine/retrieval_proposer.cpp \
 	src/engine/sampling.cpp \
+	src/engine/speculation_trace.cpp \
+	src/engine/speculative_controller.cpp \
+	src/engine/speculative_artifact.cpp \
+	src/engine/target_verifier.cpp \
+	src/engine/target_verifier_episode.cpp \
+	src/engine/target_verifier_registry.cpp \
+	src/engine/target_verifier_runtime.cpp \
+	src/engine/target_verifier_test_hooks.cpp \
 	src/model_format/gguf_reader.cpp \
 	src/model_format/gguf_tensor_bridge.cpp \
 	src/runtime/backend_error.cpp \
+	src/runtime/sha256.cpp \
 	src/tokenizer/tokenizer.cpp \
 	src/tensor/backend.cpp \
 	src/tensor/backend_buffer.mm \
@@ -51,7 +72,8 @@ ENGINE_SOURCES := \
 
 FRONTEND_CLI_SOURCES := \
 	src/frontends/cli/generate.cpp \
-	src/frontends/cli/gguf_inspect.cpp
+	src/frontends/cli/gguf_inspect.cpp \
+	src/frontends/cli/speculation_trace.cpp
 
 GGUF_INSPECT_SOURCES := \
 	src/frontends/cli/gguf_inspect_main.cpp
@@ -62,6 +84,9 @@ GENERATE_SOURCES := \
 BENCHMARK_SOURCES := \
 	src/frontends/cli/benchmark_main.cpp
 
+SPECULATION_TRACE_SOURCES := \
+	src/frontends/cli/speculation_trace_main.cpp
+
 TEST_INCLUDE_FLAGS := \
 	-Itests/benchmarks \
 	-Itests/engine \
@@ -71,13 +96,22 @@ TEST_INCLUDE_FLAGS := \
 	-Itests/tensor \
 	-Itests/tokenizer
 
+# Fault injection is compiled into the test binary only. Production binaries
+# have no test hook or alternate device-selection path.
+TEST_BUILD_FLAGS := -DLOCAL_GGUF_ENGINE_TESTING=1
+
 TEST_SOURCES := \
 	tests/benchmarks/quick_benchmark_tests.cpp \
 	tests/engine/gemma2_metal_plan_tests.cpp \
+	tests/engine/draft_vocabulary_tests.cpp \
+	tests/engine/learned_recurrent_tests.cpp \
 	tests/engine/engine_model_tests.cpp \
+	tests/engine/feature_bank_tests.cpp \
 	tests/engine/gemma2_reference_tests.cpp \
 	tests/engine/retrieval_proposer_tests.cpp \
 	tests/engine/sampling_tests.cpp \
+	tests/engine/speculation_artifact_tests.cpp \
+	tests/engine/speculative_controller_tests.cpp \
 	tests/frontends/cli/generate_cli_tests.cpp \
 	tests/frontends/cli/gguf_inspect_tests.cpp \
 	tests/model_format/gguf_reader_tests.cpp \
@@ -102,9 +136,15 @@ else
 	CXXFLAGS := $(COMMON_FLAGS) $(DEBUG_FLAGS)
 endif
 
-.PHONY: test release-test gguf-inspect generate benchmark reference-benchmark clean
+.PHONY: test release-test gguf-inspect generate benchmark speculation-trace speculation-draft reference-benchmark clean
 
-test: $(TEST_BINARY) $(GGUF_INSPECT_BINARY) $(GENERATE_BINARY) $(BENCHMARK_BINARY)
+# Embedded Metal source is a header too. Rebuild when a numeric kernel or
+# public contract changes, even if no .cpp/.mm timestamp changed.
+ENGINE_HEADERS := $(wildcard include/local_gguf_engine/*/*.hpp src/*/*.hpp src/*/*/*.hpp src/*/*/*/*.hpp)
+$(TEST_BINARY) $(GGUF_INSPECT_BINARY) $(GENERATE_BINARY) $(BENCHMARK_BINARY) $(SPECULATION_TRACE_BINARY) $(SPECULATION_DRAFT_BINARY): $(ENGINE_HEADERS)
+$(TEST_BINARY): $(wildcard tests/*/*.hpp)
+
+test: $(TEST_BINARY) $(GGUF_INSPECT_BINARY) $(GENERATE_BINARY) $(BENCHMARK_BINARY) $(SPECULATION_TRACE_BINARY) $(SPECULATION_DRAFT_BINARY)
 	./$(TEST_BINARY)
 
 release-test:
@@ -116,12 +156,20 @@ generate: $(GENERATE_BINARY)
 
 benchmark: $(GENERATE_BINARY) $(BENCHMARK_BINARY)
 
+speculation-trace: $(SPECULATION_TRACE_BINARY)
+
+speculation-draft: $(SPECULATION_DRAFT_BINARY)
+
+$(SPECULATION_DRAFT_BINARY): $(ENGINE_SOURCES) src/frontends/cli/speculation_draft_main.cpp
+	mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) src/frontends/cli/speculation_draft_main.cpp $(METAL_LDFLAGS) -o $(SPECULATION_DRAFT_BINARY)
+
 reference-benchmark:
 	/opt/homebrew/bin/llama-cli --version 2>&1 | grep -q d48a56eff
 
 $(TEST_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(TEST_SOURCES)
 	mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(TEST_INCLUDE_FLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(TEST_SOURCES) $(METAL_LDFLAGS) -o $(TEST_BINARY)
+	$(CXX) $(CXXFLAGS) $(TEST_BUILD_FLAGS) $(TEST_INCLUDE_FLAGS) $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(TEST_SOURCES) $(METAL_LDFLAGS) -o $(TEST_BINARY)
 
 $(GGUF_INSPECT_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GGUF_INSPECT_SOURCES)
 	mkdir -p $(BUILD_DIR)
@@ -134,6 +182,10 @@ $(GENERATE_BINARY): $(ENGINE_SOURCES) $(FRONTEND_CLI_SOURCES) $(GENERATE_SOURCES
 $(BENCHMARK_BINARY): $(ENGINE_SOURCES) $(BENCHMARK_SOURCES)
 	mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) $(BENCHMARK_SOURCES) $(METAL_LDFLAGS) -o $(BENCHMARK_BINARY)
+
+$(SPECULATION_TRACE_BINARY): $(ENGINE_SOURCES) src/frontends/cli/speculation_trace.cpp $(SPECULATION_TRACE_SOURCES)
+	mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(ENGINE_SOURCES) src/frontends/cli/speculation_trace.cpp $(SPECULATION_TRACE_SOURCES) $(METAL_LDFLAGS) -o $(SPECULATION_TRACE_BINARY)
 
 clean:
 	rm -rf build
