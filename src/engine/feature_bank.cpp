@@ -26,6 +26,9 @@ using tensor::Shape;
 using tensor::TensorDescriptor;
 using tensor::backends::metal::MetalCommandContext;
 
+static_assert(feature_bank_tap_max_count <= std::numeric_limits<std::uint8_t>::digits,
+    "feature capture mask must cover every supported tap");
+
 [[nodiscard]] TensorDescriptor descriptor(
     std::uint64_t rows,
     std::uint64_t columns,
@@ -727,6 +730,12 @@ void FeatureSinkRuntimeAccess::encode_tap(
                 const auto bit = static_cast<std::uint8_t>(1U << tap);
                 if ((impl.active_tap_masks[bank_index] & bit) != 0U) {
                     throw std::logic_error("feature tap was encoded twice for one target row set");
+                }
+                // Projection is emitted with the final tap. Merely checking
+                // completeness after submission could accept a final tap
+                // encoded before earlier columns had been filled.
+                if (impl.active_tap_masks[bank_index] != bit - 1U) {
+                    throw std::logic_error("feature taps were not encoded in causal order");
                 }
                 impl.active_tap_masks[bank_index] |= bit;
                 command.encode_feature_tap_copy(

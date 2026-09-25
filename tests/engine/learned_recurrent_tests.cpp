@@ -2,6 +2,7 @@
 #include "local_gguf_engine/engine/learned_recurrent.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
+#include "local_gguf_engine/tensor/quantization.hpp"
 #include "tensor_test_support.hpp"
 #include "../../src/tensor/backends/metal/metal_command_context.hpp"
 #include "../../src/tensor/backends/metal/metal_test_hooks.hpp"
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <unistd.h>
 
 namespace {
@@ -264,11 +266,302 @@ void sampler_boundaries() {
     }
     expect(decisions>=300,"interval sampler refused ordinary unambiguous decisions");
 }
+
+void lossless_finite_grid_equations() {
+    if(!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
+    prepare_recurrent_pipelines();
+    auto alloc=[](unsigned n){return tensor::allocate_backend_buffer(tensor::TensorDescriptor::from(
+        tensor::Shape::from({1,n}),tensor::DType::f32),runtime::BackendKind::metal);};
+    const auto check=[&](const std::vector<float>& values,std::uint32_t top_k,float top_p,
+                         float min_p,float temperature,std::uint32_t expected_count) {
+        auto scores=tensor::copy_tensor_to_backend(tests::tensor_f32_vector(values),runtime::BackendKind::metal);
+        auto a=alloc(static_cast<unsigned>(2*values.size())),b=alloc(static_cast<unsigned>(2*values.size()));
+        auto status=alloc(1),words=alloc(1),tokens=alloc(2),support=alloc(769);
+        std::array<std::uint32_t,769> previous {};bool first=true;
+        // Include both sides of exact inverse-CDF boundaries. These must not
+        // use the old interval sampler's draw-dependent conservative refusal.
+        for(std::uint32_t word:{0U,1U,0x3fffffffU,0x40000000U,0x7fffffffU,0x80000000U,UINT32_MAX}) {
+            MetalCommandContext cmd("lossless actual finite-grid draft law");
+            cmd.write_u32(status,0);cmd.write_u32(words,word);
+            const auto sorted=cmd.encode_draft_stable_top_k(scores,a,b,status,1,
+                static_cast<std::uint32_t>(values.size()),top_k);
+            cmd.encode_memory_barrier();
+            const std::array<const tensor::BackendBuffer*,5> buffers {
+                sorted.final_buffer_is_a?&a:&b,&words,&tokens,&status,&support};
+            cmd.encode_recurrent_stage(RecurrentStage::sample_lossless,buffers,
+                {0,top_k,0,0},{temperature,top_p,min_p,0});
+            const auto stats=cmd.commit_and_wait();
+            expect(cmd.read_verifier_status(status)==0,"valid lossless law refused a random word");
+            expect(stats.transient_buffer_allocation_count==0,"lossless selector allocated transient storage");
+            std::uint32_t selected=UINT32_MAX,count=0;
+            read_shared_metal_buffer_bytes(tokens,4,std::span<std::uint8_t>(reinterpret_cast<std::uint8_t*>(&selected),4));
+            read_shared_metal_buffer_bytes(support,0,std::span<std::uint8_t>(reinterpret_cast<std::uint8_t*>(&count),4));
+            expect(count==expected_count,"top-p/min-p/underflow changed finite-grid support");
+            std::array<std::uint32_t,769> raw {};
+            read_shared_metal_buffer_bytes(support,0,std::span<std::uint8_t>(
+                reinterpret_cast<std::uint8_t*>(raw.data()),(1+3*count)*4));
+            if(!first) expect(raw==previous,"proposal law depends on proposal draw");
+            previous=raw;first=false;
+            std::uint64_t cumulative=0;DraftTokenDistribution distribution;distribution.count=count;
+            double cpu_total=0,cpu_partial=0;
+            const bool uniform=std::all_of(values.begin(),values.begin()+count,
+                [&](float value){return value==values[0];});
+            for(std::uint32_t i=0;i<count;++i) cpu_total+=std::exp(
+                double(values[i]-values[0])/double(temperature));
+            for(std::uint32_t i=0;i<count;++i) {
+                const auto boundary=std::uint64_t(raw[2+3*i])|(std::uint64_t(raw[3+3*i])<<32);
+                expect(raw[1+3*i]==i,"stable top-k proposal IDs differ from CPU score order");
+                if(uniform) {
+                    // Equal retained logits have exactly equal integer bins.
+                    const auto expected_boundary=(draft_probability_mass_total/count)*(i+1);
+                    expect(boundary==expected_boundary,"CPU analytic uniform-bin equation differs from Metal");
+                } else {
+                    cpu_partial+=std::exp(double(values[i]-values[0])/double(temperature));
+                    // Precise Metal exp permits four ulps. Bound both sum
+                    // roundoffs, division and CDF quantization independently;
+                    // this is parity evidence, not the q used for correction.
+                    const auto bound=double(8*count)*std::numeric_limits<float>::epsilon()
+                        +1.0/double(draft_probability_mass_total);
+                    expect(std::abs(double(boundary)/double(draft_probability_mass_total)-cpu_partial/cpu_total)<=bound,
+                        "CPU exponential/CDF equation differs from Metal beyond operation error bound");
+                }
+                distribution.values[i]={raw[1+3*i],boundary-cumulative};cumulative=boundary;
+            }
+            expect(cumulative==draft_probability_mass_total,"draft mass not exactly normalized");
+            if(uniform) expect(selected==word/(draft_probability_mass_total/count),"GPU boundary chose wrong uniform bin");
+            expect(selected==select_draft_token(distribution,word),"CPU integer-CDF inversion differs from Metal");
+        }
+    };
+    check({0,0,0,0},4,1,0,0.8F,4);
+    check({0,0,0,0},4,0.5F,0,0.8F,2);
+    check({0,0,0,0},4,0.01F,0,0.8F,1);
+    check({0,0,-1000,-1000},4,1,0,0.0001F,2);
+    check({0,0,-1000,-1000},4,1,0.5F,0.8F,2);
+    check({0,-1000,-1000,-1000},4,1,0,0.8F,1);
+    check(std::vector<float>(257,0.0F),256,1,0,0.8F,256);
+    check({3,2,0,-7},4,1,0,0.8F,4);
+    check({3,2,0,-7},4,0.95F,0,0.8F,2);
+    check({3,2,0,-7},4,1,0.05F,2.0F,2);
+
+    auto a=alloc(8),words=alloc(1),tokens=alloc(2),status=alloc(1),support=alloc(768);
+    const std::array<const tensor::BackendBuffer*,5> short_buffers {&a,&words,&tokens,&status,&support};
+    MetalCommandContext cmd("lossless proposal capacity validation");
+    refuses([&]{cmd.encode_recurrent_stage(RecurrentStage::sample_lossless,short_buffers,
+        {0,4,0,0},{0.8F,1,0,0});},"undersized probability arena accepted");
+    refuses([&]{cmd.encode_recurrent_stage(RecurrentStage::sample_lossless,short_buffers,
+        {23,4,0,0},{0.8F,1,0,0});},"lossless proposal horizon overflow accepted");
+}
+
+void lossless_live_chain() {
+    if(!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
+    for(unsigned horizon:{3U,4U,7U,8U,15U,16U,23U}) {
+        Fixture f(horizon);auto artifact=load_speculative_artifact(f.encode());
+        auto table=tensor::copy_tensor_to_backend(f.table,runtime::BackendKind::metal);
+        auto norm=tensor::copy_tensor_to_backend(tests::tensor_f32_vector(f.norm),runtime::BackendKind::metal);
+        auto feature=tensor::copy_tensor_to_backend(tests::tensor_f32_matrix(1,32,f.feature),runtime::BackendKind::metal);
+        auto plan=Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm);
+        TokenSampler sampler({.temperature=0.8F,.top_k=8,.seed=71});
+        const auto checkpoint=sampler.checkpoint();const auto preview=sampler.preview_proposal_words(horizon);
+        const auto words=std::span(preview.words).first(horizon);
+        TargetStateView origin {.execution_epoch=1,.source_stage=FeatureTapStage::final_normalized,
+            .coordinate={4,5},.row_count=1,.feature_width=32};
+        auto wrong=preview;wrong.words[0]^=1U;
+        refuses([&]{static_cast<void>(plan.execute_lossless(feature,origin,7,sampler,
+            std::span(wrong.words).first(horizon)));},"foreign lossless proposal words accepted");
+        refuses([&]{static_cast<void>(plan.execute_lossless(feature,origin,7,sampler,
+            words.first(horizon-1)));},"short lossless proposal word pool accepted");
+        const auto actual=plan.execute_lossless(feature,origin,7,sampler,words);
+        expect(actual.status==0 && actual.count==horizon && actual.has_distributions,
+            "lossless recurrent did not return complete actual proposal laws");
+        expect(actual.transient_buffer_allocations==0 && actual.execution.command_buffer_count==1,
+            "lossless chain did not retain one-command fixed-storage execution");
+        expect(sampler.checkpoint().same_state(checkpoint),"draft advanced sampler random stream");
+        std::array<double,23> ideal_draws {};
+        for(unsigned i=0;i<horizon;++i) {
+            const auto& law=actual.proposal_distributions[i];
+            expect(law.count>0 && law.count<=8 && select_draft_token(law,words[i])==actual.tokens[i],
+                "published proposal differs from actual integer law");
+            ideal_draws[i]=double(words[i])/double(draft_probability_mass_total);
+        }
+        // The native proposal law is explicitly quantized, not the old CPU
+        // ideal law; these ordinary non-boundary inputs independently check
+        // that the unchanged recurrent equations still produce the same path.
+        const auto golden=recurrent_cpu_golden(artifact,f.table.view(),f.norm,f.feature,7,
+            std::span(ideal_draws).first(horizon));
+        expect(std::equal(golden.tokens.begin(),golden.tokens.end(),actual.tokens.begin()),
+            "lossless ordinary recurrent chain differs from independent CPU equations");
+        const auto states=plan.diagnostic_target_states();
+        for(std::size_t i=0;i<states.size();++i) tests::expect_close(states[i],golden.target_states[i],
+            0.00001F,"lossless recurrent state CPU/Metal parity");
+        const auto binding=plan.verifier_inputs(1);
+        expect(binding.arena_epoch==1,"lossless proposals lack verifier lease");
+        refuses([&]{static_cast<void>(plan.execute_lossless(feature,origin,7,sampler,words));},
+            "stale lossless feature epoch accepted");
+        ++origin.execution_epoch;
+        const auto repeated=plan.execute_lossless(feature,origin,7,sampler,words);
+        expect(repeated.tokens==actual.tokens,"uncommitted lossless preview is not reproducible");
+        fill_shared_metal_buffer_u32(feature,0x7fc00000U);++origin.execution_epoch;
+        refuses([&]{static_cast<void>(plan.execute_lossless(feature,origin,7,sampler,words));},
+            "lossless nonfinite arithmetic silently fell back");
+        expect(plan.poisoned(),"lossless malformed arithmetic did not poison plan");
+        refuses([&]{static_cast<void>(plan.verifier_inputs(2));},"poisoned lossless proposal lease survived");
+    }
+}
+
+void lossless_quantized_head_chain() {
+    if(!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
+    for(unsigned horizon:{3U,4U,7U,8U,15U,16U,23U}) {
+        Fixture f(horizon);
+        // Retain all top-k entries so this equation test isolates projection,
+        // normalization and the actual finite-grid law. Truncation boundaries
+        // have their independent tests above, shared by both head variants.
+        f.a.recurrent.top_p=1;f.a.recurrent.min_p=0;
+        auto artifact=load_speculative_artifact(f.encode());
+        auto packed=tensor::quantize_f16_gguf_weight_q8_0(f.table.view());
+        const auto packed_view=packed.view();
+        auto table=tensor::copy_tensor_to_backend(f.table,runtime::BackendKind::metal);
+        auto head=tensor::copy_tensor_to_backend(packed,runtime::BackendKind::metal);
+        auto norm=tensor::copy_tensor_to_backend(tests::tensor_f32_vector(f.norm),runtime::BackendKind::metal);
+        auto feature=tensor::copy_tensor_to_backend(tests::tensor_f32_matrix(1,32,f.feature),runtime::BackendKind::metal);
+        auto plan=Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm,RecurrentDraftHead::q8_0,&head);
+        auto control=Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm);
+        expect(plan.draft_head()==RecurrentDraftHead::q8_0 && control.draft_head()==RecurrentDraftHead::f16,
+            "recurrent projection variant lost its explicit identity");
+        expect(plan.owned_bytes()==control.owned_bytes(),"aliased Q8 head was counted as new owned storage");
+        TokenSampler sampler({.temperature=0.8F,.top_k=8,.top_p=1,.min_p=0,.seed=71});
+        const auto checkpoint=sampler.checkpoint();const auto preview=sampler.preview_proposal_words(horizon);
+        const auto words=std::span(preview.words).first(horizon);
+        TargetStateView origin {.execution_epoch=1,.source_stage=FeatureTapStage::final_normalized,
+            .coordinate={4,5},.row_count=1,.feature_width=32};
+        std::array<double,23> draws {};
+        for(unsigned i=0;i<horizon;++i) draws[i]=double(words[i])/double(draft_probability_mass_total);
+        refuses([&]{static_cast<void>(plan.execute_development(feature,origin,7,std::span(draws).first(horizon)));},
+            "quantized head silently changed the old development control");
+        refuses([&]{static_cast<void>(plan.execute_live(feature,origin,7,sampler,sampler.preview_tickets(horizon)));},
+            "quantized head entered the old common-draw live route");
+        expect(!plan.poisoned(),"invalid Q8 mode poisoned an unused plan");
+        const auto actual=plan.execute_lossless(feature,origin,7,sampler,words);
+        expect(actual.status==0 && actual.count==horizon && actual.has_distributions,
+            "quantized lossless chain did not publish complete proposal laws");
+        expect(actual.execution.q8_decode_projection_count==horizon && actual.execution.f16_projection_count==0,
+            "quantized draft projection accounting reports the wrong head");
+        expect(actual.transient_buffer_allocations==0 && actual.execution.command_buffer_count==1,
+            "quantized full-vocabulary chain allocates or stages dependent tokens on host");
+        expect(sampler.checkpoint().same_state(checkpoint),"quantized draft consumed authoritative randomness");
+        const auto golden=recurrent_cpu_golden(artifact,f.table.view(),f.norm,f.feature,7,
+            std::span(draws).first(horizon),&packed_view);
+        const auto f16_golden=recurrent_cpu_golden(artifact,f.table.view(),f.norm,f.feature,7,
+            std::span(draws).first(horizon));
+        expect(!std::equal(golden.logits.begin(),golden.logits.begin()+65,f16_golden.logits.begin()),
+            "Q8 head fixture did not exercise quantization differences from the F16 control");
+        expect(std::equal(golden.tokens.begin(),golden.tokens.end(),actual.tokens.begin()),
+            "Q8 dependent path differs from independent CPU dequantization equations");
+        const auto states=plan.diagnostic_target_states();
+        for(std::size_t i=0;i<states.size();++i) tests::expect_close(states[i],golden.target_states[i],
+            0.00001F,"Q8 recurrent state CPU/Metal parity");
+        for(unsigned depth=0;depth<horizon;++depth) {
+            const auto logits=std::span(golden.logits).subspan(depth*65,65);
+            std::array<unsigned,65> order {};std::iota(order.begin(),order.end(),0U);
+            std::sort(order.begin(),order.end(),[&](unsigned a,unsigned b) {
+                return logits[a]>logits[b] || (logits[a]==logits[b] && a<b);
+            });
+            const auto& law=actual.proposal_distributions[depth];
+            expect(law.count==8 && select_draft_token(law,words[depth])==actual.tokens[depth],
+                "Q8 proposal law is not its actual inverse-CDF law");
+            double squared=0;
+            for(unsigned i=0;i<32;++i) squared+=double(golden.target_states[depth*32+i])*golden.target_states[depth*32+i];
+            const double normalization=1/std::sqrt(squared/32+f.a.target.config.rms_norm_epsilon);
+            double largest_l1_score=0;
+            for(unsigned token=0;token<65;++token) {
+                const auto at=token*34;
+                const auto scale=tensor::f16_bits_to_f32(static_cast<std::uint16_t>(
+                    std::uint16_t(packed.bytes()[at])|(std::uint16_t(packed.bytes()[at+1])<<8)));
+                double l1=0;
+                for(unsigned i=0;i<32;++i) l1+=std::abs(double(golden.target_states[depth*32+i])*normalization
+                    *scale*std::bit_cast<std::int8_t>(packed.bytes()[at+2+i]));
+                largest_l1_score=std::max(largest_l1_score,l1);
+            }
+            // gamma(4*d+16) bounds RMS reduction, two scaled products,
+            // accumulation and softcap evaluation for this 32-wide fixture.
+            // Softmax perturbs a subset probability by at most exp(4*eta/T)-1;
+            // add the selector's exp/sum/divide roundoff and integer CDF grid.
+            const double n_epsilon=(4*32+16)*double(std::numeric_limits<float>::epsilon());
+            const double eta=n_epsilon/(1-n_epsilon)*std::max(1.0,largest_l1_score);
+            const double cdf_bound=std::expm1(4*eta/f.a.recurrent.temperature)
+                +8*law.count*double(std::numeric_limits<float>::epsilon())+1.0/draft_probability_mass_total;
+            double total=0,partial=0;std::uint64_t cumulative=0;
+            for(unsigned i=0;i<8;++i) total+=std::exp(double(logits[order[i]]-logits[order[0]])/f.a.recurrent.temperature);
+            for(unsigned i=0;i<8;++i) {
+                expect(law.values[i].token==order[i],"Q8 full-vocabulary support differs from independent CPU projection");
+                partial+=std::exp(double(logits[order[i]]-logits[order[0]])/f.a.recurrent.temperature);
+                cumulative+=law.values[i].probability_mass;
+                expect(std::abs(double(cumulative)/draft_probability_mass_total-partial/total)<=cdf_bound,
+                    "Q8 actual proposal CDF exceeds independent numerical error budget");
+            }
+            expect(cumulative==draft_probability_mass_total,"Q8 proposal mass is not exactly normalized");
+        }
+        expect(plan.verifier_inputs(1).arena_epoch==1,"Q8 proposal did not publish a verifier lease");
+        refuses([&]{static_cast<void>(plan.execute_lossless(feature,origin,7,sampler,words));},
+            "Q8 draft accepted stale provenance");
+        ++origin.execution_epoch;
+        expect(plan.execute_lossless(feature,origin,7,sampler,words).tokens==actual.tokens,
+            "uncommitted Q8 proposal preview is not reproducible");
+        fill_shared_metal_buffer_u32(feature,0x7fc00000U);++origin.execution_epoch;
+        refuses([&]{static_cast<void>(plan.execute_lossless(feature,origin,7,sampler,words));},
+            "Q8 draft invalid arithmetic silently fell back");
+        expect(plan.poisoned(),"Q8 arithmetic failure did not poison draft state");
+        refuses([&]{static_cast<void>(plan.verifier_inputs(2));},"Q8 poisoned lease survived");
+    }
+}
+
+void quantized_head_configuration() {
+    if(!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
+    Fixture f;auto artifact=load_speculative_artifact(f.encode());
+    auto table=tensor::copy_tensor_to_backend(f.table,runtime::BackendKind::metal);
+    auto norm=tensor::copy_tensor_to_backend(tests::tensor_f32_vector(f.norm),runtime::BackendKind::metal);
+    refuses([&]{static_cast<void>(Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm,
+        RecurrentDraftHead::q8_0));},"missing Q8 draft head silently fell back to F16");
+    refuses([&]{static_cast<void>(Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm,
+        RecurrentDraftHead::q8_0,&table));},"F16 head accepted as packed Q8");
+    refuses([&]{static_cast<void>(Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm,
+        static_cast<RecurrentDraftHead>(2)));},"unknown draft head accepted");
+    auto packed=tensor::quantize_f16_gguf_weight_q8_0(f.table.view());
+    auto head=tensor::copy_tensor_to_backend(packed,runtime::BackendKind::metal);
+    refuses([&]{static_cast<void>(Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm,
+        RecurrentDraftHead::f16,&head));},"F16 route accepted a silently substituted Q8 head");
+    auto wrong_shape=tensor::allocate_backend_buffer(tensor::TensorDescriptor::from(
+        tensor::Shape::from({32,64}),tensor::DType::q8_0),runtime::BackendKind::metal);
+    refuses([&]{static_cast<void>(Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm,
+        RecurrentDraftHead::q8_0,&wrong_shape));},"reduced-vocabulary Q8 head accepted");
+    auto cpu_head=tensor::copy_tensor_to_backend(packed,runtime::BackendKind::cpu);
+    refuses([&]{static_cast<void>(Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm,
+        RecurrentDraftHead::q8_0,&cpu_head));},"CPU draft head silently substituted for resident Metal");
+    set_metal_device_unavailable_for_testing(true);
+    try {
+        refuses([&]{static_cast<void>(Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm,
+            RecurrentDraftHead::q8_0,&head));},"Q8 plan bypassed unavailable Metal");
+    } catch(...) {set_metal_device_unavailable_for_testing(false);throw;}
+    set_metal_device_unavailable_for_testing(false);
+    // A malformed packed block must fail through device arithmetic validation,
+    // never publish a proposal or recover by switching to the F16 table.
+    packed.mutable_bytes()[0]=0;packed.mutable_bytes()[1]=0x7e;
+    auto malformed=tensor::copy_tensor_to_backend(packed,runtime::BackendKind::metal);
+    auto plan=Gemma2SpeculativePlan::fixture_for_testing(artifact,table,norm,RecurrentDraftHead::q8_0,&malformed);
+    auto feature=tensor::copy_tensor_to_backend(tests::tensor_f32_matrix(1,32,f.feature),runtime::BackendKind::metal);
+    TokenSampler sampler({.temperature=0.8F,.top_k=8,.seed=71});
+    const auto words=sampler.preview_proposal_words(3);
+    TargetStateView origin {.execution_epoch=1,.source_stage=FeatureTapStage::final_normalized,
+        .coordinate={4,5},.row_count=1,.feature_width=32};
+    refuses([&]{static_cast<void>(plan.execute_lossless(feature,origin,7,sampler,
+        std::span(words.words).first(3)));},"malformed Q8 scale silently selected a draft token");
+    expect(plan.poisoned(),"malformed Q8 scale did not poison draft plan");
+    refuses([&]{static_cast<void>(plan.verifier_inputs(1));},"malformed Q8 head published a lease");
+}
 }
 
 namespace local_gguf_engine::tests {
 std::span<const TestCase> learned_recurrent_test_cases() {
-    static const std::array<TestCase,7> cases {{
+    static const std::array<TestCase,11> cases {{
         {"trained recurrent artifact validates complete numeric and weight contract",artifact_contract},
         {"trained recurrent source detects mutation after opening",file_lifetime},
         {"trained recurrent dependent CPU/Metal rollout and lifetime parity",full_rollout},
@@ -276,6 +569,10 @@ std::span<const TestCase> learned_recurrent_test_cases() {
         {"trained recurrent fails closed without a Metal device",unavailable_device},
         {"trained recurrent preserves BF16 cancellation and rejects capacity overflow",cancellation_boundary},
         {"live recurrent opaque tickets and device hypothetical histories match CPU",live_tickets_and_histories},
+        {"lossless recurrent actual grid law matches CPU boundaries and underflow",lossless_finite_grid_equations},
+        {"lossless recurrent full chains preserve probabilities and transactional lifetime",lossless_live_chain},
+        {"lossless Q8 recurrent chains match independent dequantized equations at every horizon",lossless_quantized_head_chain},
+        {"lossless Q8 recurrent head selection rejects incompatible storage and unavailable Metal",quantized_head_configuration},
     }};return cases;
 }
 }

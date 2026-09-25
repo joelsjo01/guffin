@@ -8,10 +8,22 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
+
+if TYPE_CHECKING:
+    from .dspark import DSparkConfig
+
+
+@dataclass
+class LowRankLogitCorrection:
+    """Independent vocabulary bias, never a correction to normalized features."""
+
+    features: Tensor  # [batch,horizon,rank]
+    weight: Tensor    # [vocabulary,rank], learned independently of the tied head
 
 
 @dataclass
@@ -20,6 +32,8 @@ class DraftOutput:
     confidence: Tensor | None = None
     category_logits: Tensor | None = None
     head_pre_normalized: bool = False
+    logit_correction: LowRankLogitCorrection | None = None
+    semantic_logits: Tensor | None = None  # optional unsaturated base projection, training graph owned
 
 
 def _origin_taps(context_taps: Tensor, anchor_indices: Tensor) -> Tensor:
@@ -401,63 +415,38 @@ class BlockDiffusionDrafter(nn.Module):
 
 
 class DSparkDrafter(nn.Module):
-    """Block semantic backbone plus source-distinct sequential corrections."""
+    """Trainer adapter; the P mechanism is independent from the legacy D module."""
 
-    def __init__(
-        self, target_width: int, vocabulary: int, tap_count: int, width: int,
-        horizon: int, rank: int, correction: str, token_table: Tensor,
-    ) -> None:
+    def __init__(self, config: DSparkConfig, token_table: Tensor) -> None:
         super().__init__()
-        # DSpark gamma rows are anchor plus gamma-1 masks; the anchor output is
-        # proposal one, so a dedicated block backbone retains all gamma rows.
-        self.horizon = horizon
-        self.backbone = BlockDiffusionDrafter(
-            target_width, vocabulary, tap_count, width, 3, horizon,
-            token_table, flare=False,
-        )
-        self.token_rank = nn.Embedding(vocabulary, rank)
-        self.correction = correction
-        if correction == "markov":
-            self.rank_to_target = nn.Linear(rank, target_width, bias=False)
-        elif correction == "gated":
-            self.gate = nn.Linear(rank + width, target_width)
-            self.rank_to_target = nn.Linear(rank, target_width, bias=False)
-        elif correction == "source_rnn":
-            joined = rank + width + rank
-            self.wg = nn.Linear(joined, rank)
-            self.wc = nn.Linear(joined, rank)
-            self.wo = nn.Linear(joined, rank)
-            self.rank_to_target = nn.Linear(rank, target_width, bias=False)
-        else:
-            raise ValueError(f"unknown DSpark correction {correction}")
-        self.base_to_target = TargetSpaceProjection(width, target_width)
-        self.confidence = nn.Linear(width + rank, 1)
+        from .dspark import DSparkDrafter as SourceMechanism
+        self.core = SourceMechanism(config, token_table)
+        self.horizon = config.horizon
 
-    def forward(
-        self, context_taps: Tensor, context_positions: Tensor,
-        anchor_indices: Tensor, rollout_tokens: Tensor,
-    ) -> DraftOutput:
-        base = self.backbone.block_states(
+    def prepare_backbone(self, context_taps: Tensor, context_positions: Tensor,
+                         anchor_indices: Tensor, anchor_tokens: Tensor) -> Tensor:
+        return self.core.prepare_backbone(
+            context_taps, context_positions, anchor_indices, anchor_tokens
+        )
+
+    def project_base(self, base: Tensor) -> Tensor:
+        return self.core.project_base(base)
+
+    def correct(self, base: Tensor, previous_tokens: Tensor) -> DraftOutput:
+        result = self.core.correct(base, previous_tokens)
+        correction = (
+            None if result.correction_features is None else
+            LowRankLogitCorrection(result.correction_features, result.correction_weight)
+        )
+        return DraftOutput(result.base_states, confidence=result.confidence,
+                           head_pre_normalized=True, logit_correction=correction)
+
+    def forward(self, context_taps: Tensor, context_positions: Tensor,
+                anchor_indices: Tensor, rollout_tokens: Tensor) -> DraftOutput:
+        base = self.prepare_backbone(
             context_taps, context_positions, anchor_indices, rollout_tokens[:, 0]
         )
-        state = torch.zeros(base.shape[0], self.token_rank.embedding_dim, device=base.device, dtype=base.dtype)
-        outputs, confidences = [], []
-        for depth in range(self.horizon):
-            token = self.token_rank(rollout_tokens[:, depth])
-            if self.correction == "markov":
-                correction = self.rank_to_target(token)
-            elif self.correction == "gated":
-                correction = torch.sigmoid(self.gate(torch.cat((base[:, depth], token), dim=-1))) \
-                    * self.rank_to_target(token)
-            else:
-                joined = torch.cat((state, token, base[:, depth]), dim=-1)
-                gate = torch.sigmoid(self.wg(joined))
-                candidate = torch.tanh(self.wc(joined))
-                state = gate * state + (1.0 - gate) * candidate
-                correction = self.rank_to_target(torch.tanh(self.wo(joined)))
-            outputs.append(self.base_to_target(base[:, depth]) + correction)
-            confidences.append(self.confidence(torch.cat((base[:, depth], token), dim=-1)).squeeze(-1))
-        return DraftOutput(torch.stack(outputs, 1), torch.stack(confidences, 1))
+        return self.correct(base, rollout_tokens)
 
 
 class DBlastDrafter(nn.Module):
@@ -610,10 +599,32 @@ def make_model(
             int(parameters["block"]), token_table, implementation == "dflare",
         )
     if implementation == "dspark":
-        return DSparkDrafter(
-            target_width, vocabulary, taps, width, horizon, int(parameters["rank"]),
-            str(parameters["correction"]), token_table,
+        from .dspark import DSparkConfig
+        if parameters.get("p_model_contract") != "gemma2-dspark-logit-correction/v1":
+            raise ValueError(
+                "legacy P cells do not specify a faithful backbone/logit correction; "
+                "use the explicit versioned Arm-P geometry, not a hidden default"
+            )
+        required = (
+            "width", "horizon", "layers", "rank", "correction", "attention_heads", "kv_heads",
+            "head_dim", "intermediate_width", "mask_token_id", "rms_epsilon",
+            "rope_theta", "embedding_scale", "initializer_std", "tap_set", "context_mode",
         )
+        missing = [key for key in required if key not in parameters]
+        if missing:
+            raise ValueError(f"P geometry is incomplete: {missing}")
+        tap_set = parameters["tap_set"]
+        if (parameters["context_mode"] != "full_context"
+                or not isinstance(tap_set, list) or not tap_set
+                or any(not isinstance(tap, str) or not tap for tap in tap_set)
+                or len(set(tap_set)) != len(tap_set)):
+            raise ValueError("P requires an explicit full-context tap contract")
+        config = DSparkConfig(
+            target_width=target_width, vocabulary=vocabulary, tap_count=len(tap_set),
+            **{key: parameters[key] for key in required
+               if key not in {"tap_set", "context_mode"}},
+        )
+        return DSparkDrafter(config, token_table)
     if implementation == "dblast":
         return DBlastDrafter(
             target_width, vocabulary, taps, width, horizon,

@@ -1,6 +1,8 @@
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <queue>
@@ -240,8 +242,23 @@ template <typename Values>
 
 void validate_architecture(const GGUFMetadataSection& metadata) {
     const auto architecture = require_metadata_string(metadata, "general.architecture");
-    if (architecture != "gemma2") {
+    if (architecture != "gemma2" && architecture != "llama" && architecture != "gemma3") {
         throw TokenizerError(TokenizerErrorCode::unsupported_architecture, architecture);
+    }
+    if (architecture == "llama"
+        && (require_metadata_string(metadata, "tokenizer.ggml.normalizer")
+                != "identity-no-collapse-byte-fallback"
+            || optional_metadata_bool(metadata, "tokenizer.ggml.add_space_prefix") != true)) {
+        throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "unsupported Llama normalization");
+    }
+    if (architecture == "gemma3"
+        && (optional_metadata_bool(metadata, "tokenizer.ggml.add_space_prefix") != false
+            || optional_metadata_string(metadata, "tokenizer.ggml.pre").value_or("default") != "default"
+            || optional_metadata_string(metadata, "tokenizer.ggml.normalizer").value_or("identity-no-collapse-byte-fallback")
+                != "identity-no-collapse-byte-fallback"
+            || optional_metadata_bool(metadata, "tokenizer.ggml.remove_extra_whitespaces").value_or(false)
+            || !optional_metadata_bool(metadata, "tokenizer.ggml.escape_whitespaces").value_or(true))) {
+        throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "unsupported Gemma3 normalization");
     }
 }
 
@@ -597,11 +614,15 @@ PromptFormatResult format_generate_prompt_from_gguf_metadata(
 Tokenizer::Tokenizer(
     TokenizerModel model,
     std::vector<TokenizerToken> vocabulary,
-    TokenizerSpecialTokens special_tokens
+    TokenizerSpecialTokens special_tokens,
+    bool add_space_prefix,
+    TokenizerProfile profile
 )
     : model_(model),
       vocabulary_(std::move(vocabulary)),
       special_tokens_(special_tokens),
+      add_space_prefix_(add_space_prefix),
+      profile_(profile),
       encode_candidate_token_ids_(),
       special_encode_candidate_token_ids_(),
       token_text_to_id_(),
@@ -662,11 +683,48 @@ Tokenizer::Tokenizer(
             return left < right;
         }
     );
+    if (profile_ == TokenizerProfile::gemma3) {
+        // SentencePiece user-defined symbols are longest-prefix, indivisible
+        // pieces. A prepared trie avoids a vocabulary scan per input byte. The
+        // authenticated GGUF converts source ▁-runs to literal spaces and marks
+        // <unused*>/mask as controls; their source behavior is still atomic.
+        added_token_trie_.emplace_back();
+        const auto insert = [&](std::string_view piece, std::uint32_t token) {
+            std::uint32_t node = 0;
+            for (const char character : piece) {
+                const auto byte = static_cast<unsigned char>(character);
+                auto child = added_token_trie_[node].child;
+                while (child && added_token_trie_[child].byte != byte) child = added_token_trie_[child].sibling;
+                if (!child) {
+                    if (added_token_trie_.size() == UINT32_MAX) throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "added-token trie overflow");
+                    child = static_cast<std::uint32_t>(added_token_trie_.size());
+                    added_token_trie_.push_back({0, added_token_trie_[node].child, UINT32_MAX, byte});
+                    added_token_trie_[node].child = child;
+                }
+                node = child;
+            }
+            auto& prior = added_token_trie_[node].token;
+            if (prior != UINT32_MAX && prior != token) throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "ambiguous Gemma3 added-token alias");
+            prior = token;
+        };
+        for (std::uint32_t id = 0; id < vocabulary_.size(); ++id) {
+            const auto& token = vocabulary_[id];
+            if (token.type != 3 && token.type != 4 && token.type != 2) continue;
+            insert(token.text, id);
+            if (token.type == 4 && token.text.find_first_not_of(' ') == std::string::npos) {
+                std::string markers;
+                for (std::size_t i = 0; i < token.text.size(); ++i) markers += "▁";
+                insert(markers, id);
+            }
+        }
+    }
 }
 
 TokenizerModel Tokenizer::model() const noexcept {
     return model_;
 }
+
+TokenizerProfile Tokenizer::profile() const noexcept { return profile_; }
 
 std::string_view Tokenizer::model_name() const noexcept {
     return tokenizer_model_name(model_);
@@ -680,11 +738,25 @@ const TokenizerSpecialTokens& Tokenizer::special_tokens() const noexcept {
     return special_tokens_;
 }
 
+const runtime::Sha256Digest& Tokenizer::identity() const noexcept { return identity_; }
+
 TokenizerEncodeOptions Tokenizer::default_encode_options() const noexcept {
     return TokenizerEncodeOptions {
         .add_bos = special_tokens_.add_bos_token,
         .add_eos = special_tokens_.add_eos_token,
     };
+}
+
+std::size_t Tokenizer::owned_bytes() const noexcept {
+    std::size_t bytes = vocabulary_.capacity() * sizeof(TokenizerToken)
+        + encode_candidate_token_ids_.capacity() * sizeof(std::uint32_t)
+        + special_encode_candidate_token_ids_.capacity() * sizeof(std::uint32_t)
+        + added_token_trie_.capacity() * sizeof(AddedTokenNode)
+        + token_text_to_id_.bucket_count() * sizeof(void*)
+        + token_text_to_id_.size() * sizeof(decltype(token_text_to_id_)::value_type);
+    for (const auto& token : vocabulary_) bytes += token.text.capacity() + 1U;
+    for (const auto& [text, id] : token_text_to_id_) { (void)id; bytes += text.capacity() + 1U; }
+    return bytes;
 }
 
 std::vector<std::uint32_t> Tokenizer::encode(std::string_view text) const {
@@ -695,6 +767,12 @@ std::vector<std::uint32_t> Tokenizer::encode(
     std::string_view text,
     TokenizerEncodeOptions options
 ) const {
+    if (add_space_prefix_ || profile_ == TokenizerProfile::gemma3) {
+        TokenizerEncodeWorkspace workspace(text.size());
+        std::vector<std::uint32_t> output(text.size() * 3U + 5U);
+        output.resize(encode_into(text, output, workspace, options));
+        return output;
+    }
     std::vector<std::uint32_t> token_ids;
     token_ids.reserve(text.size() + (options.add_bos ? 1U : 0U) + (options.add_eos ? 1U : 0U));
 
@@ -880,6 +958,16 @@ std::string Tokenizer::decode(
     std::span<const std::uint32_t> token_ids,
     TokenizerDecodeOptions options
 ) const {
+    if (add_space_prefix_) {
+        std::size_t capacity = 0;
+        for (const auto id : token_ids) {
+            if (id >= vocabulary_.size()) throw TokenizerError(TokenizerErrorCode::token_id_out_of_range, std::to_string(id));
+            capacity += vocabulary_[id].text.size();
+        }
+        std::string output(capacity, '\0');
+        output.resize(decode_into(token_ids, output, options));
+        return output;
+    }
     std::string output;
     for (const auto token_id : token_ids) {
         append_decoded_token(output, token_id, options);
@@ -916,6 +1004,12 @@ void Tokenizer::append_decoded_token(
 }
 
 bool Tokenizer::token_id_is_special(std::uint32_t token_id) const noexcept {
+    if (profile_ == TokenizerProfile::gemma3 && token_id < vocabulary_.size()) {
+        const auto& text = vocabulary_[token_id].text;
+        return text == "<pad>" || text == "<eos>" || text == "<bos>" || text == "<unk>"
+            || text == "<start_of_turn>" || text == "<end_of_turn>"
+            || text == "<start_of_image>" || text == "<end_of_image>";
+    }
     return special_tokens_.bos_token_id == token_id
         || special_tokens_.eos_token_id == token_id
         || token_id_is_control(token_id);
@@ -973,13 +1067,285 @@ std::optional<std::pair<std::uint32_t, std::size_t>> Tokenizer::special_token_ma
     return std::nullopt;
 }
 
+std::optional<std::pair<std::uint32_t, std::size_t>> Tokenizer::added_token_match_at(
+    std::string_view text, std::size_t offset, bool include_special, bool specials_only
+) const noexcept {
+    std::optional<std::pair<std::uint32_t, std::size_t>> result;
+    std::uint32_t node = 0;
+    for (auto cursor = offset; cursor < text.size();) {
+        auto child = added_token_trie_[node].child;
+        const auto byte = static_cast<unsigned char>(text[cursor]);
+        while (child && added_token_trie_[child].byte != byte) child = added_token_trie_[child].sibling;
+        if (!child) break;
+        node = child;
+        ++cursor;
+        const auto id = added_token_trie_[node].token;
+        if (id != UINT32_MAX && (include_special || !token_id_is_special(id))
+            && (!specials_only || token_id_is_special(id))) result = {{id, cursor - offset}};
+    }
+    return result;
+}
+
+TokenizerEncodeWorkspace::TokenizerEncodeWorkspace(std::size_t max_input_bytes)
+    : max_input_bytes_(max_input_bytes) {
+    if (max_input_bytes > (std::numeric_limits<std::size_t>::max() - 16U) / 12U) {
+        throw std::length_error("tokenizer workspace capacity overflow");
+    }
+    const auto bound = max_input_bytes * 3U + 3U;
+    escaped_.reserve(bound);
+    // Normalization expands bytes, not symbol count: every input byte yields
+    // at most one codepoint, plus the dummy prefix. A merge adds at most two
+    // heap entries, and there are at most n-1 merges.
+    symbols_.reserve(max_input_bytes + 1U);
+    candidates_.reserve((max_input_bytes + 1U) * 3U);
+}
+
+std::size_t TokenizerEncodeWorkspace::owned_bytes() const noexcept {
+    return escaped_.capacity() + 1U + symbols_.capacity() * sizeof(Symbol)
+        + candidates_.capacity() * sizeof(Bigram);
+}
+
+std::size_t Tokenizer::encode_into(
+    std::string_view text, std::span<std::uint32_t> output,
+    TokenizerEncodeWorkspace& workspace, TokenizerEncodeOptions options
+) const {
+    if (text.size() > workspace.max_input_bytes_) throw std::length_error("tokenizer input capacity exceeded");
+    std::size_t written = 0;
+    const auto emit = [&](std::uint32_t id) {
+        if (written == output.size()) throw std::length_error("tokenizer output capacity exceeded");
+        output[written++] = id;
+    };
+    if (options.add_bos) emit(require_special_token_id(special_tokens_.bos_token_id, "tokenizer.ggml.bos_token_id"));
+    const auto special_at = [&](std::size_t offset) -> std::optional<std::pair<std::uint32_t, std::size_t>> {
+        if (profile_ == TokenizerProfile::gemma3) {
+            if (options.encode_special_tokens && text.substr(offset).starts_with("<image_soft_token>")) {
+                throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "Gemma3 multimodal token is outside the text embedding vocabulary");
+            }
+            // Non-control user-defined pieces are frozen after normalization:
+            // mixed ASCII spaces and literal ▁ must form the same longest run.
+            return options.encode_special_tokens ? added_token_match_at(text, offset, true, true) : std::nullopt;
+        }
+        if (!options.encode_special_tokens) return std::nullopt;
+        auto match = special_token_match_at(text, offset);
+        if (!match && add_space_prefix_ && special_tokens_.unknown_token_id) {
+            const auto id = *special_tokens_.unknown_token_id;
+            if (text.substr(offset).starts_with(vocabulary_[id].text)) match = {{id, vocabulary_[id].text.size()}};
+        }
+        return match;
+    };
+    const auto lower_priority = [](const auto& left, const auto& right) {
+        return left.score < right.score || (left.score == right.score && left.left > right.left);
+    };
+    auto& escaped = workspace.escaped_;
+    auto& symbols = workspace.symbols_;
+    auto& candidates = workspace.candidates_;
+    for (std::size_t segment_start = 0; segment_start < text.size();) {
+        if (const auto match = special_at(segment_start)) {
+            emit(match->first);
+            segment_start += match->second;
+            continue;
+        }
+        auto segment_end = segment_start + 1;
+        while (segment_end < text.size() && !special_at(segment_end)) ++segment_end;
+        escaped.clear();
+        symbols.clear();
+        candidates.clear();
+        constexpr std::string_view marker = "\xE2\x96\x81";
+        if (add_space_prefix_) escaped += marker;
+        // The pinned SP normalizer is identity with no whitespace collapsing.
+        // This byte API first applies Unicode maximal-subpart replacement, like
+        // decoding the target's byte stream to a Python Unicode string before
+        // handing it to the reference Llama tokenizer.
+        for (auto offset = segment_start; offset < segment_end;) {
+            const auto lead = static_cast<unsigned char>(text[offset]);
+            if (lead == ' ') { escaped += marker; ++offset; continue; }
+            std::size_t size = lead < 0x80U ? 1U
+                : (lead >= 0xC2U && lead <= 0xDFU ? 2U
+                : (lead >= 0xE0U && lead <= 0xEFU ? 3U
+                : (lead >= 0xF0U && lead <= 0xF4U ? 4U : 0U)));
+            bool valid = size != 0 && size <= segment_end - offset;
+            for (std::size_t byte = 1; valid && byte < size; ++byte) {
+                const auto next = static_cast<unsigned char>(text[offset + byte]);
+                valid = next >= 0x80U && next <= 0xBFU;
+            }
+            if (valid && size >= 3) {
+                const auto second = static_cast<unsigned char>(text[offset + 1]);
+                valid = !((lead == 0xE0U && second < 0xA0U) || (lead == 0xEDU && second >= 0xA0U)
+                    || (lead == 0xF0U && second < 0x90U) || (lead == 0xF4U && second >= 0x90U));
+            }
+            if (!valid) {
+                std::size_t consumed = 1;
+                while (consumed < size && offset + consumed < segment_end) {
+                    const auto next = static_cast<unsigned char>(text[offset + consumed]);
+                    if (next < 0x80U || next > 0xBFU) break;
+                    if (consumed == 1 && ((lead == 0xE0U && next < 0xA0U) || (lead == 0xEDU && next >= 0xA0U)
+                        || (lead == 0xF0U && next < 0x90U) || (lead == 0xF4U && next >= 0x90U))) break;
+                    ++consumed;
+                }
+                escaped += "\xEF\xBF\xBD";
+                offset += consumed;
+            }
+            else { escaped.append(text.data() + offset, size); offset += size; }
+        }
+        for (std::size_t offset = 0; offset < escaped.size();) {
+            const auto lead = static_cast<unsigned char>(escaped[offset]);
+            const auto frozen = profile_ == TokenizerProfile::gemma3
+                ? added_token_match_at(escaped, offset, options.encode_special_tokens) : std::nullopt;
+            const std::size_t size = frozen ? frozen->second
+                : (lead < 0x80U ? 1U : (lead < 0xE0U ? 2U : (lead < 0xF0U ? 3U : 4U)));
+            symbols.push_back({offset, size, static_cast<std::int64_t>(symbols.size()) - 1, -1,
+                frozen ? frozen->first : UINT32_MAX});
+            if (symbols.size() > 1) symbols[symbols.size() - 2].next = static_cast<std::int64_t>(symbols.size() - 1);
+            offset += size;
+        }
+        const auto add_candidate = [&](std::int64_t left_index, std::int64_t right_index) {
+            if (left_index < 0 || right_index < 0) return;
+            const auto left = static_cast<std::size_t>(left_index);
+            const auto right = static_cast<std::size_t>(right_index);
+            if (symbols[left].frozen_token != UINT32_MAX || symbols[right].frozen_token != UINT32_MAX) return;
+            const std::string_view combined(escaped.data() + symbols[left].offset, symbols[left].size + symbols[right].size);
+            const auto found = token_text_to_id_.find(combined);
+            if (found == token_text_to_id_.end()) return;
+            if (candidates.size() == candidates.capacity()) throw std::length_error("tokenizer merge capacity exceeded");
+            candidates.push_back({left, right, vocabulary_[found->second].score.value_or(0.0F), combined.size()});
+            std::push_heap(candidates.begin(), candidates.end(), lower_priority);
+        };
+        for (std::size_t index = 1; index < symbols.size(); ++index) add_candidate(static_cast<std::int64_t>(index - 1), static_cast<std::int64_t>(index));
+        while (!candidates.empty()) {
+            std::pop_heap(candidates.begin(), candidates.end(), lower_priority);
+            const auto candidate = candidates.back();
+            candidates.pop_back();
+            auto& left = symbols[candidate.left];
+            auto& right = symbols[candidate.right];
+            if (!left.size || !right.size || left.size + right.size != candidate.size
+                || left.next != static_cast<std::int64_t>(candidate.right)) continue;
+            left.size += right.size;
+            right.size = 0;
+            left.next = right.next;
+            if (right.next >= 0) symbols[static_cast<std::size_t>(right.next)].previous = static_cast<std::int64_t>(candidate.left);
+            add_candidate(left.previous, static_cast<std::int64_t>(candidate.left));
+            add_candidate(static_cast<std::int64_t>(candidate.left), left.next);
+        }
+        for (std::int64_t index = symbols.empty() ? -1 : 0; index >= 0;) {
+            const auto& symbol = symbols[static_cast<std::size_t>(index)];
+            const std::string_view piece(escaped.data() + symbol.offset, symbol.size);
+            const auto found = token_text_to_id_.find(piece);
+            if (symbol.frozen_token != UINT32_MAX) emit(symbol.frozen_token);
+            else if (found != token_text_to_id_.end()) emit(found->second);
+            else {
+                bool complete = true;
+                for (const auto byte : piece) complete &= byte_token_ids_[static_cast<unsigned char>(byte)].has_value();
+                if (complete) for (const auto byte : piece) emit(*byte_token_ids_[static_cast<unsigned char>(byte)]);
+                else emit(require_special_token_id(special_tokens_.unknown_token_id, "tokenizer.ggml.unknown_token_id"));
+            }
+            index = symbol.next;
+        }
+        segment_start = segment_end;
+    }
+    if (options.add_eos) emit(require_special_token_id(special_tokens_.eos_token_id, "tokenizer.ggml.eos_token_id"));
+    return written;
+}
+
+std::size_t Tokenizer::decode_into(
+    std::span<const std::uint32_t> ids, std::span<char> output, TokenizerDecodeOptions options
+) const {
+    std::size_t written = 0;
+    bool first_piece = true;
+    const auto emit = [&](char byte) {
+        if (written == output.size()) throw std::length_error("tokenizer decode capacity exceeded");
+        output[written++] = byte;
+    };
+    constexpr std::string_view marker = "\xE2\x96\x81";
+    for (const auto id : ids) {
+        if (id >= vocabulary_.size()) throw TokenizerError(TokenizerErrorCode::token_id_out_of_range, std::to_string(id));
+        if (options.skip_special_tokens && (token_id_is_special(id) || special_tokens_.unknown_token_id == id)) continue;
+        const auto& token = vocabulary_[id];
+        if (token.type == gguf_token_type_byte) emit(static_cast<char>(*parse_byte_token(token.text)));
+        else {
+            std::size_t offset = add_space_prefix_ && first_piece && token.text.starts_with(marker) ? marker.size() : 0;
+            while (offset < token.text.size()) {
+                if (std::string_view(token.text).substr(offset).starts_with(marker)) { emit(' '); offset += marker.size(); }
+                else emit(token.text[offset++]);
+            }
+        }
+        first_piece = false;
+    }
+    return written;
+}
+
 Tokenizer load_tokenizer_from_gguf_metadata(const GGUFMetadataSection& metadata) {
     validate_architecture(metadata);
     const auto model = parse_tokenizer_model(require_metadata_string(metadata, "tokenizer.ggml.model"));
     auto vocabulary = build_vocabulary(metadata);
     const auto special_tokens = load_special_tokens(metadata, vocabulary.size());
 
-    return Tokenizer(model, std::move(vocabulary), special_tokens);
+    const auto architecture = require_metadata_string(metadata, "general.architecture");
+    const bool add_space_prefix = architecture == "llama";
+    const bool gemma3 = architecture == "gemma3";
+    if (add_space_prefix || gemma3) {
+        std::array<bool, 256> bytes {};
+        for (const auto& token : vocabulary) {
+            if (!token.score.has_value() || !std::isfinite(*token.score) || !token.type.has_value()
+                || (*token.type != 1 && *token.type != 2 && *token.type != 3 && *token.type != 6 && !(gemma3 && *token.type == 4))) {
+                throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "unsupported standalone token profile");
+            }
+            if (*token.type == gguf_token_type_byte) {
+                const auto byte = parse_byte_token(token.text);
+                if (!byte || bytes[*byte]) throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "Llama byte fallback");
+                bytes[*byte] = true;
+            }
+        }
+        if (!std::all_of(bytes.begin(), bytes.end(), [](bool value) { return value; })) {
+            throw TokenizerError(TokenizerErrorCode::invalid_vocabulary, "incomplete Llama byte fallback");
+        }
+    }
+    auto tokenizer = Tokenizer(model, std::move(vocabulary), special_tokens, add_space_prefix,
+        gemma3 ? TokenizerProfile::gemma3 : (add_space_prefix ? TokenizerProfile::llama_legacy : TokenizerProfile::gemma2));
+    tokenizer.identity_ = tokenizer_identity_from_gguf_metadata(metadata);
+    return tokenizer;
+}
+
+runtime::Sha256Digest tokenizer_identity_from_gguf_metadata(const GGUFMetadataSection& metadata) {
+    validate_architecture(metadata);
+    const auto model = parse_tokenizer_model(require_metadata_string(metadata, "tokenizer.ggml.model"));
+    const auto& texts = require_metadata_array_values<std::vector<std::string>>(
+        metadata, "tokenizer.ggml.tokens", GGUFMetadataValueType::string);
+    const auto scores = optional_metadata_array_values<std::vector<float>>(
+        metadata, "tokenizer.ggml.scores", GGUFMetadataValueType::float32);
+    const auto types = optional_metadata_array_values<std::vector<std::int32_t>>(
+        metadata, "tokenizer.ggml.token_type", GGUFMetadataValueType::int32);
+    if (scores) validate_optional_array_length("tokenizer.ggml.scores", scores->get().size(), texts.size());
+    if (types) validate_optional_array_length("tokenizer.ggml.token_type", types->get().size(), texts.size());
+    const auto specials = load_special_tokens(metadata, texts.size());
+    runtime::Sha256 hash;
+    const auto integer = [&](std::uint64_t value) {
+        std::array<std::uint8_t, 8> bytes {};
+        for (unsigned i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<std::uint8_t>(value >> (8U * i));
+        hash.update(bytes);
+    };
+    const auto text = [&](std::string_view value) {
+        integer(value.size());
+        hash.update({reinterpret_cast<const std::uint8_t*>(value.data()), value.size()});
+    };
+    text("local-gguf-engine/tokenizer-semantics/v1");
+    integer(static_cast<std::uint64_t>(model));
+    const auto architecture = require_metadata_string(metadata, "general.architecture");
+    integer(architecture == "llama" ? 1U : (architecture == "gemma3" ? 2U : 0U));
+    for (const auto id : {specials.bos_token_id, specials.eos_token_id, specials.unknown_token_id}) {
+        integer(id.has_value() ? 1U : 0U);
+        integer(id.value_or(0));
+    }
+    integer(specials.add_bos_token ? 1U : 0U);
+    integer(specials.add_eos_token ? 1U : 0U);
+    integer(scores.has_value() ? 1U : 0U);
+    integer(types.has_value() ? 1U : 0U);
+    integer(texts.size());
+    for (std::size_t i = 0; i < texts.size(); ++i) {
+        text(texts[i]);
+        if (scores) integer(std::bit_cast<std::uint32_t>(scores->get()[i]));
+        if (types) integer(static_cast<std::uint32_t>(types->get()[i]));
+    }
+    return hash.finalize();
 }
 
 }  // namespace local_gguf_engine::tokenizer

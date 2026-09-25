@@ -4,6 +4,7 @@
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 #include "local_gguf_engine/engine/speculative_artifact.hpp"
 #include "local_gguf_engine/engine/recurrent_chat.hpp"
+#include "local_gguf_engine/engine/standalone_chat.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -14,6 +15,8 @@ enum class PreparedGemma2Mode : std::uint8_t {
     target_only,
     fixture_learned,
     development_recurrent,
+    standalone_vicuna_tli,
+    standalone_gemma3_tli,
 };
 
 enum class PreparedGemma2Lifecycle : std::uint8_t {
@@ -53,8 +56,14 @@ public:
     void poison() noexcept;
     [[nodiscard]] RecurrentChatPlan* recurrent() noexcept;
     [[nodiscard]] const RecurrentChatPlan* recurrent() const noexcept;
+    [[nodiscard]] StandaloneChatPlan* standalone() noexcept;
+    [[nodiscard]] const StandaloneChatPlan* standalone() const noexcept;
 
 private:
+    friend PreparedGemma2Plan prepare_gemma2_standalone_plan(
+        const EngineModel&, const tokenizer::Tokenizer&, std::shared_ptr<StandaloneDraftArtifact>,
+        StandaloneExecutionOptions, Gemma2OutputHeadPolicy
+    );
     friend PreparedGemma2Plan prepare_gemma2_target_only_plan(
         const EngineModel&, Gemma2OutputHeadPolicy
     );
@@ -64,7 +73,8 @@ private:
     );
     friend PreparedGemma2Plan prepare_gemma2_recurrent_plan(
         const EngineModel&, std::shared_ptr<RecurrentWeightsFile>,
-        const TokenSamplerOptions&, Gemma2OutputHeadPolicy
+        const TokenSamplerOptions&, Gemma2OutputHeadPolicy, SpeculativeSamplingMode,
+        RecurrentExecutionOptions
     );
 
     PreparedGemma2Plan(
@@ -87,7 +97,14 @@ private:
     std::optional<runtime::Sha256Digest> artifact_digest_;
     std::uint64_t execution_epoch_ = 0U;
     std::optional<RecurrentChatPlan> recurrent_;
+    std::optional<StandaloneChatPlan> standalone_;
 };
+
+[[nodiscard]] PreparedGemma2Plan prepare_gemma2_standalone_plan(
+    const EngineModel& verified_model, const tokenizer::Tokenizer& target_tokenizer,
+    std::shared_ptr<StandaloneDraftArtifact> source, StandaloneExecutionOptions execution,
+    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic
+);
 
 [[nodiscard]] PreparedGemma2Plan prepare_gemma2_target_only_plan(
     const EngineModel& model,
@@ -105,7 +122,9 @@ private:
 [[nodiscard]] PreparedGemma2Plan prepare_gemma2_recurrent_plan(
     const EngineModel& verified_model, std::shared_ptr<RecurrentWeightsFile> source,
     const TokenSamplerOptions& sampler,
-    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic
+    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic,
+    SpeculativeSamplingMode sampling_mode = SpeculativeSamplingMode::exact_match,
+    RecurrentExecutionOptions execution = {}
 );
 
 }  // namespace local_gguf_engine::engine

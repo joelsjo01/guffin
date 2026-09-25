@@ -5,6 +5,7 @@
 #include "local_gguf_engine/frontends/cli/speculation_trace.hpp"
 #include "local_gguf_engine/runtime/sha256.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -133,6 +134,66 @@ void test_fixture_artifact_roundtrip_authenticates_every_payload_slice() {
         rejected = error.code() == SpeculativeArtifactErrorCode::digest_mismatch;
     }
     expect(rejected, "artifact payload corruption was not rejected");
+}
+
+void test_fixture_artifact_five_tap_wire_capacity_and_compatibility() {
+    auto descriptor = artifact_descriptor();
+    descriptor.target.config.block_count = 5U;
+    auto& bank = descriptor.feature_banks[0];
+    bank.bank_id = 0x01020304U;
+    bank.tap_count = 5U;
+    bank.children[0].payload_byte_count = 40U;
+    for (std::uint16_t tap = 0U; tap < bank.tap_count; ++tap) {
+        bank.taps[tap] = {.stage = FeatureTapStage::layer_residual, .layer_index = tap};
+    }
+    const std::array<std::uint8_t, 40U> payload {};
+    const auto encoded = encode_fixture_speculative_artifact(descriptor, payload);
+    const auto loaded = load_speculative_artifact(encoded);
+    auto expected = bank;
+    expected.children[0].payload_digest = sha256(payload);
+    expect(loaded.descriptor().schema_version == 2U
+        && loaded.descriptor().feature_banks[0] == expected,
+        "five-tap artifact lost taps, projection identity, or existing schema");
+
+    // The wire format writes actual entries, not the in-memory array extent.
+    // An unused fifth slot must not alter any previously valid four-tap bytes.
+    bank.tap_count = 4U;
+    bank.children[0].payload_byte_count = 32U;
+    const auto four_payload = std::span(payload).first(32U);
+    const auto four_encoded = encode_fixture_speculative_artifact(descriptor, four_payload);
+    bank.taps[4] = {.stage = static_cast<FeatureTapStage>(255U), .layer_index = 65535U};
+    expect(encode_fixture_speculative_artifact(descriptor, four_payload) == four_encoded
+        && load_speculative_artifact(four_encoded).descriptor().feature_banks[0].tap_count == 4U,
+        "expanded feature capacity changed the existing four-tap wire representation");
+    bank.tap_count = 6U;
+    auto rejected = false;
+    try {
+        static_cast<void>(encode_fixture_speculative_artifact(descriptor, four_payload));
+    } catch (const SpeculativeArtifactError& error) {
+        rejected = error.code() == SpeculativeArtifactErrorCode::invalid_descriptor;
+    }
+    expect(rejected, "artifact writer accepted feature tap capacity overflow");
+
+    // Authenticate malformed input so the reader's capacity check, rather
+    // than the envelope checksum, is what prevents an out-of-bounds parse.
+    auto malformed = encoded;
+    constexpr std::array<std::uint8_t, 9U> bank_header {
+        4U, 3U, 2U, 1U, 0U, 5U, 0U, 1U, 0U,
+    };
+    const auto at = std::search(malformed.begin(), malformed.end(),
+        bank_header.begin(), bank_header.end());
+    expect(at != malformed.end(), "five-tap fixture wire bank could not be located");
+    *(at + 5) = 6U;
+    std::fill(malformed.begin() + 32, malformed.begin() + 64, 0U);
+    const auto checksum = sha256(malformed);
+    std::copy(checksum.bytes.begin(), checksum.bytes.end(), malformed.begin() + 32);
+    rejected = false;
+    try {
+        static_cast<void>(load_speculative_artifact(malformed));
+    } catch (const SpeculativeArtifactError& error) {
+        rejected = error.code() == SpeculativeArtifactErrorCode::capacity_overflow;
+    }
+    expect(rejected, "authenticated artifact reader accepted feature tap capacity overflow");
 }
 
 void test_fixture_artifact_authenticates_phase4_scoring_tensors() {
@@ -612,6 +673,8 @@ const TestCase kTests[] = {
     {"SHA-256 matches published abc vector", test_sha256_matches_published_abc_vector},
     {"fixture speculative artifact authenticates descriptor and payload",
         test_fixture_artifact_roundtrip_authenticates_every_payload_slice},
+    {"fixture speculative artifact preserves five-tap wire bounds and compatibility",
+        test_fixture_artifact_five_tap_wire_capacity_and_compatibility},
     {"fixture speculative artifact authenticates Phase-4 scoring tensors",
         test_fixture_artifact_authenticates_phase4_scoring_tensors},
     {"speculation trace roundtrips and rejects future leakage",

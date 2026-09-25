@@ -95,7 +95,13 @@ llama.cpp reference is a separate, infrequent benchmark documented in
 systematically heat-soak and throttle later runs, so a retention decision uses
 one candidate and one baseline in fresh processes with at least four minutes of
 idle cooldown before each. Require at least 2% aggregate generation improvement,
-wins on both turns, exact workload/token-hash correctness equivalence, and no
+wins on both turns, equivalent workloads and the mode's correctness contract, and no
 greater-than-2% regression in another headline metric. Do not substitute a
 back-to-back repetition burst for thermal isolation. Never put measured results
 here.
+
+For the frozen exact-match baseline, correctness still includes identical
+selected-token hashes. Distribution-preserving speculative sampling may produce
+different seeded text: verify its probability law and numerical target parity
+independently, retain raw token counts/durations and output hashes for provenance,
+and do not describe differing natural-stop workloads as an exact-work comparison.

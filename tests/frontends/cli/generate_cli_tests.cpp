@@ -1,6 +1,7 @@
 #include "generate_cli_tests.hpp"
 
 #include "local_gguf_engine/engine/gemma2_chat_session.hpp"
+#include "local_gguf_engine/engine/gemma2_reference.hpp"
 #include "local_gguf_engine/frontends/cli/generate.hpp"
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
@@ -13,6 +14,7 @@
 #include "tensor_test_support.hpp"
 #include "../../../src/engine/target_verifier_test_hooks.hpp"
 #include "../../../src/engine/prepared_plan_test_hooks.hpp"
+#include "../../../src/tensor/backends/metal/metal_test_hooks.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -203,8 +205,10 @@ void test_formats_and_validates_chat_decode_attribution() {
         .total = 21U,
     };
     const auto line = format_chat_decode_attribution_line(metrics);
-    expect(line.starts_with("[ Decode: {\"schema_version\":4"),
+    expect(line.starts_with("[ Decode: {\"schema_version\":5"),
         "decode attribution prefix mismatch");
+    expect(line.find("\"standalone_effective_sampler\":null") != std::string::npos,
+        "target-only diagnostics invent a draft sampler");
     expect(line.find("\"selected_token_hash\":\"0000000000001234\"") != std::string::npos,
         "decode attribution selected-token hash mismatch");
     expect(line.find("\"proposal_buckets\":[{\"match_length\":\"2\",\"support\":\"2\","
@@ -223,6 +227,51 @@ void test_formats_and_validates_chat_decode_attribution() {
         "decode attribution output elision bytes mismatch");
     expect(line.find("\"scheduled_bytes_total\":37") != std::string::npos,
         "decode attribution scheduled total mismatch");
+
+    metrics.standalone_draft = true;
+    metrics.standalone_kind = local_gguf_engine::engine::StandaloneDraftKind::gemma3_270m_q8;
+    metrics.standalone_effective_sampler = local_gguf_engine::engine::TokenSamplerOptions {
+        .temperature = 0.5F, .top_k = 0, .top_p = 0.75F, .min_p = 0.125F, .repetition_penalty = 1.5F};
+    metrics.learned_horizon = 3;
+    metrics.generation.learned_cycle_count = 4;
+    metrics.generation.learned_accepted_edge_count = 6;
+    metrics.generation.learned_accepted_prefix_histogram[0] = 1;
+    metrics.generation.learned_accepted_prefix_histogram[1] = 1;
+    metrics.generation.learned_accepted_prefix_histogram[2] = 1;
+    metrics.generation.learned_accepted_prefix_histogram[3] = 1;
+    metrics.generation.learned_rejection_depth_histogram[0] = 1;
+    metrics.generation.learned_rejection_depth_histogram[1] = 1;
+    metrics.generation.learned_censored_cycle_count = 1;
+    metrics.generation.learned_full_accept_count = 1;
+    metrics.generation.learned_horizon_limited_cycle_count = 1;
+    const auto gemma3_line = format_chat_decode_attribution_line(metrics);
+    expect(gemma3_line.find("\"speculative_draft_model\":\"standalone_gemma3_tli\"") != std::string::npos
+            && gemma3_line.find("\"learned_draft_head\":\"q8_0\"") != std::string::npos,
+        "Gemma3 draft attribution inherited Vicuna/F16 identity");
+    expect(gemma3_line.find("\"standalone_effective_sampler\":{\"temperature\":0.5,\"top_k\":0,\"top_p\":0.75,\"min_p\":0.125,\"repetition_penalty\":1.5}") != std::string::npos,
+        "standalone diagnostics omit actual effective draft scalars or confuse zero with inheritance");
+    expect(gemma3_line.find("\"standalone_draft_sampler\":\"explicit_or_target_scalars_native_history_v1\"") != std::string::npos,
+        "standalone sampler identity incorrectly claims unconditional target-scalar inheritance");
+    expect(gemma3_line.find("\"learned_accepted_prefix_histogram\":[1,1,1,1,0") != std::string::npos
+        && gemma3_line.find("\"learned_rejection_depth_histogram\":[1,1,0") != std::string::npos
+        && gemma3_line.find("\"learned_censored_cycle_count\":1") != std::string::npos
+        && gemma3_line.find("\"learned_full_accept_count\":1") != std::string::npos
+        && gemma3_line.find("\"learned_horizon_limited_cycle_count\":1") != std::string::npos,
+        "standalone diagnostics lost prefix/rejection/censoring attribution");
+    metrics.standalone_kind = local_gguf_engine::engine::StandaloneDraftKind::vicuna_68m_f16;
+    const auto vicuna_line = format_chat_decode_attribution_line(metrics);
+    expect(vicuna_line.find("\"speculative_draft_model\":\"standalone_vicuna_tli\"") != std::string::npos
+            && vicuna_line.find("\"learned_draft_head\":\"f16\"") != std::string::npos,
+        "Vicuna draft attribution changed with Gemma3 support");
+    for (const bool missing : {false, true}) {
+        auto malformed = metrics;
+        if (missing) malformed.standalone_effective_sampler.reset();
+        else malformed.standalone_effective_sampler->temperature = std::numeric_limits<float>::quiet_NaN();
+        bool refused = false;
+        try { static_cast<void>(format_chat_decode_attribution_line(malformed)); }
+        catch (const std::logic_error&) { refused = true; }
+        expect(refused, "standalone diagnostics silently invented/misrepresented effective sampler values");
+    }
 
     metrics.decode_execution.gpu_duration_ns = 201U;
     bool rejected = false;
@@ -1464,7 +1513,7 @@ void test_runs_generate_chat_decode_diagnostics_only_when_requested_when_availab
     );
     expect(exit_code == EXIT_SUCCESS && error.str().empty(),
         "decode-diagnostic chat invocation failed");
-    expect(output.str().find("[ Decode: {\"schema_version\":4") != std::string::npos,
+    expect(output.str().find("[ Decode: {\"schema_version\":5") != std::string::npos,
         "requested decode attribution record is missing");
 }
 
@@ -1873,7 +1922,8 @@ void test_rejects_generate_invalid_backend_option() {
 // Positive/negative target projections give deterministic full-match/mismatch
 // controls. These tiny weights are correctness fixtures, never speed evidence.
 std::vector<std::uint8_t> chat_recurrent_fixture_weights(
-    const std::filesystem::path& model_path, bool mismatch, std::uint32_t horizon = 3U
+    const std::filesystem::path& model_path, bool mismatch, std::uint32_t horizon = 3U,
+    std::uint32_t top_k = 1U
 ) {
     namespace engine = local_gguf_engine::engine;
     auto file = read_file_backed_gguf_model(model_path);
@@ -1889,7 +1939,7 @@ std::vector<std::uint8_t> chat_recurrent_fixture_weights(
     descriptor.target.config = model.gemma2_config();
     descriptor.target.output_head_policy = static_cast<std::uint32_t>(target.output_head_policy());
     auto& spec = descriptor.recurrent;
-    spec.version = 1; spec.width = 16; spec.horizon = horizon; spec.top_k = 1;
+    spec.version = 1; spec.width = 16; spec.horizon = horizon; spec.top_k = top_k;
     spec.temperature = 0.8F; spec.top_p = 0.95F; spec.min_p = 0.05F;
     spec.provenance.fill(local_gguf_engine::runtime::sha256(std::array<std::uint8_t,1>{1}));
     const std::array<std::array<unsigned,2>,10> shapes {{{16,256},{1,16},{16,256},
@@ -1909,13 +1959,21 @@ std::vector<std::uint8_t> chat_recurrent_fixture_weights(
     return engine::encode_recurrent_weights_artifact(descriptor, payload);
 }
 
-void test_live_recurrent_chat_transactions() {
-    if (!tensor_backend_is_available(BackendKind::metal)) return;
-    namespace engine = local_gguf_engine::engine;
+std::vector<std::uint8_t> chat_recurrent_target_fixture_bytes(bool sampled = false,
+    bool secondary_is_stop = false, bool dense = false, std::uint32_t context = 128) {
     auto tensors = tiny_gemma2_generate_cli_tensors_for_forced_token(5);
     tensors.erase(std::find_if(tensors.begin(), tensors.end(), [](const auto& t) {return t.name == "output.weight";}));
     std::vector<float> embedding(256U * 110U, 0.0F);
     for (unsigned token = 0; token < 110; ++token) embedding[token] = token == 5 ? 1.0F : 0.1F;
+    if (sampled) { embedding[5] = 0.25F; embedding[6] = 0.20F; }
+    if (dense) {
+        for (unsigned feature = 1; feature < 256; ++feature) {
+            for (unsigned token = 0; token < 110; ++token) {
+                embedding[feature * 110 + token] = embedding[token] * 0.03F
+                    * static_cast<float>(static_cast<int>((feature * 13) % 17) - 8);
+            }
+        }
+    }
     replace_tiny_tensor(tensors, "token_embd.weight", tensor_f16_gguf_matrix(256, 110, embedding));
     // Nonzero, position-sensitive K/V makes rollback parity observable even
     // though the zero attention output keeps token 5 authoritative.
@@ -1924,29 +1982,55 @@ void test_live_recurrent_chat_transactions() {
         local_gguf_engine::tests::tensor_q4_k_gguf_weight_matrix(256, 256, 3));
     replace_tiny_tensor(tensors, "blk.0.attn_v.weight",
         local_gguf_engine::tests::tensor_q6_k_gguf_weight_matrix(256, 256, 7));
-    const auto bytes = write_tiny_gguf_bytes(tiny_gemma2_generate_cli_metadata(128), tensors);
+    auto metadata = tiny_gemma2_generate_cli_metadata(context);
+    if (secondary_is_stop) {
+        for (auto& entry : metadata) {
+            if (entry.key == "tokenizer.ggml.eos_token_id") entry = metadata_u32(entry.key, 6);
+        }
+    }
+    return write_tiny_gguf_bytes(metadata, tensors);
+}
+
+void expect_chat_cached_bytes_equal(const Gemma2ChatSession& actual,
+    const Gemma2ChatSession& expected, const std::string& boundary) {
+    expect(actual.cached_token_count() == expected.cached_token_count(), boundary + " logical cache mismatch");
+    const auto& a = actual.plan_for_testing().kv_cache();
+    const auto& b = expected.plan_for_testing().kv_cache();
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        for (bool keys : {false, true}) {
+            const auto& ab = keys ? a[i].key : a[i].value;
+            const auto& bb = keys ? b[i].key : b[i].value;
+            const auto av = local_gguf_engine::tensor::copy_backend_buffer_bytes(ab, 0, ab.descriptor().byte_count);
+            const auto bv = local_gguf_engine::tensor::copy_backend_buffer_bytes(bb, 0, bb.descriptor().byte_count);
+            const auto active = std::min<std::size_t>(actual.cached_token_count(), a[i].row_capacity)
+                * (av.size() / a[i].row_capacity);
+            const auto different = std::mismatch(av.begin(), av.begin() + static_cast<std::ptrdiff_t>(active), bv.begin());
+            expect(different.first == av.begin() + static_cast<std::ptrdiff_t>(active),
+                boundary + (keys ? " key-cache bytes differ at " : " value-cache bytes differ at ")
+                + std::to_string(different.first - av.begin()));
+        }
+    }
+}
+
+void check_live_recurrent_chat_transactions(local_gguf_engine::engine::SpeculativeSamplingMode sampling_mode,
+    local_gguf_engine::engine::RecurrentExecutionOptions execution = {}) {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    namespace engine = local_gguf_engine::engine;
+    const auto bytes = chat_recurrent_target_fixture_bytes();
     TempBinaryFile model("recurrent-chat-target", bytes);
     std::string state_boundary = "initial generation";
     const auto exact_state = [&](const Gemma2ChatSession& actual, const Gemma2ChatSession& expected) {
-        expect(actual.sampler_for_testing().checkpoint().same_state(expected.sampler_for_testing().checkpoint()),
-            "learned chat changed exact RNG/history state");
-        expect(actual.cached_token_count() == expected.cached_token_count(), "learned logical cache mismatch");
-        const auto& a = actual.plan_for_testing().kv_cache();
-        const auto& b = expected.plan_for_testing().kv_cache();
-        for (std::size_t i = 0; i < a.size(); ++i) {
-            for (bool keys : {false, true}) {
-                const auto& ab = keys ? a[i].key : a[i].value;
-                const auto& bb = keys ? b[i].key : b[i].value;
-                const auto av = local_gguf_engine::tensor::copy_backend_buffer_bytes(ab, 0, ab.descriptor().byte_count);
-                const auto bv = local_gguf_engine::tensor::copy_backend_buffer_bytes(bb, 0, bb.descriptor().byte_count);
-                const auto active = std::min<std::size_t>(actual.cached_token_count(), a[i].row_capacity)
-                    * (av.size() / a[i].row_capacity);
-                const auto different = std::mismatch(av.begin(), av.begin() + static_cast<std::ptrdiff_t>(active), bv.begin());
-                expect(different.first == av.begin() + static_cast<std::ptrdiff_t>(active),
-                    state_boundary + (keys ? " learned key-cache bytes differ at " : " learned value-cache bytes differ at ")
-                    + std::to_string(different.first - av.begin()));
-            }
+        if (sampling_mode == engine::SpeculativeSamplingMode::exact_match) {
+            expect(actual.sampler_for_testing().checkpoint().same_state(expected.sampler_for_testing().checkpoint()),
+                "learned chat changed exact RNG/history state");
+        } else {
+            // The point-mass target fixes the output sequence in this fixture,
+            // but rejection sampling has its own legitimate random schedule.
+            expect(actual.sampler_for_testing().history_snapshot()
+                == expected.sampler_for_testing().history_snapshot(),
+                "lossless chat retained rejected or unobserved tokens in repetition history");
         }
+        expect_chat_cached_bytes_equal(actual, expected, state_boundary);
     };
     for (bool mismatch : {false, true}) {
         state_boundary = mismatch ? "initial mismatch" : "initial match";
@@ -1956,9 +2040,13 @@ void test_live_recurrent_chat_transactions() {
             .context_shift = true, .retrieval_decode = false,
             .development_recurrent_weights = weights.path(),
             .sampler = {.temperature = 0.8F, .top_k = 1, .seed = 19}};
+        options.speculative_sampling = sampling_mode;
+        options.recurrent_execution = execution;
         auto ordinary_options = options;
         ordinary_options.development_recurrent_weights.reset();
         ordinary_options.speculative_decode = false;
+        ordinary_options.speculative_sampling = engine::SpeculativeSamplingMode::exact_match;
+        ordinary_options.recurrent_execution = {};
         Gemma2ChatSession baseline(read_file_backed_gguf_model(model.path()), ordinary_options);
         Gemma2ChatSession learned(read_file_backed_gguf_model(model.path()), options);
         const auto reference = baseline.generate_user_turn("Hello");
@@ -1970,8 +2058,11 @@ void test_live_recurrent_chat_transactions() {
             "live fixture did not exercise intended match/mismatch path");
         expect(actual.cached_token_count == reference.cached_token_count, "live learned cache position mismatch");
         exact_state(learned, baseline);
+        const auto before_regeneration = learned.sampler_for_testing().checkpoint();
         expect(learned.regenerate_last_turn().selected_token_ids == reference.selected_token_ids,
             "live learned regeneration changed target RNG/tokens");
+        expect(learned.sampler_for_testing().checkpoint().same_state(before_regeneration),
+            "learned regeneration did not restore its own complete random state");
         state_boundary = "regeneration";
         exact_state(learned, baseline);
         for (unsigned depth = 1; depth <= 4; ++depth) {
@@ -2084,6 +2175,402 @@ void test_live_recurrent_chat_transactions() {
     }
 }
 
+void test_live_recurrent_chat_transactions() {
+    check_live_recurrent_chat_transactions(local_gguf_engine::engine::SpeculativeSamplingMode::exact_match);
+}
+
+void test_lossless_recurrent_chat_transactions() {
+    check_live_recurrent_chat_transactions(local_gguf_engine::engine::SpeculativeSamplingMode::lossless);
+}
+
+void test_conditional_lossless_recurrent_chat_transactions() {
+    check_live_recurrent_chat_transactions(local_gguf_engine::engine::SpeculativeSamplingMode::lossless,
+        {.conditional_verification = true});
+}
+
+void check_lossless_recurrent_sampled_path_and_regeneration(bool retrieval = false) {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    namespace engine = local_gguf_engine::engine;
+    TempBinaryFile model("lossless-chat-sampled-target", chat_recurrent_target_fixture_bytes(true));
+    for (bool mismatch : {false, true}) {
+        TempBinaryFile weights("lossless-chat-sampled-weights",
+            chat_recurrent_fixture_weights(model.path(), mismatch, 3, 2));
+        Gemma2ChatSessionOptions options {.max_new_tokens = retrieval ? 65U : 17U,
+            .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+            .context_shift = true, .retrieval_decode = retrieval,
+            .development_recurrent_weights = weights.path(),
+            .sampler = {.temperature = 0.8F, .top_k = 2, .seed = 42}};
+        options.speculative_sampling = engine::SpeculativeSamplingMode::lossless;
+        options.recurrent_execution.conditional_verification = retrieval;
+        Gemma2ChatSession learned(read_file_backed_gguf_model(model.path()), options);
+        const auto actual = learned.generate_user_turn("Hello");
+        expect(actual.selected_token_ids.size() == options.max_new_tokens,
+            "lossless sampled route failed to reach its output budget");
+        expect(actual.metrics.generation.learned_cycle_count > 0
+            && actual.metrics.generation.learned_numeric_refusal_count == 0,
+            "lossless sampled fixture did not execute native proposal/verification");
+        if (retrieval) expect(actual.metrics.generation.speculative_cycle_count > 0,
+            "mixed sampled fixture did not transition through retrieval and learned execution");
+        expect((actual.metrics.generation.learned_accepted_edge_count > 0) != mismatch,
+            "lossless sampled fixture missed its accept/reject control");
+        expect(std::find(actual.selected_token_ids.begin(), actual.selected_token_ids.end(), 5U)
+                != actual.selected_token_ids.end()
+            && std::find(actual.selected_token_ids.begin(), actual.selected_token_ids.end(), 6U)
+                != actual.selected_token_ids.end(),
+            "lossless sampled fixture became a deterministic top-one proxy");
+        expect(std::all_of(actual.selected_token_ids.begin(), actual.selected_token_ids.end(),
+                [](std::uint32_t token) { return token == 5 || token == 6; }),
+            "lossless residual selected a token outside the target support");
+
+        // Replay the sequence actually emitted, not the unrelated baseline
+        // seed sequence. Every K/V row must describe this accepted history.
+        auto file = read_file_backed_gguf_model(model.path());
+        auto target = engine::load_verified_engine_model_from_gguf(file.view(), file.bytes());
+        auto replay = engine::create_gemma2_metal_model_plan(target, engine::Gemma2OutputHeadPolicy::q8_0);
+        const auto scale = engine::gemma2_input_embedding_scale(target.gemma2_config().embedding_length);
+        static_cast<void>(engine::run_gemma2_metal_resident_prefill(
+            replay, actual.rendered_prompt_token_ids, 0, scale));
+        auto position = static_cast<std::uint32_t>(actual.rendered_prompt_token_ids.size());
+        for (auto token : actual.selected_token_ids) {
+            static_cast<void>(engine::run_gemma2_metal_resident_decode_step(replay,
+                engine::create_gemma2_metal_decode_schedule(replay, position++), token, scale,
+                std::nullopt, engine::Gemma2MetalDecodeOutputMode::kv_only));
+        }
+        expect(position == actual.cached_token_count, "lossless selected-path replay length mismatch");
+        const auto compare_replay_cache = [&] {
+            const auto& cached = learned.plan_for_testing().kv_cache();
+            for (std::size_t layer = 0; layer < cached.size(); ++layer) {
+                for (bool key : {false, true}) {
+                    const auto& a = key ? cached[layer].key : cached[layer].value;
+                    const auto& b = key ? replay.kv_cache()[layer].key : replay.kv_cache()[layer].value;
+                    const auto av = local_gguf_engine::tensor::copy_backend_buffer_bytes(a, 0, a.descriptor().byte_count);
+                    const auto bv = local_gguf_engine::tensor::copy_backend_buffer_bytes(b, 0, b.descriptor().byte_count);
+                    const auto active = std::min<std::size_t>(position, cached[layer].row_capacity)
+                        * (av.size() / cached[layer].row_capacity);
+                    expect(std::equal(av.begin(), av.begin() + static_cast<std::ptrdiff_t>(active), bv.begin()),
+                        "lossless K/V differs from ordinary target execution along its emitted tokens");
+                }
+            }
+        };
+        compare_replay_cache();
+        const auto checkpoint = learned.sampler_for_testing().checkpoint();
+        const auto regenerated = learned.regenerate_last_turn();
+        expect(regenerated.selected_token_ids == actual.selected_token_ids
+                && checkpoint.same_state(learned.sampler_for_testing().checkpoint()),
+            "lossless regeneration changed its own proposal/acceptance random stream");
+        compare_replay_cache();
+        learned.clear();
+        expect(learned.generate_user_turn("Hello").selected_token_ids == actual.selected_token_ids,
+            "lossless clear did not reset independent proposal state");
+        learned.reset();
+        expect(learned.generate_user_turn("Hello").selected_token_ids == actual.selected_token_ids,
+            "lossless authenticated reset did not restore its sampling mode");
+    }
+}
+
+void test_lossless_recurrent_sampled_path_and_regeneration() {
+    check_lossless_recurrent_sampled_path_and_regeneration();
+}
+
+void test_lossless_recurrent_mixed_retrieval_transactions() {
+    check_lossless_recurrent_sampled_path_and_regeneration(true);
+}
+
+void test_q8_conditional_recurrent_cache_recovery() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    namespace engine = local_gguf_engine::engine;
+    TempBinaryFile model("q8-conditional-chat-target", chat_recurrent_target_fixture_bytes(false, false, true));
+    for (const bool mismatch : {false, true}) {
+        TempBinaryFile weights("q8-conditional-chat-weights", chat_recurrent_fixture_weights(model.path(), mismatch));
+        Gemma2ChatSessionOptions options {.max_new_tokens = 9,
+            .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+            .context_shift = true, .retrieval_decode = false,
+            .development_recurrent_weights = weights.path(),
+            .speculative_sampling = engine::SpeculativeSamplingMode::lossless,
+            .recurrent_execution = {.draft_head = engine::RecurrentDraftHead::q8_0,
+                .conditional_verification = true},
+            .sampler = {.temperature = 0.8F, .top_k = 1, .seed = 19}};
+        Gemma2ChatSession learned(read_file_backed_gguf_model(model.path()), options);
+        auto full_options = options;
+        full_options.recurrent_execution.conditional_verification = false;
+        Gemma2ChatSession control(read_file_backed_gguf_model(model.path()), full_options);
+        const auto compare = [&] {
+            expect_chat_cached_bytes_equal(learned, control, "conditional/full Q8 parity");
+            expect(learned.sampler_for_testing().checkpoint().same_state(control.sampler_for_testing().checkpoint()),
+                "conditional Q8 recovery changed sampler state");
+        };
+        bool shifted = false;
+        for (unsigned turn = 0; turn < 8; ++turn) {
+            const auto expected = control.generate_user_turn("Hello");
+            const auto actual = learned.generate_user_turn("Hello");
+            expect(actual.selected_token_ids == expected.selected_token_ids
+                    && actual.metrics.generation.learned_cycle_count > 0,
+                "conditional Q8 route did not execute or changed its seeded sequence");
+            shifted = shifted || actual.metrics.trimmed_turn_count != 0;
+            compare();
+            expect(learned.regenerate_last_turn().selected_token_ids == actual.selected_token_ids,
+                "conditional Q8 regeneration changed the selected sequence");
+            compare();
+        }
+        expect(shifted, "conditional Q8 recovery fixture did not cross its context-shift boundary");
+        for (unsigned depth = 1; depth <= 4; ++depth) {
+            learned.clear(); control.clear();
+            unsigned reference_callbacks = 0;
+            static_cast<void>(control.generate_user_turn("Hello", Gemma2ChatTurnOptions {
+                .on_text_delta = [&](std::string_view) { ++reference_callbacks; },
+                .should_stop = [&] { return reference_callbacks == depth; },
+            }));
+            unsigned callbacks = 0;
+            bool threw = false;
+            try {
+                static_cast<void>(learned.generate_user_turn("Hello", [&](std::string_view) {
+                    if (++callbacks == depth) throw std::runtime_error("conditional Q8 callback fault");
+                }));
+            } catch (const std::runtime_error&) { threw = true; }
+            expect(threw && callbacks == depth && !learned.poisoned(),
+                "conditional Q8 throwing callback lost its durable prefix or poisoned a known completion");
+            compare();
+            expect(learned.generate_user_turn("Hello").selected_token_ids
+                    == control.generate_user_turn("Hello").selected_token_ids,
+                "conditional Q8 callback recovery changed continuation tokens");
+            compare();
+        }
+        learned.reset(); control.reset();
+        expect(learned.generate_user_turn("Hello").selected_token_ids
+                == control.generate_user_turn("Hello").selected_token_ids,
+            "conditional Q8 authenticated reset changed its execution contract");
+        compare();
+    }
+}
+
+void test_conditional_recurrent_full_horizon_feature_leases() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    namespace engine = local_gguf_engine::engine;
+    TempBinaryFile model("conditional-horizon-chat-target", chat_recurrent_target_fixture_bytes());
+    for (const auto horizon : {3U, 4U, 7U, 8U, 15U, 16U, 23U}) {
+        TempBinaryFile weights("conditional-horizon-chat-weights",
+            chat_recurrent_fixture_weights(model.path(), false, horizon));
+        Gemma2ChatSessionOptions options {.max_new_tokens = horizon + 3,
+            .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+            .retrieval_decode = false, .development_recurrent_weights = weights.path(),
+            .speculative_sampling = engine::SpeculativeSamplingMode::lossless,
+            .recurrent_execution = {.conditional_verification = true},
+            .sampler = {.temperature = 0.8F, .top_k = 1, .seed = 19}};
+        Gemma2ChatSession session(read_file_backed_gguf_model(model.path()), options);
+        const auto actual = session.generate_user_turn("Hello");
+        expect(actual.selected_token_ids.size() == horizon + 3
+                && std::all_of(actual.selected_token_ids.begin(), actual.selected_token_ids.end(),
+                    [](auto token) { return token == 5U; })
+                && actual.metrics.generation.learned_accepted_edge_count >= horizon
+                && actual.metrics.generation.learned_cycle_count == 2,
+            "conditional schedule truncated its horizon or lost the final tile feature lease");
+        const auto checkpoint = session.sampler_for_testing().checkpoint();
+        expect(session.regenerate_last_turn().selected_token_ids == actual.selected_token_ids
+                && checkpoint.same_state(session.sampler_for_testing().checkpoint()),
+            "conditional full-horizon regeneration changed causal RNG state");
+    }
+}
+
+void test_recurrent_execution_configuration_is_explicit() {
+    namespace engine = local_gguf_engine::engine;
+    namespace metal = local_gguf_engine::tensor::backends::metal;
+    TempBinaryFile model("recurrent-execution-options-target", chat_recurrent_target_fixture_bytes());
+    for (const auto& args : std::vector<std::vector<std::string>> {
+        {"--speculative-verifier", "batched"},
+        {"--speculative-schedule"}, {"--speculative-schedule", "short"},
+        {"--speculative-schedule", "conditional"},
+        {"--speculative-schedule", "full", "--speculative-schedule", "conditional"},
+        {"--draft-head"}, {"--draft-head", "q4"}, {"--draft-head", "q8_0"},
+        {"--draft-head", "f16", "--draft-head", "q8_0"},
+        {"--development-recurrent-weights", "/unused", "--speculative-schedule", "conditional"},
+        {"--development-recurrent-weights", "/unused", "--speculative-sampling", "lossless",
+            "--speculative-schedule", "conditional", "--no-speculative"},
+        {"--development-recurrent-weights", "/unused", "--speculative-sampling", "lossless",
+            "--draft-head", "q8_0", "--output-head", "f16"},
+    }) {
+        std::ostringstream output, error;
+        expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) != 0
+                && !error.str().empty(), "invalid execution option silently fell back to another route");
+    }
+    for (const auto bad : {
+        engine::RecurrentExecutionOptions {.draft_head = static_cast<engine::RecurrentDraftHead>(255)},
+    }) {
+        bool refused = false;
+        try { engine::validate_recurrent_execution_options(engine::SpeculativeSamplingMode::lossless, bad); }
+        catch (const std::invalid_argument&) { refused = true; }
+        expect(refused, "invalid typed execution enum was accepted");
+    }
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    TempBinaryFile weights("recurrent-execution-options-weights", chat_recurrent_fixture_weights(model.path(), false));
+    const std::vector<std::string> base {"--speculative-sampling", "lossless",
+        "--development-recurrent-weights", weights.path().string(), "--temperature", "0.8", "--top-k", "1",
+        "--output-head", "q8_0"};
+    for (const auto& extra : std::vector<std::vector<std::string>> {
+        {"--speculative-schedule", "full", "--draft-head", "f16"},
+        {"--speculative-schedule", "conditional", "--draft-head", "q8_0"},
+    }) {
+        auto args = base; args.insert(args.end(), extra.begin(), extra.end());
+        std::ostringstream output, error;
+        expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) == 0,
+            "valid explicit execution options failed: " + error.str());
+    }
+    Gemma2ChatSessionOptions options {.max_new_tokens = 3,
+        .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+        .development_recurrent_weights = weights.path(),
+        .speculative_sampling = engine::SpeculativeSamplingMode::lossless,
+        .sampler = {.temperature = 0.8F, .top_k = 1, .seed = 19}};
+    for (const auto alternative : {
+        engine::RecurrentExecutionOptions {.draft_head = engine::RecurrentDraftHead::q8_0},
+        engine::RecurrentExecutionOptions {.conditional_verification = true},
+    }) {
+        for (bool reversed : {false, true}) {
+            options.recurrent_execution = reversed ? alternative : engine::RecurrentExecutionOptions {};
+            auto prepared = engine::Gemma2ChatSessionState::prepare(read_file_backed_gguf_model(model.path()), options);
+            options.recurrent_execution = reversed ? engine::RecurrentExecutionOptions {} : alternative;
+            bool refused = false;
+            try { Gemma2ChatSession incompatible(std::move(prepared), options); }
+            catch (const std::invalid_argument&) { refused = true; }
+            expect(refused, "prepared session silently replaced its head/tile contract");
+        }
+    }
+    options.recurrent_execution = {.draft_head = engine::RecurrentDraftHead::q8_0,
+        .conditional_verification = true};
+    metal::set_metal_device_unavailable_for_testing(true);
+    bool refused = false;
+    try {
+        try { Gemma2ChatSession unavailable(read_file_backed_gguf_model(model.path()), options); }
+        catch (const std::exception&) { refused = true; }
+    } catch (...) { metal::set_metal_device_unavailable_for_testing(false); throw; }
+    metal::set_metal_device_unavailable_for_testing(false);
+    expect(refused, "conditional Q8 execution silently fell back without Metal");
+}
+
+void test_lossless_recurrent_configuration_and_unavailable_device() {
+    namespace engine = local_gguf_engine::engine;
+    namespace metal = local_gguf_engine::tensor::backends::metal;
+    TempBinaryFile model("lossless-chat-cli-invalid", chat_recurrent_target_fixture_bytes());
+    for (const auto& args : std::vector<std::vector<std::string>> {
+        {"--speculative-sampling"},
+        {"--speculative-sampling", "approximate"},
+        {"--speculative-sampling", "lossless"},
+        {"--speculative-sampling", "lossless", "--no-speculative"},
+        {"--speculative-sampling", "lossless", "--development-recurrent-weights", "/missing-lossless-weights"},
+        {"--speculative-sampling", "lossless", "--speculative-sampling", "exact-match"},
+    }) {
+        std::ostringstream output, error;
+        expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) != 0
+                && !error.str().empty(),
+            "invalid lossless request silently selected another decoding mode");
+    }
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    TempBinaryFile weights("lossless-chat-cli-weights", chat_recurrent_fixture_weights(model.path(), false));
+    const std::vector<std::string> args {"--speculative-sampling", "lossless",
+        "--development-recurrent-weights", weights.path().string(), "--temperature", "0.8", "--top-k", "1",
+        "--output-head", "q8_0"};
+    std::ostringstream output, error;
+    expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) == 0,
+        "valid explicit lossless CLI configuration failed: " + error.str());
+    for (auto prepared_mode : {engine::SpeculativeSamplingMode::exact_match, engine::SpeculativeSamplingMode::lossless}) {
+        Gemma2ChatSessionOptions options {.max_new_tokens = 3,
+            .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+            .development_recurrent_weights = weights.path(),
+            .sampler = {.temperature = 0.8F, .top_k = 1, .seed = 19}};
+        options.speculative_sampling = prepared_mode;
+        auto prepared = engine::Gemma2ChatSessionState::prepare(read_file_backed_gguf_model(model.path()), options);
+        options.speculative_sampling = prepared_mode == engine::SpeculativeSamplingMode::exact_match
+            ? engine::SpeculativeSamplingMode::lossless : engine::SpeculativeSamplingMode::exact_match;
+        bool refused = false;
+        try { Gemma2ChatSession incompatible(std::move(prepared), options); }
+        catch (const std::invalid_argument&) { refused = true; }
+        expect(refused, "prepared session silently switched its speculative sampling contract");
+    }
+    metal::set_metal_device_unavailable_for_testing(true);
+    bool refused = false;
+    try {
+        Gemma2ChatSessionOptions options {.max_new_tokens = 3,
+            .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+            .development_recurrent_weights = weights.path(),
+            .sampler = {.temperature = 0.8F, .top_k = 1, .seed = 19}};
+        options.speculative_sampling = engine::SpeculativeSamplingMode::lossless;
+        try { Gemma2ChatSession unavailable(read_file_backed_gguf_model(model.path()), options); }
+        catch (const std::exception&) { refused = true; }
+    } catch (...) { metal::set_metal_device_unavailable_for_testing(false); throw; }
+    metal::set_metal_device_unavailable_for_testing(false);
+    expect(refused, "lossless session silently fell back when Metal was unavailable");
+}
+
+void check_lossless_recurrent_stop_tokens_and_reverse_stops(
+    local_gguf_engine::engine::RecurrentExecutionOptions execution = {}) {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    namespace engine = local_gguf_engine::engine;
+    TempBinaryFile model("lossless-chat-stop-target", chat_recurrent_target_fixture_bytes(true, true));
+    TempBinaryFile weights("lossless-chat-stop-weights", chat_recurrent_fixture_weights(model.path(), false, 3, 2));
+    unsigned learned_stops = 0;
+    for (std::uint64_t seed = 0; seed < 8; ++seed) {
+        Gemma2ChatSessionOptions options {.max_new_tokens = 17,
+            .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+            .retrieval_decode = false, .development_recurrent_weights = weights.path(),
+            .sampler = {.temperature = 0.8F, .top_k = 2, .seed = seed}};
+        options.speculative_sampling = engine::SpeculativeSamplingMode::lossless;
+        options.recurrent_execution = execution;
+        Gemma2ChatSession session(read_file_backed_gguf_model(model.path()), options);
+        unsigned callbacks = 0;
+        const auto actual = session.generate_user_turn("Hello", [&](std::string_view) { ++callbacks; });
+        if (actual.stop_token_id) {
+            expect(actual.stop_token_id == 6U && actual.selected_token_ids.back() == 6U
+                    && actual.metrics.generation.stop_reason == Gemma2GenerationStopReason::stop_token
+                    && callbacks + 1 == actual.selected_token_ids.size(),
+                "lossless native EOS escaped its stop or callback boundary");
+            learned_stops += actual.metrics.generation.learned_cycle_count > 0 ? 1U : 0U;
+        } else {
+            expect(actual.selected_token_ids.size() == options.max_new_tokens
+                    && std::find(actual.selected_token_ids.begin(), actual.selected_token_ids.end(), 6U)
+                        == actual.selected_token_ids.end(),
+                "lossless sampled route ignored an EOS or stopped before its token budget");
+        }
+        expect(actual.generated_token_ids.size() == callbacks
+                && actual.cached_token_count == actual.rendered_prompt_token_ids.size() + actual.selected_token_ids.size(),
+            "lossless EOS escaped callbacks or failed to retain its K/V row");
+        const auto checkpoint = session.sampler_for_testing().checkpoint();
+        expect(session.regenerate_last_turn().selected_token_ids == actual.selected_token_ids
+                && checkpoint.same_state(session.sampler_for_testing().checkpoint()),
+            "lossless EOS regeneration changed a completed random transaction");
+    }
+    expect(learned_stops > 0, "EOS fixture never reached a lossless speculative cycle");
+
+    TempBinaryFile fixed_model("lossless-chat-reverse-target", chat_recurrent_target_fixture_bytes());
+    for (bool mismatch : {false, true}) {
+        TempBinaryFile fixed_weights("lossless-chat-reverse-weights",
+            chat_recurrent_fixture_weights(fixed_model.path(), mismatch));
+        for (unsigned depth = 2; depth <= 4; ++depth) {
+            std::string stop;
+            for (unsigned token = 0; token < depth; ++token) stop += "Hello";
+            Gemma2ChatSessionOptions options {.max_new_tokens = 9,
+                .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+                .retrieval_decode = false, .development_recurrent_weights = fixed_weights.path(),
+                .reverse_stop_strings = {stop},
+                .sampler = {.temperature = 0.8F, .top_k = 1, .seed = 19}};
+            options.speculative_sampling = engine::SpeculativeSamplingMode::lossless;
+            options.recurrent_execution = execution;
+            Gemma2ChatSession session(read_file_backed_gguf_model(fixed_model.path()), options);
+            const auto actual = session.generate_user_turn("Hello");
+            expect(actual.reverse_stop_string == stop && actual.text.empty()
+                    && actual.selected_token_ids.size() == depth
+                    && actual.cached_token_count == actual.rendered_prompt_token_ids.size() + depth
+                    && actual.metrics.generation.stop_reason == Gemma2GenerationStopReason::reverse_stop,
+                "lossless reverse-stop discarded hidden selected-token cache or overran its prefix");
+        }
+    }
+}
+
+void test_lossless_recurrent_stop_tokens_and_reverse_stops() {
+    check_lossless_recurrent_stop_tokens_and_reverse_stops();
+}
+
+void test_conditional_lossless_recurrent_stop_tokens_and_reverse_stops() {
+    check_lossless_recurrent_stop_tokens_and_reverse_stops({.conditional_verification = true});
+}
+
 void test_recurrent_cli_rejects_missing_and_conflicting_configuration() {
     const auto bytes = tiny_gemma2_generate_cli_gguf_bytes();
     TempBinaryFile model("recurrent-chat-cli-invalid", bytes);
@@ -2100,8 +2587,198 @@ void test_recurrent_cli_rejects_missing_and_conflicting_configuration() {
     }
 }
 
+void test_standalone_tli_cli_rejects_missing_and_conflicting_configuration() {
+    TempBinaryFile model("standalone-tli-cli-invalid", chat_recurrent_target_fixture_bytes());
+    for (const auto& args : std::vector<std::vector<std::string>> {
+        {"--draft-model"},
+        {"--draft-model", ""},
+        {"--draft-model", "--speculative-sampling", "lossless"},
+        {"--draft-model", "one", "--draft-model", "two", "--speculative-sampling", "lossless"},
+        {"--draft-model", "/missing-vicuna-draft.gguf"},
+        {"--draft-model", "/missing-vicuna-draft.gguf", "--speculative-sampling", "exact-match"},
+        {"--draft-model", "/missing-vicuna-draft.gguf", "--speculative-sampling", "lossless"},
+        {"--draft-model", "/missing-vicuna-draft.gguf", "--speculative-sampling", "lossless", "--no-speculative"},
+        {"--draft-model", "/missing-vicuna-draft.gguf", "--speculative-sampling", "lossless", "--backend", "cpu"},
+        {"--draft-model", "/missing-vicuna-draft.gguf", "--speculative-sampling", "lossless",
+            "--development-recurrent-weights", "/unused"},
+        {"--draft-model", "/missing-vicuna-draft.gguf", "--speculative-sampling", "lossless", "--draft-head", "f16"},
+        {"--draft-model", "/missing-vicuna-draft.gguf", "--speculative-sampling", "lossless", "--draft-head", "q8_0"},
+        {"--draft-horizon"}, {"--draft-horizon", "3"}, {"--draft-horizon", "0"},
+        {"--draft-horizon", "-1"}, {"--draft-horizon", "24"}, {"--draft-horizon", "3.0"},
+        {"--draft-horizon", "18446744073709551616"},
+        {"--draft-model", "/missing-vicuna-draft.gguf", "--speculative-sampling", "lossless",
+            "--draft-horizon", "1", "--draft-horizon", "23"},
+    }) {
+        std::ostringstream output, error;
+        expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) != 0
+                && !error.str().empty(), "invalid standalone TLI configuration silently selected another route");
+        expect(output.str().find("local-gguf-engine chat") == std::string::npos,
+            "invalid standalone TLI configuration started chat using a fallback route");
+        expect(error.str().find("unknown chat option") == std::string::npos,
+            "standalone TLI flags were not recognized by the real CLI parser");
+    }
+}
+
+void test_standalone_draft_sampling_cli_rejects_invalid_and_conflicting_flags() {
+    TempBinaryFile model("standalone-draft-sampling-cli-invalid", chat_recurrent_target_fixture_bytes());
+    const std::vector<std::string> base {"--draft-model", "/missing-native-draft.gguf",
+        "--speculative-sampling", "lossless"};
+    for (const auto& extra : std::vector<std::vector<std::string>> {
+        {"--draft-temperature"}, {"--draft-temperature", "nan"}, {"--draft-temperature", "inf"},
+        {"--draft-temperature", "-0.1"}, {"--draft-temperature", "0", "--draft-temperature", "1"},
+        {"--draft-top-k"}, {"--draft-top-k", "-1"}, {"--draft-top-k", "1.5"},
+        {"--draft-top-k", "4294967296"}, {"--draft-top-k", "18446744073709551616"},
+        {"--draft-top-k", "0", "--draft-top-k", "40"},
+        {"--draft-top-p", "0"}, {"--draft-top-p", "1.01"}, {"--draft-top-p", "nan"},
+        {"--draft-top-p", "0.5", "--draft-top-p", "1"},
+        {"--draft-min-p", "-0.1"}, {"--draft-min-p", "1.01"}, {"--draft-min-p", "inf"},
+        {"--draft-min-p", "0", "--draft-min-p", "0.1"},
+        {"--draft-repeat-penalty", "0"}, {"--draft-repeat-penalty", "-1"},
+        {"--draft-repeat-penalty", "nan"}, {"--draft-repeat-penalty", "1", "--draft-repeat-penalty", "2"},
+    }) {
+        auto args = base;
+        args.insert(args.end(), extra.begin(), extra.end());
+        std::ostringstream output, error;
+        expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) != 0,
+            "invalid draft sampler flag was accepted");
+        expect(error.str().find("error: --draft-") != std::string::npos
+            && error.str().find("unknown chat option") == std::string::npos,
+            "invalid draft sampler must fail in explicit CLI validation before artifact loading");
+    }
+    for (const auto* flag : {"--draft-temperature", "--draft-top-k", "--draft-top-p", "--draft-min-p", "--draft-repeat-penalty"}) {
+        for (const auto& context : std::vector<std::vector<std::string>> {
+            {}, {"--no-speculative"},
+            {"--development-recurrent-weights", "/unused", "--speculative-sampling", "lossless"},
+            {"--draft-model", "/unused", "--speculative-sampling", "exact-match"},
+            {"--draft-model", "/unused", "--speculative-sampling", "lossless", "--no-speculative"},
+            {"--draft-model", "/unused", "--speculative-sampling", "lossless", "--backend", "cpu"},
+        }) {
+            auto args = context;
+            args.insert(args.end(), {flag, "1"});
+            std::ostringstream output, error;
+            expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) != 0
+                && output.str().find("local-gguf-engine chat") == std::string::npos,
+                "draft scalar overrides leaked into target-only/recurrent/non-lossless mode");
+            expect(error.str().find("requires") != std::string::npos || error.str().find("require") != std::string::npos,
+                "conflicting draft sampler configuration omitted its dependency error");
+        }
+    }
+}
+
+void test_standalone_draft_sampling_cli_propagates_effective_values_when_available() {
+    const std::filesystem::path draft("models/gemma-3-270m-it-Q8_0.gguf");
+    if (!tensor_backend_is_available(BackendKind::metal) || !std::filesystem::exists(draft)) return;
+    TempBinaryFile model("standalone-draft-sampling-cli-effective", chat_recurrent_target_fixture_bytes());
+    std::string inherited_hash;
+    for (const bool override : {false, true}) {
+        std::vector<std::string> arguments {"local-gguf-generate", model.path().string(), "--chat", "--max-new-tokens", "1",
+            "--draft-model", draft.string(), "--draft-horizon", "1", "--speculative-sampling", "lossless",
+            "--output-head", "q8_0",
+            "--temperature", "0.5", "--top-k", "2", "--top-p", "0.75", "--min-p", "0.125",
+            "--repeat-penalty", "1.5", "--seed", "42", "--decode-diagnostics"};
+        if (override) arguments.insert(arguments.end(), {"--draft-temperature", "0.25", "--draft-top-k", "0",
+            "--draft-top-p", "1", "--draft-min-p", "0", "--draft-repeat-penalty", "1"});
+        std::vector<const char*> argv;
+        for (const auto& argument : arguments) argv.push_back(argument.c_str());
+        std::istringstream input("Hello\n/exit\n");
+        std::ostringstream output, error;
+        expect(run_generate(static_cast<int>(argv.size()), argv.data(), input, output, error) == 0,
+            "valid explicit standalone draft sampler CLI failed: " + error.str());
+        const auto expected = override
+            ? "\"standalone_effective_sampler\":{\"temperature\":0.25,\"top_k\":0,\"top_p\":1,\"min_p\":0,\"repetition_penalty\":1}"
+            : "\"standalone_effective_sampler\":{\"temperature\":0.5,\"top_k\":2,\"top_p\":0.75,\"min_p\":0.125,\"repetition_penalty\":1.5}";
+        expect(output.str().find(expected) != std::string::npos, "CLI overrides/inheritance did not reach actual prepared session diagnostics");
+        const std::string_view marker = "\"selected_token_hash\":\"";
+        const auto begin = output.str().find(marker);
+        expect(begin != std::string::npos, "CLI sampler test missing target token provenance");
+        const auto hash = output.str().substr(begin + marker.size(), 16);
+        if (override) expect(hash == inherited_hash, "draft-only flags changed the authoritative ordinary target selection");
+        else inherited_hash = hash;
+    }
+}
+
+void check_standalone_real_artifact_failed_regeneration(const std::filesystem::path& draft_path) {
+    namespace engine = local_gguf_engine::engine;
+    if (!tensor_backend_is_available(BackendKind::metal) || !std::filesystem::exists(draft_path)) return;
+    TempBinaryFile model("standalone-real-regeneration", chat_recurrent_target_fixture_bytes(false, false, false, 64));
+    Gemma2ChatSessionOptions options {.max_new_tokens = 8,
+        .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+        .context_shift = true, .retrieval_decode = false, .standalone_draft_model = draft_path,
+        .standalone_execution = {.horizon = 3, .conditional_verification = true},
+        .speculative_sampling = engine::SpeculativeSamplingMode::lossless,
+        .sampler = {.temperature = 0.8F, .top_k = 1, .seed = 92, .repetition_window = 2}};
+    Gemma2ChatSession session(read_file_backed_gguf_model(model.path()), options);
+    const auto original = session.generate_user_turn("Hello");
+    expect(original.metrics.generation.learned_cycle_count > 0,
+        "real standalone regeneration test did not execute its native draft");
+    expect(original.metrics.generation.standalone_draft_gpu_ns >= original.metrics.generation.learned_draft_gpu_ns
+            && original.metrics.generation.standalone_draft_command_buffer_count > 0
+            && original.metrics.generation.standalone_draft_compute_dispatch_count > 0
+            && original.metrics.decode_execution.gpu_duration_ns <= original.metrics.generation.decode_duration_ns,
+        "standalone complete-path metrics omit work or exceed their enclosing decode clock");
+    const auto checkpoint = session.sampler_for_testing().checkpoint();
+    const auto cached = session.cached_token_count();
+    engine::set_target_verifier_failure_for_testing(engine::TargetVerifierFailurePoint::encode);
+    bool failed = false;
+    try { static_cast<void>(session.regenerate_last_turn()); }
+    catch (const std::exception&) { failed = true; }
+    engine::clear_target_verifier_failure_for_testing();
+    expect(failed && !session.poisoned() && session.cached_token_count() == cached
+            && session.sampler_for_testing().checkpoint().same_state(checkpoint),
+        "unpublished failed standalone regeneration lost its durable target/sampler state");
+    const auto regenerated = session.regenerate_last_turn();
+    expect(regenerated.selected_token_ids == original.selected_token_ids
+            && regenerated.metrics.generation.learned_accepted_edge_count
+                == original.metrics.generation.learned_accepted_edge_count
+            && session.sampler_for_testing().checkpoint().same_state(checkpoint),
+        "failed standalone regeneration changed its original draft context or future probability draws");
+    bool shifted = false;
+    for (unsigned turn = 0; turn < 8; ++turn) {
+        const auto continued = session.generate_user_turn("Hello");
+        if (!continued.rebuilt_context) continue;
+        shifted = true;
+        expect(continued.cache_position == 0 && continued.trimmed_turn_count > 0
+                && continued.cached_token_count <= session.context_length()
+                && continued.metrics.generation.standalone_prefill_ns > 0
+                && continued.metrics.generation.learned_cycle_count > 0
+                && continued.selected_token_ids == original.selected_token_ids,
+            "standalone context shift failed to rebuild and execute its native draft at target position zero");
+        const auto shifted_state = session.sampler_for_testing().checkpoint();
+        const auto replayed = session.regenerate_last_turn();
+        expect(replayed.selected_token_ids == continued.selected_token_ids
+                && replayed.metrics.generation.learned_accepted_edge_count
+                    == continued.metrics.generation.learned_accepted_edge_count
+                && session.sampler_for_testing().checkpoint().same_state(shifted_state),
+            "regeneration after standalone context shift did not reproduce its own draft law and random state");
+        break;
+    }
+    expect(shifted, "standalone real-artifact session did not exercise context shifting");
+}
+
+void test_standalone_real_artifact_failed_regeneration_when_available() {
+    check_standalone_real_artifact_failed_regeneration("models/vicuna_68m/vicuna-68m-f16.gguf");
+}
+void test_gemma3_real_artifact_failed_regeneration_when_available() {
+    check_standalone_real_artifact_failed_regeneration("models/gemma-3-270m-it-Q8_0.gguf");
+}
+
 const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
+    {"real Gemma3 failed regeneration and context shifts preserve own sampling state when available", test_gemma3_real_artifact_failed_regeneration_when_available},
+    {"real standalone failed regeneration restores original append policy when available", test_standalone_real_artifact_failed_regeneration_when_available},
+    {"standalone TLI CLI rejects missing malformed and conflicting configuration", test_standalone_tli_cli_rejects_missing_and_conflicting_configuration},
+    {"standalone draft sampling CLI rejects invalid and conflicting scalars", test_standalone_draft_sampling_cli_rejects_invalid_and_conflicting_flags},
+    {"standalone draft sampling CLI preserves target selection and reports effective overrides when available", test_standalone_draft_sampling_cli_propagates_effective_values_when_available},
+    {"recurrent execution CLI and prepared contracts are explicit", test_recurrent_execution_configuration_is_explicit},
+    {"conditional lossless chat preserves full live transaction boundaries", test_conditional_lossless_recurrent_chat_transactions},
+    {"conditional Q8 chat preserves full-chain tokens cache and recovery", test_q8_conditional_recurrent_cache_recovery},
+    {"conditional chat preserves every full horizon and final feature lease", test_conditional_recurrent_full_horizon_feature_leases},
+    {"mixed retrieval and learned lossless chat preserves emitted-path K/V", test_lossless_recurrent_mixed_retrieval_transactions},
+    {"conditional lossless chat honors EOS and reverse stops", test_conditional_lossless_recurrent_stop_tokens_and_reverse_stops},
     {"live learned chat preserves target tokens and callback transaction boundaries", test_live_recurrent_chat_transactions},
+    {"lossless learned chat preserves committed cache and callback transaction boundaries", test_lossless_recurrent_chat_transactions},
+    {"lossless learned sampled chat replays target K/V and its own random state", test_lossless_recurrent_sampled_path_and_regeneration},
+    {"lossless learned CLI and unavailable-device requests fail closed", test_lossless_recurrent_configuration_and_unavailable_device},
+    {"lossless learned chat honors EOS and reverse-stop transaction boundaries", test_lossless_recurrent_stop_tokens_and_reverse_stops},
     {"learned chat CLI fails closed on missing and conflicting configuration", test_recurrent_cli_rejects_missing_and_conflicting_configuration},
     {
         "formats chat timing line from runtime metrics",
@@ -2249,6 +2926,10 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
 }  // namespace
 
 namespace local_gguf_engine::tests {
+
+std::vector<std::uint8_t> standalone_chat_target_fixture_bytes(std::uint32_t context) {
+    return chat_recurrent_target_fixture_bytes(false, false, false, context);
+}
 
 std::span<const TestCase> generate_cli_test_cases() {
     return kGenerateCliTests;

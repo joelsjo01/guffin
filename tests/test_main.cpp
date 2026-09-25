@@ -23,6 +23,14 @@
 #include <exception>
 #include <iostream>
 
+namespace local_gguf_engine::tests {
+std::span<const TestCase> lossless_sampling_test_cases();
+std::span<const TestCase> standalone_draft_artifact_test_cases();
+std::span<const TestCase> standalone_chat_test_cases();
+std::span<const TestCase> vicuna_draft_test_cases();
+std::span<const TestCase> gemma3_draft_test_cases();
+}
+
 int main() {
     int failures = 0;
     std::size_t test_count = 0;
@@ -49,6 +57,13 @@ int main() {
     for (const auto& test : local_gguf_engine::tests::sampling_test_cases()) {
         run_test(test);
     }
+    for (const auto& test : local_gguf_engine::tests::lossless_sampling_test_cases()) {
+        run_test(test);
+    }
+    for (const auto& test : local_gguf_engine::tests::standalone_draft_artifact_test_cases()) run_test(test);
+    for (const auto& test : local_gguf_engine::tests::standalone_chat_test_cases()) run_test(test);
+    for (const auto& test : local_gguf_engine::tests::vicuna_draft_test_cases()) run_test(test);
+    for (const auto& test : local_gguf_engine::tests::gemma3_draft_test_cases()) run_test(test);
     for (const auto& test : local_gguf_engine::tests::speculative_controller_test_cases()) {
         run_test(test);
     }

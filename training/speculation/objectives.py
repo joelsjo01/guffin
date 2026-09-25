@@ -142,7 +142,8 @@ class GemmaTargetHead(nn.Module):
         self.softcap = softcap
         self.chunk_size = chunk_size
 
-    def forward(self, states: Tensor, apply_norm: bool = True) -> Tensor:
+    def forward(self, states: Tensor, apply_norm: bool = True,
+                apply_softcap: bool = True) -> Tensor:
         normalized = states.float()
         if apply_norm:
             normalized = normalized * torch.rsqrt(
@@ -155,9 +156,64 @@ class GemmaTargetHead(nn.Module):
         logits = _FrozenVocabularyMatmul.apply(
             normalized, self.token_table, self.chunk_size
         )
-        if self.softcap > 0.0:
+        if apply_softcap and self.softcap > 0.0:
             logits = self.softcap * torch.tanh(logits / self.softcap)
         return logits
+
+
+def draft_logits(output: DraftOutput, head: GemmaTargetHead,
+                 depth: int | None = None) -> Tensor:
+    """Project semantic states once, then add P's independent vocabulary bias.
+
+    P owns its learned final RMSNorm. Its correction is added after that norm
+    and the frozen projection. The Gemma transfer applies its declared softcap
+    to the corrected logits; neither rank factors nor corrected logits pass
+    through target-hidden RMSNorm. R's existing arithmetic path is unchanged.
+    """
+    states = output.states
+    if states.ndim != 3 or any(size <= 0 for size in states.shape):
+        raise ValueError("draft head requires nonempty [batch,horizon,width] states")
+    if depth is not None and (
+            not isinstance(depth, int) or isinstance(depth, bool)
+            or not 0 <= depth < states.shape[1]):
+        raise ValueError("draft head depth is outside the proposal horizon")
+    correction = output.logit_correction
+    semantic_logits = output.semantic_logits
+    if semantic_logits is not None and (
+            semantic_logits.shape != (*states.shape[:2], head.token_table.shape[0])
+            or semantic_logits.device != states.device
+            or semantic_logits.dtype != torch.float32
+            or not output.head_pre_normalized):
+        raise ValueError("prepared P base logits have incompatible shape/device/norm")
+    if correction is None and semantic_logits is None and not output.head_pre_normalized:
+        return head(states if depth is None else states[:, depth],
+                    apply_norm=not output.head_pre_normalized)
+    if correction is not None:
+        features, weight = correction.features, correction.weight
+        if (features.ndim != 3 or features.shape[:2] != states.shape[:2]
+            or features.shape[-1] <= 0 or weight.ndim != 2
+            or weight.shape != (head.token_table.shape[0], features.shape[-1])
+            or features.device != states.device or weight.device != states.device
+            or not features.is_floating_point() or not weight.is_floating_point()
+            or not output.head_pre_normalized):
+            raise ValueError("P vocabulary correction shape/device/norm contract is invalid")
+    if depth is not None:
+        states = states[:, depth]
+        if correction is not None:
+            features = features[:, depth]
+        if semantic_logits is not None:
+            semantic_logits = semantic_logits[:, depth]
+    base = (head(states, apply_norm=False, apply_softcap=False)
+            if semantic_logits is None else semantic_logits)
+    logits = base if correction is None else base + F.linear(features, weight).float()
+    # An infinity must not be hidden by the bounded Gemma softcap.
+    if not bool(torch.isfinite(logits.detach()).all().item()):
+        raise ValueError(
+            "draft logits must be finite before softcap (nonfinite semantic/correction projection)"
+        )
+    if head.softcap > 0.0:
+        logits = head.softcap * torch.tanh(logits / head.softcap)
+    return logits
 
 
 _SAMPLER_MAX_TOP_K = 256
@@ -723,7 +779,7 @@ def standard_objective(
         sampler, head.token_table.shape[0]
     )
 
-    logits = head(output.states, apply_norm=not output.head_pre_normalized)
+    logits = draft_logits(output, head)
     raw_log_normalizer = torch.logsumexp(logits, dim=-1)
     selected_raw_logit = deterministic_last_dim_gather(
         logits, labels.unsqueeze(-1)

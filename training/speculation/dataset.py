@@ -651,6 +651,28 @@ def _select_row(record: TraceRecord, tap_set: tuple[str, ...]) -> _Row:
     )
 
 
+def _retained_turn_context(context: list[_Row], rows: list[_Row],
+                           context_mode: str) -> list[_Row]:
+    retained = context + rows
+    if not retained:
+        return retained
+    if context_mode == "root_only":
+        return retained[-8192:]
+    if context_mode != "full_context":
+        raise DatasetError(f"unknown feature context mode {context_mode}")
+    # A context rebuild discards the old generation, not an arbitrary suffix
+    # of the current generation. Silent truncation here would otherwise bypass
+    # _example's capacity check at the next conversation turn.
+    start = len(retained) - 1
+    generation = retained[-1].context_generation
+    while start > 0 and retained[start - 1].context_generation == generation:
+        start -= 1
+    retained = retained[start:]
+    if len(retained) > 8192:
+        raise DatasetError("full-context turn exceeds the declared 8192-row capacity")
+    return retained
+
+
 def _example(
     context: list[_Row], rows: list[_Row], origins: list[int], horizon: int,
     sampler: tuple[object, ...], context_mode: str,
@@ -674,8 +696,10 @@ def _example(
             generation_start -= 1
         visible_context = combined[generation_start:last_origin + 1]
         if len(visible_context) > 8192:
-            visible_context = visible_context[-8192:]
-            generation_start = last_origin + 1 - len(visible_context)
+            raise DatasetError(
+                "full-context feature sequence exceeds the declared 8192-row capacity; "
+                "silently training on a truncated context is forbidden"
+            )
         anchor_indices = numpy.asarray(
             [index - generation_start for index in global_origins], dtype=numpy.int64
         )
@@ -1441,9 +1465,7 @@ class TraceWindowStream:
                                 if (self.maximum_origins is not None
                                         and emitted >= self.maximum_origins):
                                     return
-                    context.extend(rows)
-                    if len(context) > 8192:
-                        context = context[-8192:]
+                    context = _retained_turn_context(context, rows, self.context_mode)
         expected_origins = (
             len(self.membership.references) if self.membership is not None
             else self.maximum_origins

@@ -680,6 +680,14 @@ SpeculativeControllerOutcome BoundedSpeculativeController::run_impl(
         throw std::invalid_argument("speculative controller scenario is incomplete");
     }
     const auto& graph = scenario.graph->storage();
+    if ((scenario.sampling_mode != SpeculativeSamplingMode::exact_match
+            && scenario.sampling_mode != SpeculativeSamplingMode::lossless)
+        || (scenario.sampling_mode == SpeculativeSamplingMode::lossless
+            && (graph.header.kind != ProposalGraphKind::chain
+                || scenario.proposal_source != SpeculativeProposalSource::learned_external
+                || graph.header.primary_policy != ProposalPrimaryPolicy::independent_distribution))) {
+        throw std::invalid_argument("lossless controller requires an independent learned chain");
+    }
     if (graph.header.kind == ProposalGraphKind::chain) {
         validate_chain_verifier_schedule(scenario.chain_schedule, graph.header.horizon);
     } else if (scenario.chain_schedule.tile_count != 0U) {
@@ -824,7 +832,14 @@ SpeculativeControllerOutcome BoundedSpeculativeController::run_impl(
             throw std::out_of_range("controller requested an unavailable scripted target sample");
         }
         const auto sample = scenario.target_samples[target_sample_cursor++];
-        if (!sample.checkpoint.follows_sample(current_checkpoint, sample.token_id)) {
+        const bool lossless = scenario.sampling_mode == SpeculativeSamplingMode::lossless;
+        const bool accepted = sample.law == ControllerSampleLaw::rejection_accept;
+        const bool valid_law = lossless
+            ? (accepted || sample.law == ControllerSampleLaw::rejection_residual)
+            : sample.law == ControllerSampleLaw::target_draw;
+        if (!valid_law || (lossless
+            ? !sample.checkpoint.follows_speculative(current_checkpoint, sample.token_id, accepted)
+            : !sample.checkpoint.follows_sample(current_checkpoint, sample.token_id))) {
             throw std::invalid_argument("scripted target sample checkpoint does not follow its anchor");
         }
         ++outcome.sampled_preview_count;
@@ -847,6 +862,10 @@ SpeculativeControllerOutcome BoundedSpeculativeController::run_impl(
     };
 
     auto select_sample = [&](const ControllerTargetSample& sample, const EdgeMatch& match) {
+        if (scenario.sampling_mode == SpeculativeSamplingMode::lossless
+            && ((sample.law == ControllerSampleLaw::rejection_accept) != match.matched)) {
+            throw std::invalid_argument("lossless sample decision disagrees with proposal path");
+        }
         ++current_depth;
         current_checkpoint = sample.checkpoint;
         current_node = match.materialized ? match.child_node : proposal_node_none;

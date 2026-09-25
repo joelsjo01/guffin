@@ -55,6 +55,7 @@ PreparedGemma2Lifecycle PreparedGemma2Plan::lifecycle() const noexcept {
     if (lifecycle_ == PreparedGemma2Lifecycle::poisoned
         || target_.verification_poisoned()
         || (recurrent_.has_value() && recurrent_->poisoned())
+        || (standalone_.has_value() && standalone_->poisoned())
         || (feature_sinks_.has_value() && feature_sinks_->poisoned())
         || (draft_cache_.has_value() && draft_cache_->poisoned())) {
         return PreparedGemma2Lifecycle::poisoned;
@@ -154,6 +155,7 @@ void PreparedGemma2Plan::reset_learned_state() {
     if (feature_sinks_) feature_sinks_->reset();
     if (draft_cache_) draft_cache_->reset();
     if (recurrent_) recurrent_->invalidate();
+    if (standalone_) standalone_->reset();
     lifecycle_ = PreparedGemma2Lifecycle::ready;
     execution_epoch_ = 0U;
 }
@@ -166,6 +168,33 @@ RecurrentChatPlan* PreparedGemma2Plan::recurrent() noexcept {
 }
 const RecurrentChatPlan* PreparedGemma2Plan::recurrent() const noexcept {
     return recurrent_ ? &*recurrent_ : nullptr;
+}
+StandaloneChatPlan* PreparedGemma2Plan::standalone() noexcept {
+    return standalone_ ? &*standalone_ : nullptr;
+}
+const StandaloneChatPlan* PreparedGemma2Plan::standalone() const noexcept {
+    return standalone_ ? &*standalone_ : nullptr;
+}
+
+PreparedGemma2Plan prepare_gemma2_standalone_plan(const EngineModel& model,
+    const tokenizer::Tokenizer& tokenizer, std::shared_ptr<StandaloneDraftArtifact> source,
+    StandaloneExecutionOptions execution, Gemma2OutputHeadPolicy policy) {
+    if (!model.payload_receipt())
+        throw std::invalid_argument("standalone draft requires authenticated model sources");
+    if (!model.tokenizer_identity() || *model.tokenizer_identity() != tokenizer.identity())
+        throw std::invalid_argument("standalone target tokenizer does not match authenticated GGUF metadata");
+    if (!source)
+        throw std::invalid_argument("standalone draft requires authenticated model sources");
+    if (execution.horizon == 0 || execution.horizon > external_speculation_max_horizon)
+        throw std::invalid_argument("standalone draft horizon is outside prepared capacity");
+    ResidentTargetPayloadReceipt resident;
+    auto target = create_gemma2_metal_model_plan(model, policy, resident);
+    const auto mode = source->kind() == StandaloneDraftKind::gemma3_270m_q8
+        ? PreparedGemma2Mode::standalone_gemma3_tli : PreparedGemma2Mode::standalone_vicuna_tli;
+    PreparedGemma2Plan result(mode, std::move(target),
+        std::nullopt, std::nullopt, *model.payload_receipt(), resident, source->digest());
+    result.standalone_.emplace(std::move(source), tokenizer, result.target_, execution);
+    return result;
 }
 
 PreparedGemma2Plan prepare_gemma2_target_only_plan(
@@ -187,8 +216,10 @@ PreparedGemma2Plan prepare_gemma2_target_only_plan(
 
 PreparedGemma2Plan prepare_gemma2_recurrent_plan(
     const EngineModel& model, std::shared_ptr<RecurrentWeightsFile> source,
-    const TokenSamplerOptions& sampler, Gemma2OutputHeadPolicy policy
+    const TokenSamplerOptions& sampler, Gemma2OutputHeadPolicy policy,
+    SpeculativeSamplingMode sampling_mode, RecurrentExecutionOptions execution
 ) {
+    validate_recurrent_execution_options(sampling_mode, execution);
     if (!source || !model.payload_receipt()) {
         throw std::invalid_argument("recurrent prepared plan requires authenticated sources");
     }
@@ -196,6 +227,10 @@ PreparedGemma2Plan prepare_gemma2_recurrent_plan(
     const auto& descriptor = artifact.descriptor();
     const auto resolved = resolve_gemma2_output_head_policy(
         model.gemma2_config(), bind_gemma2_model_weights(model), policy);
+    if (execution.draft_head == RecurrentDraftHead::q8_0
+        && resolved != Gemma2OutputHeadPolicy::q8_0) {
+        incompatible("Q8 recurrent drafting requires a resident Q8 target head");
+    }
     const auto& s = descriptor.recurrent;
     if (descriptor.kind != SpeculativeArtifactKind::trained_candidate
         || descriptor.target.model != *model.payload_receipt()
@@ -208,10 +243,11 @@ PreparedGemma2Plan prepare_gemma2_recurrent_plan(
     }
     ResidentTargetPayloadReceipt resident;
     auto target = create_gemma2_metal_model_plan(model, resolved, resident);
-    auto draft = Gemma2SpeculativePlan::create(source, *model.payload_receipt(), resident, target);
+    auto draft = Gemma2SpeculativePlan::create(source, *model.payload_receipt(), resident, target,
+        execution.draft_head);
     PreparedGemma2Plan result(PreparedGemma2Mode::development_recurrent, std::move(target),
         std::nullopt, std::nullopt, *model.payload_receipt(), resident, artifact.envelope_digest());
-    result.recurrent_.emplace(std::move(draft), result.target_);
+    result.recurrent_.emplace(std::move(draft), result.target_, sampling_mode, execution);
     return result;
 }
 

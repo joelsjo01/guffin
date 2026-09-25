@@ -13,7 +13,7 @@
 
 namespace local_gguf_engine::tensor::backends::metal {
 
-enum class RecurrentStage : std::uint32_t { linear, norm, embedding, join, update, sample, verifier_requests };
+enum class RecurrentStage : std::uint32_t { linear, norm, embedding, join, update, sample, verifier_requests, sample_lossless };
 void prepare_recurrent_pipelines();
 
 namespace draft_detail {

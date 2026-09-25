@@ -66,11 +66,30 @@ struct Gemma2GenerationMetrics {
     std::uint64_t proposer_duration_ns = 0;
     std::uint32_t learned_cycle_count = 0;
     std::uint32_t learned_accepted_edge_count = 0;
+    // Durable accepted-prefix lengths, not eagerly computed previews. Depth
+    // zero denotes rejection of the first proposal. Terminal truncations are
+    // kept separate so they cannot be mistaken for failed draft predictions.
+    std::array<std::uint32_t, external_speculation_max_horizon + 1> learned_accepted_prefix_histogram {};
+    std::array<std::uint32_t, external_speculation_max_horizon> learned_rejection_depth_histogram {};
+    std::uint32_t learned_censored_cycle_count = 0;
+    std::uint32_t learned_full_accept_count = 0;
+    std::uint32_t learned_horizon_limited_cycle_count = 0;
     std::uint32_t learned_numeric_refusal_count = 0;
     std::uint64_t learned_draft_duration_ns = 0;
     std::uint64_t learned_draft_gpu_ns = 0;
     std::uint64_t learned_target_gpu_ns = 0;
     std::uint64_t learned_cycle_duration_ns = 0;
+    std::uint64_t standalone_prefill_ns = 0;
+    std::uint64_t standalone_rebuild_ns = 0;
+    std::uint64_t standalone_draft_uploaded_bytes = 0;
+    std::uint64_t standalone_draft_readback_bytes = 0;
+    // All standalone work, including prompt synchronization and ordinary or
+    // retrieval catch-up outside speculative cycles. Cycle-only learned_*
+    // fields above retain their existing meaning.
+    std::uint64_t standalone_draft_wall_ns = 0;
+    std::uint64_t standalone_draft_gpu_ns = 0;
+    std::uint32_t standalone_draft_command_buffer_count = 0;
+    std::uint32_t standalone_draft_compute_dispatch_count = 0;
     // FNV-1a over each selected uint32 token in little-endian byte order.
     // This is diagnostic evidence, not a cryptographic identity.
     std::uint64_t selected_token_hash = 0;
@@ -321,6 +340,7 @@ void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan);
 );
 
 class RecurrentChatPlan;
+class StandaloneChatPlan;
 // Borrowed, preallocated turn storage. Updated only once the selected token's
 // K/V is recoverable, before any irreversible callback for that token.
 struct Gemma2GenerationCommitJournal {
@@ -343,7 +363,9 @@ struct Gemma2GenerationCommitJournal {
     RetrievalProposer* proposer = nullptr,
     const Gemma2GenerationTraceBinding* trace = nullptr,
     RecurrentChatPlan* learned = nullptr,
-    Gemma2GenerationCommitJournal* journal = nullptr
+    Gemma2GenerationCommitJournal* journal = nullptr,
+    StandaloneChatPlan* standalone = nullptr,
+    std::span<const std::uint32_t> standalone_context = {}
 );
 
 }  // namespace local_gguf_engine::engine

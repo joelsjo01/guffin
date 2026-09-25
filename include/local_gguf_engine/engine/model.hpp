@@ -84,7 +84,8 @@ public:
         std::optional<std::string> name,
         Gemma2ModelConfig gemma2_config,
         std::vector<EngineTensorView> tensor_views,
-        std::optional<EngineModelPayloadReceipt> payload_receipt = std::nullopt
+        std::optional<EngineModelPayloadReceipt> payload_receipt = std::nullopt,
+        std::optional<runtime::Sha256Digest> tokenizer_identity = std::nullopt
     );
 
     [[nodiscard]] ModelArchitecture architecture() const noexcept;
@@ -92,6 +93,7 @@ public:
     [[nodiscard]] const Gemma2ModelConfig& gemma2_config() const noexcept;
     [[nodiscard]] const std::vector<EngineTensorView>& tensor_views() const noexcept;
     [[nodiscard]] const std::optional<EngineModelPayloadReceipt>& payload_receipt() const noexcept;
+    [[nodiscard]] const std::optional<runtime::Sha256Digest>& tokenizer_identity() const noexcept;
     [[nodiscard]] const EngineTensorView* find_tensor_view(std::string_view name) const noexcept;
 
 private:
@@ -100,6 +102,9 @@ private:
     Gemma2ModelConfig gemma2_config_;
     std::vector<EngineTensorView> tensor_views_;
     std::optional<EngineModelPayloadReceipt> payload_receipt_;
+    // Separate from the frozen artifact receipt: legacy trained artifacts retain
+    // their identities, while standalone plans bind the actual source tokenizer.
+    std::optional<runtime::Sha256Digest> tokenizer_identity_;
 };
 
 [[nodiscard]] std::string_view model_architecture_name(ModelArchitecture architecture) noexcept;

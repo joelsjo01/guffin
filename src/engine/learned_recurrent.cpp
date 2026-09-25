@@ -97,12 +97,16 @@ std::uint32_t recurrent_sample_cpu(std::span<const float> logits,double draw,con
 
 RecurrentGolden recurrent_cpu_golden(const AuthenticatedSpeculativeArtifact& artifact,
     const tensor::TensorView& table,std::span<const float> norm,std::span<const float> feature,
-    std::uint32_t root,std::span<const double> draws) {
+    std::uint32_t root,std::span<const double> draws,const tensor::TensorView* packed_output_head) {
     const auto& a=artifact.descriptor();const auto& s=a.recurrent;const auto& c=a.target.config;
     const auto d=c.embedding_length,w=s.width,v=c.vocab_size;
     if(s.version!=1 || draws.size()!=s.horizon || feature.size()!=d || norm.size()!=d
         || table.descriptor().dtype!=tensor::DType::f16 || table.bytes().size()!=std::uint64_t(d)*v*2 || root>=v) {
         throw std::invalid_argument("recurrent golden shape");
+    }
+    if(packed_output_head && (packed_output_head->descriptor().dtype!=tensor::DType::q8_0
+        || packed_output_head->descriptor().shape!=table.descriptor().shape || d%32!=0)) {
+        throw std::invalid_argument("recurrent golden packed head shape");
     }
     std::array<std::vector<float>,10> weights;
     for(std::size_t i=0;i<10;++i) {
@@ -122,6 +126,17 @@ RecurrentGolden recurrent_cpu_golden(const AuthenticatedSpeculativeArtifact& art
         const auto at=(std::uint64_t(token)*d+i)*2;
         return tensor::f16_bits_to_f32(static_cast<std::uint16_t>(
             std::uint16_t(table.bytes()[at])|(std::uint16_t(table.bytes()[at+1])<<8)));
+    };
+    auto head_value=[&](std::uint32_t token,std::uint32_t i) {
+        if(!packed_output_head) return table_value(token,i);
+        // Independent Q8_0 equation: each dimension-0 block is a little-endian
+        // half scale followed by 32 signed bytes. No Metal dequantizer or
+        // quantizer is used as this projection's numerical oracle.
+        const auto bytes=packed_output_head->bytes();
+        const auto at=(std::uint64_t(token)*(d/32)+i/32)*34;
+        const auto scale=tensor::f16_bits_to_f32(static_cast<std::uint16_t>(
+            std::uint16_t(bytes[at])|(std::uint16_t(bytes[at+1])<<8)));
+        return scale*float(std::bit_cast<std::int8_t>(bytes[at+2+i%32]));
     };
     RecurrentGolden result;std::uint32_t token=root;
     for(std::uint32_t depth=0;depth<s.horizon;++depth) {
@@ -144,9 +159,10 @@ RecurrentGolden recurrent_cpu_golden(const AuthenticatedSpeculativeArtifact& art
         for(std::uint32_t i=0;i<d;++i) target[i]=(target[i]*scale)*norm[i];
         std::vector<float> logits(v);
         for(std::uint32_t t=0;t<v;++t) {
-            double score=0;for(std::uint32_t i=0;i<d;++i) score+=double(target[i])*table_value(t,i);
+            double score=0;for(std::uint32_t i=0;i<d;++i) score+=double(target[i])*head_value(t,i);
             logits[t]=c.final_logit_softcap*std::tanh(static_cast<float>(score)/c.final_logit_softcap);
         }
+        result.logits.insert(result.logits.end(),logits.begin(),logits.end());
         token=recurrent_sample_cpu(logits,draws[depth],s);result.tokens.push_back(token);
     }
     return result;

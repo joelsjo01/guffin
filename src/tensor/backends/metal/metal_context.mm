@@ -27,8 +27,8 @@ void prepare_recurrent_pipelines() {
             "recurrent library: "+ns_error_message(error,"compile failed"));
         NSArray<NSString*>* names=@[@"recurrent_linear",@"recurrent_norm",@"recurrent_embedding",
                                     @"recurrent_join",@"recurrent_update",@"recurrent_sample",
-                                    @"recurrent_verifier_requests"];
-        std::array<id<MTLComputePipelineState>,7> ready {};
+                                    @"recurrent_verifier_requests",@"recurrent_sample_lossless"];
+        std::array<id<MTLComputePipelineState>,8> ready {};
         for (NSUInteger i=0;i<ready.size();++i) {
             auto function=[library newFunctionWithName:names[i]];
             ready[i]=[state.device newComputePipelineStateWithFunction:function error:&error];

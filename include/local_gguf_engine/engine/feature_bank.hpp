@@ -16,7 +16,10 @@
 namespace local_gguf_engine::engine {
 
 inline constexpr std::size_t feature_bank_max_count = 8U;
-inline constexpr std::size_t feature_bank_tap_max_count = 4U;
+// The shared DFlash/DSpark feature bank uses five distinct target-layer taps.
+// Artifact banks serialize only tap_count entries, so older banks keep their
+// existing wire representation when this in-memory capacity grows.
+inline constexpr std::size_t feature_bank_tap_max_count = 5U;
 inline constexpr std::size_t feature_bank_child_max_count = 8U;
 inline constexpr std::size_t feature_bank_total_child_max_count =
     feature_bank_max_count * feature_bank_child_max_count;

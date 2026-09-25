@@ -2,6 +2,7 @@ import contextlib
 import copy
 import importlib.util
 import io
+import hashlib
 import pathlib
 import json
 import struct
@@ -120,7 +121,136 @@ def decode_attribution(evaluated, cached, decoded, initial_cache, attention_toke
     }
 
 
+def standalone_attribution_v5():
+    record = decode_attribution(12, 0, 10, 0)
+    record.update(
+        schema_version=5, generation_completion_ns=10_000_000_000,
+        full_turn_ns=11_000_000_000, first_text_ns=1_000_000_000, learned_owned_bytes=1000,
+        learned_horizon=3, learned_cycles=4, learned_accepted_edges=6,
+        learned_numeric_refusals=0, learned_draft_ns=100, learned_draft_gpu_ns=90,
+        learned_target_gpu_ns=1000, learned_cycle_ns=1200,
+        scheduled_bytes_basis="one_row_equivalent_not_physical_bandwidth",
+        speculative_draft_model="standalone_gemma3_tli", speculative_sampling="lossless",
+        standalone_draft_sampler="explicit_or_target_scalars_native_history_v1",
+        standalone_effective_sampler=dict(temperature=0.5, top_k=0, top_p=0.75,
+                                          min_p=0.125, repetition_penalty=1.5),
+        learned_draft_head="q8_0", learned_verification_schedule="full",
+        standalone_prefill_ns=10, standalone_rebuild_ns=0,
+        standalone_draft_uploaded_bytes=64, standalone_draft_readback_bytes=32,
+        standalone_draft_wall_ns=110, standalone_draft_gpu_ns=95,
+        standalone_draft_command_buffer_count=2, standalone_draft_compute_dispatch_count=40,
+        learned_accepted_prefix_histogram=[1, 1, 1, 1] + [0] * 20,
+        learned_rejection_depth_histogram=[1, 1] + [0] * 21,
+        learned_censored_cycle_count=1, learned_full_accept_count=1,
+        learned_horizon_limited_cycle_count=1,
+    )
+    return record
+
+
 class QuickBenchmarkScriptTests(unittest.TestCase):
+    def test_schema5_acceptance_accounting_distinguishes_rejection_stop_and_capacity(self):
+        record = standalone_attribution_v5()
+        turn = dict(evaluated=12, cached=0, decoded=10, decode_attribution=record)
+        QUICK.validate_decode_attribution(turn, "First")
+        # A full-accepted stop is not a horizon-limited continuation.
+        record["learned_horizon_limited_cycle_count"] = 0
+        QUICK.validate_decode_attribution(turn, "First")
+        for horizon in (1, 23):
+            boundary = standalone_attribution_v5()
+            boundary.update(learned_horizon=horizon, learned_cycles=1,
+                            learned_accepted_edges=horizon,
+                            learned_accepted_prefix_histogram=[int(i == horizon) for i in range(24)],
+                            learned_rejection_depth_histogram=[0] * 23,
+                            learned_censored_cycle_count=0)
+            QUICK.validate_acceptance_accounting(boundary, "Boundary")
+        stage4 = standalone_attribution_v5()
+        stage4.update(speculative_draft_model="none", learned_horizon=0, learned_cycles=0,
+                      learned_accepted_edges=0, learned_accepted_prefix_histogram=[0] * 24,
+                      learned_rejection_depth_histogram=[0] * 23, learned_censored_cycle_count=0,
+                      learned_full_accept_count=0, learned_horizon_limited_cycle_count=0,
+                      standalone_draft_sampler="none", standalone_effective_sampler=None)
+        turn["decode_attribution"] = stage4
+        QUICK.validate_decode_attribution(turn, "Stage4")
+
+    def test_schema5_accounting_rejects_missing_malformed_and_inconsistent_counts(self):
+        fixture = standalone_attribution_v5()
+        fields = ("learned_accepted_prefix_histogram", "learned_rejection_depth_histogram",
+                  "learned_censored_cycle_count", "learned_full_accept_count",
+                  "learned_horizon_limited_cycle_count")
+        for field in fields:
+            bad = copy.deepcopy(fixture)
+            del bad[field]
+            with self.subTest(missing=field), self.assertRaises(RuntimeError):
+                QUICK.validate_acceptance_accounting(bad, "First")
+        malformed = [
+            ("learned_accepted_prefix_histogram", [0] * 23),
+            ("learned_accepted_prefix_histogram", [0] * 25),
+            ("learned_accepted_prefix_histogram", tuple(fixture["learned_accepted_prefix_histogram"])),
+            ("learned_rejection_depth_histogram", [0] * 22),
+            ("learned_rejection_depth_histogram", [0] * 24),
+            ("learned_rejection_depth_histogram", None),
+            ("learned_cycles", 5), ("learned_accepted_edges", 7),
+            ("learned_censored_cycle_count", 0), ("learned_full_accept_count", 0),
+            ("learned_horizon_limited_cycle_count", 2),
+            ("learned_horizon", 0), ("learned_horizon", 2), ("learned_horizon", 24),
+        ]
+        for field, value in malformed:
+            bad = dict(fixture, **{field: value})
+            with self.subTest(field=field, value=value), self.assertRaises(RuntimeError):
+                QUICK.validate_acceptance_accounting(bad, "First")
+        for field in fields:
+            for value in (-1, 2**32, True, 1.0, "1", None):
+                bad = copy.deepcopy(fixture)
+                if isinstance(bad[field], list):
+                    bad[field][0] = value
+                else:
+                    bad[field] = value
+                with self.subTest(field=field, value=value), self.assertRaises(RuntimeError):
+                    QUICK.validate_acceptance_accounting(bad, "First")
+        # Preserve global cycle totals but move rejection to a depth with no
+        # matching accepted prefix; this must not masquerade as a valid run.
+        bad = copy.deepcopy(fixture)
+        bad["learned_rejection_depth_histogram"][:3] = [0, 0, 2]
+        with self.assertRaises(RuntimeError):
+            QUICK.validate_acceptance_accounting(bad, "First")
+        bad = copy.deepcopy(fixture)
+        bad["learned_rejection_depth_histogram"][:4] = [0, 1, 0, 1]
+        with self.assertRaises(RuntimeError):
+            QUICK.validate_acceptance_accounting(bad, "First")
+
+    def test_schema5_requires_complete_valid_effective_sampler_but_keeps_schema4(self):
+        fixture = standalone_attribution_v5()
+        turn = dict(evaluated=12, cached=0, decoded=10, decode_attribution=fixture)
+        QUICK.validate_decode_attribution(turn, "First")
+        for effective in (None, {}, [], {"temperature": 1},
+                          dict(fixture["standalone_effective_sampler"], seed=42)):
+            bad = copy.deepcopy(turn)
+            bad["decode_attribution"]["standalone_effective_sampler"] = effective
+            with self.subTest(effective=effective), self.assertRaises(RuntimeError):
+                QUICK.validate_decode_attribution(bad, "First")
+        for field, value in (("temperature", float("nan")), ("temperature", -1),
+                             ("top_k", True), ("top_k", 262145), ("top_k", 1.0),
+                             ("top_p", 0), ("min_p", 1.1), ("repetition_penalty", 0)):
+            bad = copy.deepcopy(turn)
+            bad["decode_attribution"]["standalone_effective_sampler"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(RuntimeError):
+                QUICK.validate_decode_attribution(bad, "First")
+        bad = copy.deepcopy(turn)
+        bad["decode_attribution"].update(speculative_draft_model="standalone_vicuna_tli", learned_draft_head="f16")
+        bad["decode_attribution"]["standalone_effective_sampler"]["top_k"] = 32001
+        with self.assertRaises(RuntimeError):
+            QUICK.validate_decode_attribution(bad, "First")
+        legacy = copy.deepcopy(turn)
+        legacy["decode_attribution"].update(schema_version=4, standalone_draft_sampler="target_scalars_native_history_v1")
+        for field in ("standalone_effective_sampler", "learned_accepted_prefix_histogram",
+                      "learned_rejection_depth_histogram", "learned_censored_cycle_count",
+                      "learned_full_accept_count", "learned_horizon_limited_cycle_count"):
+            del legacy["decode_attribution"][field]
+        QUICK.validate_decode_attribution(legacy, "Legacy")
+        legacy["decode_attribution"]["schema_version"] = 5
+        with self.assertRaises(RuntimeError):
+            QUICK.validate_decode_attribution(legacy, "Missing new contract")
+
     def test_complete_generation_metrics_fail_closed(self):
         record = decode_attribution(12, 0, 2, 0)
         record.update(schema_version=4, generation_completion_ns=10_000_000_000,
@@ -132,6 +262,17 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
                       scheduled_bytes_basis="one_row_equivalent_not_physical_bandwidth")
         turn = dict(evaluated=12, cached=0, decoded=2, decode_attribution=record)
         QUICK.validate_decode_attribution(turn, "First")
+        execution = dict(learned_verification_schedule="conditional", learned_draft_head="q8_0")
+        record.update(execution)
+        QUICK.validate_decode_attribution(turn, "First")
+        for field in execution:
+            bad = copy.deepcopy(turn)
+            del bad["decode_attribution"][field]
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                QUICK.validate_decode_attribution(bad, "First")
+            bad["decode_attribution"][field] = "invalid"
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                QUICK.validate_decode_attribution(bad, "First")
         for field, value in (("generation_completion_ns", 0), ("full_turn_ns", 1),
                              ("first_text_ns", 12_000_000_000),
                              ("learned_owned_bytes", True), ("learned_cycles", -1),
@@ -150,6 +291,273 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             self.assertNotIn("--no-speculative", command)
             parse.assert_called_once_with("outerr")
 
+    def test_lossless_chat_mode_is_explicit_and_validated(self):
+        with mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
+                mock.patch.object(QUICK, "parse_local", return_value=[]):
+            QUICK.run_local_chat("engine", "model", 0, recurrent_weights="weights",
+                                 speculative_sampling="lossless")
+            self.assertEqual(run.call_args.args[0][-2:], ["--speculative-sampling", "lossless"])
+        for options in ({"speculative_sampling": "lossless"},
+                        {"speculative_sampling": "unknown", "recurrent_weights": "weights"},
+                        {"speculative_sampling": "lossless", "recurrent_weights": "weights",
+                         "speculative": False}):
+            with self.subTest(options=options), mock.patch.object(QUICK, "run_process") as run:
+                with self.assertRaises(ValueError):
+                    QUICK.run_local_chat("engine", "model", 0, **options)
+                run.assert_not_called()
+
+    def test_standalone_tli_flags_reach_executable_for_full_capacity(self):
+        for horizon in (1, 3, 23):
+            for schedule in ("full", "conditional"):
+                with self.subTest(horizon=horizon, schedule=schedule), \
+                        mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
+                        mock.patch.object(QUICK, "parse_local", return_value=[]) as parse:
+                    QUICK.run_local_chat("engine", "model", 0, draft_model="draft.gguf",
+                                         draft_horizon=horizon, speculative_sampling="lossless",
+                                         speculative_schedule=schedule)
+                    command = run.call_args.args[0]
+                    for flag, value in (("--draft-model", "draft.gguf"), ("--draft-horizon", str(horizon)),
+                                        ("--speculative-sampling", "lossless"),
+                                        ("--speculative-schedule", schedule)):
+                        self.assertEqual(command[command.index(flag) + 1], value)
+                    self.assertNotIn("--development-recurrent-weights", command)
+                    self.assertNotIn("--draft-head", command)
+                    parse.assert_called_once_with("outerr")
+
+    def test_draft_sampling_flags_are_forwarded_without_mutating_target_flags_or_inputs(self):
+        overrides = dict(temperature=0.0, top_k=0, top_p=1.0, min_p=0.0, repetition_penalty=1.25)
+        previous = copy.deepcopy(overrides)
+        with mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
+                mock.patch.object(QUICK, "parse_local", return_value=[]):
+            QUICK.run_local_chat("engine", "target", 0, draft_model="draft.gguf",
+                                 speculative_sampling="lossless", draft_sampling=overrides)
+        command = run.call_args.args[0]
+        self.assertEqual(overrides, previous)
+        for field, flag in QUICK.DRAFT_SAMPLING_FLAGS.items():
+            self.assertEqual(command.count(flag), 1)
+            self.assertEqual(command[command.index(flag) + 1], str(overrides[field]))
+        for target_flag in ("--temperature", "--top-k", "--top-p", "--min-p", "--repeat-penalty"):
+            self.assertNotIn(target_flag, command)
+        self.assertEqual(command[command.index("--seed") + 1], str(QUICK.SEED))
+        self.assertNotIn("--draft-seed", command)
+        self.assertNotIn("--draft-repetition-window", command)
+        with mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
+                mock.patch.object(QUICK, "parse_local", return_value=[]):
+            QUICK.run_local_chat("engine", "target", 0, draft_model="draft.gguf", speculative_sampling="lossless")
+        self.assertFalse(set(QUICK.DRAFT_SAMPLING_FLAGS.values()).intersection(run.call_args.args[0]))
+
+    def test_draft_sampling_invalid_values_and_contexts_fail_before_process_and_cooldown(self):
+        invalid = [None, [], "temperature=1", {"seed": 1}, {"repetition_window": 2}]
+        invalid += [{field: value} for field, value in (
+            ("temperature", -1), ("temperature", float("nan")), ("temperature", float("inf")),
+            ("temperature", 1e39), ("temperature", 1e-300), ("temperature", 10**400),
+            ("top_k", -1), ("top_k", 262145), ("top_k", True), ("top_k", 1.0),
+            ("top_k", "1"), ("top_k", 10**400),
+            ("top_p", 0), ("top_p", 1.1), ("top_p", 1e-300),
+            ("min_p", -0.1), ("min_p", 1.1), ("min_p", False),
+            ("repetition_penalty", 0), ("repetition_penalty", -1),
+            ("repetition_penalty", 1e-300), ("repetition_penalty", float("inf")),
+        )]
+        # None is the inheritance sentinel at run_local_chat, not a malformed
+        # explicit scalar map. Its direct validation remains invalid.
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                QUICK.validate_draft_sampling(values)
+            if values is None:
+                continue
+            with self.subTest(values=values), mock.patch.object(QUICK, "run_process") as run, \
+                    mock.patch.object(QUICK.time, "sleep") as sleep:
+                with self.assertRaises(ValueError):
+                    QUICK.run_local_chat("engine", "target", 240, draft_model="draft",
+                                         speculative_sampling="lossless", draft_sampling=values)
+                run.assert_not_called()
+                sleep.assert_not_called()
+        for options in ({}, {"speculative": False},
+                        {"recurrent_weights": "weights", "speculative_sampling": "lossless"},
+                        {"draft_model": "draft", "speculative_sampling": "exact-match"},
+                        {"draft_model": "draft", "speculative_sampling": "lossless", "speculative": False},
+                        {"draft_model": "draft", "speculative_sampling": "lossless", "recurrent_weights": "weights"}):
+            with self.subTest(options=options), mock.patch.object(QUICK, "run_process") as run, \
+                    mock.patch.object(QUICK.time, "sleep") as sleep:
+                with self.assertRaises(ValueError):
+                    QUICK.run_local_chat("engine", "target", 240, draft_sampling={"top_k": 0}, **options)
+                run.assert_not_called()
+                sleep.assert_not_called()
+
+    def test_draft_sampling_receipts_require_the_requested_f32_values(self):
+        requested = dict(temperature=0.8, top_k=0, top_p=0.95, min_p=0.05, repetition_penalty=1.1)
+        effective = {field: value if field == "top_k" else struct.unpack("<f", struct.pack("<f", value))[0]
+                     for field, value in requested.items()}
+        record = standalone_attribution_v5()
+        record["standalone_effective_sampler"] = effective
+        for field in requested:
+            bad = copy.deepcopy(record)
+            if field == "top_k":
+                bad["standalone_effective_sampler"][field] = 1
+            else:
+                bits = struct.unpack("<I", struct.pack("<f", effective[field]))[0]
+                bad["standalone_effective_sampler"][field] = struct.unpack("<f", struct.pack("<I", bits + 1))[0]
+            with self.subTest(field=field), \
+                    mock.patch.object(QUICK, "run_process", return_value=("out", "err")), \
+                    mock.patch.object(QUICK, "parse_local", return_value=[{"decode_attribution": bad}]):
+                with self.assertRaisesRegex(RuntimeError, "actual proposal execution"):
+                    QUICK.run_local_chat("engine", "target", 0, draft_model="draft",
+                                         speculative_sampling="lossless", draft_sampling=requested)
+            del bad["standalone_effective_sampler"][field]
+            with mock.patch.object(QUICK, "run_process", return_value=("out", "err")), \
+                    mock.patch.object(QUICK, "parse_local", return_value=[{"decode_attribution": bad}]):
+                with self.assertRaises(RuntimeError):
+                    QUICK.run_local_chat("engine", "target", 0, draft_model="draft",
+                                         speculative_sampling="lossless", draft_sampling=requested)
+        with mock.patch.object(QUICK, "run_process", return_value=("out", "err")), \
+                mock.patch.object(QUICK, "parse_local", return_value=[{"decode_attribution": record}]):
+            turns = QUICK.run_local_chat("engine", "target", 0, draft_model="draft",
+                                        speculative_sampling="lossless", draft_sampling=requested)
+        self.assertEqual(turns[0]["decode_attribution"]["standalone_effective_sampler"], effective)
+
+    def test_standalone_tli_conflicts_fail_before_process_or_cooldown(self):
+        invalid = [
+            {"draft_model": "draft"},
+            {"draft_model": "draft", "speculative_sampling": "exact-match"},
+            {"draft_model": "draft", "speculative_sampling": "lossless", "speculative": False},
+            {"draft_model": "draft", "speculative_sampling": "lossless", "recurrent_weights": "weights"},
+            {"draft_model": "draft", "speculative_sampling": "lossless", "draft_head": "f16"},
+            {"draft_model": "draft", "speculative_sampling": "lossless", "draft_head": "q8_0"},
+            {"draft_model": "", "speculative_sampling": "lossless"},
+            {"draft_horizon": 3},
+        ]
+        invalid.extend({"draft_model": "draft", "speculative_sampling": "lossless", "draft_horizon": value}
+                       for value in (0, -1, 24, True, 3.0, "3", 2**64))
+        for options in invalid:
+            with self.subTest(options=options), mock.patch.object(QUICK, "run_process") as run, \
+                    mock.patch.object(QUICK.time, "sleep") as sleep:
+                with self.assertRaises(ValueError):
+                    QUICK.run_local_chat("engine", "model", 240, **options)
+                run.assert_not_called()
+                sleep.assert_not_called()
+
+    def test_standalone_tli_benchmark_rejects_execution_fallback(self):
+        record = {"speculative_draft_model": "standalone_vicuna_tli", "speculative_sampling": "lossless",
+                  "learned_horizon": 3, "learned_verification_schedule": "conditional"}
+        for field, replacement in (("speculative_draft_model", "recurrent"), ("learned_horizon", 1),
+                                   ("speculative_sampling", "exact-match"),
+                                   ("learned_verification_schedule", "full")):
+            bad = dict(record, **{field: replacement})
+            with self.subTest(field=field), \
+                    mock.patch.object(QUICK, "run_process", return_value=("out", "err")), \
+                    mock.patch.object(QUICK, "parse_local", return_value=[{"decode_attribution": bad}]):
+                with self.assertRaisesRegex(RuntimeError, "does not match chat execution"):
+                    QUICK.run_local_chat("engine", "model", 0, draft_model="draft",
+                                         speculative_sampling="lossless", speculative_schedule="conditional")
+
+    def test_standalone_tli_benchmark_records_artifact_identity_and_horizon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            draft = pathlib.Path(directory) / "draft.gguf"
+            draft.write_bytes(b"test draft artifact")
+            argv = ["quick_benchmark.py", "--model", "target.gguf", "--draft-model", str(draft),
+                    "--draft-horizon", "23", "--speculative-sampling", "lossless",
+                    "--speculative-schedule", "conditional", "--cooldown", "0", "--json"]
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(QUICK, "run_local_chat", return_value=[{
+                        "decode_attribution": {"speculative_draft_model": "standalone_vicuna_tli"}
+                    }]) as chat, \
+                    mock.patch.object(QUICK, "run_kernel_diagnostics", return_value={}), \
+                    mock.patch.object(QUICK, "collect_environment", return_value={}), \
+                    contextlib.redirect_stdout(output):
+                QUICK.main()
+            protocol = json.loads(output.getvalue())["protocol"]
+            self.assertEqual(protocol["standalone_draft_model_sha256"],
+                             hashlib.sha256(b"test draft artifact").hexdigest())
+            self.assertEqual(protocol["standalone_draft_horizon"], 23)
+            self.assertEqual(protocol["speculative_draft_model"], "standalone_vicuna_tli")
+            self.assertIsNone(protocol["development_recurrent_weights_sha256"])
+            self.assertFalse(protocol["cross_mode_token_identity_required"])
+            self.assertEqual(chat.call_args.args[-2:], (str(draft), 23))
+            self.assertEqual(chat.call_args.kwargs, {"draft_sampling": None})
+
+    def test_main_records_and_passes_draft_sampling_overrides_as_keyword(self):
+        with tempfile.TemporaryDirectory() as directory:
+            draft = pathlib.Path(directory) / "draft.gguf"
+            draft.write_bytes(b"test draft artifact")
+            argv = ["quick_benchmark.py", "--model", "target.gguf", "--draft-model", str(draft),
+                    "--draft-horizon", "23", "--speculative-sampling", "lossless",
+                    "--draft-temperature", "0.5", "--draft-top-k", "0", "--draft-top-p", "1",
+                    "--draft-min-p", "0", "--draft-repeat-penalty", "1.25", "--cooldown", "0", "--json"]
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(QUICK, "run_local_chat", return_value=[{
+                        "decode_attribution": {"speculative_draft_model": "standalone_gemma3_tli"}
+                    }]) as chat, \
+                    mock.patch.object(QUICK, "run_kernel_diagnostics", return_value={}), \
+                    mock.patch.object(QUICK, "collect_environment", return_value={}), \
+                    contextlib.redirect_stdout(output):
+                QUICK.main()
+            expected = dict(temperature=0.5, top_k=0, top_p=1.0, min_p=0.0, repetition_penalty=1.25)
+            protocol = json.loads(output.getvalue())["protocol"]
+            self.assertEqual(protocol["standalone_draft_sampling_overrides"], expected)
+            self.assertEqual(protocol["decode_attribution_schema"], 5)
+            self.assertEqual(protocol["seed"], QUICK.SEED)
+            self.assertEqual(chat.call_args.kwargs, {"draft_sampling": expected})
+            self.assertEqual(chat.call_args.args[-2:], (str(draft), 23))
+
+    def test_main_invalid_draft_scalars_fail_before_artifact_process_or_cooldown(self):
+        for extra in (["--draft-temperature", "nan"], ["--draft-top-k", "-1"],
+                      ["--draft-top-p", "0"], ["--draft-min-p", "1.1"],
+                      ["--draft-repeat-penalty", "1e-300"]):
+            argv = ["quick_benchmark.py", "--model", "target.gguf", "--draft-model", "/does-not-exist",
+                    "--speculative-sampling", "lossless", *extra]
+            with self.subTest(extra=extra), mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(QUICK, "run_local_chat") as chat, \
+                    mock.patch.object(QUICK, "run_process") as run, \
+                    mock.patch.object(QUICK.time, "sleep") as sleep, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    QUICK.main()
+                chat.assert_not_called()
+                run.assert_not_called()
+                sleep.assert_not_called()
+
+    def test_standalone_tli_metrics_reject_wrong_probability_contract(self):
+        record = decode_attribution(12, 0, 2, 0)
+        record.update(schema_version=4, generation_completion_ns=10_000_000_000,
+                      full_turn_ns=11_000_000_000, first_text_ns=1_000_000_000, learned_owned_bytes=1000,
+                      learned_horizon=3, learned_cycles=1, learned_accepted_edges=2,
+                      learned_numeric_refusals=0, learned_draft_ns=100, learned_draft_gpu_ns=90,
+                      learned_target_gpu_ns=1000, learned_cycle_ns=1200,
+                      scheduled_bytes_basis="one_row_equivalent_not_physical_bandwidth",
+                      speculative_draft_model="standalone_vicuna_tli", speculative_sampling="lossless",
+                      standalone_draft_sampler="target_scalars_native_history_v1",
+                      learned_draft_head="f16", learned_verification_schedule="full",
+                      standalone_prefill_ns=10, standalone_rebuild_ns=0,
+                      standalone_draft_uploaded_bytes=64, standalone_draft_readback_bytes=32,
+                      standalone_draft_wall_ns=110, standalone_draft_gpu_ns=95,
+                      standalone_draft_command_buffer_count=2, standalone_draft_compute_dispatch_count=40)
+        turn = dict(evaluated=12, cached=0, decoded=2, decode_attribution=record)
+        QUICK.validate_decode_attribution(turn, "First")
+        gemma = copy.deepcopy(turn)
+        gemma["decode_attribution"].update(speculative_draft_model="standalone_gemma3_tli",
+                                          learned_draft_head="q8_0")
+        QUICK.validate_decode_attribution(gemma, "First")
+        gemma["decode_attribution"]["learned_draft_head"] = "f16"
+        with self.assertRaises(RuntimeError):
+            QUICK.validate_decode_attribution(gemma, "First")
+        for field, value in (("speculative_draft_model", "unknown"), ("speculative_sampling", "exact-match"),
+                             ("learned_horizon", 24), ("learned_draft_head", "q8_0"),
+                             ("standalone_draft_gpu_ns", 89), ("standalone_draft_wall_ns", 99),
+                             ("standalone_draft_sampler", "unfiltered")):
+            bad = copy.deepcopy(turn)
+            bad["decode_attribution"][field] = value
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                QUICK.validate_decode_attribution(bad, "First")
+
+        for field in (key for key in record if key.startswith("standalone_") and key != "standalone_draft_sampler"):
+            for value in (None, -1, True, "1"):
+                bad = copy.deepcopy(turn)
+                bad["decode_attribution"][field] = value
+                with self.subTest(field=field, value=value), self.assertRaises(RuntimeError):
+                    QUICK.validate_decode_attribution(bad, "First")
+
     def test_human_report_labels_captured_stream_mode(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -159,6 +567,28 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             "local startup warm-up: enabled (16-token prefill + 1-token decode + width-two verifier)",
             output.getvalue(),
         )
+
+    def test_lossless_execution_options_are_independent_and_fail_closed(self):
+        choices = {"speculative_schedule": ("conditional", "--speculative-schedule"),
+                   "draft_head": ("q8_0", "--draft-head")}
+        for field, (value, flag) in choices.items():
+            with self.subTest(field=field), \
+                    mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
+                    mock.patch.object(QUICK, "parse_local", return_value=[]):
+                QUICK.run_local_chat("engine", "model", 0, recurrent_weights="weights",
+                                     speculative_sampling="lossless", **{field: value})
+                command = run.call_args.args[0]
+                self.assertEqual(command[command.index(flag) + 1], value)
+                for other, (_, other_flag) in choices.items():
+                    if other != field:
+                        self.assertNotIn(other_flag, command)
+            for mode, option in ((None, value), ("exact-match", value), ("lossless", "invalid")):
+                with self.subTest(field=field, mode=mode, option=option), \
+                        mock.patch.object(QUICK, "run_process") as run:
+                    with self.assertRaises(ValueError):
+                        QUICK.run_local_chat("engine", "model", 0, recurrent_weights="weights",
+                                             speculative_sampling=mode, **{field: option})
+                    run.assert_not_called()
 
     def test_kernel_schema_accepts_and_prints_isolated_and_sustained_modes(self):
         diagnostics = kernel_diagnostics_fixture()

@@ -238,6 +238,7 @@ class SpeculationTrainingTorchTests(unittest.TestCase):
                 _validated_active_gemma_head(malformed, contract)
 
     def test_mechanism_distinct_models_have_exact_horizon_shapes_and_backward(self):
+        from training.speculation.dspark import DSparkConfig
         from training.speculation.models import (
             BlockDiffusionDrafter,
             DBlastDrafter,
@@ -264,8 +265,14 @@ class SpeculationTrainingTorchTests(unittest.TestCase):
                                   horizon + 1, table, False),
             BlockDiffusionDrafter(width, vocabulary, taps, width, 2,
                                   horizon + 1, table, True),
-            DSparkDrafter(width, vocabulary, taps, width, horizon, 4,
-                          "source_rnn", table),
+            DSparkDrafter(DSparkConfig(
+                target_width=width, vocabulary=vocabulary, tap_count=taps,
+                width=width, layers=3, horizon=horizon, rank=4,
+                correction="source_rnn", attention_heads=2, kv_heads=1,
+                head_dim=8, intermediate_width=64, mask_token_id=0,
+                rms_epsilon=1e-6, rope_theta=10000.0, embedding_scale=1.0,
+                initializer_std=0.02,
+            ), table),
             DBlastDrafter(width, vocabulary, taps, width, horizon, 2, table),
             JetSpecLatentDrafter(width, vocabulary, taps, width, 2, horizon, table),
             TreeFlashDrafter(width, vocabulary, taps, width, 2, horizon, 32,

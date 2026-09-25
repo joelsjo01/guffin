@@ -1,7 +1,9 @@
 #include "local_gguf_engine/engine/model.hpp"
 
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
+#include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
+#include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -350,13 +352,15 @@ EngineModel::EngineModel(
     std::optional<std::string> name,
     Gemma2ModelConfig gemma2_config,
     std::vector<EngineTensorView> tensor_views,
-    std::optional<EngineModelPayloadReceipt> payload_receipt
+    std::optional<EngineModelPayloadReceipt> payload_receipt,
+    std::optional<runtime::Sha256Digest> tokenizer_identity
 )
     : architecture_(architecture),
       name_(std::move(name)),
       gemma2_config_(gemma2_config),
       tensor_views_(std::move(tensor_views)),
-      payload_receipt_(std::move(payload_receipt)) {}
+      payload_receipt_(std::move(payload_receipt)),
+      tokenizer_identity_(std::move(tokenizer_identity)) {}
 
 ModelArchitecture EngineModel::architecture() const noexcept {
     return architecture_;
@@ -376,6 +380,10 @@ const std::vector<EngineTensorView>& EngineModel::tensor_views() const noexcept 
 
 const std::optional<EngineModelPayloadReceipt>& EngineModel::payload_receipt() const noexcept {
     return payload_receipt_;
+}
+
+const std::optional<runtime::Sha256Digest>& EngineModel::tokenizer_identity() const noexcept {
+    return tokenizer_identity_;
 }
 
 const EngineTensorView* EngineModel::find_tensor_view(std::string_view name) const noexcept {
@@ -439,9 +447,17 @@ EngineModel load_verified_engine_model_from_gguf(
         ),
         .source_tensors = hash_source_tensors(tensor_views),
     };
-    return EngineModel(
-        architecture, name, gemma2_config, std::move(tensor_views), receipt
-    );
+    // Numeric fixtures and weight-only inspection may have no tokenizer. Such
+    // models remain valid here, but cannot prepare standalone TLI chat plans.
+    // The parsed view is caller-owned and can be modified independently of the
+    // authenticated byte span. Bind tokenizer semantics to the actual file,
+    // with one preparation-only metadata parse, never to that mutable view.
+    std::optional<runtime::Sha256Digest> tokenizer_identity;
+    if (find_metadata_entry(model.directory.metadata, "tokenizer.ggml.tokens")) {
+        const auto authenticated_metadata = model_format::read_gguf_metadata_section(whole_gguf_bytes);
+        tokenizer_identity = tokenizer::tokenizer_identity_from_gguf_metadata(authenticated_metadata);
+    }
+    return EngineModel(architecture, name, gemma2_config, std::move(tensor_views), receipt, tokenizer_identity);
 }
 
 }  // namespace local_gguf_engine::engine

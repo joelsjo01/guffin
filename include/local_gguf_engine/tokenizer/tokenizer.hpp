@@ -1,6 +1,7 @@
 #pragma once
 
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
+#include "local_gguf_engine/runtime/sha256.hpp"
 
 #include <array>
 #include <cstdint>
@@ -44,6 +45,10 @@ enum class TokenizerModel {
     llama,
 };
 
+// The GGUF tokenizer model name alone does not identify normalization or
+// user-defined-piece behavior. Keep historical target/Vicuna semantics frozen.
+enum class TokenizerProfile { gemma2, llama_legacy, gemma3 };
+
 struct TokenizerToken {
     std::string text;
     std::optional<float> score;
@@ -80,12 +85,41 @@ struct ChatMessage {
     std::string_view content;
 };
 
+// Prepared once for a declared input byte bound. The bounded encoder never
+// grows these buffers, including its merge heap and normalization scratch.
+class TokenizerEncodeWorkspace final {
+public:
+    explicit TokenizerEncodeWorkspace(std::size_t max_input_bytes);
+    [[nodiscard]] std::size_t owned_bytes() const noexcept;
+private:
+    friend class Tokenizer;
+    struct Symbol {
+        std::size_t offset, size;
+        std::int64_t previous, next;
+        std::uint32_t frozen_token = UINT32_MAX;
+    };
+    struct Bigram { std::size_t left, right; float score; std::size_t size; };
+    std::size_t max_input_bytes_;
+    std::string escaped_;
+    std::vector<Symbol> symbols_;
+    std::vector<Bigram> candidates_;
+};
+
+struct TokenTextHash {
+    using is_transparent = void;
+    std::size_t operator()(std::string_view text) const noexcept {
+        return std::hash<std::string_view>{}(text);
+    }
+};
+
 class Tokenizer final {
 public:
     [[nodiscard]] TokenizerModel model() const noexcept;
+    [[nodiscard]] TokenizerProfile profile() const noexcept;
     [[nodiscard]] std::string_view model_name() const noexcept;
     [[nodiscard]] const std::vector<TokenizerToken>& vocabulary() const noexcept;
     [[nodiscard]] const TokenizerSpecialTokens& special_tokens() const noexcept;
+    [[nodiscard]] const runtime::Sha256Digest& identity() const noexcept;
     [[nodiscard]] TokenizerEncodeOptions default_encode_options() const noexcept;
 
     [[nodiscard]] std::vector<std::uint32_t> encode(std::string_view text) const;
@@ -105,6 +139,18 @@ public:
         TokenizerDecodeOptions options = {}
     ) const;
     [[nodiscard]] bool token_id_is_special(std::uint32_t token_id) const noexcept;
+    // Container payload/capacity accounting; unordered-map allocator/node
+    // bookkeeping is implementation-dependent and excluded. Process RSS is the
+    // authoritative total memory measurement, not this preparation estimate.
+    [[nodiscard]] std::size_t owned_bytes() const noexcept;
+    [[nodiscard]] std::size_t encode_into(
+        std::string_view text, std::span<std::uint32_t> output,
+        TokenizerEncodeWorkspace& workspace, TokenizerEncodeOptions options = {}
+    ) const;
+    [[nodiscard]] std::size_t decode_into(
+        std::span<const std::uint32_t> token_ids, std::span<char> output,
+        TokenizerDecodeOptions options = {}
+    ) const;
 
 private:
     friend Tokenizer load_tokenizer_from_gguf_metadata(
@@ -114,7 +160,9 @@ private:
     Tokenizer(
         TokenizerModel model,
         std::vector<TokenizerToken> vocabulary,
-        TokenizerSpecialTokens special_tokens
+        TokenizerSpecialTokens special_tokens,
+        bool add_space_prefix = false,
+        TokenizerProfile profile = TokenizerProfile::gemma2
     );
 
     void append_exact_token_ids(std::vector<std::uint32_t>& token_ids, std::string_view text) const;
@@ -132,13 +180,26 @@ private:
         std::string_view text,
         std::size_t offset
     ) const noexcept;
+    [[nodiscard]] std::optional<std::pair<std::uint32_t, std::size_t>> added_token_match_at(
+        std::string_view text, std::size_t offset, bool include_special, bool specials_only = false
+    ) const noexcept;
 
     TokenizerModel model_;
     std::vector<TokenizerToken> vocabulary_;
     TokenizerSpecialTokens special_tokens_;
+    bool add_space_prefix_ = false;
+    TokenizerProfile profile_ = TokenizerProfile::gemma2;
+    struct AddedTokenNode {
+        std::uint32_t child = 0;
+        std::uint32_t sibling = 0;
+        std::uint32_t token = UINT32_MAX;
+        unsigned char byte = 0;
+    };
+    std::vector<AddedTokenNode> added_token_trie_;
+    runtime::Sha256Digest identity_;
     std::vector<std::uint32_t> encode_candidate_token_ids_;
     std::vector<std::uint32_t> special_encode_candidate_token_ids_;
-    std::unordered_map<std::string, std::uint32_t> token_text_to_id_;
+    std::unordered_map<std::string, std::uint32_t, TokenTextHash, std::equal_to<>> token_text_to_id_;
     std::array<std::optional<std::uint32_t>, 256> byte_token_ids_;
 };
 
@@ -153,6 +214,12 @@ private:
     std::string_view prompt
 );
 [[nodiscard]] Tokenizer load_tokenizer_from_gguf_metadata(
+    const model_format::GGUFMetadataSection& metadata
+);
+// Semantic identity of the exact tokenizer fields consumed by this runtime.
+// Can be computed directly from authenticated GGUF metadata without building a
+// second vocabulary/map or changing the historical model-payload receipt.
+[[nodiscard]] runtime::Sha256Digest tokenizer_identity_from_gguf_metadata(
     const model_format::GGUFMetadataSection& metadata
 );
 

@@ -1509,7 +1509,146 @@ void test_live_callback_pause_matches_scripted_controller() {
     }
 }
 
+void test_lossless_controller_adopts_only_causal_randomness() {
+    BoundedSpeculativeController controller;
+    for (const auto horizon : {3U, 23U}) {
+        auto storage = chain_storage(horizon, ChainTileEndpoint::post_full_candidate);
+        storage.header.primary_policy = ProposalPrimaryPolicy::independent_distribution;
+        storage.nodes.proposal_ticket_offsets.fill(proposal_ticket_none);
+        storage.materialized_edges.proposal_ticket_offsets.fill(proposal_ticket_none);
+        const auto graph = validate_proposal_graph(std::move(storage), validation_context());
+        for (const auto rejection_depth : {0U, 1U, horizon - 1U, horizon}) {
+            auto scenario = chain_scenario(graph, {}, single_tile_schedule(horizon));
+            scenario.sampling_mode = SpeculativeSamplingMode::lossless;
+            TokenSampler sampler({.temperature=0.8F, .top_k=1, .seed=42});
+            sampler.observe_tokens(std::span(&kRootToken, 1));
+            scenario.origin_checkpoint = sampler.checkpoint();
+            auto fork = sampler.fork();
+            for (unsigned i = 0; i < horizon; ++i) {
+                const auto proposal = kRootToken + i + 1;
+                DraftTokenDistribution q;
+                q.count = 1;
+                q.values[0] = {proposal, std::uint64_t{1} << 32};
+                const std::array<TokenLogit, 1> p {{{i == rejection_depth ? 900U : proposal, 1.0F}}};
+                const auto selected = fork.sample_speculative(proposal, q, p);
+                fork.observe_tokens(std::span(&selected.token, 1));
+                scenario.target_samples[i] = {selected.token, fork.checkpoint(), selected.accepted
+                    ? ControllerSampleLaw::rejection_accept : ControllerSampleLaw::rejection_residual};
+                ++scenario.target_sample_count;
+                if (!selected.accepted) break;
+            }
+            const auto completed = controller.run(scenario);
+            expect(completed.accepted_edge_count == rejection_depth,
+                "lossless controller retained a rejected proposal or lost an acceptance");
+            expect(completed.adopted_checkpoint.same_state(fork.checkpoint()),
+                "lossless controller did not adopt the causal proposal/acceptance RNG state");
+            for (unsigned depth = 0; depth < completed.selected_count; ++depth) {
+                auto stopped = scenario;
+                stopped.callbacks[depth] = ControllerCallbackDecision::stop_generation;
+                const auto result = controller.run(stopped);
+                const auto& expected = depth == 0 ? scenario.origin_checkpoint
+                    : scenario.target_samples[depth - 1].checkpoint;
+                expect(result.adopted_checkpoint.same_state(expected),
+                    "callback stop adopted unused future lossless random draws");
+            }
+            auto malformed = scenario;
+            malformed.target_samples[0].law = ControllerSampleLaw::target_draw;
+            expect_rejected<std::invalid_argument>([&] { static_cast<void>(controller.run(malformed)); },
+                "lossless controller accepted an unaudited target-draw transition");
+            malformed = scenario;
+            malformed.sampling_mode = SpeculativeSamplingMode::exact_match;
+            expect_rejected<std::invalid_argument>([&] { static_cast<void>(controller.run(malformed)); },
+                "legacy controller accepted a rejection-sampling checkpoint");
+        }
+    }
+}
+
+void test_lossless_conditional_tiles_preserve_decisions_and_randomness() {
+    BoundedSpeculativeController controller;
+    for(const auto horizon:{3U,4U,7U,8U,15U,16U,23U}) {
+        auto storage=chain_storage(horizon,ChainTileEndpoint::post_full_candidate);
+        storage.header.primary_policy=ProposalPrimaryPolicy::independent_distribution;
+        storage.nodes.proposal_ticket_offsets.fill(proposal_ticket_none);
+        storage.materialized_edges.proposal_ticket_offsets.fill(proposal_ticket_none);
+        const auto graph=validate_proposal_graph(std::move(storage),validation_context());
+        for(std::uint32_t rejected=0;rejected<=horizon;++rejected) {
+            auto reference=chain_scenario(graph,{},single_tile_schedule(horizon));
+            reference.sampling_mode=SpeculativeSamplingMode::lossless;
+            TokenSampler sampler({.temperature=0.8F,.top_k=1,.seed=42});
+            sampler.observe_tokens(std::span(&kRootToken,1));
+            reference.origin_checkpoint=sampler.checkpoint();
+            auto fork=sampler.fork();
+            for(std::uint32_t edge=0;edge<horizon;++edge) {
+                const auto proposal=kRootToken+edge+1;
+                DraftTokenDistribution q;
+                q.count=1;
+                q.values[0]={proposal,draft_probability_mass_total};
+                const std::array<TokenLogit,1> p {{{edge==rejected?900U:proposal,1.0F}}};
+                const auto selected=fork.sample_speculative(proposal,q,p);
+                fork.observe_tokens(std::span(&selected.token,1));
+                reference.target_samples[edge]={selected.token,fork.checkpoint(),selected.accepted
+                    ?ControllerSampleLaw::rejection_accept:ControllerSampleLaw::rejection_residual};
+                ++reference.target_sample_count;
+                if(!selected.accepted) break;
+            }
+            const auto compare=[&](const SpeculativeControllerScenario& single) {
+                auto conditional=single;
+                conditional.chain_schedule=make_registered_conditional_chain_schedule(
+                    horizon,ChainTileEndpoint::post_full_candidate);
+                conditional.verifier_topology=TargetVerifierTopology::conditional_tile_cascade;
+                conditional.draft_schedule=SpeculativeDraftSchedule::conditional_tiles;
+                const auto expected=controller.run(single);
+                const auto actual=controller.run(conditional);
+                expect(actual.selected_count==expected.selected_count
+                    && actual.selected_tokens==expected.selected_tokens
+                    && actual.accepted_edge_count==expected.accepted_edge_count
+                    && actual.adopted_checkpoint.same_state(expected.adopted_checkpoint),
+                    "conditional lossless scheduling changed selection or causal RNG ownership");
+                expect(actual.logical_cached_count==expected.logical_cached_count
+                    && actual.retained_row_count+actual.endpoint_kv_only_count
+                        ==expected.retained_row_count+expected.endpoint_kv_only_count
+                    && actual.stop_reason==expected.stop_reason
+                    && actual.disposition==expected.disposition
+                    && actual.has_carry==expected.has_carry
+                    && (!actual.has_carry || actual.carry_token==expected.carry_token)
+                    && actual.callback_count==expected.callback_count,
+                    "conditional lossless scheduling changed terminal cache/carry/callback state");
+                for(std::uint32_t callback=0;callback<actual.callback_count;++callback) {
+                    const auto& a=actual.callback_records[callback];
+                    const auto& b=expected.callback_records[callback];
+                    expect(a.token_id==b.token_id && a.logical_selected_count==b.logical_selected_count
+                        && a.logical_cached_count==b.logical_cached_count && a.decision==b.decision,
+                        "conditional lossless callback observed a different cache receipt");
+                }
+                expect(actual.next_candidate_lease.source==expected.next_candidate_lease.source
+                    && actual.next_candidate_lease.node_index==expected.next_candidate_lease.node_index,
+                    "conditional lossless scheduling lost the full-prefix next candidate");
+            };
+            compare(reference);
+            const auto selected_count=std::min(rejected+2,horizon+1);
+            for(std::uint32_t depth=0;depth<selected_count;++depth) {
+                for(const auto decision:{ControllerCallbackDecision::stop_generation,
+                    ControllerCallbackDecision::throw_exception}) {
+                    auto stopped=reference;
+                    stopped.callbacks[depth]=decision;
+                    compare(stopped);
+                }
+                auto stopped=reference;
+                stopped.token_is_stop[depth]=true;
+                compare(stopped);
+                stopped=reference;
+                stopped.remaining_selected_token_budget=depth+1;
+                compare(stopped);
+            }
+        }
+    }
+}
+
 const TestCase kTests[] = {
+    {"lossless conditional tiles preserve all-horizon decisions randomness and terminal receipts",
+        test_lossless_conditional_tiles_preserve_decisions_and_randomness},
+    {"lossless controller adopts only causal proposal and acceptance randomness",
+        test_lossless_controller_adopts_only_causal_randomness},
     {"live callback pauses preserve the pure controller's exact commit floor",
         test_live_callback_pause_matches_scripted_controller},
     {"registered speculative chain transitions are exhaustive",

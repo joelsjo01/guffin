@@ -1,42 +1,25 @@
 #pragma once
 
 #include "local_gguf_engine/engine/learned_recurrent.hpp"
+#include "local_gguf_engine/engine/chain_chat.hpp"
 
 namespace local_gguf_engine::engine {
 
-struct RecurrentCommittedToken {
-    std::uint32_t token_id = 0;
-    std::uint32_t depth = 0;
-    std::uint32_t cached_token_count = 0;
-    bool stop_token = false;
-};
-// Synchronous borrowed callback. Binding an lvalue makes its lifetime explicit
-// and avoids constructing a heap-owning std::function in every draft cycle.
-class RecurrentCommitCallback final {
-public:
-    template<class Callable> RecurrentCommitCallback(Callable& callback) noexcept
-        : context_(&callback), invoke_([](const void* context, const RecurrentCommittedToken& token) {
-            return (*static_cast<const Callable*>(context))(token);
-        }) {}
-    [[nodiscard]] Gemma2MetalTokenStreamDecision operator()(const RecurrentCommittedToken& token) const {
-        return invoke_(context_, token);
-    }
-private:
-    const void* context_;
-    Gemma2MetalTokenStreamDecision (*invoke_)(const void*, const RecurrentCommittedToken&);
+struct RecurrentExecutionOptions {
+    RecurrentDraftHead draft_head = RecurrentDraftHead::f16;
+    bool conditional_verification = false;
+
+    friend bool operator==(const RecurrentExecutionOptions&, const RecurrentExecutionOptions&) = default;
 };
 
-struct RecurrentCycleResult {
+void validate_recurrent_execution_options(
+    SpeculativeSamplingMode sampling_mode, const RecurrentExecutionOptions& execution
+);
+
+using RecurrentCommittedToken = ChainCommittedToken;
+using RecurrentCommitCallback = ChainCommitCallback;
+struct RecurrentCycleResult : ChainCycleResult {
     RecurrentExecutionResult draft;
-    TargetVerifierExecutionStats target;
-    Gemma2MetalDecodeExecutionStats endpoint;
-    std::uint32_t retained_rows = 0;
-    std::uint32_t accepted_edges = 0;
-    std::optional<std::uint32_t> carry;
-    std::optional<std::uint32_t> stop_token;
-    bool callback_stopped = false;
-    bool has_next_candidates = false;
-    CompactTokenCandidates next_candidates;
 };
 
 // Explicit weights-only development execution. No fitted routing/admission
@@ -44,7 +27,9 @@ struct RecurrentCycleResult {
 // final target feature until the next draft has consumed it, without replay.
 class RecurrentChatPlan final {
 public:
-    RecurrentChatPlan(Gemma2SpeculativePlan draft, const Gemma2MetalModelPlan& target);
+    RecurrentChatPlan(Gemma2SpeculativePlan draft, const Gemma2MetalModelPlan& target,
+        SpeculativeSamplingMode sampling_mode = SpeculativeSamplingMode::exact_match,
+        RecurrentExecutionOptions execution = {});
     ~RecurrentChatPlan();
     RecurrentChatPlan(RecurrentChatPlan&&) noexcept;
     RecurrentChatPlan& operator=(RecurrentChatPlan&&) noexcept;
@@ -52,9 +37,15 @@ public:
     RecurrentChatPlan& operator=(const RecurrentChatPlan&) = delete;
     void validate_sampler(const TokenSamplerOptions&) const;
     [[nodiscard]] std::uint32_t horizon() const noexcept;
+    [[nodiscard]] SpeculativeSamplingMode sampling_mode() const noexcept;
+    [[nodiscard]] const RecurrentExecutionOptions& execution_options() const noexcept;
     [[nodiscard]] bool poisoned() const noexcept;
     [[nodiscard]] std::size_t owned_bytes() const noexcept;
     void invalidate() noexcept;
+    // Preparation only: after the first setup cycle, exercise every remaining
+    // tile shape on setup K/V. Consumes no sampler draws or external callbacks;
+    // the caller's logical context must still be empty.
+    void warm_up_verifier_tiles(Gemma2MetalModelPlan& target);
     void publish_prefill_origin(std::uint32_t position);
     void publish_decode_origin(std::uint32_t position);
     void publish_retrieval_origin(std::uint32_t row, std::uint32_t position);

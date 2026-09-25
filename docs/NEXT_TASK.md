@@ -2,15 +2,931 @@
 
 ## Active baton
 
-Execution status: Phases 2 through 4 are complete. The user has completed the
-first three-seed H3 full-vocabulary training control and verified its Phase-6
-weights export/native recurrent Metal chain. The user-authorized H3 live-chat
-integration is now at its verification handoff: native session execution and
-full CI pass, and the cooled canonical screen preserves tokens but is slower
-than Stage 4. This remains a weights-only development route, not a selected or
-admitted learned policy. Stop here for user review; do not start training,
-policy fitting or another optimization. The wider Phase-5, Phase-6 and Phase-7
-candidate registries are not complete.
+Execution status: **the user requested removal of the paired-row verifier
+optimization. Its kernels, five setup-time pipeline variants, typed dispatch
+option, verifier routing and three dedicated tests have been removed.** The
+pre-pass verifier implementation and its existing tests are restored; earlier
+speculative-decoding work, Stage 4/defaults and the detailed plans below are
+preserved. Full release `bash scripts/ci.sh` passed 161 Python and 480 C++ tests
+with real Metal/MPS access and no compiler warnings; log:
+`build/verifier-removal-ci.log`. The rebuilt production executable is byte-for-byte
+identical to the preserved pre-pass baseline (SHA-256
+`4b027cbab15ef5b1b3eab6d619c26b83e6b310a7ec28a7fcdd1d57743bfebb92`).
+**Removal and verification are complete; stop for user review.** Do not start
+another optimization, training run or benchmark screen. No new timing run was
+needed for this exact executable restoration; the old-verifier run below remains
+historical evidence, not a new measurement of the restored build.
+
+### Withdrawn verifier optimization: historical contract and evidence
+
+The following records describe the removed candidate, not the current code.
+The user's removal request supersedes the earlier retention decision. Raw
+benchmark/checkpoint receipts and ignored diagnostic helpers remain locally
+for provenance; the candidate-specific checkpoint helper is not compatible
+with the restored API and is not part of the build or CI.
+
+The completed bounded H3/conditional pass initially retained the paired-row
+optimization in the explicit speculative path; that decision is withdrawn.
+The cooled old/new comparison narrowly
+passed the preregistered generation gates at +2.0273%, not the 18 tokens/s goal.
+This is not a Stage-4 comparison or a speculative-default promotion. No training
+was started; do not automatically begin another optimization or measurement pass.
+
+The authorized scope was attribution of the real Gemma-3-270M / Gemma-2-9B
+chat verifier and one focused GPU optimization justified by that evidence.
+Preserve Stage 4/defaults, full
+vocabulary, both sampling modes, target numeric fidelity and all transactional
+K/V/callback/rollback semantics. No training, new drafter, horizon sweep or
+unrelated cleanup. Preserve the detailed plans and previous negative results.
+
+Temporary diagnostic instrumentation must be isolated from the production
+performance executable and removed after attribution. This M4 exposes only
+stage-boundary timestamp counters and Xcode is unavailable: encoder-splitting
+profiles are perturbed diagnostics, not physical bandwidth/utilization evidence
+or admission measurements. Do not present inferred traffic as measured traffic.
+
+Preregistered real-path screen: preserve the current release executable
+(`4b027cbab15ef5b1b3eab6d619c26b83e6b310a7ec28a7fcdd1d57743bfebb92`),
+then compare old and candidate H3/conditional/lossless using the same pinned
+models, inherited draft scalars, retrieval, seed 42 and canonical natural-stop
+two-turn chat. Baseline first, candidate second; fresh process and at least
+240 idle seconds before each. Report all raw clocks/counts/hashes, both turns,
+acceptance, memory/swap and thermal limitations. Require the existing retention
+gates and independent CPU/Metal/numeric/lifecycle coverage plus full repository
+CI; remove rejected candidates. Any proposed speculative-default promotion
+additionally requires its own cooled Stage-4 comparison, not merely a win over
+the old speculative implementation. Stop after this bounded pass and handoff.
+
+### Completed verifier optimization (2026-09-20)
+
+Preserved control: ignored
+`benchmarks/results/verifier-opt-FTOoKg/baseline-generate`, matching the SHA above.
+One instrumented canonical H3/conditional chat reproduced all 683 tokens, both
+hashes, 273 cycles and 388 accepted draft edges. Four sampled verifier commands
+used 575 encoder groups each; command indices include preparation/restarts and
+are not token positions. Corrected grouped timings were Q4 64.00–64.41 ms,
+Q6 2.01–2.31 ms, Q8 head 17.94–18.09 ms, attention 1.29–3.40 ms. Q4 accounted
+for 70.95–73.11% and the head 20.05–20.36% of these instrumented stage sums.
+They prioritize work; encoder splitting adds overhead/changes overlap, and
+these are not exact shares of uninstrumented chat latency.
+
+Diagnostic limitations are explicit in the raw evidence under that directory:
+the initial diagnostic mistakenly applied Mach's 125/3 conversion to CPU
+timestamps already expressed in nanoseconds. Independent API/unit review and a
+local timebase query established this factor; saved stage `ns` values must be
+multiplied by 3/125. Command-buffer `cb_ns` is unaffected. Empty initial barrier
+encoders produced stale-looking counter values for cache-commit samples, so
+their stage breakdown is invalid and is not used to choose an optimization.
+No physical bandwidth/occupancy attribution is available. The corrected
+instrumentation source is preserved locally, and all temporary profiling code
+has been removed from production source.
+
+Candidate: verifier-only two-row Q4 and Q8 kernels co-schedule four independent
+SIMD groups in a 128-thread workgroup. Each SIMD owns one row and two columns;
+the block traversal, scalar arithmetic and SIMD reductions remain unchanged.
+This shares cache locality, not decoded floating-point accumulators; it is
+different from the rejected four-row F32 sharing attempt. Q4's retained routes
+and the default/draft Q8 head stay selected outside this exact shape. Five
+pipelines are prepared at setup with explicit SIMD/thread-capacity validation.
+No runtime allocations, synchronization, sampling or cache semantics were added.
+Release `bash scripts/ci.sh` passed 161 Python and 483 C++ tests on real
+Metal/MPS without warnings (`build/verifier-opt-ci.log`). The three new tests
+cover independent CPU Q4/Q8 equations, exact scalar/retained-head bytes,
+production inner widths, odd columns, nonzero row offsets, poison/canaries,
+malformed/overflow/capacity requests and recovery. Existing full lifecycle,
+unavailable-device, forest and wrapped-cache tests remain unchanged and passed.
+
+The ignored actual-checkpoint probe also passed: a synthetic 16-token prefix
+and two ordinary scalar inputs compared with the two-row verifier. All 42
+layers' private K/V rows, normalized hidden, all 256000 logits per row, compact
+candidates and prepared target probabilities were bit-identical. Separate Q8
+head default/pair and offset checks also matched. The receipt records 264
+comparisons / 8909532 compared bytes / zero failures. This is correctness-only
+evidence, not a representative workload or speed measurement. The production
+chat candidate SHA is
+`dd70d8a89de228cc9cfc2dfecf263fe78d6f33700f099f42b51afdfc9498fbfd`.
+The preregistered cooled pair completed; Stage 4 remains the default.
+
+The comparison used the canonical two-turn seed-42 natural-stop chat, H3,
+conditional lossless verification, unchanged retrieval and inherited draft
+sampling. Baseline ran first, candidate second, each in a fresh production
+process after at least 240 idle seconds with no competing engine/training/build
+job. Both emitted 337 / 346 tokens with hashes `34f8758fbd0f205d` /
+`6f1f6917e9fbef08`, identical cache positions and acceptance/depth/censoring
+receipts: 273 cycles, 388 accepted draft edges (1.4212/cycle).
+
+| Metric, first / follow-up where applicable | Previous verifier | Paired-row verifier |
+| --- | ---: | ---: |
+| Complete-generation seconds | 21.269695125 / 23.519990333 | 20.850335291 / 23.049359875 |
+| Generation tokens/s | 15.8441 / 14.7109 | 16.1628 / 15.0113 |
+| Aggregate generation tokens/s | 15.2490 | 15.5582 |
+| Selected-token TTFT, ms | 194.489 / 477.185 | 191.125 / 474.990 |
+| First visible text, ms | 309.159 / 606.653 | 301.186 / 598.091 |
+| Prompt tokens/s | 82.2669 / 39.8168 | 83.7148 / 40.0008 |
+| Both full turns, seconds | 45.471186624 | 44.569279792 |
+| Whole process including setup/warm-up/pause, seconds | 117.06 | 122.92 |
+| Peak process memory footprint, bytes | 10562923896 | 10562629008 |
+| Maximum RSS, bytes | 10494885888 | 10812751872 |
+
+Generation improved **2.0273%**, winning both turns, with no regression in TTFT,
+first visible text or prompt throughput. This barely clears the existing 2%
+screen, not a confidence interval or proof of a repeatable margin. Total target
+GPU time fell from 35.604429654 to 34.790552301 seconds (-2.2859%); learned draft
+GPU time was essentially unchanged, 7.084458006 to 7.082856826 seconds. Total
+generation GPU time fell from 43.898620059 to 43.079196816 seconds. This supports
+a target-side improvement but does not measure physical bandwidth or prove the
+cache-locality mechanism directly. Both runs had 1653 command buffers/waits,
+657391 dispatches, 571489 barriers, zero transient allocations and zero numeric
+refusals. Engine-reported weight/KV/scratch/drafter storage was identical.
+
+Memory/startup caveats: whole-process time was 5.01% worse and maximum RSS 3.03%
+higher despite effectively unchanged peak footprint (-0.0028%). Both runs had
+system compression and swap activity. At 16 KiB/page, baseline swap-in/out
+deltas were 687 / 22092 pages; candidate 4319 / 580. System swap used changed
+1398.12 to 1735.31 MiB in the baseline and 1687.31 to 1640.38 MiB in the candidate.
+Whole-process page faults were 22538 versus 438131; these snapshots cannot
+attribute paging or startup changes to the kernel. Do not claim a cold-start,
+RSS or swap-free improvement. Five additional pipelines compile at setup,
+including for non-speculative use; they add no steady-generation compilation.
+`pmset` recorded no thermal/performance warnings before or after either run,
+but there are no temperature/clock traces or heat-soaked performance claims.
+One fixed-order cooled pair cannot eliminate drift or system-state confounding.
+
+Raw identities, argv/stdout/stderr, per-turn diagnostics, time/VM/thermal
+receipts and the gate summary are under ignored
+`benchmarks/results/verifier-opt-FTOoKg/comparison/`; checkpoint parity receipts
+are one directory above. The local driver is
+`build/verifier_optimization_screen.py` and the correctness-only probe is
+`build/verifier_checkpoint_probe.cpp`. They are diagnostics, not runtime paths.
+Changed production ownership: `metal_backend.mm` (kernel specialization),
+`metal_context.hpp/.mm` (setup-time variants), `metal_command_context.hpp/.mm`
+(typed routing), `target_verifier_runtime.cpp` (explicit target-head request).
+Coverage was added to `tests/engine/gemma2_metal_plan_tests.cpp`; this document
+owns the handoff. No source-exact paper claim or new unresolved source field is
+introduced. The larger speculative-speed goal remains unmet; a Stage-4 win and
+default promotion remain unproven. Stop here for user review.
+
+### Previous draft-length/calibration baton (completed)
+
+Execution status: **the user has authorized the Gemma 3 draft-length,
+verification-schedule and draft-only calibration pass; implementation and full
+CI and all twelve preregistered production-chat runs are complete. Stop for
+user review. No tested candidate beat Stage 4 or qualifies for promotion.**
+Preserve Stage 4/default target sampling and
+the complete native drafter. No training or rented resources: the user owns
+training execution. This supersedes the completed integration stop below.
+
+Add fixed-capacity acceptance-prefix/rejection-depth accounting with stop,
+budget and callback censoring distinguished from rejection; expose explicit
+draft-only sampler scalars with unchanged inherited defaults and the actual
+effective proposal-law identity in diagnostics. Keep actual finite-grid q,
+target transforms, RNG and cache transactions authoritative. Validate controls
+at the engine boundary, not only the CLI; reject incompatible configurations.
+
+Preregistered development screen: all eight configurations H2/H3/H4/H6 crossed
+with full/conditional verification, same canonical two-turn seed-42 natural-stop
+chat. Order: Stage 4, H4 conditional, H4 full, H2 full, H2 conditional,
+H6 conditional, H6 full, H3 full, H3 conditional, Stage 4. Each is a fresh
+production process after at least 240 idle seconds. Keep target defaults and
+retrieval policy unchanged. Rank configurations by aggregate complete-generation
+tokens/s, reporting both turns, first text/TTFT, raw counts/hashes, depth
+histograms, full-accept/censored counts, all draft/target costs, memory/swap and
+thermal limitations; differing text/context remains unequal work.
+
+Then test draft temperatures 0.6 and 1.0 at the best measured length/schedule,
+against inherited target temperature 0.8, leaving all other draft scalars
+inherited and target sampling untouched. This is a labeled local calibration
+ablation, not a source-exact paper reproduction or a rejection of untested
+calibration settings. Training/distillation remains a separate user-run next
+step if needed, not an automatic experiment. No default promotion from this
+exploratory selection; a proposed retention candidate needs a fresh cooled
+candidate/baseline confirmation and all existing gates.
+
+Run deterministic/adversarial coverage and full repository CI before the
+screen. Stop after this bounded matrix/calibration and honest handoff, or a
+verified external blocker. Preserve the detailed historical plans below.
+
+### Draft-length/calibration implementation handoff (2026-09-19)
+
+Implemented typed optional draft-only temperature, top-k, top-p, min-p and
+repetition-penalty overrides. Omitted fields inherit target settings. Resolution
+validates the target first, then the native draft vocabulary/ranges; only the
+draft proposal operation receives the result. Target sampler options, history,
+RNG ownership and acceptance/residual equations are unchanged. The actual
+transformed finite-grid q still determines acceptance and residual correction.
+Unrestricted native draft top-k (`0`) does not relax the target support cap.
+CLI flags are `--draft-temperature`, `--draft-top-k`, `--draft-top-p`,
+`--draft-min-p`, and `--draft-repeat-penalty`; they require an explicit standalone
+draft and lossless mode. No defaults, weights or Metal kernels were changed.
+
+Diagnostics schema 5 records the actual effective draft scalars and fixed
+24-bin accepted-prefix / 23-bin rejection-depth arrays, plus censored,
+full-accept and horizon-limited continuation counts. A controller-selected
+correction is a rejection; a discarded speculative preview is not. Stops,
+callbacks and token budgets can censor a prefix. Full acceptance at a stop is
+distinct from reaching the horizon with a valid continuation. The benchmark
+parser checks conservation, capacities and exact F32 override receipts while
+retaining schema-3/4 compatibility. New controls allocate no per-cycle storage.
+
+Verification: final release `bash scripts/ci.sh` passed **161 Python tests and
+480 C++ tests** with actual Metal/MPS access and no compiler warnings. Log:
+ignored `build/gemma3-tuning-final-ci.log`. Coverage includes independent native
+q equations for all five scalars, explicit-default equivalence, nondefault-q
+acceptance/residual and target cache parity, rejection/censoring distinctions,
+malformed/boundary controls, CLI propagation and diagnostic integrity. Existing
+authenticated Gemma 3 full-checkpoint/wrapped-cache goldens passed again.
+The first CI run caught a new small CLI test fixture selecting an incompatible
+F16 target head; the fixture now explicitly selects the required Q8 policy.
+No checks or tolerances were weakened. Optional real Vicuna weights remain
+unavailable locally; its full-shape synthetic tests passed, not a checkpoint
+rerun.
+
+Changed ownership: `standalone_chat.hpp/.cpp` and its tests (typed draft
+controls); `chain_chat.hpp/.mm` (authoritative rejection receipt);
+`gemma2_runtime.hpp/.cpp` (fixed counters); `gemma2_chat_session.hpp/.cpp`
+(effective sampler receipt); `generate.cpp` and CLI tests (flags/schema);
+`quick_benchmark.py` and its tests (validation/provenance); this document and
+`GRAPH.md`. The ignored local runner `build/gemma3_tuning_screen.py` implements
+the exact matrix/order above and the two subsequent temperature trials using
+the canonical production-chat driver, natural stopping, 240-second cooldowns,
+raw outputs, `/usr/bin/time -l` and memory/thermal snapshots. It refuses an
+occupied output directory and checks pinned artifacts and executable identity.
+
+Before timing, read-only
+process inspection found the user's separate interactive H3/conditional chat
+(PID 32005, parent 6836), still open after final CI. It was idle but retained
+the model/cache lifetime; concurrent residency can distort memory pressure and
+timing. Do not terminate the user's process without permission. The user was
+asked to exit it with `/quit` or `/exit`. On resumption the user confirmed and
+process inspection found no inference, training or build jobs; the release
+executable was up to date. The unchanged bounded screen completed with
+results in ignored `benchmarks/results/gemma3-tuning-F0NoKt/`, after its
+prescribed cooldowns. No training was started. Do not infer any speedup or default
+promotion from implementation/CI success. Earlier numerical/source fidelity
+limitations remain unchanged; no new source-exact calibration claim is made.
+
+### Completed draft-length/calibration screen (2026-09-19)
+
+Decision: **keep Stage 4 as default.** H3/conditional with inherited draft
+temperature 0.8 remains the fastest speculative configuration tested, but its
+15.3690 tokens/s trails both baselines (15.9083 and 16.0305) by 3.39–4.13%,
+and loses on both turns. Neither longer drafts nor either tested temperature
+improved this result. This is a bounded development screen, not rejection of
+untested calibration, distillation, or the whole speculative-decoding design.
+No additional confirmation pair was launched because no candidate met the
+initial generation gates; no defaults, weights or runtime code changed in
+this measurement pass. All benchmark/build/test processes have ended, and no
+training was started. Do not automatically begin another optimization phase.
+
+Protocol: exactly the preregistered order above, canonical two-turn seed-42
+natural-stop chat, unchanged retrieval and target sampling, fresh process and
+at least 240 seconds idle before each run. Host: Apple M4, 16 GiB RAM,
+macOS 26.6.2 (25G83). One idle interval before H3/conditional lasted about
+790 seconds, longer than the required minimum; its cause was not established.
+Release executable SHA-256:
+`4b027cbab15ef5b1b3eab6d619c26b83e6b310a7ec28a7fcdd1d57743bfebb92`.
+Both model hashes are the pinned identities above. Raw argv/stdout/stderr,
+per-turn diagnostic JSON, `/usr/bin/time -l`, system snapshots, identity,
+calibration selection and summary are in ignored
+`benchmarks/results/gemma3-tuning-F0NoKt/`. The build remained up to date
+through completion. The prior full CI (161 Python / 480 C++ tests) verifies
+this executable; only this document changed during the measurement pass.
+
+Here C means conditional, F means full; draft temperature is 0.8 unless
+specified. Generation rates use selected tokens divided by the complete
+generation clock, including callback/stop completion, not just target GPU time.
+
+| Run, in execution order | First / follow-up tokens | Total completion seconds | First / follow-up tokens/s | Aggregate tokens/s | Accepted draft tokens/cycle |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Stage 4 before | 276 / 322 | 37.590376875 | 16.0814 / 15.7629 | 15.9083 | — |
+| H4 C | 184 / 217 | 29.167807209 | 14.0670 / 13.4887 | 13.7480 | 1.5449 |
+| H4 F | 184 / 217 | 41.202314083 | 10.0924 / 9.4468 | 9.7325 | 1.5449 |
+| H2 F | 190 / 215 | 29.345788541 | 14.0947 / 13.5514 | 13.8010 | 1.0153 |
+| H2 C | 190 / 215 | 29.331823999 | 14.1074 / 13.5530 | 13.8075 | 1.0153 |
+| H6 C | 281 / 303 | 43.973101042 | 14.2555 / 12.4890 | 13.2808 | 1.6409 |
+| H6 F | 281 / 303 | 83.519796584 | 8.2112 / 6.1463 | 6.9924 | 1.6409 |
+| H3 F | 337 / 346 | 57.200630750 | 12.8070 / 11.2021 | 11.9404 | 1.4212 |
+| H3 C | 337 / 346 | 44.440065084 | 15.9235 / 14.8648 | 15.3690 | 1.4212 |
+| Stage 4 after | 276 / 322 | 37.303815625 | 16.1505 / 15.9291 | 16.0305 | — |
+| H3 C, draft T=0.6 | 232 / 346 | 38.790424750 | 15.6778 / 14.4212 | 14.9006 | 1.2540 |
+| H3 C, draft T=1.0 | 254 / 327 | 39.670855209 | 14.7975 / 14.5296 | 14.6455 | 1.2461 |
+
+Both calibration runs recorded the requested effective F32 temperature, with
+top-k 40, top-p 0.95, min-p 0.05 and repetition penalty 1 unchanged. Target
+temperature stayed 0.8. The two settings were 3.05% and 4.71% slower than the
+inherited-temperature H3 C run. Selecting the maximum of eight single runs
+and then calibrating it is exploratory selection, not a confidence interval.
+
+Latency pairs below are first / follow-up. These are recorded separately from
+generation throughput; whole-process times additionally retain initialization,
+warm-up and the five-second inter-turn pause.
+
+| Run | Selected-token TTFT, ms | First visible text, ms | Prompt tokens/s | Both full turns, s | Whole process, s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Stage 4 before | 168.281 / 446.225 | 237.496 / 526.754 | 95.1 / 42.6 | 38.2266 | 70.31 |
+| H4 C | 198.076 / 966.794 | 327.792 / 1114.176 | 80.8 / 19.7 | 30.3462 | 116.70 |
+| H4 F | 189.219 / 462.316 | 432.880 / 731.084 | 84.6 / 41.1 | 41.8629 | 129.10 |
+| H2 F | 190.944 / 624.573 | 333.422 / 785.582 | 83.8 / 30.4 | 30.1726 | 109.86 |
+| H2 C | 190.582 / 441.455 | 331.991 / 590.319 | 84.0 / 43.0 | 29.9667 | 111.84 |
+| H6 C | 189.325 / 558.664 | 322.507 / 710.871 | 84.5 / 34.0 | 44.7312 | 124.06 |
+| H6 F | 188.633 / 423.292 | 532.412 / 778.318 | 84.8 / 44.9 | 84.1362 | 162.45 |
+| H3 F | 190.322 / 440.530 | 383.359 / 643.108 | 84.1 / 43.1 | 57.8350 | 135.74 |
+| H3 C | 191.054 / 495.843 | 303.208 / 626.175 | 83.7 / 38.3 | 45.1375 | 122.64 |
+| Stage 4 after | 168.281 / 1027.047 | 232.504 / 1098.964 | 95.1 / 18.5 | 38.5081 | 67.93 |
+| H3 C, T=0.6 | 191.565 / 437.734 | 303.365 / 563.060 | 83.5 / 43.4 | 39.4290 | 115.35 |
+| H3 C, T=1.0 | 190.125 / 437.075 | 301.597 / 558.736 | 84.2 / 43.5 | 40.3016 | 116.83 |
+
+Full/conditional runs at each horizon produced identical per-turn hashes,
+counts, prompt/cache lengths and acceptance accounting. These specific pairs
+are equal-work comparisons. Cross-horizon, cross-temperature and Stage-4-versus-
+draft outputs differ and are **not** equal-work comparisons. Baseline hashes
+were identical before/after (`49080569719b1cea` / `369b09d9b01ff1e1`). Candidate
+hashes are preserved in each per-turn JSON; H3 default also reproduced the
+earlier integration hashes `34f8758fbd0f205d` / `6f1f6917e9fbef08`.
+
+The fixed counters conserve every cycle and accepted edge; all runs reported
+zero numeric refusals and zero instrumented transient allocations. In the
+table below, prefix bins are counts for 0 through H accepted edges; rejection
+bins are counts for rejection after 0 through H−1 accepted edges. Censoring is
+not rejection. Both schedules at a given horizon share the same row.
+
+| Configuration | Cycles | Accepted-prefix bins | Rejection-depth bins | Censored / full / horizon-limited |
+| --- | ---: | --- | --- | ---: |
+| H2 | 196 | 78, 37, 81 | 78, 36 | 1 / 81 / 80 |
+| H3, T=0.8 | 273 | 88, 60, 47, 78 | 88, 59, 47 | 1 / 78 / 78 |
+| H4 | 156 | 55, 36, 22, 11, 32 | 55, 36, 22, 10 | 1 / 32 / 31 |
+| H6 | 220 | 89, 45, 22, 24, 14, 12, 14 | 89, 45, 22, 23, 14, 12 | 1 / 14 / 14 |
+| H3, T=0.6 | 252 | 97, 57, 35, 63 | 97, 57, 35 | 0 / 63 / 62 |
+| H3, T=1.0 | 256 | 98, 54, 47, 57 | 98, 53, 47 | 1 / 57 / 57 |
+
+H6 generated all six proposals eagerly, but reached an actual sixth-proposal
+decision in only 26/220 cycles, accepting 14. Its observed mean remained below
+two accepted draft tokens/cycle. Do not treat differences of cross-horizon
+means as paired estimates: their sampled trajectories differ.
+
+All-work draft totals below include prompt prefill and out-of-cycle committed-
+token catch-up, not just proposal calls. Target GPU is speculative-cycle work,
+not all target work; the completion/turn/process clocks above retain the
+remaining work. These are overlapping scopes, not components to add blindly.
+
+| Candidate | All draft wall / GPU, s | Target cycle GPU, s | Peak process footprint, bytes | System swap used before → after, MiB |
+| --- | ---: | ---: | ---: | ---: |
+| H4 C | 5.7606 / 5.3875 | 23.0667 | 10564054416 | 1724.88 → 2288.25 |
+| H4 F | 5.5430 / 5.2819 | 35.2991 | 10560974224 | 2136.25 → 2355.50 |
+| H2 F | 3.8175 / 3.5691 | 24.9728 | 10561809808 | 2171.50 → 2278.81 |
+| H2 C | 3.8029 / 3.5652 | 24.9549 | 10561695120 | 2238.81 → 2230.81 |
+| H6 C | 11.1968 / 10.8682 | 32.3049 | 10569936296 | 2166.81 → 2223.31 |
+| H6 F | 11.7513 / 11.3359 | 71.3264 | 10583158160 | 2199.31 → 2161.06 |
+| H3 F | 7.6941 / 7.3130 | 48.0977 | 10564955536 | 2153.06 → 1715.19 |
+| H3 C | 7.5966 / 7.2614 | 35.4091 | 10562678184 | 1547.19 → 1699.69 |
+| H3 C, T=0.6 | 6.9428 / 6.5972 | 30.9814 | 10562465144 | 1579.69 → 1787.94 |
+| H3 C, T=1.0 | 7.0264 / 6.6274 | 31.8368 | 10562710928 | 1755.94 → 1731.94 |
+
+Baseline peak footprints were 9854266024 / 9883675328 bytes; swap used was
+1263.56 → 2052.88 / 1603.69 → 1587.69 MiB. Draft-plan owned storage ranged
+from 700820764 to 714171356 bytes (H3 C: 701757036). Complete draft command
+buffer / compute-dispatch counts, and uploaded / read-back bytes, were:
+H2 600 / 179530 and 80536 / 20920; H3 default 843 / 340402 and 115308 / 38196;
+H4 474 / 243916 and 67708 / 25224; H6 665 / 493051 and 100568 / 41140;
+T=0.6 768 / 306973 and 106324 / 34920; T=1.0 776 / 308265 and 107960 / 35480.
+The counts are identical across full/conditional at a given horizon. No
+context rebuild occurred in these conversations; rollback, stop, callback,
+cache-maintenance and synchronization costs remain in the production clocks.
+
+Memory/thermal limitations: the host had substantial compression and system-
+wide swapping, not clean exclusive residency. For example, baseline-before
+swap-in/out deltas were 18830/69460 pages versus 7731/17444 for H3 C; pages are
+16 KiB. Every run's VM counters, RSS/footprint and swap snapshots are retained.
+Every `pmset` snapshot reported no recorded thermal/performance warning, which
+does **not** establish unthrottled GPU clocks or heat-soaked stability. Baseline
+generation drift was +0.77%, but follow-up TTFT varied from 446 to 1027 ms;
+do not cherry-pick the more favourable latency baseline. Physical bandwidth,
+GPU arithmetic intensity and compute utilization were not measured here;
+scheduled weight-byte counters are not a hardware bandwidth measurement.
+
+Actionable inference, not a new authorized phase: profile the target verifier's
+batching cost before spending on another draft model or increasing horizon.
+Actual full/conditional target batch rows are H2 `3 / 3`, H3 `4 / (2+2)`,
+H4 `5 / (2+3)`, H6 `7 / (2+2+3)`. H2 generation schedules are identical
+(conditional adds setup warm-up), so its 0.048% difference is not a batching
+optimization. At matching outputs, conditional reduced target-cycle GPU time
+from 48.10 to 35.41 s at H3, 35.30 to 23.07 s at H4, and 71.33 to 32.30 s
+at H6. This combines avoiding later rejected work with possible kernel-width
+efficiency differences; it does not yet identify their individual shares or
+prove a particular kernel defect. Keep all original correctness/source
+contracts and the Stage 4 baseline intact in any follow-up.
+
+### Previous Gemma 3 integration baton (completed)
+
+Execution status: **native Gemma-3-270M-IT Q8_0 / Gemma-2-9B TLI integration,
+full CI and the bounded cooled chat comparison are complete; stop for user
+review.** The H3/conditional screen did not pass retention gates. Gemma 3 is
+explicitly selectable, not performance-admitted; Stage 4 remains the default.
+No training, optimization sweep or next architecture is authorized by this
+completed baton. Earlier implementation plans and evidence remain preserved.
+
+Implement the complete downloaded `models/gemma-3-270m-it-Q8_0.gguf` as an
+engine-owned resident Metal drafter. Its SHA-256 is
+`0ef57d2c838458a1952664260dcba38e5bdda37494f3af732f06e4add24068e3`.
+Keep Stage 4, Vicuna and existing R paths selectable with unchanged defaults
+and target arithmetic. No training, reduced vocabulary/model, framework
+runtime, silent fallback, or unrelated cleanup.
+
+Required work: authenticate Gemma-3 tokenizer normalization/added-token
+semantics; implement its complete 18-layer Q8 transformer, tied 262,144-row
+embedding/head, Q/K norms, split-half RoPE, 4:1 attention, fifteen 512-row
+sliding layers and three 32,768-row global layers. Preserve the GGUF norm
+conversion convention and distinguish precision-matched reference equations
+from original BF16-source execution. Use a control-preserving, injective Gemma
+token bridge, keeping actual accepted draft IDs and independent draft positions.
+Do not inherit Vicuna's control stripping or 2,048/1,024 context policy.
+
+Keep speculative K/V private until accepted; rollback must restore semantic
+cache contents, not merely decrement a ring frontier. Prepare all resident
+weights, full-vocabulary probability storage, transaction/snapshot storage and
+scratch up front. Support horizons 1–23 and explicit full/conditional target
+verification. Preserve the actual finite-grid proposal law, owner/epoch/depth
+leases, unchanged target transforms, rejection/residual sampling, callbacks,
+stops, budgets, regeneration, context shifts and explicit pending-token state.
+Fail closed on malformed artifacts, ambiguous mappings, stale state, uncertain
+numeric decisions, overflow and unavailable Metal. A draft-context overflow
+must not shorten the target context or silently switch execution modes.
+
+Verification: independent real-checkpoint CPU/pinned-source goldens and Metal
+parity; tokenizer/control/whitespace/byte goldens; full-vocabulary selection;
+sliding-wrap prefill and all rejection/commit depths; regeneration and failed
+regeneration; context shifting; capacity, malformed and unavailable-device
+paths. Run complete repository CI. Then run the actual chat executable against
+Stage 4 with the required fresh-process cooldowns, reporting complete costs,
+acceptance, TTFT, raw counts/hashes, memory/swap and limitations. Different
+lossless natural-stop outputs are not an exact-work comparison. No performance
+admission without the applicable gates.
+
+Stop after end-to-end integration, verification and an honest performance
+handoff, or an explicit external blocker. Preserve the detailed earlier plans.
+
+### Gemma 3 numerical and source contract
+
+The native drafter retains Q8_0 weights and uses F32 activations and draft K/V.
+The initial F16-cache implementation exposed a real verification problem:
+small legitimate F32 reduction differences could cross a half-precision
+rounding midpoint and propagate through later layers. Independently evaluated
+layer-0 V examples were position 25/channel 112 (CPU batched F32 -1.135248899,
+scalar F32 -1.135254860, F64 -1.135256976) and position 469/channel 125
+(-41.109371185, -41.109382629, -41.109382370 respectively). The native F16
+results agreed with scalar/F64 rounding, but differed from batched F32
+rounding; a later cache parity check failed. The fix is full-precision draft
+cache storage, not relaxed tolerances or matching one particular reduction.
+It adds 103.5 MiB of resident K/V plus bounded private-cache storage. Target
+arithmetic/cache precision is unchanged. Old F16 goldens remain separate local
+diagnostics; F32 goldens have their own identity and hashes.
+
+Reference equations are pinned to Transformers v4.55.0 and llama.cpp
+`d48a56effbba99944a677938d4beb63a0065ecdf`'s Gemma 3 GGUF conversion, norm and
+RoPE conventions. This is precision-matched GGUF execution, not original
+BF16 execution: embedding scaling uses F32 sqrt(640), and stored GGUF norm
+vectors already contain gamma = 1 + source weight. The complete 262,144-entry
+tokenizer was checked against the authenticated SentencePiece model and
+declared converter rules; 8,910 independent encoding cases cover user-defined
+pieces and ordinary/mixed text. Official gated HF tokenizer-config byte
+identity remains unclaimed, rather than inferred from a public mirror.
+
+The F32 implementation passed six focused actual-Metal groups: complete
+18-layer independent synthetic equations; private-cache transactions, every
+commit depth, wrapped rollback and pending-token restoration; complete
+262,144-token selection/CDF laws; the final 32,768-context row and overflow;
+malformed/unavailable-device behavior; and authenticated real-checkpoint
+goldens plus byte-exact replay across batch sizes. Real-checkpoint maximum
+absolute logit differences were 0.0000400543 (short prefill), 0.000079155
+(decode), 0.0000724792 (position 511), 0.000164032 (512), and 0.000156403
+(535). All 18 layers' short and wrapped K/V goldens passed. Existing tolerances
+were unchanged: logits `0.03 + 0.001 * abs(reference)` and cache values
+`0.004 + 0.002 * abs(reference)`. The independent F32 identity SHA-256 is
+`888b2ceab5ce29e8c3e5deac6c9b06d5fac4503de94553c568f3d3aca83d794f`.
+Full release CI subsequently passed with actual Metal/MPS access: 153 Python
+tests and 475 C++ tests, no compiler warnings, including the real Gemma 3
+artifact's wrapped context, successful/failed regeneration and context shifts.
+The optional real Vicuna checkpoint was unavailable locally; its complete-shape
+synthetic parity/lifecycle coverage passed. This is not a claim that its missing
+checkpoint was rerun. CI log: ignored `build/gemma3-final-ci.log`.
+
+The production command requires no Python environment or training:
+
+```sh
+build/release/local-gguf-generate models/gemma-2-9b-Q4.gguf --chat --backend metal \
+  --draft-model models/gemma-3-270m-it-Q8_0.gguf --draft-horizon 3 \
+  --speculative-sampling lossless --speculative-schedule conditional
+```
+
+Horizon 1–23 and `full` verification remain explicitly selectable; H3 with
+conditional verification is the bounded performance screen, not a capacity
+restriction. Omitting the draft options preserves the default Stage 4 path.
+
+### Gemma 3 production-chat evidence and handoff
+
+On 2026-09-19, the release chat executable ran the canonical two prompts with
+seed 42, natural stopping and the five-second inter-turn pause. Each mode used
+a fresh process after its own 240-second idle cooldown, with no concurrent
+build/test workload. Baseline ran first; candidate used H3, conditional
+verification, lossless sampling and the authenticated Q8 artifact. No kernel
+probe substituted for chat. Raw output, counts, durations, hashes, system
+snapshots and `/usr/bin/time -l` records are in ignored
+`benchmarks/results/gemma3-tli-W2vqJl/`; the local driver is
+`build/gemma3_chat_screen.py`. Executable SHA-256:
+`dbfcee7100282baaf6b43e9e61e2c7c743c3ff54e4dbae3faedd50e39b12a3c6`.
+
+| Complete-path metric | Stage 4 | Gemma 3 H3/conditional |
+| --- | ---: | ---: |
+| First turn, selected tokens / completion seconds | 276 / 17.902870000 | 337 / 21.007626208 |
+| Follow-up, selected tokens / completion seconds | 322 / 21.627597584 | 346 / 23.312855291 |
+| Aggregate generation tokens/s | 15.1276 | 15.4105 |
+| First / follow-up generation tokens/s | 15.4165 / 14.8884 | 16.0418 / 14.8416 |
+| First / follow-up selected-token TTFT, ms | 167.421 / 585.602 | 190.900 / 429.724 |
+| First / follow-up visible-text latency, ms | 229.412 / 661.905 | 302.206 / 552.095 |
+| First / follow-up prompt tokens/s | 95.6 / 32.4 | 83.8 / 44.2 |
+| Peak process memory footprint, bytes | 9,854,560,912 | 10,562,760,056 |
+
+The drafter accepted 388 edges across 273 cycles: **1.4212 accepted draft
+tokens per cycle**, excluding the mandatory target/root token. First-turn
+acceptance was 1.5344; follow-up was 1.3169. Numeric refusals were zero. Complete
+draft work, including prefill/ordinary catch-up and cache maintenance, totaled
+7.5411 s wall / 7.2349 s GPU, 843 command buffers, 340,402 compute dispatches,
+115,308 uploaded bytes and 38,196 read-back bytes. Target speculative-cycle GPU
+time totaled 35.3732 s; the generation-completion clock additionally includes
+ordinary work, selection, synchronization, readback and callbacks. Prepared
+standalone-plan ownership is 701,756,996 bytes (669.25 MiB), including the
+complete resident drafter, verifier/sampler storage, ledgers and tokenizers.
+
+Selected-token hashes, for provenance rather than equality:
+Stage 4 `49080569719b1cea` / `369b09d9b01ff1e1`; Gemma 3
+`34f8758fbd0f205d` / `6f1f6917e9fbef08`. These distribution-preserving runs
+produced different text, stop lengths and follow-up contexts; this is **not an
+exact-work comparison**.
+
+System memory pressure materially limits inference from this pair. Swap usage
+rose from 1012.88 to 2087.12 MiB during baseline and from 1991.12 to 2950.38 MiB
+during candidate. System swap-in/out page deltas were 15,223 / 83,088 versus
+4,378 / 65,488 (16-KiB pages); compression/decompression also occurred. These
+are system counters, not per-process swap attribution. `pmset -g therm`
+reported no recorded warnings, which does not establish unthrottled GPU clocks.
+No hardware bandwidth/utilization trace or heat-soaked retention sweep was
+performed, and logical scheduled-byte counters are not physical bandwidth.
+
+Decision: aggregate throughput was 1.8702% higher, below the 2% gate; first
+turn was 4.0558% faster but follow-up was 0.3143% slower. First-turn prompt/TTFT
+and visible latency also regressed beyond the allowed headline limit. Combined
+with unequal natural-stop work and memory pressure, this is not performance
+admission or proof of a general speedup. It also does not reject all Gemma 3
+horizons/schedules or the preserved architecture families. Stop here; any
+further optimization/experiment requires a new user-directed baton.
+
+Files changed by this integration: new `gemma3_draft` header/implementation,
+independent `gemma3_reference_golden.py` and its test/hash fixtures; existing
+standalone artifact/tokenizer/bridge, standalone chat transaction and checkpoint
+ownership, prepared-plan kind, Gemma 2 runtime/session metrics, CLI and quick
+benchmark identity handling; their deterministic tests, Makefile/test registry,
+GRAPH and this baton. No production inference dependency or training process
+was added. Pre-existing worktree changes and detailed historical plans were
+preserved; ENGINE_PRINCIPLES was not changed.
+
+### Previous Vicuna baton (completed)
+
+Execution status: **the native Vicuna/TLI integration and bounded verification
+pass are complete; stop for user review.** The cooled H3/conditional development
+screen did not beat Stage 4. The implementation remains explicitly selectable,
+not performance-admitted, and Stage 4 remains the default. No next architecture,
+training run, or additional benchmark sweep is authorized by this completed pass.
+
+The user has authorized **native Vicuna-68M / Gemma-2 TLI integration** after
+the read-only compatibility and cost audit. Implement the complete downloaded
+`double7/vicuna-68m` checkpoint as an engine-owned resident Metal drafter, with
+authenticated conversion, native tokenizer semantics, a validated vocabulary
+intersection, independent draft positions/K/V, full-vocabulary finite-grid
+proposal probabilities, and distribution-preserving target verification in the
+actual chat executable. No training, new corpus, inference-framework runtime,
+reduced model, hidden draft-support truncation, or silent Stage-4 fallback.
+
+This supersedes the paused optimization authorization immediately below, not
+the preserved historical implementation requirements. Stage 4 and both old R
+sampling paths remain selectable with unchanged defaults and target arithmetic.
+TLI is a chain algorithm; it does not implement or exclude the preserved P,
+tree, beam, or multi-stream candidates. Keep full and conditional verification
+explicit and retain the requested horizon. The H3 cost examples from the audit
+are illustrations, not a measured acceptance or latency promise.
+
+Required ownership boundaries: authenticated model/tokenizer/mapping lifetime;
+resident draft weights and bounded scratch; separate target/draft positions;
+per-prefix proposal-law leases; target/sampler/draft rollback and committed
+callback prefixes; pending corrections/bonus tokens; and a declared bounded
+2048-token draft-context rebuild policy that never shortens the target context.
+Only the draft distribution is restricted to the token intersection. The
+target's complete existing post-transform probability law remains authoritative.
+Do not renormalize gathered subsets of the full draft law. Fail closed on
+malformed/incompatible artifacts, stale state, numeric uncertainty, overflow,
+or unavailable Metal. Allocate/upload/compile production storage at preparation,
+not in the steady generation loop.
+
+Verification: independently check the complete Llama equations and tokenizer
+against pinned-source/CPU goldens and real Metal; cover all rejection depths,
+full acceptance, unmapped corrections, byte/special tokens, cache rollback,
+callback stop/throw, regeneration, context rebuild/shift, and unavailable-device
+and malformed-artifact paths. Run complete repository CI. Then run the actual
+chat benchmark against Stage 4 in fresh processes with the required cooldowns,
+reporting acceptance, TTFT, full draft/target/selection/synchronization/cache
+costs, memory/swap, raw output counts and hashes. Different lossless outputs are
+not exact-work comparisons. No performance admission without its gates.
+
+Stop after that end-to-end integration, verification and honest performance
+handoff, or an explicit external blocker. Do not launch training or widen this
+into unrelated architecture work. The exact original paper-run configuration
+is not fully authenticated: label this native Gemma-Q4/Vicuna transfer honestly,
+including F16 conversion and the draft-context policy, rather than claiming an
+exact reproduction of its NVIDIA benchmark. All earlier detailed plans below
+remain preserved.
+
+### Native Vicuna/TLI implementation and verification
+
+The production route now executes the complete 68,030,208-parameter downloaded
+checkpoint with native Metal: two Llama layers, hidden width 768, FFN width 3072,
+12 attention/K/V heads, head dimension 64, and all 32,000 output rows. The
+offline converter authenticates the pinned source files and converts F32 weights
+to F16. The loader authenticates the complete resulting artifact (weights and
+tokenizer), not merely its header. No Python/framework executes production
+inference. Conversion and independent Transformers/SentencePiece goldens are
+offline tools only.
+
+Files owned by this integration: new `vicuna_draft`, `standalone_draft_artifact`,
+`standalone_chat` and `chain_chat` engine headers/implementations; existing
+`sampling`, `model`, `prepared_gemma2_plan`, `recurrent_chat`, `gemma2_runtime`,
+`gemma2_chat_session`, and tokenizer headers/implementations; generate CLI;
+`scripts/convert_vicuna_draft.py`, `scripts/vicuna_reference_golden.py`, and
+`scripts/quick_benchmark.py`; corresponding artifact/Metal/lifecycle/lossless/
+CLI/Python tests; `Makefile`, `tests/test_main.cpp`, this baton and GRAPH.
+Unrelated pre-existing worktree changes were preserved. ENGINE_PRINCIPLES was
+not modified. Weights, reference environments, executables and results remain
+ignored local files, not committed artifacts.
+
+`VicunaDraftPlan` owns resident weights, 2,048-position K/V, normalized prefix
+state, fixed-capacity proposal/CDF storage, native history, and one-command
+dependent drafting for every requested horizon 1–23. `StandaloneChatPlan` owns
+the target-token and actual draft-emission ledgers, tokenizer workspace,
+mapping, committed-prefix receipts, and a single-slot typed regeneration
+checkpoint. Target and draft positions are never assumed equal. Draft overflow
+rebuilds the last 1,024 actual draft tokens with rebased local RoPE positions;
+the Gemma target context is not shortened. Accepted mapped tokens append their
+actual draft IDs; an unmapped target correction may append zero, one or many
+draft IDs. No concatenation/re-encoding of an accepted generated suffix is used
+as a substitute for its original emission ledger during failed regeneration.
+
+The common `ChainChatVerifier` owns target transactions and sampler/callback
+prefix commits, while R retains its own feature/draft state. R's registered
+conditional schedules and Stage-4 defaults remain unchanged. Full and conditional
+verification stay separately selectable. Proposal probabilities have explicit
+owner/epoch/depth leases; gathering the entries needed for target verification
+does not renormalize that subset or cap the draft vocabulary at target top-k.
+
+Proposal-law identity: the primary native transfer copies effective target
+temperature/top-k/top-p/min-p/repetition-penalty scalars. Draft repetition uses
+the entire retained **native draft** history, not the target's 64-token history.
+The pinned Transformers 4.50.0 order is repetition, intersection suppression,
+temperature, top-k (including threshold ties), ascending-tail top-p, then min-p.
+Selection retains the actual full-vocabulary finite-grid CDF. The explicitly
+unfiltered softmax diagnostic overload is not the production benchmark route.
+Native deterministic score-descending/token-ID-ascending tie ordering, F16
+conversion, the bounded context policy, and the type-safe intersection are
+declared transfer choices; unspecified Torch backend ties and the unauthenticated
+original paper-run configuration are not claimed source-exact.
+
+Sources: [TLI Algorithm 4](https://arxiv.org/html/2502.05202v3#S4),
+[pinned assistant generation configuration](https://github.com/huggingface/transformers/blob/v4.50.0/src/transformers/generation/candidate_generator.py),
+and [pinned logit processors](https://github.com/huggingface/transformers/blob/v4.50.0/src/transformers/generation/logits_process.py).
+
+The converted local artifact already exists at
+`models/vicuna_68m/vicuna-68m-f16.gguf`, SHA-256
+`2038020ca7b9a2584252f4bf1cfd5e4cb833130b0853822e58cfa538299211b7`.
+For a fresh checkout with the pinned downloaded source, conversion is:
+
+```sh
+.stage5a-venv/bin/python scripts/convert_vicuna_draft.py \
+  --source models/vicuna_68m \
+  --output models/vicuna_68m/vicuna-68m-f16.gguf
+```
+
+It deliberately refuses to overwrite an existing artifact. Chat execution:
+
+```sh
+make MODE=release generate
+build/release/local-gguf-generate models/gemma-2-9b-Q4.gguf \
+  --chat --backend metal \
+  --draft-model models/vicuna_68m/vicuna-68m-f16.gguf \
+  --draft-horizon 3 --speculative-sampling lossless \
+  --speculative-schedule conditional
+```
+
+Final release repository CI passed **464 C++ tests and 144 Python tests** on
+real Metal/MPS, with no compiler warnings or reported dependency skips. Evidence:
+`build/vicuna-final-ci.log`. The actual checkpoint's maximum logit differences
+were 0.000484467 (prefill) / 0.000381470 (decode) against independent CPU equations,
+and about 0.00183 / 0.00176 against pinned precision-matched Transformers goldens.
+Actual 64-row prefill versus 64 individual decodes gave bit-identical all-layer
+K/V and logits. The pinned proposal-filter golden matched its 38-token support
+and probabilities; separate tests cover full-32k laws, more-than-256 cutoff ties,
+native repetition history beyond 64 tokens, tiny top-p, finite extreme logits,
+and stale probability owners. Integrated tests cover callback stop/throw at each
+prefix, every H3 rejection depth, H1/H2/H5/H23 plus full/conditional schedules,
+budget/stop corrections, draft-context overflow/rebuild, unavailable Metal,
+failed regeneration followed by exact own-sequence recovery, and target-context
+shifting followed by regeneration. No test tolerance was relaxed.
+
+The cooled production-chat screen completed with the same final release
+executable, seed 42, the canonical two prompts, natural stops, captured streams,
+and five seconds between turns. Each fresh process had its own 240-second idle
+cooldown; idle sleep was prevented. The canonical `run_local_chat` driver was
+used without launching unrelated kernel probes. Evidence, executable/model/
+artifact hashes, exact arguments, raw output, CI log, and before/after system
+snapshots are in ignored `benchmarks/results/vicuna-tli-9ySSAf/`; the reproducible
+local harness is `build/vicuna_chat_screen.py`.
+
+| Configuration | Selected tokens | Complete generation seconds | Complete tokens/s |
+| --- | ---: | ---: | ---: |
+| Stage 4 | 276 + 322 = 598 | 37.422474 | 15.979702 |
+| Vicuna H3, conditional, lossless | 179 + 181 = 360 | 24.292966 | 14.819105 |
+
+Complete per-turn rates were 16.2133 / 15.7848 for Stage 4 and
+15.3700 / 14.3118 for Vicuna: **7.26% lower aggregate throughput**, with neither
+turn winning. The CLI's narrower first-to-last-selection aggregate rates were
+16.0245 / 14.8220; the headline above includes final K/V, callbacks and result
+assembly. Vicuna accepted **123 / 228 = 0.539474 draft tokens per H3 cycle**.
+Mean draft wall/GPU cost was 5.1725 / 4.5495 ms per cycle; target verification
+GPU cost was 98.1945 ms per cycle. All standalone draft wall time, including
+prompt synchronization and ordinary/retrieval catch-up, was 1.199101 seconds;
+no draft context rebuild occurred in this short workload. All-work draft
+readback/upload was 22,188 / 95,480 bytes. There were no reported transient
+device-buffer allocations or numeric refusals.
+
+TTFT was 0.169099 / 0.847958 seconds for Stage 4 versus
+0.167030 / 0.393044 for Vicuna; first visible text was 0.232187 / 0.921036
+versus 0.259012 / 0.492925. The shorter first Vicuna response changes follow-up
+context length, so these are **different-work, single-pair development results**,
+not a statistical speedup/TTFT admission or a rejection of the architecture
+family. Token hashes were Stage 4 `49080569719b1cea`, `369b09d9b01ff1e1` and
+Vicuna `af0d7d2bee7ff982`, `2ea5f94660ab5419`.
+
+Preparation/startup is not hidden inside the generation-rate claim: whole
+process elapsed time (including preparation, warmup and the five-second input
+pause) was 69.32 seconds for Stage 4 and 107.32 seconds for Vicuna. Verified
+target/draft loading adds preparation work; this pass did not optimize startup.
+Owned standalone buffers/tokenizer/workspace receipts total 299,857,633 bytes,
+but that is not an OS residency measurement or a full process footprint. Peak
+process memory footprint was 9,887,115,968 / 10,128,042,976 bytes; maximum RSS
+was separately 4,961,468,416 / 9,250,570,240 bytes. Whole-system swap-in/out
+increased by 2,087 / 27,884 pages for Stage 4 and 3,414 / 19,484 for Vicuna
+(16 KiB pages), so neither run is a clean no-swap retention experiment.
+`pmset` recorded no thermal/performance warnings, which does **not** establish
+equal clocks or heat-soaked performance. Physical GPU bandwidth, arithmetic
+intensity and heat-soaked retention remain unmeasured; logical scheduled bytes
+are not substituted for those measurements. No retention gate is claimed met.
+
+Earlier unfiltered smoke output remains diagnostic only. No training was
+launched. The benchmark and build/test processes have exited; work is stopped
+for user review, with the full earlier implementation plan preserved below.
+
+### Previous bounded GPU optimization status (preserved)
+
+Execution status: **the requested single repeat is complete; additional
+performance comparisons are paused**. The preserved batched candidate repeated
+at 5.2155 tokens/s versus its earlier 5.2014, with identical executable, weights
+and token hashes. The rejected kernel remains removed. The retained
+Q8/conditional implementation still needs its own real-path performance screen;
+do not claim that the optimization pass or wider phases are complete.
+
+Authorized scope: one bounded lossless GPU-execution optimization pass.
+Improve native batched target verification, evaluate
+conditional later verification, and separately evaluate a Q8 full-vocabulary
+draft head with the existing H3 weights. No training, new corpus, P continuation
+or new inference dependency. Keep Stage 4 and both existing reference sampling
+paths selectable with unchanged defaults and arithmetic.
+
+The previous release CI passed; its cooled real-chat development screen measured
+8.4976 tokens/s versus Stage 4's 15.8341, with 0.4157 accepted draft tokens per H3
+cycle. Per learned cycle the measured draft cost was 55.19 ms and target
+verification/commit 168.45 ms. These costs motivate this pass but are not promises
+of a speedup. New execution options must be explicit, prepared/authenticated,
+and reject incompatible modes rather than silently fall back.
+
+The batched verifier must preserve the target model, transforms and logical K/V
+semantics with independent, justified numerical evidence; changing arithmetic
+order is allowed, weakening existing tests is not. Conditional verification must
+retain the complete requested horizon and execute later tiles only when their
+prefix is accepted. Q8 drafting changes q, never p, and must return its actual
+finite-grid proposal law. Keep these dimensions separately selectable so their
+acceptance and full costs can be distinguished. Close the deterministic mixed
+retrieval/lossless transition coverage gap while validating integration.
+
+Stop after complete repository CI, native CPU/Metal correctness and lifecycle
+checks, and cooled production-chat evidence. Retain no rejected kernel merely
+because its microbenchmark passed. Report any unimplemented dimension honestly;
+do not turn this pass into open-ended infrastructure or training work.
+
+### GPU-execution pass in progress
+
+The retained implementation has two independent, explicit lossless controls:
+`--speculative-schedule full|conditional` and `--draft-head f16|q8_0`.
+Defaults remain full/F16. Requested controls require explicit learned weights
+and lossless sampling; prepared plans bind both choices. Q8 drafting aliases
+the authenticated resident Q8 target head, retains F16 token embeddings, and
+publishes its actual finite-grid q. It is a separate inference variant of the
+existing weights, not a newly trained/source-exact Q8 model.
+
+Conditional verification retains every registered horizon (3/4/7/8/15/16/23)
+and the registered prefix tiles. Later target tiles execute only after acceptance
+of their causal prefix; drafting still executes the full requested horizon.
+Target tickets own K/V and callback-prefix commits across tiles. Preparation
+allocates bounded device storage and warms all selected tiles. The retained
+target arithmetic is unchanged, so existing cache reconstruction remains exact.
+
+A new four-row F32 weight-sharing kernel was implemented and independently
+validated, including CPU equations, full-forward parity and exact cache
+reconstruction. That version passed release CI with **445 C++ and 134 Python
+tests** on real Metal/MPS, without warnings or dependency skips. Its first cooled
+chat screen was slower: **5.20 tokens/s**, versus **8.56** for reference lossless
+and **15.99** for Stage 4. Verification GPU cost was about 345 ms per learned
+cycle versus 167 ms. The kernel, its execution flag, numerical diagnostic
+extensions and additional cache-arithmetic receipt machinery were removed;
+existing source work and the detailed plan below were preserved.
+
+The user then reported closing the computer and requested one repeat. The
+original executable is preserved at
+`benchmarks/results/lossless-opt-2D6bK3/rejected-batched-generate`; the repeat uses
+that identical executable, weights, prompts and settings with a fresh cooldown
+and automatic-idle-sleep prevention. It completed at **5.215514 tokens/s**
+(467 selected tokens / 89.540551 seconds), versus **5.201443** previously.
+Both turns' token hashes match exactly. The repeat still shows the regression;
+the result does not depend on trusting the potentially sleep-affected first run.
+Both runs had swap activity, and neither is a clean admission experiment.
+Other performance comparisons are paused. Raw numerical, CI and chat evidence
+remains under that ignored results directory. No broader architecture family
+is excluded.
+
+Final release repository CI after removing the rejected code passed **440 C++
+tests and 134 Python tests**, using real Metal/MPS, with no compiler warnings or
+dependency skips. `git diff --check` passed. Real-path performance evidence for
+the retained Q8/conditional variants remains pending; the pass is not complete
+and those options are not admitted/recommended on performance grounds. No
+training or corpus collection was started. Prior P source-field and
+implementation gaps are unchanged.
+
+Retained edits in this pass are in `learned_recurrent.hpp/.cpp`,
+`gemma2_speculative_runtime.mm`, `recurrent_chat.hpp/.mm`,
+`prepared_gemma2_plan.hpp/.cpp`, `gemma2_chat_session.hpp/.cpp`, the generate
+CLI and quick benchmark driver, their focused recurrent/controller/CLI/script
+tests, and this document/GRAPH. The target verifier, projection kernels and
+ordinary runtime were restored after rejecting the new kernel; earlier
+lossless/P changes and all user data remain preserved. No source file or part
+of the detailed implementation contract below was deleted.
+
+### Prior lossless-chain scope clarification
+
+The user clarified that **target-model output quality, not
+identical wording/RNG consumption for the same seed**, is required, and authorized
+distribution-preserving speculative sampling. The active slice is an explicit
+lossless rejection-sampling chain using the already trained R weights, followed
+by a real-chat development screen. No new training or corpus collection. Keep
+Stage 4 and the old exact-match learned route selectable and unchanged. Do not
+continue large Arm-P training investment until this slice is assessed.
+
+The new chain samples proposals from their actual normalized distribution q,
+accepts with min(1,p/q), and on rejection samples normalized positive(p-q), where
+p is the unchanged target model's complete post-transform sampling distribution.
+Metal must return the actual proposal law, including finite-grid selection;
+an ideal softmax substituted for a different sampler is invalid. Proposal and
+acceptance randomness are separate, checkpointed and rolled back at callback
+boundaries. No chain algorithm is silently applied to trees or beams.
+
+Stop after end-to-end chain integration, deterministic/adversarial probability,
+Metal and lifecycle coverage, complete repository CI, and a thermally isolated
+real-chat development comparison (or an explicit hardware blocker). Report
+acceptance, complete costs and differing output lengths honestly; this first
+screen neither admits a policy nor excludes R/P families. Preserve all P work.
+
+This clarification supersedes same-seed/token-hash/bit-identical arithmetic
+requirements for the new mode wherever they appear in the historical plan
+below. Those requirements remain valid for the frozen exact-match controls.
+Target transforms, logical K/V correctness, causal positions, stop/callback,
+rollback, regeneration and context-shift invariants remain mandatory. Numerical
+kernel changes require independent parity evidence, not simply looser tests.
+
+The current P slice replaces the incorrect offline P equations and adds the
+native five-tap feature boundary. **P is not yet training-ready, packed, native
+Metal executable, or integrated into chat.** After the active lossless-chain
+reassessment, its remaining work begins with authenticated full-
+teacher evidence and the P training/run contract, then the actual resident
+block backbone, per-layer context K/V, vocabulary correction, artifact and joint
+chat transaction. Do not route the new equations through the old sparse-support
+R trainer. Long data collection/training remains for the user after a verified
+command handoff. The broader candidate capacities and source controls below
+remain open; this priority change does not exclude any family or complete the
+wider Phase-5, Phase-6 or Phase-7 registries.
 The earlier attempt to generate Phase 0 attestation, simulation, and
 evidence-receipt machinery was removed because it did not advance the
 production decoder. The source identities, candidate distinctions, capacities,
@@ -62,6 +978,201 @@ the exact Arm-S differentiable target-top-block executor, the remaining
 registered family objectives, and bundle-router training remain implementation
 work after that control. None is silently substituted by the full-vocabulary
 control.
+
+### Lossless R-chain implementation checkpoint
+
+The explicit `--speculative-sampling lossless` chat mode reuses the existing
+authenticated R weights and resident full-vocabulary Metal chain. It implements
+the modified rejection sampler in
+[Leviathan et al., Algorithm 1](https://proceedings.mlr.press/v202/leviathan23a.html),
+not a confidence threshold or unchecked draft-token shortcut. The unchanged
+target sampling transforms define p. The draft Metal kernel returns its actual
+q as positive integer bin masses partitioning all `2^32` proposal words; an
+ideal softmax is not substituted for the implemented finite-grid distribution.
+Acceptance is `min(1,p/q)` and correction uses normalized `max(p-q,0)` over
+the target support. Full-vocabulary scoring remains in the production path;
+bounded support readback follows the configured top-k transform.
+
+Proposal randomness has a separate checkpoint-owned stream. Acceptance,
+residual and ordinary bonus draws use the target stream; callback stops adopt
+only their causal prefix. Regeneration reproduces this mode's own sequence,
+not the old same-seed sequence. The shared controller and target transaction
+still own retained K/V, logical positions, stop behavior, carry, context shifts
+and rollback. The lossless controller accepts independent learned chains only;
+trees and beams have not been silently converted. Target/verifier numerical
+kernels and the old exact-match proposal arithmetic are unchanged.
+
+Probability support and native scratch are fixed-capacity and allocated during
+preparation; the new kernel is warmed there. One command executes the complete
+dependent draft chain without host-staged intermediate tokens. All active
+probability readback is included in completion accounting. Malformed support,
+stale proposal randomness, incompatible prepared modes and invalid device
+arithmetic fail closed. In particular, lossless mode does not perform the old
+draw-dependent numeric-refusal fallback, which would bias its proposal law.
+Existing Metal driver/legacy host allocation limitations described below remain;
+zero transient GPU-buffer allocations is not a whole-process allocation proof.
+
+Verification: release repository CI with `.stage5a-venv/bin` on PATH and real
+Metal/MPS access passed **431 C++ tests and 133 Python tests**, without dependency
+skips. New independent equations cover analytic marginal recovery, enumerated
+independent draws, finite-grid boundaries, disjoint/equal/nearly equal supports,
+full support capacity, transforms, malformed inputs and RNG rollback. Native
+CPU/Metal checks cover actual proposal masses and all seven chain horizons.
+Controller tests cover H3/H23 rejection and callback depths; live chat tests
+cover stochastic sequential-target K/V parity on the emitted path, acceptance,
+rejection, callbacks/throws, EOS/reverse stops, regeneration/reset, context
+shifting, poisoned failures, CLI errors and unavailable Metal. The guarantee is
+target-distribution preservation within validated floating-point accuracy, not
+bit-identical baseline CDF/RNG decisions or a guarantee of any individual answer.
+
+Run it without a Python environment or retraining:
+
+```sh
+make MODE=release generate
+build/release/local-gguf-generate models/gemma-2-9b-Q4.gguf \
+  --chat --seed 42 --decode-diagnostics \
+  --development-recurrent-weights artifacts/learned_speculation/phase6-h3-v2/seed1.lgweights \
+  --speculative-sampling lossless
+```
+
+Omit `--speculative-sampling lossless` for the previous exact-match learned
+control; omit both learned flags for default Stage 4. Existing sampler/artifact
+compatibility checks still apply. This is an explicit weights-only development
+control, not an admitted policy. The weights were trained for the earlier
+common-draw objective; they were not retrained or relabeled as optimized for
+rejection-sampling overlap. No new corpus collection or training was started.
+The open P source fields, training contract and production implementation gaps
+below are unchanged.
+
+#### Lossless real-chat development screen, 2026-09-18
+
+One fresh Stage-4 process and then one fresh lossless seed-1 H3 retrieval-first
+process each followed 240 seconds idle, with no concurrent build, training or
+kernel probe. Both used the canonical two prompts, seed 42, five-second
+inter-turn pause and natural stops. Complete generation time includes terminal
+K/V, callbacks, synchronization, readback and result assembly.
+
+| Mode / turn | Selected tokens | Complete generation seconds | Tokens/s | First visible text seconds |
+| --- | ---: | ---: | ---: | ---: |
+| Stage 4 / first | 276 | 17.381557000 | 15.88 | 0.248140541 |
+| Stage 4 / follow-up | 322 | 20.385153208 | 15.80 | 1.798620417 |
+| Lossless H3 / first | 226 | 26.424128333 | 8.55 | 0.388446167 |
+| Lossless H3 / follow-up | 211 | 25.001911416 | 8.44 | 0.633081667 |
+
+Aggregate rates were **15.8341 versus 8.4976 tokens/s**: 598 tokens in
+37.766710208 seconds versus 437 in 51.426039749 seconds. Stage 4 retained
+the expected token hashes `49080569719b1cea` / `369b09d9b01ff1e1`. Lossless
+hashes were `56f82d050f7c6827` / `0cde022e6980d79e`, with final positions
+242 / 472. Different wording and follow-up context lengths mean this is not an
+exact-work comparison. It is not a controlled estimate of gain over the earlier
+exact-match H3 screen either. No routing parameter was fitted on these prompts.
+
+Lossless made 178 learned cycles, accepted 74 draft edges (**0.415730 per H3
+cycle**, not a per-tested-edge acceptance percentage), and had no numeric
+refusals. Drafting took 9.824411375 seconds wall / 9.759673283 seconds GPU;
+target verification/commit took 29.983679238 seconds GPU. Learned cycle wall
+time was 40.095521002 seconds. Ordinary carries, retrieval, endpoint and other
+host work remain charged in the 51.426-second complete total. Acceptance is
+insufficient to amortize these measured costs; changing sampling alone did not
+deliver a speedup. This is not an exclusion of R/P architecture families.
+
+Owned learned plan storage was 64,806,808 bytes. Both routes reported zero
+transient GPU-buffer allocations, not zero driver/host allocations. Process
+child peak RSS was 4.194 GiB / 8.888 GiB; RSS and owned-buffer accounting are
+different observations and neither is a full physical-residency measurement.
+System swap usage rose 121.69 to 723.56 MiB for Stage 4 and 675.56 to
+1,349.88 MiB for lossless. Swap-in/out deltas were 31,012 / 69,752 and
+2,929 / 45,716 pages respectively (16 KiB pages). Compressor occupancy changed
+by +76,989 / -21,763 pages; compression and decompression activity occurred in
+both runs. These counters are system-wide, not engine-attributed traffic.
+`pmset` recorded no thermal/performance warning before or after either run;
+that is not a frequency trace or proof of thermal stationarity. First-selection
+TTFT was 0.167549 / 1.711326 seconds for Stage 4 and 0.166147 / 0.398685 for
+lossless; prompt rates were 95.5 / 11.1 and 96.3 / 47.7 tokens/s. Memory
+pressure and context differences prevent a clean prompt/TTFT comparison.
+No physical-bandwidth, arithmetic-intensity or heat-soaked retention claim is
+made. The development control is slower on both turns and is not admitted.
+
+Raw reports/transcripts and the small invocation wrapper are ignored under
+`benchmarks/results/lossless-chat-0o97be/` (`stage4.json`, `lossless.json`,
+their `.log` files and `run_screen.py`). The wrapper calls the unchanged
+canonical `quick_benchmark.run_local_chat` driver, with cooldown outside that
+function to capture pre/post system observations; separate kernel probes are
+omitted. Both runs used executable SHA-256
+`ff5d43f66b7a4e7ff5c129e2821eee43ea5da307c83e43afeded862841441b95`
+and the lossless weights SHA-256 was
+`d323ebca6927964fc6b44e86843c5cfe9da1fbd4920ce75e6bea5f578bd5072b`.
+No benchmark or training process from this slice remains running.
+
+### Arm P implementation checkpoint
+
+The source mechanism is pinned to DeepSpec commit
+`005e03b81cec38b7da6399833d609ee89a2587f2`, specifically
+`deepspec/modeling/dspark/{qwen3/modeling.py,markov_head.py,common.py,loss.py}`
+and `config/dspark/dspark_qwen3_4b.py`. The independent offline implementation
+in `training/speculation/dspark.py` now owns explicit GQA/head geometry, per-head
+Q/K RMSNorm, NeoX RoPE, shared five-tap fusion and shared context/block K/V
+projections, SwiGLU layers, learned final draft RMSNorm, and repeated frozen
+mask-token embeddings. It uses the source anchor-plus-H-minus-one-mask layout;
+trace feature position t places the selected anchor at t+1. Context after that
+origin is masked, while the block's own mask slots attend bidirectionally.
+
+Markov, gated-Markov and the source's joint-projection RNN now produce an
+independent rank-to-full-vocabulary logit bias. They no longer modify hidden
+states before a second target RMSNorm. GRU and compact widths remain explicitly
+separate interpretations. Deployment-prefix training equations reuse one
+parallel backbone and one base-vocabulary projection; sequential previews only
+apply correction and proposal selection. The existing R head arithmetic is
+unchanged. The old P cell identities fail closed rather than silently acquire
+new equations or resume incompatible weights.
+
+`phase_p_gemma_model.json` declares the full-width Gemma transfer: width 3,584,
+five layers, H7, rank 256, 16 query/8 K/V heads of dimension 256 and FFN width
+14,336. Gemma embedding scaling, pad-token mask, five-tap map and post-correction
+softcap are explicitly labeled transfer choices, not author-supplied Gemma-2
+fields. Metadata-only construction counts 1,186,251,009 learned parameters:
+F32 weights, gradients and two Adam moments alone require 17.677 GiB, excluding
+1.709 GiB of frozen F16 embeddings, activations and temporary storage. This is
+an allocation ledger, not measured residency or a performance exclusion. No
+full-size allocation or training run was performed, and no smaller model was
+substituted to fit this machine.
+
+`dspark_objective.py` independently implements the pinned single-process loss:
+0.1 CE + 0.9 **full L1** + 1.0 confidence BCE, with detached confidence target
+`1 - 0.5*L1` and the released weighted denominator plus `1e-6`. The released
+Qwen configuration's depth decay is 4; the paper control's is 7. Both identities
+remain explicit. Raw complete teacher logits are mandatory; prepared top-k
+sampling supports are not relabeled as that teacher. This confidence estimates
+rejection-sampling overlap, not our exact seeded hard-match survival.
+
+Native `FeatureBankSpec` now accepts five conditioning taps without changing
+the encoding of existing four-tap artifacts. Capture rejects out-of-order taps
+before final-tap projection can use stale columns. The independent 44-tap
+offline trace capacity still supports five conditioning taps plus a separate
+final-normalized teacher feature. Full-context training rejects overflow rather
+than silently keeping only the final 8,192 rows, including at turn boundaries.
+
+Verification: the final `MODE=release bash scripts/ci.sh` run with
+`.stage5a-venv/bin` on PATH and actual Metal/MPS device access passed all 415
+C++ tests and all 132 Python tests without dependency skips. New checks cover
+independent source equations, complete forward/backward gradients, real CPU/MPS
+parity, one-backbone/one-base-head deployment rollout, future-feature and future-
+teacher poisoning, full-width shape construction without allocation, full
+declared horizons, finite/boundary/overflow rejection, unchanged R arithmetic,
+and five-tap CPU/Metal projection/promotion/rollback. `git diff --check` passed.
+No P production-path benchmark was run: there is not yet a native P backbone
+or trained P artifact, so an offline/component timing could not answer the
+chat-speed question.
+
+Remaining work includes source-checkpoint logits/scheduler goldens, the paper
+versus released-code training controls, complete teacher-data provenance,
+efficient full-context batching and resource strategy, the full registry/run
+contract, packed native P layers and context-cache maintenance, dynamic
+vocabulary, exact-seed confidence calibration, and chat integration. Existing
+H3 final-only traces are insufficient for this P model. The current tests are
+equation/backpropagation and feature-kernel evidence, not a trained P result or
+real-path P throughput. No training or performance conclusion is authorized by
+these diagnostics.
 
 ### H3 weights-only native handoff
 
@@ -665,11 +1776,23 @@ drafter. This follows the separation used by
 [DynaSpec](https://arxiv.org/abs/2510.13847): shortlisting reduces draft-head
 work; target verification remains exhaustive.
 
-The controller samples x1 through xH from the full target compact-candidate
-path and accepts each edge only on identity with d1 through dH. It does not use
-the standard min(1, p/q) rejection rule or a residual distribution. Standard speculative
-sampling is distribution-preserving but generally consumes randomness
-differently, so equal seeds need not produce equal sequences
+The active lossless chain uses modified rejection sampling: independently draft
+d_i from the actual q_i, accept with min(1,p_i(d_i)/q_i(d_i)), and on the first
+rejection draw from normalized max(p_i-q_i,0). After all accepted proposals the
+post-full target row supplies the ordinary next-token distribution. Both laws
+condition on the same accepted prefix and bind the actual transforms, support
+and numeric selection rule. Full-vocabulary target scoring remains mandatory;
+the existing configured top-k transform makes the resulting support bounded.
+Greedy target sampling remains its point-mass distribution. Reject malformed
+or stale proposal laws before publication, and never hide a draw-dependent
+failure with target fallback: that can condition the proposal law and bias it.
+
+This preserves the target distribution within validated hardware numerics, not
+the old seeded trajectory. The retained exact-match control instead samples
+the target and checks token identity. Its acceptance formulas below describe
+that legacy control, **not** lossless rejection sampling. Standard speculative
+sampling generally consumes randomness differently, so equal seeds need not
+produce equal sequences
 ([Leviathan et al.](https://proceedings.mlr.press/v202/leviathan23a.html),
 [Chen et al.](https://arxiv.org/abs/2302.01318)).
 
@@ -689,7 +1812,19 @@ of the target draw. Its match probability is the joint collision probability
 under the frozen coupling and must be measured/derived from that joint law; do
 not substitute p(d) or the independent sum_v p(v)q(v).
 
-### Seeded sampler identity
+### Sampling transforms and mode-owned randomness
+
+The lossless mode retains target transforms in the order listed below, but not
+the old seed-to-token mapping or one-draw-per-token budget. Proposal randomness
+has a separate stream from accept/reject and residual draws. Both streams are
+owned by sampler checkpoints so callbacks, failure recovery and regeneration
+adopt only the committed prefix; unused future proposal draws are not committed.
+Probability-law tests replace cross-mode token-hash equality. Keep exact-match
+goldens unchanged and retain reproducibility within each mode/configuration.
+
+The remaining ticket/common-draw details in this subsection describe the
+retained exact-match control and historical source-family plans. They do not
+override the active lossless contract or make chain acceptance valid for trees.
 
 The authoritative sampler retains its current contract and transform order:
 
@@ -754,7 +1889,17 @@ same-seed contract. A scalar-ticket failure disables only that proposal arm; it
 never changes target output correctness. A deterministic draft arm remains a
 required control.
 
-### Numeric target identity
+### Numeric target fidelity
+
+For lossless mode, target probabilities and retained K/V must be numerically
+faithful to the same model and accepted causal prefix. Nonidentical seeded
+outputs are not evidence of degradation. Kernel reordering may be considered
+only with independent CPU/Metal equations or pinned goldens, justified numeric
+bounds and real-model coverage; no arbitrary approximation or relaxed tolerance
+is authorized. This sampling slice reuses the existing verifier kernels and
+does not change their arithmetic or tolerances.
+
+The bit-identity requirements below continue to govern the exact-match control.
 
 The current width-two parity tolerance is useful evidence but is not, by
 itself, a universal same-seed proof. Before admission, committed target K/V
@@ -1207,6 +2352,11 @@ CE/total-variation/confidence objective weights `0.1/0.9/1.0`. Reproduce its
 chain logits and confidence schedule first. PCTree then changes only inference
 construction over this same checkpoint. Rank128/512, GRU, other H, and Gemma
 widths are declared transfers/ablations, not DSpark reproduction.
+The pinned DeepSpec commit `005e03b81cec38b7da6399833d609ee89a2587f2`
+provides a distinct executable-code control: `loss.py` weights full L1 distance
+by 0.9 (not half-L1), and `dspark_qwen3_4b.py` sets loss-decay gamma to 4 rather
+than the paper's gamma7 control. Preserve these named identities and their
+weighted-mean versus paper-sum reductions; neither silently resolves the other.
 [DBlast](https://arxiv.org/abs/2608.05448) is an additional warning that
 independent parallel positions are especially fragile under stochastic,
 high-entropy output; its dependent proposal ideas belong in Arm P, while its

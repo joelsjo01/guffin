@@ -37,6 +37,10 @@ struct Gemma2ChatSessionOptions {
     bool retrieval_decode = true;
     // Explicit weights-only experiment, not a selected or admitted policy.
     std::optional<std::filesystem::path> development_recurrent_weights;
+    std::optional<std::filesystem::path> standalone_draft_model;
+    StandaloneExecutionOptions standalone_execution;
+    SpeculativeSamplingMode speculative_sampling = SpeculativeSamplingMode::exact_match;
+    RecurrentExecutionOptions recurrent_execution;
     std::vector<std::string> reverse_stop_strings;
     TokenSamplerOptions sampler;
     Gemma2MonotonicClock clock;
@@ -60,6 +64,16 @@ struct Gemma2ChatTurnMetrics {
     std::uint64_t first_text_duration_ns = 0;
     std::size_t learned_owned_byte_count = 0;
     std::uint32_t learned_horizon = 0;
+    bool standalone_draft = false;
+    StandaloneDraftKind standalone_kind = StandaloneDraftKind::vicuna_68m_f16;
+    StandaloneExecutionOptions standalone_execution;
+    std::uint64_t standalone_prefill_ns = 0;
+    std::uint64_t standalone_rebuild_ns = 0;
+    // Resolved against this turn's target scalars and native draft vocabulary.
+    // The target sampler and its history/RNG are not changed by draft overrides.
+    std::optional<TokenSamplerOptions> standalone_effective_sampler;
+    SpeculativeSamplingMode speculative_sampling = SpeculativeSamplingMode::exact_match;
+    RecurrentExecutionOptions recurrent_execution;
     std::uint32_t initial_cache_position = 0;
     std::uint32_t reused_cached_token_count = 0;
     Gemma2TokenSelectionMode selection_mode = Gemma2TokenSelectionMode::greedy;
@@ -120,6 +134,7 @@ private:
     friend class Gemma2ChatSession;
     Gemma2ChatSessionState(model_format::GGUFFileBackedModel, EngineModel,
         tokenizer::Tokenizer, PreparedGemma2Plan, std::shared_ptr<RecurrentWeightsFile>,
+        std::optional<std::filesystem::path>, std::shared_ptr<StandaloneDraftArtifact>,
         std::optional<std::filesystem::path>);
     model_format::GGUFFileBackedModel file_model_;
     EngineModel model_;
@@ -127,6 +142,8 @@ private:
     PreparedGemma2Plan prepared_;
     std::shared_ptr<RecurrentWeightsFile> recurrent_source_;
     std::optional<std::filesystem::path> requested_weights_;
+    std::shared_ptr<StandaloneDraftArtifact> standalone_source_;
+    std::optional<std::filesystem::path> requested_standalone_;
 };
 
 class Gemma2ChatSession final {
@@ -203,6 +220,7 @@ private:
     tokenizer::Tokenizer tokenizer_;
     std::optional<PreparedGemma2Plan> prepared_;
     std::shared_ptr<RecurrentWeightsFile> recurrent_source_;
+    std::shared_ptr<StandaloneDraftArtifact> standalone_source_;
     Gemma2OutputHeadPolicy output_head_policy_;
     std::vector<OwnedChatMessage> messages_;
     std::vector<std::uint32_t> cached_token_ids_;
@@ -222,6 +240,9 @@ private:
     std::size_t max_new_tokens_ = 0;
     bool context_shift_ = false;
     bool speculative_decode_ = true;
+    SpeculativeSamplingMode speculative_sampling_ = SpeculativeSamplingMode::exact_match;
+    RecurrentExecutionOptions recurrent_execution_;
+    StandaloneExecutionOptions standalone_execution_;
     bool turn_active_ = false;
     std::uint64_t publication_revision_ = 0;
     std::size_t maximum_decoded_token_bytes_ = 1;

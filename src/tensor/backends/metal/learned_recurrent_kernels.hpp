@@ -152,6 +152,70 @@ kernel void recurrent_sample(device const RPair* sorted [[buffer(0)]],
     }
     atomic_store_explicit(status,1u,memory_order_relaxed);
 }
+// Unlike common-draw sampling, rejection sampling needs the probability of
+// the *implemented* proposal, not an enclosure of an ideal double softmax.
+// F32 transforms define this draft law; quantized monotone CDF boundaries
+// partition all 2^32 equally likely input words exactly. Rounding/underflow
+// therefore affects draft efficiency only. The target corrects using these
+// actual integer bin masses. No draw-dependent numerical refusal is allowed.
+// Output ABI per depth: count, then 256 (token, cumulative low, high) triples.
+kernel void recurrent_sample_lossless(device const RPair* sorted [[buffer(0)]],
+    device const uint* words [[buffer(1)]], device uint* tokens [[buffer(2)]],
+    device atomic_uint* status [[buffer(3)]], device uint* support [[buffer(4)]],
+    constant uint4& p [[buffer(5)]], constant float4& f [[buffer(6)]]) {
+    const uint base=p.x*769u;
+    support[base]=0;tokens[p.x+1]=0;
+    if(atomic_load_explicit(status,memory_order_relaxed)!=0) return;
+    float weights[256], total=0.0f;
+    for(uint i=0;i<p.y;++i) {
+        if(!isfinite(sorted[i].score)) {
+            atomic_store_explicit(status,2u,memory_order_relaxed);return;
+        }
+        weights[i]=exp(sorted[i].score-sorted[0].score);
+        total+=weights[i];
+    }
+    uint count=p.y;
+    if(f.y<1.0f) {
+        float partial=0.0f;
+        for(uint i=0;i<p.y;++i) {
+            partial+=weights[i];
+            if(partial>=f.y*total) {count=i+1;break;}
+        }
+    }
+    if(f.z>0.0f) {
+        for(uint i=1;i<count;++i) if(weights[i]<f.z) {count=i;break;}
+    }
+    total=0.0f;
+    for(uint i=0;i<count;++i) {
+        weights[i]=exp((sorted[i].score-sorted[0].score)/f.x);
+        total+=weights[i];
+    }
+    if(!isfinite(total) || total<=0.0f) {
+        atomic_store_explicit(status,2u,memory_order_relaxed);return;
+    }
+    const ulong whole=0x100000000ul;
+    float partial=0.0f;ulong previous=0;uint written=0;
+    for(uint i=0;i<count;++i) {
+        partial+=weights[i];
+        ulong boundary=(i+1==count) ? whole
+            : ulong(clamp(partial/total,0.0f,1.0f)*0x1p32f);
+        boundary=max(previous,min(whole,boundary));
+        if(boundary==previous) continue;
+        const uint at=base+1+3*written++;
+        support[at]=sorted[i].token;
+        support[at+1]=uint(boundary);support[at+2]=uint(boundary>>32);
+        previous=boundary;
+    }
+    support[base]=written;
+    const ulong draw=ulong(words[p.x]);
+    for(uint i=0;i<written;++i) {
+        const uint at=base+1+3*i;
+        const ulong boundary=ulong(support[at+1])|(ulong(support[at+2])<<32);
+        if(draw<boundary) {tokens[p.x+1]=support[at];return;}
+    }
+    atomic_store_explicit(status,2u,memory_order_relaxed);
+}
+
 // ABI: 64 ring tokens, 23 suffix tokens, head/length/window/suffix_count.
 // Only the authoritative base history crosses from the host. Hypothetical
 // histories are constructed directly from the device-resident proposal chain.

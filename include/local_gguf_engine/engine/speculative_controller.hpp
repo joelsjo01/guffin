@@ -108,6 +108,7 @@ enum class ProposalPrimaryPolicy : std::uint8_t {
     scalar_common_draw,
     deterministic,
     greedy,
+    independent_distribution,
 };
 
 enum class ProposalSiblingPolicy : std::uint8_t {
@@ -348,9 +349,16 @@ struct TargetStateLeaseDescriptor {
     std::uint32_t node_index = proposal_node_none;
 };
 
+enum class ControllerSampleLaw : std::uint8_t {
+    target_draw,
+    rejection_accept,
+    rejection_residual,
+};
+
 struct ControllerTargetSample {
     std::uint32_t token_id = 0;
     SamplerCheckpoint checkpoint;
+    ControllerSampleLaw law = ControllerSampleLaw::target_draw;
 };
 
 struct ControllerCallbackRecord {
@@ -417,6 +425,7 @@ struct SpeculativeControllerScenario {
     const ValidatedProposalGraph* graph = nullptr;
     ChainVerifierSchedule chain_schedule;
     SpeculativeProposalSource proposal_source = SpeculativeProposalSource::none;
+    SpeculativeSamplingMode sampling_mode = SpeculativeSamplingMode::exact_match;
     SpeculativeDraftSchedule draft_schedule = SpeculativeDraftSchedule::eager;
     SpeculativeRouteMode route_mode = SpeculativeRouteMode::learned_only;
     TargetVerifierTopology verifier_topology = TargetVerifierTopology::single_invocation_post_full;

@@ -164,10 +164,12 @@ void emit_text_delta(
 Gemma2ChatSessionState::Gemma2ChatSessionState(
     model_format::GGUFFileBackedModel file, EngineModel model,
     tokenizer::Tokenizer tokenizer, PreparedGemma2Plan prepared,
-    std::shared_ptr<RecurrentWeightsFile> source, std::optional<std::filesystem::path> weights
+    std::shared_ptr<RecurrentWeightsFile> source, std::optional<std::filesystem::path> weights,
+    std::shared_ptr<StandaloneDraftArtifact> standalone, std::optional<std::filesystem::path> standalone_path
 ) : file_model_(std::move(file)), model_(std::move(model)),
     tokenizer_(std::move(tokenizer)), prepared_(std::move(prepared)),
-    recurrent_source_(std::move(source)), requested_weights_(std::move(weights)) {}
+    recurrent_source_(std::move(source)), requested_weights_(std::move(weights)),
+    standalone_source_(std::move(standalone)), requested_standalone_(std::move(standalone_path)) {}
 
 Gemma2ChatSessionState Gemma2ChatSessionState::prepare(
     model_format::GGUFFileBackedModel file, const Gemma2ChatSessionOptions& options,
@@ -176,22 +178,47 @@ Gemma2ChatSessionState Gemma2ChatSessionState::prepare(
     if (options.backend != runtime::BackendKind::metal) {
         throw std::invalid_argument("Gemma 2 chat session requires Metal backend");
     }
-    if (options.development_recurrent_weights && !options.speculative_decode) {
+    if ((options.development_recurrent_weights || options.standalone_draft_model) && !options.speculative_decode) {
         throw std::invalid_argument("requested recurrent weights conflict with disabled speculation");
+    }
+    validate_recurrent_execution_options(options.speculative_sampling, options.recurrent_execution);
+    if (options.standalone_draft_model && (options.development_recurrent_weights
+        || options.speculative_sampling != SpeculativeSamplingMode::lossless
+        || options.recurrent_execution != RecurrentExecutionOptions{}))
+        throw std::invalid_argument("standalone draft requires lossless sampling without recurrent configuration");
+    if (!options.standalone_draft_model && options.standalone_execution != StandaloneExecutionOptions{})
+        throw std::invalid_argument("standalone execution options require a draft artifact");
+    if ((options.speculative_sampling != SpeculativeSamplingMode::exact_match
+            && options.speculative_sampling != SpeculativeSamplingMode::lossless)
+        || (options.speculative_sampling == SpeculativeSamplingMode::lossless
+            && !options.development_recurrent_weights && !options.standalone_draft_model)) {
+        throw std::invalid_argument("lossless sampling requires explicit recurrent weights");
     }
     // Validate sampler before any device allocation, including target-only mode.
     static_cast<void>(TokenSampler(options.sampler));
     auto source = options.development_recurrent_weights
         ? std::make_shared<RecurrentWeightsFile>(*options.development_recurrent_weights) : nullptr;
-    auto model = source || authenticate_target
+    auto standalone = options.standalone_draft_model
+        ? std::make_shared<StandaloneDraftArtifact>(*options.standalone_draft_model) : nullptr;
+    if (standalone) {
+        static_cast<void>(resolve_standalone_draft_sampler_options(options.sampler,
+            options.standalone_execution.draft_sampling,
+            static_cast<std::uint32_t>(standalone->tokenizer().vocabulary().size())));
+    }
+    auto model = source || standalone || authenticate_target
         ? load_verified_engine_model_from_gguf(file.view(), file.bytes())
         : load_engine_model_from_gguf(file.view());
     auto tokenizer = tokenizer::load_tokenizer_from_gguf_metadata(file.view().directory.metadata);
-    auto prepared = source
-        ? prepare_gemma2_recurrent_plan(model, source, options.sampler, options.output_head_policy)
+    auto prepared = standalone
+        ? prepare_gemma2_standalone_plan(model, tokenizer, standalone, options.standalone_execution,
+            options.output_head_policy)
+        : source
+        ? prepare_gemma2_recurrent_plan(model, source, options.sampler, options.output_head_policy,
+            options.speculative_sampling, options.recurrent_execution)
         : prepare_gemma2_target_only_plan(model, options.output_head_policy);
     return Gemma2ChatSessionState(std::move(file), std::move(model), std::move(tokenizer),
-        std::move(prepared), std::move(source), options.development_recurrent_weights);
+        std::move(prepared), std::move(source), options.development_recurrent_weights,
+        std::move(standalone), options.standalone_draft_model);
 }
 
 Gemma2ChatSession::Gemma2ChatSession(
@@ -209,12 +236,16 @@ Gemma2ChatSession::Gemma2ChatSession(
       tokenizer_(std::move(state.tokenizer_)),
       prepared_(std::move(state.prepared_)),
       recurrent_source_(std::move(state.recurrent_source_)),
+      standalone_source_(std::move(state.standalone_source_)),
       output_head_policy_(prepared_->target().output_head_policy()),
       reverse_stop_strings_(std::move(options.reverse_stop_strings)),
       end_of_turn_token_id_(find_token_id_by_text(tokenizer_, "<end_of_turn>")),
       max_new_tokens_(options.max_new_tokens),
       context_shift_(options.context_shift),
       speculative_decode_(options.speculative_decode && options.retrieval_decode),
+      speculative_sampling_(options.speculative_sampling),
+      recurrent_execution_(options.recurrent_execution),
+      standalone_execution_(options.standalone_execution),
       initial_sampler_options_(options.sampler),
       sampler_(initial_sampler_options_),
       clock_(std::move(options.clock)) {
@@ -226,13 +257,29 @@ Gemma2ChatSession::Gemma2ChatSession(
     }
     stop_token_ids_ = chat_stop_token_ids(tokenizer_, end_of_turn_token_id_);
     if (bool(recurrent_source_) != options.development_recurrent_weights.has_value()
+        || bool(standalone_source_) != options.standalone_draft_model.has_value()
+        || state.requested_standalone_ != options.standalone_draft_model
         || state.requested_weights_ != options.development_recurrent_weights
-        || (recurrent_source_ && !options.speculative_decode)
+        || ((recurrent_source_ || standalone_source_) && !options.speculative_decode)
         || output_head_policy_ != resolve_gemma2_output_head_policy(model_.gemma2_config(),
             bind_gemma2_model_weights(model_), options.output_head_policy)) {
         throw std::invalid_argument("prepared session and requested speculation mode differ");
     }
-    if (auto* learned = prepared_->recurrent()) learned->validate_sampler(options.sampler);
+    if (auto* learned = prepared_->recurrent()) {
+        if (learned->sampling_mode() != options.speculative_sampling
+            || learned->execution_options() != options.recurrent_execution) {
+            throw std::invalid_argument("prepared session and requested sampling law or execution differ");
+        }
+        learned->validate_sampler(options.sampler);
+    } else if (auto* standalone = prepared_->standalone()) {
+        if (options.speculative_sampling != SpeculativeSamplingMode::lossless
+            || standalone->execution_options() != options.standalone_execution
+            || options.recurrent_execution != RecurrentExecutionOptions{})
+            throw std::invalid_argument("prepared standalone execution differs from requested configuration");
+    } else if (options.speculative_sampling != SpeculativeSamplingMode::exact_match
+        || options.recurrent_execution != RecurrentExecutionOptions{}) {
+        throw std::invalid_argument("lossless sampling requires explicit recurrent weights");
+    }
     cache_segments_.reserve(plan().config().context_length);
     for (const auto& token : tokenizer_.vocabulary()) {
         maximum_decoded_token_bytes_ = std::max(maximum_decoded_token_bytes_, token.text.size() + 1U);
@@ -270,6 +317,7 @@ void Gemma2ChatSession::rebuild_durable_cache() {
     }
     if (restored != tokens.size()) throw std::logic_error("incomplete durable chat cache receipt");
     if (prepared_->recurrent()) prepared_->recurrent()->invalidate();
+    if (prepared_->standalone()) prepared_->standalone()->synchronize_context(tokens);
 }
 
 void Gemma2ChatSession::warm_up_plan() {
@@ -286,8 +334,8 @@ void Gemma2ChatSession::warm_up_plan() {
         plan(), std::span<const std::uint32_t, 16>(token_ids), sampler_
     );
     if (auto* learned = prepared_->recurrent()) {
-        // Warm the actual full chain and exact H+1-row target topology, not a
-        // width-two proxy. Scratch/KV writes are outside all logical history.
+        // Warm the selected chain and all registered verification tiles.
+        // Scratch/KV writes are outside all logical history.
         auto warm_sampler = sampler_;
         const std::array<std::uint32_t, 1> prompt {token_id};
         warm_sampler.observe_tokens(prompt);
@@ -303,8 +351,10 @@ void Gemma2ChatSession::warm_up_plan() {
         if (warmed.draft.status != 0U) {
             throw std::runtime_error("recurrent numeric refusal prevented complete topology warmup");
         }
+        learned->warm_up_verifier_tiles(plan());
         learned->invalidate();
     }
+    if (prepared_->standalone()) prepared_->standalone()->warm_up(plan(), sampler_);
     if (!messages_.empty() || !cached_token_ids_.empty() || !turn_cache_positions_.empty()
         || !turn_sampler_states_.empty()) {
         throw std::runtime_error("Gemma2 chat warm-up mutated logical session state");
@@ -667,7 +717,9 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             speculative_decode_ ? &proposer_ : nullptr,
             turn_options.trace,
             prepared_->recurrent(),
-            &journal
+            &journal,
+            prepared_->standalone(),
+            rendered_token_ids
         );
     };
     try {
@@ -732,8 +784,21 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             .prompt_processing_duration_ns = prompt_processing_duration_ns,
             .generation_duration_ns = generation_duration_ns,
             .learned_owned_byte_count = prepared_->recurrent()
-                ? prepared_->recurrent()->owned_bytes() : 0U,
-            .learned_horizon = prepared_->recurrent() ? prepared_->recurrent()->horizon() : 0U,
+                ? prepared_->recurrent()->owned_bytes() : prepared_->standalone()
+                    ? prepared_->standalone()->owned_bytes() : 0U,
+            .learned_horizon = prepared_->recurrent() ? prepared_->recurrent()->horizon()
+                : prepared_->standalone() ? prepared_->standalone()->horizon() : 0U,
+            .standalone_draft = prepared_->standalone() != nullptr,
+            .standalone_kind = prepared_->standalone() ? prepared_->standalone()->kind()
+                : StandaloneDraftKind::vicuna_68m_f16,
+            .standalone_execution = standalone_execution_,
+            .standalone_prefill_ns = generation.metrics.standalone_prefill_ns,
+            .standalone_rebuild_ns = generation.metrics.standalone_rebuild_ns,
+            .standalone_effective_sampler = prepared_->standalone()
+                ? std::optional(prepared_->standalone()->effective_draft_sampler_options(sampler_before_turn.options()))
+                : std::nullopt,
+            .speculative_sampling = speculative_sampling_,
+            .recurrent_execution = recurrent_execution_,
             .initial_cache_position = cache_position,
             .reused_cached_token_count = cache_position,
             .selection_mode = sampler_before_turn.is_greedy()
@@ -801,6 +866,8 @@ Gemma2ChatTurnResult Gemma2ChatSession::regenerate_last_turn(
     const auto cache_position = turn_cache_positions_.back();
     std::vector<std::uint32_t> prefix(cached_token_ids_.begin(),
         cached_token_ids_.begin() + static_cast<std::ptrdiff_t>(cache_position));
+    auto* standalone = prepared_->standalone();
+    auto draft_checkpoint = standalone ? standalone->checkpoint() : StandaloneChatCheckpoint {};
     auto previous_cache = std::move(cached_token_ids_);
     auto previous_user = std::move(messages_[messages_.size() - 2U]);
     auto previous_assistant = std::move(messages_.back());
@@ -822,6 +889,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::regenerate_last_turn(
             catch (...) { prepared_->poison(); throw; }
         }
         auto result = generate_user_turn(previous_user.content, turn_options);
+        if (standalone) standalone->discard(draft_checkpoint);
         result.metrics.full_turn_duration_ns = elapsed_ns(started, monotonic_now_ns(clock_));
         return result;
     } catch (...) {
@@ -835,8 +903,12 @@ Gemma2ChatTurnResult Gemma2ChatSession::regenerate_last_turn(
             cache_segments_.push_back(previous_segment);
             if (!poisoned()) {
                 try {
+                    // Restore the original emission ledger before target
+                    // reconstruction. Retokenizing a generated suffix is not
+                    // equivalent to its original mapped/correction appends.
+                    if (standalone) standalone->restore(draft_checkpoint);
                     rebuild_durable_cache();
-                    prepared_->reset_learned_state();
+                    if (!standalone) prepared_->reset_learned_state();
                 } catch (...) { prepared_->poison(); }
             }
         }
@@ -861,8 +933,11 @@ void Gemma2ChatSession::reset() {
     // Release the old residency before allocating its replacement. The opened
     // weight source survives; a replaced pathname cannot silently change it.
     prepared_.reset();
-    prepared_.emplace(recurrent_source_
-        ? prepare_gemma2_recurrent_plan(model_, recurrent_source_, initial_sampler_options_, output_head_policy_)
+    prepared_.emplace(standalone_source_
+        ? prepare_gemma2_standalone_plan(model_, tokenizer_, standalone_source_, standalone_execution_, output_head_policy_)
+        : recurrent_source_
+        ? prepare_gemma2_recurrent_plan(model_, recurrent_source_, initial_sampler_options_, output_head_policy_,
+            speculative_sampling_, recurrent_execution_)
         : prepare_gemma2_target_only_plan(model_, output_head_policy_));
     clear();
     try { warm_up_plan(); }

@@ -129,6 +129,12 @@ void write_generate_usage(std::ostream& error) {
           << " [--output-head f16|q8_0]"
           << " [--no-speculative]"
           << " [--no-retrieval] [--development-recurrent-weights <path>]"
+          << " [--draft-model <native.gguf>] [--draft-horizon <1..23>]"
+          << " [--draft-temperature T] [--draft-top-k K] [--draft-top-p P]"
+          << " [--draft-min-p P] [--draft-repeat-penalty R]"
+          << " [--speculative-sampling exact-match|lossless]"
+          << " [--speculative-schedule full|conditional]"
+          << " [--draft-head f16|q8_0]"
           << " [--decode-diagnostics] [--metal-capture PATH]"
           << '\n';
 }
@@ -343,6 +349,14 @@ struct ParsedChatCommand {
     bool speculative_decode = true;
     bool retrieval_decode = true;
     std::optional<std::filesystem::path> development_recurrent_weights;
+    std::optional<std::filesystem::path> standalone_draft_model;
+    engine::StandaloneExecutionOptions standalone_execution;
+    bool draft_horizon_requested = false;
+    engine::SpeculativeSamplingMode speculative_sampling = engine::SpeculativeSamplingMode::exact_match;
+    bool speculative_sampling_requested = false;
+    engine::RecurrentExecutionOptions recurrent_execution;
+    bool schedule_requested = false;
+    bool draft_head_requested = false;
     engine::Gemma2OutputHeadPolicy output_head_policy = engine::Gemma2OutputHeadPolicy::automatic;
     std::optional<std::string> metal_capture_path;
 };
@@ -412,6 +426,41 @@ private:
             command.retrieval_decode = false;
             continue;
         }
+        if (option == "--speculative-sampling") {
+            if (command.speculative_sampling_requested || index + 1 >= argc) {
+                error << "error: --speculative-sampling requires one exact-match or lossless value\n";
+                return false;
+            }
+            const std::string_view value(argv[++index]);
+            if (value != "exact-match" && value != "lossless") {
+                error << "error: --speculative-sampling requires exact-match or lossless\n";
+                return false;
+            }
+            command.speculative_sampling_requested = true;
+            command.speculative_sampling = value == "lossless"
+                ? engine::SpeculativeSamplingMode::lossless : engine::SpeculativeSamplingMode::exact_match;
+            continue;
+        }
+        if (option == "--speculative-schedule" || option == "--draft-head") {
+            auto& requested = option == "--speculative-schedule"
+                ? command.schedule_requested : command.draft_head_requested;
+            if (requested || index + 1 >= argc) {
+                error << "error: " << option << " requires exactly one value\n";
+                return false;
+            }
+            requested = true;
+            const std::string_view value(argv[++index]);
+            if (option == "--speculative-schedule" && (value == "full" || value == "conditional")) {
+                command.recurrent_execution.conditional_verification = value == "conditional";
+            } else if (option == "--draft-head" && (value == "f16" || value == "q8_0")) {
+                command.recurrent_execution.draft_head = value == "q8_0"
+                    ? engine::RecurrentDraftHead::q8_0 : engine::RecurrentDraftHead::f16;
+            } else {
+                error << "error: invalid value for " << option << '\n';
+                return false;
+            }
+            continue;
+        }
         if (option == "--development-recurrent-weights") {
             if (command.development_recurrent_weights || index + 1 >= argc
                 || std::string_view(argv[index + 1]).empty()
@@ -420,6 +469,63 @@ private:
                 return false;
             }
             command.development_recurrent_weights = argv[++index];
+            continue;
+        }
+        if (option == "--draft-model") {
+            if (command.standalone_draft_model || index + 1 >= argc
+                || std::string_view(argv[index + 1]).empty()
+                || std::string_view(argv[index + 1]).starts_with("--")) {
+                error << "error: --draft-model requires one native draft GGUF file\n";
+                return false;
+            }
+            command.standalone_draft_model = argv[++index];
+            continue;
+        }
+        if (option == "--draft-horizon") {
+            std::size_t horizon = 0;
+            if (command.draft_horizon_requested || index + 1 >= argc
+                || !parse_positive_size(argv[index + 1], horizon)
+                || horizon > engine::external_speculation_max_horizon) {
+                error << "error: --draft-horizon requires one integer in [1, 23]\n";
+                return false;
+            }
+            command.draft_horizon_requested = true;
+            command.standalone_execution.horizon = static_cast<std::uint32_t>(horizon);
+            ++index;
+            continue;
+        }
+        if (option == "--draft-temperature" || option == "--draft-top-p"
+            || option == "--draft-min-p" || option == "--draft-repeat-penalty") {
+            auto& sampling = command.standalone_execution.draft_sampling;
+            auto& destination = option == "--draft-temperature" ? sampling.temperature
+                : option == "--draft-top-p" ? sampling.top_p
+                : option == "--draft-min-p" ? sampling.min_p : sampling.repetition_penalty;
+            float value = 0.0F;
+            if (destination || index + 1 >= argc || !parse_float(argv[index + 1], value)) {
+                error << "error: " << option << " requires one finite number\n";
+                return false;
+            }
+            const bool valid = option == "--draft-temperature" ? value >= 0.0F
+                : option == "--draft-top-p" ? value > 0.0F && value <= 1.0F
+                : option == "--draft-min-p" ? value >= 0.0F && value <= 1.0F : value > 0.0F;
+            if (!valid) {
+                error << "error: " << option << " is outside its valid range\n";
+                return false;
+            }
+            destination = value;
+            ++index;
+            continue;
+        }
+        if (option == "--draft-top-k") {
+            std::uint64_t value = 0;
+            auto& destination = command.standalone_execution.draft_sampling.top_k;
+            if (destination || index + 1 >= argc || !parse_u64(argv[index + 1], value)
+                || value > std::numeric_limits<std::uint32_t>::max()) {
+                error << "error: --draft-top-k requires one unsigned 32-bit integer (0 disables top-k)\n";
+                return false;
+            }
+            destination = static_cast<std::uint32_t>(value);
+            ++index;
             continue;
         }
         if (option == "--output-head") {
@@ -571,6 +677,45 @@ private:
         return false;
     }
 
+    if (command.standalone_draft_model
+        && (command.development_recurrent_weights || !command.speculative_decode
+            || !command.speculative_sampling_requested
+            || command.speculative_sampling != engine::SpeculativeSamplingMode::lossless
+            || command.options.backend != BackendKind::metal || command.draft_head_requested)) {
+        error << "error: --draft-model requires Metal and explicit lossless speculation,"
+              << " and conflicts with recurrent weights, --no-speculative and --draft-head\n";
+        return false;
+    }
+    if (command.draft_horizon_requested && !command.standalone_draft_model) {
+        error << "error: --draft-horizon requires --draft-model\n";
+        return false;
+    }
+    if (command.standalone_execution.draft_sampling != engine::StandaloneDraftSamplingOptions{}
+        && !command.standalone_draft_model) {
+        error << "error: draft sampling overrides require --draft-model and explicit lossless speculation\n";
+        return false;
+    }
+    const bool has_draft = command.development_recurrent_weights || command.standalone_draft_model;
+    if (command.speculative_sampling_requested && (!has_draft || !command.speculative_decode)) {
+        error << "error: --speculative-sampling requires a draft configuration and enabled speculation\n";
+        return false;
+    }
+    if ((command.schedule_requested || command.draft_head_requested)
+        && (!has_draft || !command.speculative_decode
+            || command.speculative_sampling != engine::SpeculativeSamplingMode::lossless)) {
+        error << "error: speculative execution options require a draft configuration and lossless sampling\n";
+        return false;
+    }
+    if (command.standalone_draft_model) {
+        command.standalone_execution.conditional_verification =
+            command.recurrent_execution.conditional_verification;
+        command.recurrent_execution = {};
+    }
+    if (command.recurrent_execution.draft_head == engine::RecurrentDraftHead::q8_0
+        && command.output_head_policy == engine::Gemma2OutputHeadPolicy::f16) {
+        error << "error: Q8 draft head requires the Q8 target head to be resident\n";
+        return false;
+    }
     if (command.greedy_requested) {
         if (command.temperature_requested && command.sampler.temperature > 0.0F) {
             error << "error: --greedy cannot be combined with positive --temperature\n";
@@ -699,6 +844,10 @@ int run_generate_chat(
             .speculative_decode = command.speculative_decode,
             .retrieval_decode = command.retrieval_decode,
             .development_recurrent_weights = command.development_recurrent_weights,
+            .standalone_draft_model = command.standalone_draft_model,
+            .standalone_execution = command.standalone_execution,
+            .speculative_sampling = command.speculative_sampling,
+            .recurrent_execution = command.recurrent_execution,
             .reverse_stop_strings = command.reverse_stop_strings,
             .sampler = command.sampler,
         }
@@ -708,6 +857,20 @@ int run_generate_chat(
     output << "local-gguf-engine chat\n";
     if (command.development_recurrent_weights) {
         output << "development recurrent weights: always-propose control; no admitted routing policy\n";
+        output << "speculative sampling: "
+               << (command.speculative_sampling == engine::SpeculativeSamplingMode::lossless
+                   ? "lossless (target distribution; different seeded text)" : "exact-match") << '\n';
+        output << "learned execution: schedule="
+               << (command.recurrent_execution.conditional_verification ? "conditional" : "full")
+               << " draft-head=" << (command.recurrent_execution.draft_head == engine::RecurrentDraftHead::q8_0
+                   ? "q8_0" : "f16") << '\n';
+    }
+    if (command.standalone_draft_model) {
+        output << "standalone TLI draft: authenticated native Metal model; no admitted routing policy\n"
+               << "speculative sampling: lossless (target distribution; different seeded text)\n"
+               << "standalone execution: horizon=" << command.standalone_execution.horizon
+               << " schedule=" << (command.standalone_execution.conditional_verification
+                   ? "conditional" : "full") << " draft-head=artifact-defined\n";
     }
     output << "commands: /exit /quit /clear /reset /regen /tokens /read <path>\n";
     output << "multiline: end a line with \\\n";
@@ -836,7 +999,19 @@ std::string format_chat_timing_detail_line(const engine::Gemma2ChatTurnMetrics& 
 }
 
 std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetrics& metrics) {
-    constexpr std::uint32_t schema_version = 4U;
+    constexpr std::uint32_t schema_version = 5U;
+    if (metrics.standalone_draft != metrics.standalone_effective_sampler.has_value()) {
+        throw std::logic_error("standalone diagnostics require the actual effective draft sampler");
+    }
+    if (metrics.standalone_effective_sampler) {
+        const auto& sampler = *metrics.standalone_effective_sampler;
+        if (!std::isfinite(sampler.temperature) || sampler.temperature < 0.0F
+            || !std::isfinite(sampler.top_p) || sampler.top_p <= 0.0F || sampler.top_p > 1.0F
+            || !std::isfinite(sampler.min_p) || sampler.min_p < 0.0F || sampler.min_p > 1.0F
+            || !std::isfinite(sampler.repetition_penalty) || sampler.repetition_penalty <= 0.0F) {
+            throw std::logic_error("standalone diagnostics contain invalid effective draft scalars");
+        }
+    }
     const auto decode_tokens = static_cast<std::uint64_t>(metrics.generation.decode_token_count);
     const auto checked_multiply = [](std::uint64_t left, std::uint64_t right, const char* name) {
         if (left != 0U && right > std::numeric_limits<std::uint64_t>::max() / left) {
@@ -913,6 +1088,22 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"first_text_ns\":" << metrics.first_text_duration_ns
          << ",\"learned_owned_bytes\":" << metrics.learned_owned_byte_count
          << ",\"learned_horizon\":" << metrics.learned_horizon
+         << ",\"speculative_draft_model\":\""
+         << (metrics.standalone_draft
+             ? (metrics.standalone_kind == engine::StandaloneDraftKind::gemma3_270m_q8
+                 ? "standalone_gemma3_tli" : "standalone_vicuna_tli")
+             : (metrics.learned_horizon != 0U ? "recurrent" : "none")) << "\""
+         << ",\"speculative_sampling\":\""
+         << (metrics.speculative_sampling == engine::SpeculativeSamplingMode::lossless
+             ? "lossless" : "exact-match") << "\""
+         << ",\"learned_verification_schedule\":\""
+         << ((metrics.standalone_draft ? metrics.standalone_execution.conditional_verification
+                 : metrics.recurrent_execution.conditional_verification) ? "conditional" : "full") << "\""
+         << ",\"learned_draft_head\":\""
+         << ((metrics.standalone_draft
+                 ? metrics.standalone_kind == engine::StandaloneDraftKind::gemma3_270m_q8
+                 : metrics.recurrent_execution.draft_head == engine::RecurrentDraftHead::q8_0)
+             ? "q8_0" : "f16") << "\""
          << ",\"scheduled_bytes_basis\":\"one_row_equivalent_not_physical_bandwidth\""
          << ",\"learned_cycles\":" << metrics.generation.learned_cycle_count
          << ",\"learned_accepted_edges\":" << metrics.generation.learned_accepted_edge_count
@@ -921,6 +1112,44 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"learned_draft_gpu_ns\":" << metrics.generation.learned_draft_gpu_ns
          << ",\"learned_target_gpu_ns\":" << metrics.generation.learned_target_gpu_ns
          << ",\"learned_cycle_ns\":" << metrics.generation.learned_cycle_duration_ns
+         << ",\"standalone_prefill_ns\":" << metrics.generation.standalone_prefill_ns
+         << ",\"standalone_rebuild_ns\":" << metrics.generation.standalone_rebuild_ns
+         << ",\"standalone_draft_uploaded_bytes\":" << metrics.generation.standalone_draft_uploaded_bytes
+         << ",\"standalone_draft_readback_bytes\":" << metrics.generation.standalone_draft_readback_bytes
+         << ",\"standalone_draft_wall_ns\":" << metrics.generation.standalone_draft_wall_ns
+         << ",\"standalone_draft_gpu_ns\":" << metrics.generation.standalone_draft_gpu_ns
+         << ",\"standalone_draft_command_buffer_count\":" << metrics.generation.standalone_draft_command_buffer_count
+         << ",\"standalone_draft_compute_dispatch_count\":" << metrics.generation.standalone_draft_compute_dispatch_count
+         << ",\"standalone_draft_sampler\":\""
+         << (metrics.standalone_draft ? "explicit_or_target_scalars_native_history_v1" : "none") << "\""
+         << ",\"standalone_effective_sampler\":";
+    if (metrics.standalone_effective_sampler) {
+        const auto& sampler = *metrics.standalone_effective_sampler;
+        // Emit round-trippable F32 values actually consumed by the draft, not
+        // the original CLI strings or unchanged target configuration.
+        const auto precision = json.precision();
+        json << std::setprecision(std::numeric_limits<float>::max_digits10)
+             << "{\"temperature\":" << sampler.temperature
+             << ",\"top_k\":" << sampler.top_k
+             << ",\"top_p\":" << sampler.top_p
+             << ",\"min_p\":" << sampler.min_p
+             << ",\"repetition_penalty\":" << sampler.repetition_penalty << '}';
+        json.precision(precision);
+    } else json << "null";
+    json << ",\"learned_accepted_prefix_histogram\":[";
+    for (std::size_t index = 0; index < metrics.generation.learned_accepted_prefix_histogram.size(); ++index) {
+        if (index) json << ',';
+        json << metrics.generation.learned_accepted_prefix_histogram[index];
+    }
+    json << "],\"learned_rejection_depth_histogram\":[";
+    for (std::size_t index = 0; index < metrics.generation.learned_rejection_depth_histogram.size(); ++index) {
+        if (index) json << ',';
+        json << metrics.generation.learned_rejection_depth_histogram[index];
+    }
+    json << ']'
+         << ",\"learned_censored_cycle_count\":" << metrics.generation.learned_censored_cycle_count
+         << ",\"learned_full_accept_count\":" << metrics.generation.learned_full_accept_count
+         << ",\"learned_horizon_limited_cycle_count\":" << metrics.generation.learned_horizon_limited_cycle_count
          << ",\"speculative_cycles\":" << metrics.generation.speculative_cycle_count
          << ",\"speculative_matches\":" << metrics.generation.speculative_second_token_match_count
          << ",\"speculative_misses\":" << metrics.generation.speculative_second_token_miss_count

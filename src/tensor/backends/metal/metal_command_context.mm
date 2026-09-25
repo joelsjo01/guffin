@@ -2248,7 +2248,9 @@ void MetalCommandContext::encode_recurrent_stage(
         || impl_->state->recurrent_pipelines[index]==nil) {
         throw std::logic_error("recurrent pipelines were not prepared before execution");
     }
-    const std::size_t expected = stage==RecurrentStage::linear ? 5U
+    const bool lossless=stage==RecurrentStage::sample_lossless;
+    const bool sample=stage==RecurrentStage::sample || lossless;
+    const std::size_t expected = (stage==RecurrentStage::linear || lossless) ? 5U
         : (stage==RecurrentStage::norm || stage==RecurrentStage::embedding || stage==RecurrentStage::sample) ? 4U : 3U;
     if (buffers.size()!=expected) throw std::invalid_argument("recurrent stage buffer count");
     for (auto* buffer:buffers) {
@@ -2263,12 +2265,13 @@ void MetalCommandContext::encode_recurrent_stage(
     if (stage==RecurrentStage::verifier_requests) {
         if (x==0 || x>23) throw std::invalid_argument("recurrent verifier horizon");
         capacity(0,91*4);capacity(1,(x+1)*4);capacity(2,(x+1)*91*4);
-    } else if (stage==RecurrentStage::sample) {
+    } else if (sample) {
         if (x>=23 || y==0 || y>256 || !std::isfinite(scalars[0]) || scalars[0]<=0
             || !(scalars[1]>0 && scalars[1]<=1) || !(scalars[2]>=0 && scalars[2]<=1)) {
             throw std::invalid_argument("recurrent sampler dimensions or scalars");
         }
-        capacity(0,y*8);capacity(1,(x+1)*8);capacity(2,(x+2)*4);capacity(3,4);
+        capacity(0,y*8);capacity(1,(x+1)*(lossless?4:8));capacity(2,(x+2)*4);capacity(3,4);
+        if(lossless) capacity(4,(x+1)*769*4);
     } else {
         if (x==0 || x>8192) throw std::invalid_argument("recurrent stage width");
         if (stage==RecurrentStage::linear) {
@@ -2292,14 +2295,14 @@ void MetalCommandContext::encode_recurrent_stage(
         bind_buffer(encoder,*buffers[i],static_cast<NSUInteger>(i));
     }
     [encoder setBytes:dimensions.data() length:sizeof(dimensions) atIndex:buffers.size()];
-    if (stage==RecurrentStage::sample) {
-        [encoder setBytes:scalars.data() length:sizeof(scalars) atIndex:5];
+    if (sample) {
+        [encoder setBytes:scalars.data() length:sizeof(scalars) atIndex:buffers.size()+1];
     }
     const auto groups=stage==RecurrentStage::linear ? dimensions[1]
-        : (stage==RecurrentStage::norm || stage==RecurrentStage::sample
+        : (stage==RecurrentStage::norm || sample
            || stage==RecurrentStage::verifier_requests) ? 1U
         : (dimensions[0]+255U)/256U;
-    const auto threads=stage==RecurrentStage::sample ? 1U
+    const auto threads=sample ? 1U
         : (stage==RecurrentStage::linear || stage==RecurrentStage::norm) ? 32U : 256U;
     [encoder dispatchThreadgroups:MTLSizeMake(groups,1,1)
               threadsPerThreadgroup:MTLSizeMake(threads,1,1)];

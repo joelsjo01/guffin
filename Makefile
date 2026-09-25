@@ -28,6 +28,11 @@ ENGINE_SOURCES := \
 	src/engine/gemma2_speculative_runtime.mm \
 	src/engine/learned_recurrent.cpp \
 	src/engine/recurrent_chat.mm \
+	src/engine/chain_chat.mm \
+	src/engine/standalone_chat.cpp \
+	src/engine/standalone_draft_artifact.cpp \
+	src/engine/vicuna_draft.mm \
+	src/engine/gemma3_draft.mm \
 	src/engine/model.cpp \
 	src/engine/prepared_gemma2_plan.cpp \
 	src/engine/prepared_plan_test_hooks.cpp \
@@ -105,11 +110,16 @@ TEST_SOURCES := \
 	tests/engine/gemma2_metal_plan_tests.cpp \
 	tests/engine/draft_vocabulary_tests.cpp \
 	tests/engine/learned_recurrent_tests.cpp \
+	tests/engine/standalone_draft_artifact_tests.cpp \
+	tests/engine/standalone_chat_tests.cpp \
+	tests/engine/vicuna_draft_tests.cpp \
+	tests/engine/gemma3_draft_tests.cpp \
 	tests/engine/engine_model_tests.cpp \
 	tests/engine/feature_bank_tests.cpp \
 	tests/engine/gemma2_reference_tests.cpp \
 	tests/engine/retrieval_proposer_tests.cpp \
 	tests/engine/sampling_tests.cpp \
+	tests/engine/lossless_sampling_tests.cpp \
 	tests/engine/speculation_artifact_tests.cpp \
 	tests/engine/speculative_controller_tests.cpp \
 	tests/frontends/cli/generate_cli_tests.cpp \

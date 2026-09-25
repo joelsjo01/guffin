@@ -27,7 +27,13 @@ struct RecurrentGolden {
     std::vector<std::uint32_t> tokens;
     std::vector<float> target_states;
     std::vector<float> confidence_logits;
+    std::vector<float> logits;
 };
+
+// Q8_0 is a separately selected deployment variant of the unchanged trained
+// weights. It aliases the authenticated resident target head; embeddings stay
+// F16. Only rejection sampling corrects this variant's actual proposal law.
+enum class RecurrentDraftHead : std::uint32_t { f16, q8_0 };
 
 // Offline equations, with an exhaustive vocabulary and the unchanged sampler
 // operation order. Never used to execute a production draft or recover a
@@ -36,7 +42,8 @@ struct RecurrentGolden {
     const AuthenticatedSpeculativeArtifact& artifact,
     const tensor::TensorView& token_table, std::span<const float> output_norm,
     std::span<const float> final_feature, std::uint32_t root_token,
-    std::span<const double> unit_draws
+    std::span<const double> unit_draws,
+    const tensor::TensorView* packed_output_head = nullptr
 );
 [[nodiscard]] std::uint32_t recurrent_sample_cpu(
     std::span<const float> logits, double draw, const LearnedRecurrentSpec& spec
@@ -47,6 +54,10 @@ struct RecurrentExecutionResult {
     std::uint32_t status = 2U;
     std::array<std::uint32_t,23> tokens {};
     std::array<float,23> confidence_logits {};
+    // Present only for lossless rejection sampling. Each law is the actual
+    // finite-grid proposal distribution, not an idealized softmax estimate.
+    std::array<DraftTokenDistribution,23> proposal_distributions {};
+    bool has_distributions = false;
     std::uint32_t count = 0U;
     std::uint64_t execution_epoch = 0U;
     std::uint64_t gpu_duration_ns = 0U;
@@ -66,7 +77,8 @@ public:
     [[nodiscard]] static Gemma2SpeculativePlan create(
         std::shared_ptr<RecurrentWeightsFile> source,
         const EngineModelPayloadReceipt& model, const ResidentTargetPayloadReceipt& resident,
-        const Gemma2MetalModelPlan& target
+        const Gemma2MetalModelPlan& target,
+        RecurrentDraftHead head = RecurrentDraftHead::f16
     );
     // Weights-only execution is an explicit development operation. Tokens
     // remain on device throughout the dependent recurrence; one compact
@@ -84,16 +96,24 @@ public:
         std::uint32_t root_token, const TokenSampler& sampler,
         const SamplerTicketPool& tickets
     );
+    [[nodiscard]] RecurrentExecutionResult execute_lossless(
+        const tensor::BackendBuffer& final_feature, const TargetStateView& provenance,
+        std::uint32_t root_token, const TokenSampler& sampler,
+        std::span<const std::uint32_t> proposal_draw_words
+    );
     void validate_sampler(const TokenSamplerOptions& options) const;
     [[nodiscard]] VerifierDeviceInputBinding verifier_inputs(std::uint64_t epoch) const;
     [[nodiscard]] const SpeculativeArtifactDescriptor& descriptor() const noexcept;
+    [[nodiscard]] RecurrentDraftHead draft_head() const noexcept;
     [[nodiscard]] bool poisoned() const noexcept;
     [[nodiscard]] std::size_t owned_bytes() const noexcept;
     [[nodiscard]] std::vector<float> diagnostic_target_states() const;
 #if defined(LOCAL_GGUF_ENGINE_TESTING)
     [[nodiscard]] static Gemma2SpeculativePlan fixture_for_testing(
         const AuthenticatedSpeculativeArtifact& artifact,
-        const tensor::BackendBuffer& table, const tensor::BackendBuffer& norm
+        const tensor::BackendBuffer& table, const tensor::BackendBuffer& norm,
+        RecurrentDraftHead head = RecurrentDraftHead::f16,
+        const tensor::BackendBuffer* packed_output_head = nullptr
     );
 #endif
 private:
@@ -101,7 +121,8 @@ private:
     explicit Gemma2SpeculativePlan(std::unique_ptr<Impl> impl);
     [[nodiscard]] RecurrentExecutionResult execute(
         const tensor::BackendBuffer&, const TargetStateView&, std::uint32_t,
-        std::span<const double>, const SamplerHistorySnapshot*
+        std::span<const double>, const SamplerHistorySnapshot*,
+        std::span<const std::uint32_t> proposal_draw_words = {}
     );
     std::unique_ptr<Impl> impl_;
 };

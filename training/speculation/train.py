@@ -28,12 +28,13 @@ from .dataset import (
 )
 from .gguf import GGUFFile
 from .manifest import WORKLOADS
-from .models import DraftOutput, make_model
+from .models import DSparkDrafter, DraftOutput, make_model
 from .objectives import (
     GemmaTargetHead,
     ObjectiveWeights,
     TargetSupport,
     dblast_objective,
+    draft_logits,
     select_exact_proposal_tokens,
     standard_objective,
 )
@@ -54,6 +55,19 @@ from .validation_stats import (
 
 class TrainingError(RuntimeError):
     pass
+
+
+def _validate_training_implementation(cell: TrainingCell) -> None:
+    if cell.implementation == "dspark":
+        # The legacy trace objective sees the prepared top-k sampler support,
+        # not the full raw teacher distribution required by DSpark's source
+        # CE/L1/soft-confidence objective. Do not quietly train the new model
+        # with the old R loss or accept its obsolete three-layer cell identity.
+        raise TrainingError(
+            "Arm P training requires its versioned full-teacher data and run contract; "
+            "the legacy sparse-support R trainer cannot execute the DSpark source objective. "
+            "No P training has started."
+        )
 
 
 VALIDATION_STREAM_SEED = 0xD1B54A32D192ED03
@@ -638,20 +652,32 @@ def _rollout(
     own = torch.zeros_like(teacher)
     own[:, 0] = teacher[:, 0]
     reached = torch.ones_like(example.labels, dtype=torch.bool)
+    # P's defining division: one parallel backbone/head, followed only by
+    # predecessor-conditioned corrections. Retain this graph for the final
+    # loss; the proposal-only previews borrow detached copies, not new runs.
+    p_base = p_logits = None
+    if isinstance(model, DSparkDrafter):
+        p_base = model.prepare_backbone(
+            example.context_taps, example.context_positions,
+            example.anchor_indices, teacher[:, 0],
+        )
+        p_logits = head(model.project_base(p_base), apply_norm=False,
+                        apply_softcap=False)
     with torch.no_grad():
         for depth in range(teacher.shape[1] - 1):
-            preview = model(
-                example.context_taps, example.context_positions,
-                example.anchor_indices, own,
-            )
+            if p_base is not None:
+                preview = model.correct(p_base.detach(), own)
+                preview.semantic_logits = p_logits.detach()
+            else:
+                preview = model(
+                    example.context_taps, example.context_positions,
+                    example.anchor_indices, own,
+                )
             preview_states = preview.states
             if (preview_states.ndim != 3
                     or preview_states.shape[:2] != teacher.shape):
                 raise TrainingError("self-rollout state shape is invalid")
-            logits = head(
-                preview_states[:, depth],
-                apply_norm=not preview.head_pre_normalized,
-            )
+            logits = draft_logits(preview, head, depth)
             if proposal_policy == "common_draw":
                 proposed = select_exact_proposal_tokens(
                     logits, example.target_unit_draws[:, depth], example.sampler
@@ -664,6 +690,10 @@ def _rollout(
             reached[:, depth + 1] = (
                 reached[:, depth] & (proposed == example.labels[:, depth])
             )
+    if p_base is not None:
+        output = model.correct(p_base, own)
+        output.semantic_logits = p_logits
+        return output, reached
     return model(
         example.context_taps, example.context_positions,
         example.anchor_indices, own,
@@ -1214,6 +1244,7 @@ def train_cell(
     run_contract: RunContract,
     cell_contract: RunCellContract,
 ) -> dict[str, object]:
+    _validate_training_implementation(cell)
     if (run_contract.registry_sha256 != registry.digest
             or cell_contract.cell_id != cell.identifier
             or run_contract.cell(cell.identifier) != cell_contract):
@@ -2000,6 +2031,8 @@ def train_cells(
         )
     # Contract order is itself authenticated and is the execution order.
     cells = [cells_by_id[cell.cell_id] for cell in run_contract.cells]
+    for cell in cells:
+        _validate_training_implementation(cell)
     device = _device(device_name, allow_cpu_diagnostic)
     corpus, catalog = validate_trace_corpus_with_index(
         traces, registry, model, auditor, split_receipt

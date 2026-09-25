@@ -100,7 +100,7 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> corrected_logsumexp_pipeline = nil;
     id<MTLComputePipelineState> corrected_rank_finalize_pipeline = nil;
     id<MTLComputePipelineState> arm_s_transition_score_pipeline = nil;
-    std::array<id<MTLComputePipelineState>, 7> recurrent_pipelines {};
+    std::array<id<MTLComputePipelineState>, 8> recurrent_pipelines {};
     id<MTLCommandQueue> queue = nil;
 
     MatmulPipelineState();
