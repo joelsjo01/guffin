@@ -43,19 +43,12 @@ src/engine/target_verifier*.*
   -> src/tensor/backends/metal/*
 
 src/engine/prepared_gemma2_plan.*
-  -> src/engine/speculative_artifact.*
-  -> src/engine/feature_bank.*
+  -> src/engine/model.cpp
   -> src/engine/gemma2_metal_plan.*
-  -> src/engine/recurrent_chat.*
   -> src/engine/standalone_chat.*
-
-src/engine/recurrent_chat.*
-  -> src/engine/learned_recurrent.*
-  -> src/engine/chain_chat.*
 
 src/engine/standalone_chat.*
   -> src/engine/standalone_draft_artifact.*
-  -> src/engine/vicuna_draft.*
   -> src/engine/gemma3_draft.*
   -> src/engine/chain_chat.*
   -> src/tokenizer
@@ -64,20 +57,12 @@ src/engine/chain_chat.*
   -> src/engine/speculative_controller.*
   -> src/engine/target_verifier.*
 
-src/engine/speculation_trace.*
-  -> src/engine/speculative_artifact.*
-  -> src/engine/sampling.*
-
 src/engine/feature_bank.*
+  -> src/engine/target_verifier.*
   -> src/tensor/backends/metal/*
 
-src/engine/draft_vocabulary.*
-  -> src/engine/speculative_artifact.*
-  -> src/engine/gemma2_metal_plan.*
-  -> src/tensor/backends/metal/*
-
-scripts/speculation_training.py
-  -> training/speculation
+scripts/gemma3_reference_golden.py
+  -> scripts/reference_gguf.py
 
 tests
   -> module under test
@@ -85,8 +70,7 @@ tests
   -> tests/fixtures
 ```
 
-Benchmark output lives under ignored `benchmarks/results`. The old standalone
-benchmark harness is not a live source route.
+Benchmark output lives under ignored `benchmarks/results`.
 
 ## Build Entrypoints
 
@@ -100,17 +84,12 @@ benchmark harness is not a live source route.
 | `scripts/storage_policy_benchmark.py` | paired immutable-weight Metal resource-policy screen |
 | `scripts/capture_decode_gpu_trace.py` | one-shot production decode `.gputrace` driver |
 | `scripts/llama_reference_benchmark.py` | infrequent pinned llama-cli reference driver |
-| `scripts/speculation_training.py` | pinned public-corpus preparation, immutable manifest, balanced trace audit, registry plan, and offline-training entry |
-| `scripts/speculation_export.py` | immutable trained recurrent weights export |
-| `scripts/speculation_draft_parity.py` | independent trained-checkpoint/native recurrent parity command |
-| `scripts/convert_vicuna_draft.py` | authenticated complete Vicuna checkpoint to native F16 GGUF conversion |
-| `scripts/vicuna_reference_golden.py` | offline pinned Transformers full-model reference logits |
 | `scripts/gemma3_reference_golden.py` | independent full-checkpoint GGUF/Q8 Gemma 3 CPU logits and logical K/V goldens |
+| `scripts/reference_gguf.py` | independent GGUF reader shared by offline checkpoint equations |
+| `scripts/reference_requirements.txt` | pinned NumPy/PyTorch dependencies for offline CPU reference goldens |
 | `docs/LLAMA_CPP_REFERENCE_BASELINE.md` | stored pinned reference identity, protocol, and result |
 | `src/frontends/cli/generate_main.cpp` | `local-gguf-generate` binary entry |
 | `src/frontends/cli/gguf_inspect_main.cpp` | `gguf-inspect` binary entry |
-| `src/frontends/cli/speculation_trace_main.cpp` | `local-gguf-speculation-trace` developer trace entry |
-| `src/frontends/cli/speculation_draft_main.cpp` | `local-gguf-speculation-draft` weights inspector and development-only recurrent execution |
 | `tests/test_main.cpp` | single test binary registry |
 
 ## Module Ownership
@@ -123,27 +102,22 @@ benchmark harness is not a live source route.
 | `src/runtime` | backend enum/error types shared across runtime layers | backend execution |
 | `src/benchmarks` | secondary production-kernel probes and summaries | chat inference execution, reference execution, CLI formatting |
 | `src/engine/model.cpp` | engine model loading from GGUF model views, architecture boundary | raw GGUF parsing internals |
+| `include/local_gguf_engine/engine/model.hpp` | source-model and resident-target payload receipt types | training artifacts, file serialization |
 | `src/engine/gemma2_model.*` | Gemma 2 config parsing and weight binding | backend upload/execution |
 | `src/engine/gemma2_metal_plan.*` | Metal resident weight upload, KV cache buffers, prefill/decode/verifier schedules and transaction state | tokenization, CLI formatting |
 | `src/engine/gemma2_runtime.*` | Gemma Metal prefill/decode/verifier execution, resident decode, metrics, argmax and selector-driven token loops | chat history, CLI parsing |
 | `src/engine/gemma2_chat_session.*` | persistent chat state, prompt rendering, KV-prefix reuse, context trimming, stops, streaming, regeneration, sampler integration | CLI commands and formatting |
 | `src/engine/gemma2_reference.*` | tiny CPU/reference Gemma numerics for parity tests | product CPU runtime |
 | `src/engine/sampling.*` | greedy and seeded stochastic token selection, top-k/top-p, repetition penalty, token history, integer proposal laws, rejection/residual sampling, checkpoint-owned random streams | model execution |
-| `src/engine/speculative_controller.*` | fixed-capacity proposal-graph validation, exact speculative token/callback/cache transitions, Arm-S lease transitions, and corrected trajectory replay | model execution, learned drafting kernels, chat rendering |
-| `src/engine/target_verifier*.*` | typed source-shape registry, validated verifier requests, owning target tickets, target-only episodes, private speculative K/V, accepted-path publication, and fault seams | learned drafting, chat rendering |
-| `src/engine/speculative_artifact.*` | authenticated bounded fixture and trained recurrent weights envelopes and target compatibility validation | training |
-| `src/engine/learned_recurrent.cpp`, `src/engine/gemma2_speculative_runtime.mm` | authenticated recurrent source lifetime, independent CPU equations, persistent native Metal chain and explicit F16/Q8 draft heads | policy fitting, session admission, other drafter families |
-| `src/engine/recurrent_chat.mm` | live recurrent feature leases, weights-only draft execution and prepared recurrent options | fitted policies, trees, other drafter families |
+| `src/engine/speculative_controller.*` | fixed-capacity proposal-graph validation, speculative token/callback/cache transitions and sampler tickets | model execution, learned drafting kernels, chat rendering |
+| `src/engine/target_verifier*.*` | validated verifier requests, owning target tickets, target-only episodes, private speculative K/V, accepted-path publication, and fault seams | learned drafting, chat rendering |
 | `src/engine/chain_chat.mm` | draft-independent chain graph, full/conditional target transactions, sampler forks and controller-driven callback prefixes | draft model execution, tokenizer conversion |
-| `src/engine/standalone_draft_artifact.cpp` | pinned complete Vicuna/Gemma 3 artifact authentication and typed bounded target/draft tokenizer mapping | Metal model execution, target sampling |
-| `src/engine/vicuna_draft.mm` | resident complete Vicuna transformer, independent K/V positions and full-vocabulary proposal probabilities | target verification, chat history |
+| `src/engine/standalone_draft_artifact.cpp` | pinned complete Gemma 3 artifact authentication and typed bounded target/draft tokenizer mapping | Metal model execution, target sampling |
 | `src/engine/gemma3_draft.mm` | resident complete Q8 Gemma 3 transformer, hybrid attention caches, private draft transactions and full-vocabulary proposal laws | target verification, conversation tokenization |
-| `src/engine/standalone_chat.cpp` | target/draft emission ledgers, bounded context conversion, draft suffix rebuilding, draft-only scalar resolution and joint chain lifecycle | target sampler transforms, model weight conversion |
-| `training/export_recurrent.py` | completed-checkpoint validation and immutable trained recurrent packing | production inference |
-| `src/engine/prepared_gemma2_plan.*` | atomic target/fixture/recurrent/standalone preparation and aggregate lifecycle | chat session composition |
+| `include/local_gguf_engine/engine/standalone_draft_types.hpp` | native draft execution statistics | draft model execution, target verification |
+| `src/engine/standalone_chat.cpp` | target/draft emission ledgers, bounded context conversion, explicit native-context restoration, draft-only scalar resolution and joint chain lifecycle | target sampler transforms, model weight conversion |
+| `src/engine/prepared_gemma2_plan.*` | atomic target/standalone preparation, authenticated payload receipts and aggregate lifecycle | chat session composition |
 | `src/engine/feature_bank.*` | typed feature capture/projection provenance, fixed-capacity Metal storage, draft cache substrate, and joint promotion lifecycle | drafter scoring, training |
-| `src/engine/draft_vocabulary.*` | authenticated selector/candidate plans, stable top-k/unions, indexed packed scoring, exact proposal arithmetic, corrected TreeFlash/Arm-S head controls, pruning, and compact constructors | training, chat-path candidate selection |
-| `src/engine/speculation_trace.*` | bounded authenticated trace serialization, causality validation, and audit | corpus collection policy, training |
 | `src/engine/retrieval_proposer.*` | session-local bounded suffix retrieval, continuation evidence, and profitability gating | sampling, model execution, chat rendering |
 | `src/tensor` | tensor descriptors/storage, dtype/layout, F16, quantization views, typed access, backend buffer wrapper | model-family policy |
 | `src/tensor/ops` | CPU/reference tensor ops and backend-dispatched op front doors | device setup |
@@ -152,8 +126,7 @@ benchmark harness is not a live source route.
 | `src/tensor/backends/metal/metal_command_context.*` | resident prefill/decode command encoding, submission statistics, selected-token readback | model scheduling, chat state |
 | `src/tensor/backends/metal/*` | Metal device context, buffers, kernels, command encoding, Metal op implementations | benchmark reporting |
 | `src/frontends/cli` | command arguments, file IO, stdout/stderr formatting, error reporting | inference math |
-| `training/speculation` | immutable source splitting, independent trace reading, GGUF target-head loading, mechanism-specific offline models/objectives, and resumable training | production inference, artifact packing |
-| `training/speculation/dspark.py`, `training/speculation/dspark_objective.py` | explicit Arm-P backbone/correction equations and full-teacher source loss | native inference, training orchestration |
+| `scripts/gemma3_reference_golden.py`, `scripts/reference_gguf.py` | independent CPU checkpoint equations and authenticated GGUF reads | production inference |
 | `tests` | deterministic coverage and fixtures | real model weights, generated benchmark artifacts |
 
 ## Task Routes
@@ -165,6 +138,16 @@ Gemma 2 model binding:
 - `src/engine/model.cpp`
 - `src/engine/gemma2_model.cpp`
 - `tests/engine/engine_model_tests.cpp`
+
+Source and resident model identities:
+
+- `include/local_gguf_engine/engine/model.hpp`
+- `src/engine/model.cpp`
+- `src/engine/gemma2_metal_plan.cpp`
+- `include/local_gguf_engine/runtime/sha256.hpp`
+- `src/runtime/sha256.cpp`
+- `tests/engine/engine_model_tests.cpp`
+- `tests/engine/standalone_draft_artifact_tests.cpp`
 
 Gemma Metal plan and resident schedules:
 
@@ -294,7 +277,6 @@ Speculative sampler/control semantics:
 Target-verifier topology frontier:
 
 - `include/local_gguf_engine/engine/target_verifier.hpp`
-- `include/local_gguf_engine/engine/target_verifier_registry.hpp`
 - `src/engine/target_verifier*.cpp`
 - `src/engine/gemma2_verification_state_access.hpp`
 - `src/tensor/backends/metal/metal_command_context.*`
@@ -302,94 +284,53 @@ Target-verifier topology frontier:
 - `tests/engine/gemma2_metal_plan_tests.cpp`
 - `tests/engine/speculative_controller_tests.cpp`
 
-Prepared learned-plan substrate and artifacts:
+Prepared target/draft plans, feature banks, and joint cache substrate:
 
 - `include/local_gguf_engine/engine/prepared_gemma2_plan.hpp`
-- `include/local_gguf_engine/engine/speculative_artifact.hpp`
 - `include/local_gguf_engine/engine/feature_bank.hpp`
 - `src/engine/prepared_gemma2_plan.cpp`
-- `src/engine/speculative_artifact.cpp`
 - `src/engine/feature_bank.cpp`
-- `tests/engine/speculation_artifact_tests.cpp`
+- `src/engine/feature_bank_runtime.hpp`
+- `src/engine/draft_cache_runtime.hpp`
+- `src/engine/prepared_plan_test_hooks.*`
 - `tests/engine/feature_bank_tests.cpp`
 - `tests/engine/gemma2_metal_plan_tests.cpp`
 
-Speculation trace format and developer CLI:
-
-- `include/local_gguf_engine/engine/speculation_trace.hpp`
-- `src/engine/speculation_trace.cpp`
-- `include/local_gguf_engine/frontends/cli/speculation_trace.hpp`
-- `src/frontends/cli/speculation_trace.cpp`
-- `src/frontends/cli/speculation_trace_main.cpp`
-- `tests/engine/speculation_artifact_tests.cpp`
-
-Immutable corpus and offline training:
-
-- `scripts/speculation_training.py`
-- `training/speculation/corpus_sources.json`
-- `training/speculation/corpus_builder.py`
-- `training/speculation/manifest.py`
-- `training/speculation/registry.json`
-- `training/speculation/registry.py`
-- `training/speculation/run_contract.py`
-- `training/speculation/data_order.py`
-- `training/speculation/trace.py`
-- `training/speculation/corpus.py`
-- `training/speculation/dataset.py`
-- `training/speculation/gguf.py`
-- `training/speculation/models.py`
-- `training/speculation/dspark.py`
-- `training/speculation/dspark_objective.py`
-- `training/speculation/phase_p_gemma_model.json`
-- `training/speculation/objectives.py`
-- `training/speculation/validation_stats.py`
-- `training/speculation/train.py`
-- `training/speculation/phase5_h3_control_run.json`
-- `tests/scripts/speculation_balanced_collection_tests.py`
-- `tests/scripts/speculation_corpus_builder_tests.py`
-- `tests/scripts/speculation_objective_math_tests.py`
-- `tests/scripts/speculation_trainer_orchestration_tests.py`
-- `tests/scripts/speculation_training_script_tests.py`
-- `tests/scripts/speculation_training_torch_tests.py`
-- `tests/scripts/speculation_dspark_model_tests.py`
-- `tests/scripts/speculation_dspark_objective_tests.py`
-- `tests/scripts/speculation_dspark_integration_tests.py`
-- `tests/scripts/speculation_validation_stats_tests.py`
-
-Standalone Vicuna/Gemma 3 TLI drafting and shared chain verification:
+Standalone Gemma 3 TLI drafting and shared chain verification:
 
 - `include/local_gguf_engine/engine/standalone_draft_artifact.hpp`
-- `include/local_gguf_engine/engine/vicuna_draft.hpp`
+- `include/local_gguf_engine/engine/standalone_draft_types.hpp`
 - `include/local_gguf_engine/engine/gemma3_draft.hpp`
 - `include/local_gguf_engine/engine/standalone_chat.hpp`
 - `include/local_gguf_engine/engine/chain_chat.hpp`
 - `src/engine/standalone_draft_artifact.cpp`
-- `src/engine/vicuna_draft.mm`
 - `src/engine/gemma3_draft.mm`
 - `src/engine/standalone_chat.cpp`
 - `src/engine/chain_chat.mm`
-- `scripts/convert_vicuna_draft.py`
-- `scripts/vicuna_reference_golden.py`
 - `scripts/gemma3_reference_golden.py`
 - `tests/engine/standalone_draft_artifact_tests.cpp`
-- `tests/engine/vicuna_draft_tests.cpp`
 - `tests/engine/gemma3_draft_tests.cpp`
 - `tests/engine/gemma3_golden_hashes.hpp`
 - `tests/engine/standalone_chat_tests.cpp`
-- `tests/scripts/vicuna_conversion_tests.py`
 - `tests/scripts/gemma3_reference_golden_tests.py`
 
-Draft vocabulary and corrected scoring:
+Offline Gemma 3 checkpoint reference equations:
 
-- `include/local_gguf_engine/engine/draft_vocabulary_types.hpp`
-- `include/local_gguf_engine/engine/draft_vocabulary.hpp`
-- `src/engine/draft_vocabulary.cpp`
-- `include/local_gguf_engine/benchmarks/corrected_vocabulary_benchmark.hpp`
-- `src/benchmarks/corrected_vocabulary_benchmark.cpp`
-- `src/tensor/backends/metal/metal_command_context.*`
-- `src/tensor/backends/metal_backend.mm`
-- `tests/engine/draft_vocabulary_tests.cpp`
-- `tests/engine/speculation_artifact_tests.cpp`
+- `scripts/gemma3_reference_golden.py`
+- `scripts/reference_gguf.py`
+- `scripts/reference_requirements.txt`
+- `tests/scripts/gemma3_reference_golden_tests.py`
+- `tests/scripts/reference_gguf_tests.py`
+- `tests/engine/gemma3_golden_hashes.hpp`
+
+Generation diagnostics and compatible `learned_*` metric fields:
+
+- `include/local_gguf_engine/engine/gemma2_runtime.hpp`
+- `src/engine/gemma2_runtime.cpp`
+- `src/engine/gemma2_chat_session.cpp`
+- `src/frontends/cli/generate.cpp`
+- `scripts/quick_benchmark.py`
+- `tests/scripts/quick_benchmark_script_tests.py`
 
 Generation and interactive CLI:
 
@@ -401,7 +342,6 @@ Generation and interactive CLI:
 Quick local/reference benchmark:
 
 - `include/local_gguf_engine/benchmarks/feature_capture_benchmark.hpp`
-- `include/local_gguf_engine/benchmarks/corrected_vocabulary_benchmark.hpp`
 - `include/local_gguf_engine/benchmarks/immutable_weight_benchmark.hpp`
 - `include/local_gguf_engine/benchmarks/output_head_benchmark.hpp`
 - `include/local_gguf_engine/benchmarks/quick_benchmark.hpp`
@@ -409,13 +349,13 @@ Quick local/reference benchmark:
 - `include/local_gguf_engine/benchmarks/width_two_verifier_benchmark.hpp`
 - `src/benchmarks/immutable_weight_benchmark.mm`
 - `src/benchmarks/feature_capture_benchmark.cpp`
-- `src/benchmarks/corrected_vocabulary_benchmark.cpp`
 - `src/benchmarks/output_head_benchmark.cpp`
 - `src/benchmarks/quick_benchmark.cpp`
 - `src/benchmarks/target_verifier_benchmark.cpp`
 - `src/benchmarks/width_two_verifier_benchmark.cpp`
 - `src/frontends/cli/benchmark_main.cpp`
 - `scripts/quick_benchmark.py`
+- `scripts/chat_benchmark_common.py`
 - `scripts/memory_benchmark.py`
 - `scripts/output_head_benchmark.py`
 - `scripts/storage_policy_benchmark.py`
@@ -444,6 +384,7 @@ Project docs:
 
 - `docs/ENGINE_PRINCIPLES.md` for durable engineering judgment
 - `docs/NEXT_TASK.md` for verified current state and the active implementation scope
+- `docs/SPECULATIVE_DECODING_RETROSPECTIVE.md` for the speculative-decoding retrospective
 - `docs/METAL_GPU_TRACE.md` for the production decode trace workflow
 - `docs/LLAMA_CPP_REFERENCE_BASELINE.md` for the pinned external benchmark
 - `docs/GRAPH.md` for this locator
@@ -461,14 +402,12 @@ Project docs:
 | Gemma chat session, KV reuse, stops, streaming, context, regeneration | `tests/frontends/cli/generate_cli_tests.cpp` |
 | Gemma reference numerics | `tests/engine/gemma2_reference_tests.cpp` |
 | Token sampling and top-logit helpers | `tests/engine/sampling_tests.cpp`, `tests/tensor/tensor_backend_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp` |
-| Speculative proposal graphs, controller transitions, tickets, and Arm-S leases | `tests/engine/speculative_controller_tests.cpp`, `tests/engine/sampling_tests.cpp` |
+| Speculative proposal graphs, controller transitions and sampler tickets | `tests/engine/speculative_controller_tests.cpp`, `tests/engine/sampling_tests.cpp` |
 | Target-verifier topology, transactions, K/V, Metal parity, and failure injection | `tests/engine/gemma2_metal_plan_tests.cpp`, `tests/engine/speculative_controller_tests.cpp` |
-| Prepared plans, artifact/trace authentication, feature banks, draft caches, joint transactions, and capture failures | `tests/engine/speculation_artifact_tests.cpp`, `tests/engine/feature_bank_tests.cpp`, `tests/engine/gemma2_metal_plan_tests.cpp` |
-| Draft vocabulary, corrected full-V scoring, TreeFlash/Arm-S constructors, and proposal parity | `tests/engine/draft_vocabulary_tests.cpp`, `tests/engine/speculation_artifact_tests.cpp` |
-| Trained recurrent weights, source lifetime, BF16 equations, complete Metal chains, and fail-closed sampling | `tests/engine/learned_recurrent_tests.cpp`, `tests/scripts/speculation_export_tests.py` |
-| Complete Vicuna conversion/authentication, bounded TLI tokenizer bridge, resident draft numerics, and standalone lifecycle | `tests/engine/standalone_draft_artifact_tests.cpp`, `tests/engine/vicuna_draft_tests.cpp`, `tests/engine/standalone_chat_tests.cpp`, `tests/scripts/vicuna_conversion_tests.py` |
+| Prepared plans, feature banks, draft caches, joint transactions, and capture failures | `tests/engine/feature_bank_tests.cpp`, `tests/engine/gemma2_metal_plan_tests.cpp`, `tests/engine/standalone_draft_artifact_tests.cpp` |
+| Lossless sampling probability laws, proposal leases, and residual correction | `tests/engine/lossless_sampling_tests.cpp` |
+| Offline GGUF directory parsing and open-mapping identity | `tests/scripts/reference_gguf_tests.py` |
 | Complete Gemma 3 Q8 checkpoint, tokenizer bridge, hybrid private K/V, full-vocabulary sampling, native lifecycle, and independent CPU goldens | `tests/engine/gemma3_draft_tests.cpp`, `tests/engine/gemma3_golden_hashes.hpp`, `tests/engine/standalone_draft_artifact_tests.cpp`, `tests/engine/standalone_chat_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp`, `tests/scripts/gemma3_reference_golden_tests.py` |
-| Pinned corpus acquisition/conversion, balanced collection, immutable split/trace/training mechanics, offline model equations, and hierarchical validation | `tests/scripts/speculation_balanced_collection_tests.py`, `tests/scripts/speculation_corpus_builder_tests.py`, `tests/scripts/speculation_objective_math_tests.py`, `tests/scripts/speculation_trainer_orchestration_tests.py`, `tests/scripts/speculation_training_script_tests.py`, `tests/scripts/speculation_training_torch_tests.py`, `tests/scripts/speculation_validation_stats_tests.py` |
 | Quick kernel summaries and real-chat timing parser validation | `tests/benchmarks/quick_benchmark_tests.cpp`, `tests/scripts/quick_benchmark_script_tests.py` |
 | Production startup/process-memory benchmark parsing | `tests/scripts/memory_benchmark_script_tests.py` |
 | Tokenizer/chat template | `tests/tokenizer/tokenizer_tests.cpp`, plus CLI tests when prompt rendering changes |

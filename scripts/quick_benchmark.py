@@ -41,6 +41,7 @@ KERNEL_SUSTAINED_DISPATCHES = 42
 KERNEL_MODE_DISPATCHES = {"isolated": 1, "sustained": KERNEL_SUSTAINED_DISPATCHES}
 ENVIRONMENT_SCHEMA_VERSION = 1
 DEFAULT_COOLDOWN_SECONDS = 240.0
+# Legacy receipt identities remain readable; only Gemma3 can be requested by this runner.
 STANDALONE_DRAFT_HEADS = {"standalone_vicuna_tli": "f16", "standalone_gemma3_tli": "q8_0"}
 DRAFT_SAMPLING_FLAGS = {"temperature": "--draft-temperature", "top_k": "--draft-top-k",
                         "top_p": "--draft-top-p", "min_p": "--draft-min-p",
@@ -275,38 +276,34 @@ def validate_decode_attribution(turn, name):
         raise RuntimeError(f"local {name} scheduled byte total mismatch")
 
 
-def validate_speculation_options(speculative, recurrent_weights, speculative_sampling,
-                                 speculative_schedule, draft_head, draft_model, draft_horizon, draft_sampling=None):
+def validate_speculation_options(speculative, speculative_sampling,
+                                 speculative_schedule, draft_model, draft_horizon, draft_sampling=None):
     if draft_sampling is not None:
         validate_draft_sampling(draft_sampling)
         if not draft_model or speculative_sampling != "lossless" or not speculative:
             raise ValueError("draft-only sampling requires an explicit lossless standalone model")
     if speculative_sampling not in (None, "exact-match", "lossless"):
         raise ValueError("unsupported speculative sampling mode")
-    if not speculative and (recurrent_weights or draft_model):
+    if not speculative and draft_model:
         raise ValueError("requested draft conflicts with disabled speculation")
-    if draft_model is not None and (not draft_model or recurrent_weights
-                                    or speculative_sampling != "lossless" or draft_head is not None):
-        raise ValueError("standalone draft requires explicit lossless sampling and conflicts with recurrent weights/head")
+    if draft_model is not None and (not draft_model or speculative_sampling != "lossless"):
+        raise ValueError("standalone draft requires an explicit model and lossless sampling")
     if draft_horizon is not None and (not draft_model or isinstance(draft_horizon, bool)
                                       or not isinstance(draft_horizon, int)
                                       or not 1 <= draft_horizon <= 23):
         raise ValueError("draft horizon requires a standalone draft model and an integer in [1, 23]")
-    if speculative_sampling is not None and (not speculative or not (recurrent_weights or draft_model)):
+    if speculative_sampling is not None and (not speculative or not draft_model):
         raise ValueError("speculative sampling mode requires a draft configuration and enabled speculation")
-    execution = (("--speculative-schedule", speculative_schedule, ("full", "conditional")),
-                 ("--draft-head", draft_head, ("f16", "q8_0")))
-    for option, value, choices in execution:
-        if value is not None and (value not in choices or speculative_sampling != "lossless"):
-            raise ValueError(f"{option} requires a supported value and lossless sampling")
+    if speculative_schedule is not None and (speculative_schedule not in ("full", "conditional")
+                                             or speculative_sampling != "lossless"):
+        raise ValueError("--speculative-schedule requires a supported value and lossless sampling")
 
 
-def run_local_chat(binary, model, cooldown, speculative=True, recurrent_weights=None, retrieval=True,
-                   speculative_sampling=None,
-                   speculative_schedule=None, draft_head=None, draft_model=None, draft_horizon=None,
-                   draft_sampling=None):
-    validate_speculation_options(speculative, recurrent_weights, speculative_sampling,
-                                 speculative_schedule, draft_head, draft_model, draft_horizon, draft_sampling)
+def run_local_chat(binary, model, cooldown, speculative=True, *, retrieval=True,
+                   speculative_sampling=None, speculative_schedule=None, draft_model=None,
+                   draft_horizon=None, draft_sampling=None):
+    validate_speculation_options(speculative, speculative_sampling,
+                                 speculative_schedule, draft_model, draft_horizon, draft_sampling)
     if cooldown:
         print(f"cooling down for {cooldown:g}s before local chat...", file=sys.stderr)
         time.sleep(cooldown)
@@ -316,8 +313,6 @@ def run_local_chat(binary, model, cooldown, speculative=True, recurrent_weights=
     ]
     if not speculative:
         command.append("--no-speculative")
-    if recurrent_weights:
-        command.extend(["--development-recurrent-weights", recurrent_weights])
     if draft_model:
         command.extend(["--draft-model", draft_model])
     if draft_horizon is not None:
@@ -328,9 +323,8 @@ def run_local_chat(binary, model, cooldown, speculative=True, recurrent_weights=
         command.append("--no-retrieval")
     if speculative_sampling is not None:
         command.extend(["--speculative-sampling", speculative_sampling])
-    for option, value in (("--speculative-schedule", speculative_schedule), ("--draft-head", draft_head)):
-        if value is not None:
-            command.extend([option, value])
+    if speculative_schedule is not None:
+        command.extend(["--speculative-schedule", speculative_schedule])
     stdout, stderr = run_process(
         command,
         "[ Detail:",
@@ -339,7 +333,7 @@ def run_local_chat(binary, model, cooldown, speculative=True, recurrent_weights=
     if draft_model:
         for turn in turns:
             record = turn["decode_attribution"]
-            if record.get("speculative_draft_model") not in STANDALONE_DRAFT_HEADS \
+            if record.get("speculative_draft_model") != "standalone_gemma3_tli" \
                     or record.get("speculative_sampling") != "lossless" \
                     or record.get("learned_horizon") != (draft_horizon or 3) \
                     or record.get("learned_verification_schedule") != (speculative_schedule or "full"):
@@ -573,50 +567,40 @@ def main():
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--no-speculative", action="store_true")
     parser.add_argument("--no-retrieval", action="store_true")
-    parser.add_argument("--development-recurrent-weights")
     parser.add_argument("--draft-model")
     parser.add_argument("--draft-horizon", type=int)
     for field, flag in DRAFT_SAMPLING_FLAGS.items():
         parser.add_argument(flag, dest="draft_" + field, type=int if field == "top_k" else float)
     parser.add_argument("--speculative-sampling", choices=("exact-match", "lossless"))
     parser.add_argument("--speculative-schedule", choices=("full", "conditional"))
-    parser.add_argument("--draft-head", choices=("f16", "q8_0"))
     args = parser.parse_args()
     draft_sampling = {field: getattr(args, "draft_" + field) for field in DRAFT_SAMPLING_FLAGS
                       if getattr(args, "draft_" + field) is not None} or None
     if args.cooldown < 0:
         parser.error("cooldown must be nonnegative")
     try:
-        validate_speculation_options(not args.no_speculative, args.development_recurrent_weights,
-                                     args.speculative_sampling, args.speculative_schedule, args.draft_head,
-                                     args.draft_model, args.draft_horizon, draft_sampling)
+        validate_speculation_options(not args.no_speculative, args.speculative_sampling,
+                                     args.speculative_schedule, args.draft_model, args.draft_horizon, draft_sampling)
     except ValueError as error:
         parser.error(str(error))
-    weights_digest = None
     draft_digest = None
-    for path, standalone in ((args.development_recurrent_weights, False), (args.draft_model, True)):
-        if path is None:
-            continue
-        with open(path, "rb") as source:
+    if args.draft_model is not None:
+        with open(args.draft_model, "rb") as source:
             digest = hashlib.sha256()
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
-            if standalone:
-                draft_digest = digest.hexdigest()
-            else:
-                weights_digest = digest.hexdigest()
+            draft_digest = digest.hexdigest()
 
     terminal_rendered = sys.stderr.isatty()
     local = run_local_chat(args.local, args.model, args.cooldown, not args.no_speculative,
-                           args.development_recurrent_weights, not args.no_retrieval,
-                           args.speculative_sampling,
-                           args.speculative_schedule, args.draft_head, args.draft_model, args.draft_horizon,
-                           draft_sampling=draft_sampling)
-    draft_identity = "recurrent" if weights_digest else "none"
-    draft_head = args.draft_head or "f16"
+                           retrieval=not args.no_retrieval, speculative_sampling=args.speculative_sampling,
+                           speculative_schedule=args.speculative_schedule, draft_model=args.draft_model,
+                           draft_horizon=args.draft_horizon, draft_sampling=draft_sampling)
+    draft_identity = "none"
+    draft_head = "f16"
     if draft_digest:
         identities = {turn["decode_attribution"].get("speculative_draft_model") for turn in local}
-        if len(identities) != 1 or not identities.issubset(STANDALONE_DRAFT_HEADS):
+        if identities != {"standalone_gemma3_tli"}:
             raise RuntimeError("standalone benchmark omitted or changed authenticated draft identity")
         draft_identity = identities.pop()
         draft_head = STANDALONE_DRAFT_HEADS[draft_identity]
@@ -637,11 +621,9 @@ def main():
             "local_startup_warmup_verifier_tokens": 2,
             "speculative_decode": not args.no_speculative,
             "retrieval_decode": not args.no_speculative and not args.no_retrieval,
-            "development_recurrent_weights_sha256": weights_digest,
             "standalone_draft_model_sha256": draft_digest,
             "standalone_draft_horizon": (args.draft_horizon or 3) if draft_digest else None,
             "speculative_draft_model": draft_identity,
-            "learned_policy": "weights_only_always_propose" if weights_digest else None,
             "speculative_sampling": args.speculative_sampling or "exact-match",
             "learned_verification_schedule": args.speculative_schedule or "full",
             "learned_draft_head": draft_head,

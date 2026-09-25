@@ -83,24 +83,7 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> feature_scatter_f32_pipeline = nil;
     id<MTLComputePipelineState> feature_scatter_f16_pipeline = nil;
     id<MTLComputePipelineState> f16_row_scatter_pipeline = nil;
-    id<MTLComputePipelineState> draft_topk_tile_pipeline = nil;
     id<MTLComputePipelineState> draft_topk_merge_pipeline = nil;
-    id<MTLComputePipelineState> draft_clear_u32_pipeline = nil;
-    id<MTLComputePipelineState> draft_union_mark_selector_pipeline = nil;
-    id<MTLComputePipelineState> draft_union_mark_aux_pipeline = nil;
-    id<MTLComputePipelineState> draft_union_count_tiles_pipeline = nil;
-    id<MTLComputePipelineState> draft_union_scan_tiles_pipeline = nil;
-    id<MTLComputePipelineState> draft_union_scatter_pipeline = nil;
-    id<MTLComputePipelineState> draft_indexed_f16_pipeline = nil;
-    id<MTLComputePipelineState> draft_indexed_q8_pipeline = nil;
-    id<MTLComputePipelineState> draft_indexed_q6_pipeline = nil;
-    id<MTLComputePipelineState> draft_indexed_q4_pipeline = nil;
-    id<MTLComputePipelineState> draft_score_correct_pipeline = nil;
-    id<MTLComputePipelineState> draft_proposal_pipeline = nil;
-    id<MTLComputePipelineState> corrected_logsumexp_pipeline = nil;
-    id<MTLComputePipelineState> corrected_rank_finalize_pipeline = nil;
-    id<MTLComputePipelineState> arm_s_transition_score_pipeline = nil;
-    std::array<id<MTLComputePipelineState>, 8> recurrent_pipelines {};
     id<MTLCommandQueue> queue = nil;
 
     MatmulPipelineState();
@@ -129,7 +112,6 @@ struct F16MatmulDispatch {
 [[nodiscard]] id<MTLDevice> system_metal_device() noexcept;
 [[nodiscard]] id<MTLDevice> metal_device_or_throw();
 [[nodiscard]] MatmulPipelineState& shared_matmul_pipeline_state();
-void prepare_recurrent_pipelines();
 [[nodiscard]] F16MatmulDispatch select_f16_matmul_dispatch(
     MatmulPipelineState& state,
     std::uint64_t rows,

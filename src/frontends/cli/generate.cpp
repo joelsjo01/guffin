@@ -128,13 +128,12 @@ void write_generate_usage(std::ostream& error) {
           << " [--reverse-prompt TEXT] [--context-shift]"
           << " [--output-head f16|q8_0]"
           << " [--no-speculative]"
-          << " [--no-retrieval] [--development-recurrent-weights <path>]"
+          << " [--no-retrieval]"
           << " [--draft-model <native.gguf>] [--draft-horizon <1..23>]"
           << " [--draft-temperature T] [--draft-top-k K] [--draft-top-p P]"
           << " [--draft-min-p P] [--draft-repeat-penalty R]"
           << " [--speculative-sampling exact-match|lossless]"
           << " [--speculative-schedule full|conditional]"
-          << " [--draft-head f16|q8_0]"
           << " [--decode-diagnostics] [--metal-capture PATH]"
           << '\n';
 }
@@ -348,15 +347,12 @@ struct ParsedChatCommand {
     bool decode_diagnostics = false;
     bool speculative_decode = true;
     bool retrieval_decode = true;
-    std::optional<std::filesystem::path> development_recurrent_weights;
     std::optional<std::filesystem::path> standalone_draft_model;
     engine::StandaloneExecutionOptions standalone_execution;
     bool draft_horizon_requested = false;
     engine::SpeculativeSamplingMode speculative_sampling = engine::SpeculativeSamplingMode::exact_match;
     bool speculative_sampling_requested = false;
-    engine::RecurrentExecutionOptions recurrent_execution;
     bool schedule_requested = false;
-    bool draft_head_requested = false;
     engine::Gemma2OutputHeadPolicy output_head_policy = engine::Gemma2OutputHeadPolicy::automatic;
     std::optional<std::string> metal_capture_path;
 };
@@ -441,34 +437,18 @@ private:
                 ? engine::SpeculativeSamplingMode::lossless : engine::SpeculativeSamplingMode::exact_match;
             continue;
         }
-        if (option == "--speculative-schedule" || option == "--draft-head") {
-            auto& requested = option == "--speculative-schedule"
-                ? command.schedule_requested : command.draft_head_requested;
-            if (requested || index + 1 >= argc) {
-                error << "error: " << option << " requires exactly one value\n";
+        if (option == "--speculative-schedule") {
+            if (command.schedule_requested || index + 1 >= argc) {
+                error << "error: --speculative-schedule requires exactly one value\n";
                 return false;
             }
-            requested = true;
+            command.schedule_requested = true;
             const std::string_view value(argv[++index]);
-            if (option == "--speculative-schedule" && (value == "full" || value == "conditional")) {
-                command.recurrent_execution.conditional_verification = value == "conditional";
-            } else if (option == "--draft-head" && (value == "f16" || value == "q8_0")) {
-                command.recurrent_execution.draft_head = value == "q8_0"
-                    ? engine::RecurrentDraftHead::q8_0 : engine::RecurrentDraftHead::f16;
-            } else {
-                error << "error: invalid value for " << option << '\n';
+            if (value != "full" && value != "conditional") {
+                error << "error: invalid value for --speculative-schedule\n";
                 return false;
             }
-            continue;
-        }
-        if (option == "--development-recurrent-weights") {
-            if (command.development_recurrent_weights || index + 1 >= argc
-                || std::string_view(argv[index + 1]).empty()
-                || std::string_view(argv[index + 1]).starts_with("--")) {
-                error << "error: --development-recurrent-weights requires one weights file\n";
-                return false;
-            }
-            command.development_recurrent_weights = argv[++index];
+            command.standalone_execution.conditional_verification = value == "conditional";
             continue;
         }
         if (option == "--draft-model") {
@@ -678,12 +658,12 @@ private:
     }
 
     if (command.standalone_draft_model
-        && (command.development_recurrent_weights || !command.speculative_decode
+        && (!command.speculative_decode
             || !command.speculative_sampling_requested
             || command.speculative_sampling != engine::SpeculativeSamplingMode::lossless
-            || command.options.backend != BackendKind::metal || command.draft_head_requested)) {
+            || command.options.backend != BackendKind::metal)) {
         error << "error: --draft-model requires Metal and explicit lossless speculation,"
-              << " and conflicts with recurrent weights, --no-speculative and --draft-head\n";
+              << " and conflicts with --no-speculative\n";
         return false;
     }
     if (command.draft_horizon_requested && !command.standalone_draft_model) {
@@ -695,25 +675,15 @@ private:
         error << "error: draft sampling overrides require --draft-model and explicit lossless speculation\n";
         return false;
     }
-    const bool has_draft = command.development_recurrent_weights || command.standalone_draft_model;
+    const bool has_draft = command.standalone_draft_model.has_value();
     if (command.speculative_sampling_requested && (!has_draft || !command.speculative_decode)) {
         error << "error: --speculative-sampling requires a draft configuration and enabled speculation\n";
         return false;
     }
-    if ((command.schedule_requested || command.draft_head_requested)
+    if (command.schedule_requested
         && (!has_draft || !command.speculative_decode
             || command.speculative_sampling != engine::SpeculativeSamplingMode::lossless)) {
         error << "error: speculative execution options require a draft configuration and lossless sampling\n";
-        return false;
-    }
-    if (command.standalone_draft_model) {
-        command.standalone_execution.conditional_verification =
-            command.recurrent_execution.conditional_verification;
-        command.recurrent_execution = {};
-    }
-    if (command.recurrent_execution.draft_head == engine::RecurrentDraftHead::q8_0
-        && command.output_head_policy == engine::Gemma2OutputHeadPolicy::f16) {
-        error << "error: Q8 draft head requires the Q8 target head to be resident\n";
         return false;
     }
     if (command.greedy_requested) {
@@ -843,11 +813,9 @@ int run_generate_chat(
             .context_shift = command.context_shift,
             .speculative_decode = command.speculative_decode,
             .retrieval_decode = command.retrieval_decode,
-            .development_recurrent_weights = command.development_recurrent_weights,
             .standalone_draft_model = command.standalone_draft_model,
             .standalone_execution = command.standalone_execution,
             .speculative_sampling = command.speculative_sampling,
-            .recurrent_execution = command.recurrent_execution,
             .reverse_stop_strings = command.reverse_stop_strings,
             .sampler = command.sampler,
         }
@@ -855,16 +823,6 @@ int run_generate_chat(
     ScopedMetalTraceArm metal_trace(command.metal_capture_path);
 
     output << "local-gguf-engine chat\n";
-    if (command.development_recurrent_weights) {
-        output << "development recurrent weights: always-propose control; no admitted routing policy\n";
-        output << "speculative sampling: "
-               << (command.speculative_sampling == engine::SpeculativeSamplingMode::lossless
-                   ? "lossless (target distribution; different seeded text)" : "exact-match") << '\n';
-        output << "learned execution: schedule="
-               << (command.recurrent_execution.conditional_verification ? "conditional" : "full")
-               << " draft-head=" << (command.recurrent_execution.draft_head == engine::RecurrentDraftHead::q8_0
-                   ? "q8_0" : "f16") << '\n';
-    }
     if (command.standalone_draft_model) {
         output << "standalone TLI draft: authenticated native Metal model; no admitted routing policy\n"
                << "speculative sampling: lossless (target distribution; different seeded text)\n"
@@ -1089,21 +1047,14 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"learned_owned_bytes\":" << metrics.learned_owned_byte_count
          << ",\"learned_horizon\":" << metrics.learned_horizon
          << ",\"speculative_draft_model\":\""
-         << (metrics.standalone_draft
-             ? (metrics.standalone_kind == engine::StandaloneDraftKind::gemma3_270m_q8
-                 ? "standalone_gemma3_tli" : "standalone_vicuna_tli")
-             : (metrics.learned_horizon != 0U ? "recurrent" : "none")) << "\""
+         << (metrics.standalone_draft ? "standalone_gemma3_tli" : "none") << "\""
          << ",\"speculative_sampling\":\""
          << (metrics.speculative_sampling == engine::SpeculativeSamplingMode::lossless
              ? "lossless" : "exact-match") << "\""
          << ",\"learned_verification_schedule\":\""
-         << ((metrics.standalone_draft ? metrics.standalone_execution.conditional_verification
-                 : metrics.recurrent_execution.conditional_verification) ? "conditional" : "full") << "\""
+         << (metrics.standalone_execution.conditional_verification ? "conditional" : "full") << "\""
          << ",\"learned_draft_head\":\""
-         << ((metrics.standalone_draft
-                 ? metrics.standalone_kind == engine::StandaloneDraftKind::gemma3_270m_q8
-                 : metrics.recurrent_execution.draft_head == engine::RecurrentDraftHead::q8_0)
-             ? "q8_0" : "f16") << "\""
+         << (metrics.standalone_draft ? "q8_0" : "f16") << "\""
          << ",\"scheduled_bytes_basis\":\"one_row_equivalent_not_physical_bandwidth\""
          << ",\"learned_cycles\":" << metrics.generation.learned_cycle_count
          << ",\"learned_accepted_edges\":" << metrics.generation.learned_accepted_edge_count

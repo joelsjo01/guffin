@@ -15,6 +15,8 @@
 #include <vector>
 
 namespace local_gguf_engine::engine {
+
+class StandaloneDraftArtifact;
 namespace {
 using tensor::BackendBuffer;
 using tensor::DType;
@@ -303,7 +305,7 @@ const MetalBackendBufferStorage& storage(const BackendBuffer& b){
 void* contents(const BackendBuffer& b){return metal_buffer_contents(storage(b));}
 void bind(id<MTLComputeCommandEncoder> encoder,const BackendBuffer& b,NSUInteger index,std::size_t offset=0){
     const auto& s=storage(b);[encoder setBuffer:s.buffer() offset:s.base_byte_offset()+offset atIndex:index];}
-void combine(VicunaDraftExecutionStats& a,const VicunaDraftExecutionStats& b){
+void combine(StandaloneDraftExecutionStats& a,const StandaloneDraftExecutionStats& b){
 #define ADD(field) if(b.field>std::numeric_limits<decltype(a.field)>::max()-a.field) \
     throw std::overflow_error("Gemma3 draft statistics overflow"); a.field+=b.field
     ADD(gpu_duration_ns);ADD(wall_duration_ns);ADD(readback_bytes);ADD(uploaded_bytes);
@@ -348,7 +350,7 @@ struct Gemma3DraftPlan::Impl {
     std::uint64_t epoch=0,published_epoch=0,probability_bytes=0,wall_start=0;
     std::size_t bytes=0;
     bool poison=false,in_transaction=false,has_pending=false,saved_pending=false;
-    VicunaDraftExecutionStats running;
+    StandaloneDraftExecutionStats running;
 
     Impl(TensorSource source_tensors,std::span<const std::int32_t> map,std::uint32_t target_vocabulary,
         std::uint32_t max_horizon,std::uint32_t transaction_rows)
@@ -425,7 +427,7 @@ struct Gemma3DraftPlan::Impl {
         command.label=@"Gemma3 resident draft";encoder=[command computeCommandEncoder];
         if(!encoder)throw std::runtime_error("Gemma3 encoder allocation failed");
     }
-    VicunaDraftExecutionStats finish(){
+    StandaloneDraftExecutionStats finish(){
         [encoder endEncoding];encoder=nil;[command commit];[command waitUntilCompleted];
         if(command.status!=MTLCommandBufferStatusCompleted){
             poison=true;invalidate();throw std::runtime_error("Gemma3 Metal execution: "+ns_error_message(command.error,"command failed"));
@@ -585,7 +587,7 @@ bool Gemma3DraftPlan::transaction_active()const noexcept{return impl_->in_transa
 void Gemma3DraftPlan::reset()noexcept{
     auto& p=*impl_;p.invalidate();p.frontier=p.materialized=0;p.has_pending=false;p.in_transaction=false;
 }
-VicunaDraftExecutionStats Gemma3DraftPlan::begin_transaction(){
+StandaloneDraftExecutionStats Gemma3DraftPlan::begin_transaction(){
     auto& p=*impl_;p.require_live();if(p.in_transaction)throw std::logic_error("Gemma3 transaction is already active");
     p.invalidate();p.in_transaction=true;p.transaction_begin=p.materialized;
     p.saved_frontier=p.frontier;p.saved_materialized=p.materialized;
@@ -605,26 +607,26 @@ void Gemma3DraftPlan::abort_transaction()noexcept{
     p.frontier=p.saved_frontier;p.materialized=p.saved_materialized;
     p.has_pending=p.saved_pending;p.pending_token=p.saved_pending_token;p.in_transaction=false;
 }
-VicunaDraftExecutionStats Gemma3DraftPlan::commit_prefix(std::uint32_t position){
+StandaloneDraftExecutionStats Gemma3DraftPlan::commit_prefix(std::uint32_t position){
     auto& p=*impl_;p.require_live();
     if(!p.in_transaction||position<p.saved_frontier||position>p.frontier)
         throw std::invalid_argument("Gemma3 commit is outside its transaction");
     const auto materialized=std::min(position,p.materialized);
     const bool pending=p.has_pending&&position==p.frontier;
-    p.invalidate();VicunaDraftExecutionStats stats;
+    p.invalidate();StandaloneDraftExecutionStats stats;
     if(materialized>p.transaction_begin){
         @autoreleasepool {p.start();p.publish_rows(p.transaction_begin,materialized,p.transaction_begin);stats=p.finish();}
     }
     p.frontier=position;p.materialized=materialized;p.has_pending=pending;p.in_transaction=false;return stats;
 }
-VicunaDraftExecutionStats Gemma3DraftPlan::append(std::span<const std::uint32_t> tokens){
+StandaloneDraftExecutionStats Gemma3DraftPlan::append(std::span<const std::uint32_t> tokens){
     auto& p=*impl_;p.require_live();
     if(tokens.size()>capacity-p.frontier
         ||(p.in_transaction&&tokens.size()>p.transaction_capacity-(p.frontier-p.transaction_begin)))
         throw std::length_error("Gemma3 draft append exceeds its prepared capacity");
     for(auto token:tokens)if(token>=vocabulary)throw std::invalid_argument("Gemma3 draft token is outside vocabulary");
     if(tokens.empty())return {};
-    p.invalidate();VicunaDraftExecutionStats result;const auto started=now_ns();
+    p.invalidate();StandaloneDraftExecutionStats result;const auto started=now_ns();
     @autoreleasepool {
         for(std::size_t offset=0;offset<tokens.size();offset+=chunk){
             const auto rows=static_cast<std::uint32_t>(std::min<std::size_t>(chunk,tokens.size()-offset));
@@ -683,7 +685,7 @@ Gemma3DraftProposal Gemma3DraftPlan::propose(std::uint32_t root,std::span<const 
             .epoch=p.published_epoch,.execution=stats};
     }
 }
-VicunaDraftExecutionStats Gemma3DraftPlan::restore_pending_token(std::uint32_t token){
+StandaloneDraftExecutionStats Gemma3DraftPlan::restore_pending_token(std::uint32_t token){
     auto& p=*impl_;p.require_live();const auto started=now_ns();
     if(p.in_transaction||p.has_pending||p.frontier!=p.materialized||p.frontier==capacity||token>=vocabulary)
         throw std::invalid_argument("Gemma3 saved pending token is incompatible with its restored prefix");
@@ -716,7 +718,7 @@ GatheredDraftTokenDistribution Gemma3DraftPlan::gather(std::uint32_t depth,const
     return result;
 }
 std::uint64_t Gemma3DraftPlan::probability_readback_bytes()const noexcept{return impl_->probability_bytes;}
-VicunaDraftExecutionStats Gemma3DraftPlan::read_logits(std::span<float> output){
+StandaloneDraftExecutionStats Gemma3DraftPlan::read_logits(std::span<float> output){
     auto& p=*impl_;p.require_live();
     if(output.size()!=vocabulary||p.frontier==0)throw std::invalid_argument("Gemma3 logit diagnostic shape or frontier is invalid");
     p.invalidate();

@@ -1,7 +1,7 @@
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
-#include "local_gguf_engine/engine/speculative_artifact.hpp"
+#include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"

@@ -25,6 +25,9 @@ namespace {
 using namespace engine;
 constexpr std::uint32_t hello = 5;
 constexpr std::uint32_t spaced_hello = 6;
+constexpr std::uint32_t draft_width = 640;
+constexpr std::uint32_t draft_vocabulary = Gemma3DraftPlan::vocabulary_size;
+constexpr std::uint32_t draft_layers = Gemma3DraftPlan::layer_count;
 
 template<class F> void refuses(F&& function, const char* message) {
     bool failed = false;
@@ -33,13 +36,13 @@ template<class F> void refuses(F&& function, const char* message) {
 }
 
 tokenizer::Tokenizer draft_tokenizer() {
-    std::vector<std::string> tokens(32000);
-    std::vector<std::int32_t> types(32000, 1);
-    std::vector<float> scores(32000, -10.0F);
+    std::vector<std::string> tokens(draft_vocabulary);
+    std::vector<std::int32_t> types(draft_vocabulary, 1);
+    std::vector<float> scores(draft_vocabulary, -10.0F);
     for (std::size_t i = 0; i < tokens.size(); ++i) tokens[i] = "test-draft-piece-" + std::to_string(i);
     tokens[0] = "<unk>"; types[0] = 2;
-    tokens[1] = "<s>"; types[1] = 3;
-    tokens[2] = "</s>"; types[2] = 3;
+    tokens[1] = "<bos>"; types[1] = 3;
+    tokens[2] = "<eos>"; types[2] = 3;
     tokens[3] = "▁"; tokens[4] = "H";
     tokens[5] = "Hello"; tokens[6] = "▁Hello";
     tokens[7] = "e"; tokens[8] = "l"; tokens[9] = "o";
@@ -51,9 +54,9 @@ tokenizer::Tokenizer draft_tokenizer() {
         tokens[1000 + i] = text.data(); types[1000 + i] = 6;
     }
     return tokenizer::load_tokenizer_from_gguf_metadata(metadata_section({
-        metadata_string("general.architecture", "llama"), metadata_string("tokenizer.ggml.model", "llama"),
+        metadata_string("general.architecture", "gemma3"), metadata_string("tokenizer.ggml.model", "llama"),
         metadata_string("tokenizer.ggml.normalizer", "identity-no-collapse-byte-fallback"),
-        metadata_bool("tokenizer.ggml.add_space_prefix", true),
+        metadata_bool("tokenizer.ggml.add_space_prefix", false),
         metadata_string_array("tokenizer.ggml.tokens", std::move(tokens)),
         metadata_f32_array("tokenizer.ggml.scores", std::move(scores)),
         metadata_i32_array("tokenizer.ggml.token_type", std::move(types)),
@@ -62,10 +65,10 @@ tokenizer::Tokenizer draft_tokenizer() {
     }));
 }
 
-// Full 68M geometry and native kernels, not a reduced production architecture.
-// Two equal head rows yield exact half-mass bins when sampled and Hello when
-// greedy. Nonzero K/V exposes causal-position/truncation bugs; zero attention
-// output keeps the proposal law independently predictable at every depth.
+// Complete Gemma3-270M geometry, all 18 layers and native Q8 kernels. Two equal
+// tied embedding/head rows yield exact half-mass bins and greedy Hello.
+// Nonzero K/V exposes causal-position/transaction bugs; zero attention output
+// and FFN keep this diagnostic proposal law independently predictable.
 struct DraftFixture {
     std::vector<tensor::TensorStorage> storage;
     std::vector<tensor::TensorView> views;
@@ -73,22 +76,32 @@ struct DraftFixture {
     DraftFixture() {
         const auto add = [&](std::uint32_t input, std::uint32_t output, unsigned kind) {
             auto value = tensor::TensorStorage::allocate(tensor::TensorDescriptor::from(
-                output == 1 ? tensor::Shape::from({input}) : tensor::Shape::from({input, output}), tensor::DType::f16));
-            auto* bits = reinterpret_cast<std::uint16_t*>(value.mutable_bytes().data());
-            std::fill_n(bits, value.descriptor().element_count, std::uint16_t {0});
-            if (kind == 1) for (std::uint32_t i = 0; i < output; ++i) bits[std::size_t(i) * input] = tensor::f32_to_f16_bits(1.0F);
-            if (kind == 2) for (std::uint32_t i = 0; i < output; ++i)
-                bits[std::size_t(i) * input] = tensor::f32_to_f16_bits(i == hello || i == spaced_hello ? 1.0F : -1.0F);
-            if (kind == 3) std::fill_n(bits, input, tensor::f32_to_f16_bits(1.0F));
-            if (kind == 4) for (std::uint32_t i = 0; i < output; ++i)
-                bits[std::size_t(i) * input + (i % input)] = tensor::f32_to_f16_bits(0.25F);
+                output ? tensor::Shape::from({input, output}) : tensor::Shape::from({input}),
+                output ? tensor::DType::q8_0 : tensor::DType::f32));
+            std::memset(value.mutable_bytes().data(), 0, value.mutable_bytes().size());
+            if (!output) {
+                auto* weights = reinterpret_cast<float*>(value.mutable_bytes().data());
+                std::fill_n(weights, input, 1.0F);
+            } else if (kind != 0) {
+                auto* bytes = reinterpret_cast<std::uint8_t*>(value.mutable_bytes().data());
+                const auto scale = tensor::f32_to_f16_bits(1.0F / 64.0F);
+                for (std::uint32_t row = 0; row < output; ++row) {
+                    const auto block = std::size_t(row) * (input / 32U) * 34U;
+                    std::memcpy(bytes + block, &scale, sizeof(scale));
+                    const auto coefficient = static_cast<std::int8_t>(kind == 2
+                        ? (row == hello || row == spaced_hello ? 64 : -64) : 16);
+                    std::memcpy(bytes + block + 2U, &coefficient, sizeof(coefficient));
+                }
+            }
             storage.push_back(std::move(value));
         };
-        add(768, 32000, 1); add(768, 32000, 2); add(768, 1, 3);
-        for (unsigned layer = 0; layer < 2; ++layer) {
-            add(768, 768, 4); add(768, 768, 4); add(768, 768, 4); add(768, 768, 0);
-            add(768, 3072, 0); add(768, 3072, 0); add(3072, 768, 0);
-            add(768, 1, 3); add(768, 1, 3);
+        add(draft_width, draft_vocabulary, 2); add(draft_width, 0, 0);
+        for (unsigned layer = 0; layer < draft_layers; ++layer) {
+            add(draft_width, 1024, 1); add(draft_width, 256, 1);
+            add(draft_width, 256, 1); add(1024, draft_width, 0);
+            add(draft_width, 2048, 0); add(draft_width, 2048, 0); add(2048, draft_width, 0);
+            for (unsigned norm = 0; norm < 4; ++norm) add(draft_width, 0, 0);
+            add(256, 0, 0); add(256, 0, 0);
         }
         for (const auto& tensor : storage) views.push_back(tensor.view());
     }
@@ -130,16 +143,29 @@ void compare_target_cache(const Gemma2MetalModelPlan& actual, const Gemma2MetalM
 
 void compare_draft_cache(const StandaloneChatPlan& actual, std::span<const std::uint32_t> expected_tokens) {
     const auto& f = fixture();
-    std::vector<std::int32_t> map(32000, -1); map[hello] = hello; map[spaced_hello] = spaced_hello;
-    VicunaDraftPlan expected(f.views, map, 110, 3);
-    static_cast<void>(expected.append(expected_tokens));
+    std::vector<std::int32_t> map(draft_vocabulary, -1); map[hello] = hello; map[spaced_hello] = spaced_hello;
+    Gemma3DraftPlan expected(f.views, map, 110, 3);
     const auto& plan = actual.draft_plan_for_testing();
     expect(plan.position() == expected_tokens.size(), "standalone draft position differs from its committed ledger");
-    const auto count = expected_tokens.size() * 768;
-    std::vector<std::uint16_t> ak(count), av(count), ek(count), ev(count);
-    for (std::uint32_t layer = 0; layer < 2; ++layer) {
-        plan.read_cache(layer, ak, av); expected.read_cache(layer, ek, ev);
-        expect(ak == ek && av == ev, "standalone draft K/V differs from independently replayed append policy");
+    const auto materialized = plan.materialized_position();
+    expect(materialized <= expected_tokens.size() && expected_tokens.size() - materialized <= 1U,
+        "standalone draft omitted more than the single legal pending emission");
+    static_cast<void>(expected.append(expected_tokens.first(materialized)));
+    if (materialized != expected_tokens.size())
+        static_cast<void>(expected.restore_pending_token(expected_tokens.back()));
+    expect(expected.position() == plan.position() && expected.materialized_position() == materialized,
+        "standalone draft pending emission receipt differs from its independent replay");
+    for (std::uint32_t layer = 0; layer < draft_layers; ++layer) {
+        const auto first = layer % 6U != 5U && materialized > 512U ? materialized - 512U : 0U;
+        const auto count = std::size_t(materialized - first) * 256U;
+        std::vector<float> ak(count), av(count), ek(count), ev(count);
+        plan.read_cache(layer, first, ak, av); expected.read_cache(layer, first, ek, ev);
+        expect(std::memcmp(ak.data(), ek.data(), count * sizeof(float)) == 0
+                && std::memcmp(av.data(), ev.data(), count * sizeof(float)) == 0,
+            "standalone draft K/V differs from independently replayed materialized emissions");
+        expect(std::any_of(ak.begin(), ak.end(), [](float value) { return value != 0.0F; })
+                && std::any_of(av.begin(), av.end(), [](float value) { return value != 0.0F; }),
+            "standalone transaction fixture lost its nonzero K/V witness");
     }
 }
 
@@ -160,7 +186,7 @@ void test_standalone_draft_sampling_resolution() {
         .min_p=0.01F, .repetition_penalty=1.2F, .seed=71, .repetition_window=7};
     TokenSampler sampler(target);
     const auto checkpoint = sampler.checkpoint();
-    expect(resolve_standalone_draft_sampler_options(target, {}, 32000) == target,
+    expect(resolve_standalone_draft_sampler_options(target, {}, draft_vocabulary) == target,
         "absent draft overrides changed inherited sampler options");
     StandaloneDraftSamplingOptions all {.temperature=0.0F, .top_k=262144,
         .top_p=1.0F, .min_p=0.0F, .repetition_penalty=1.0F};
@@ -170,16 +196,16 @@ void test_standalone_draft_sampling_resolution() {
             && effective.seed == target.seed && effective.repetition_window == target.repetition_window,
         "draft scalar resolution lost an override or changed RNG/history ownership");
     all.top_k = 0;
-    expect(resolve_standalone_draft_sampler_options(target, all, 32000).top_k == 0,
+    expect(resolve_standalone_draft_sampler_options(target, all, draft_vocabulary).top_k == 0,
         "draft unrestricted full-vocabulary top-k was rejected");
     expect(sampler.options() == target && sampler.checkpoint().same_state(checkpoint),
         "draft resolution mutated the authoritative sampler");
     auto greedy_target = target; greedy_target.temperature = 0.0F;
     all.temperature = 1.0F;
-    expect(resolve_standalone_draft_sampler_options(greedy_target, all, 32000).temperature == 1.0F,
+    expect(resolve_standalone_draft_sampler_options(greedy_target, all, draft_vocabulary).temperature == 1.0F,
         "sampled draft was incorrectly coupled to greedy target transforms");
 
-    const auto invalid = [&](StandaloneDraftSamplingOptions bad, std::uint32_t vocabulary = 32000) {
+    const auto invalid = [&](StandaloneDraftSamplingOptions bad, std::uint32_t vocabulary = draft_vocabulary) {
         refuses([&] { static_cast<void>(resolve_standalone_draft_sampler_options(target, bad, vocabulary)); },
             "malformed or incompatible draft sampling override was accepted");
     };
@@ -189,28 +215,28 @@ void test_standalone_draft_sampling_resolution() {
     for (auto value : {0.0F, -1.0F, 1.01F, nan, inf}) invalid({.top_p=value});
     for (auto value : {-0.01F, 1.01F, nan, inf}) invalid({.min_p=value});
     for (auto value : {0.0F, -1.0F, nan, inf}) invalid({.repetition_penalty=value});
-    invalid({.top_k=32001}); invalid({.top_k=std::numeric_limits<std::uint32_t>::max()});
+    invalid({.top_k=(draft_vocabulary + 1U)}); invalid({.top_k=std::numeric_limits<std::uint32_t>::max()});
     invalid({}, 0); invalid({}, 2);
     all.top_p = std::numeric_limits<float>::denorm_min(); all.min_p = 1.0F;
-    expect(resolve_standalone_draft_sampler_options(target, all, 32000).top_p == *all.top_p,
+    expect(resolve_standalone_draft_sampler_options(target, all, draft_vocabulary).top_p == *all.top_p,
         "valid draft probability endpoints were narrowed");
     auto malformed_target = target; malformed_target.temperature = nan;
-    refuses([&] { static_cast<void>(resolve_standalone_draft_sampler_options(malformed_target, all, 32000)); },
+    refuses([&] { static_cast<void>(resolve_standalone_draft_sampler_options(malformed_target, all, draft_vocabulary)); },
         "draft override concealed a malformed target temperature");
     malformed_target = target; malformed_target.top_k = 0;
-    refuses([&] { static_cast<void>(resolve_standalone_draft_sampler_options(malformed_target, all, 32000)); },
+    refuses([&] { static_cast<void>(resolve_standalone_draft_sampler_options(malformed_target, all, draft_vocabulary)); },
         "draft override concealed invalid authoritative top-k");
     malformed_target = target; malformed_target.repetition_window = 65;
-    refuses([&] { static_cast<void>(resolve_standalone_draft_sampler_options(malformed_target, all, 32000)); },
+    refuses([&] { static_cast<void>(resolve_standalone_draft_sampler_options(malformed_target, all, draft_vocabulary)); },
         "draft override concealed invalid authoritative history capacity");
 }
 
 void test_standalone_draft_sampling_changes_only_proposal_law() {
     if (!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
     const auto& f = fixture();
-    std::vector<std::int32_t> map(32000, -1);
+    std::vector<std::int32_t> map(draft_vocabulary, -1);
     map[hello] = hello; map[spaced_hello] = spaced_hello; map[7] = 7;
-    VicunaDraftPlan draft(f.views, map, 110, 3);
+    Gemma3DraftPlan draft(f.views, map, 110, 3);
     static_cast<void>(draft.append(std::span(&hello, 1)));
     const TokenSamplerOptions target_options {.temperature=1.0F, .top_k=3, .top_p=1.0F,
         .min_p=0.0F, .repetition_penalty=1.0F, .seed=71, .repetition_window=0};
@@ -218,10 +244,10 @@ void test_standalone_draft_sampling_changes_only_proposal_law() {
     const auto checkpoint = sampler.checkpoint();
     const std::array<TokenLogit, 3> candidates {{{hello, 2.0F}, {spaced_hello, 1.0F}, {7, -4.0F}}};
     const auto target_law = sampler.fork().prepare_distribution(candidates);
-    std::vector<float> logits(32000, -20.0F);
+    std::vector<float> logits(draft_vocabulary, -20.0F);
     for (const auto& entry : candidates) logits[entry.token] = entry.logit;
     const auto check = [&](StandaloneDraftSamplingOptions overrides, std::array<double, 3> expected) {
-        const auto effective = resolve_standalone_draft_sampler_options(target_options, overrides, 32000);
+        const auto effective = resolve_standalone_draft_sampler_options(target_options, overrides, draft_vocabulary);
         draft.sample_logits_for_testing(logits, 0, effective);
         const auto q = draft.gather(0, target_law);
         std::uint64_t mass = 0;
@@ -254,7 +280,7 @@ void test_standalone_draft_sampling_changes_only_proposal_law() {
             .repetition_penalty=1.0F}, softmax(2, 1, -4)) == inherited,
         "explicit inherited controls changed native proposal IDs or CDF masses");
     expect(check({.top_k=0}, softmax(2, 1, -4)) == inherited
-            && check({.top_k=32000}, softmax(2, 1, -4)) == inherited,
+            && check({.top_k=draft_vocabulary}, softmax(2, 1, -4)) == inherited,
         "draft unrestricted or larger-than-target-cap top-k changed its complete mapped law");
     check({.temperature=2.0F}, softmax(1, 0.5, -2));
     check({.top_k=1}, {1, 0, 0});
@@ -344,7 +370,7 @@ void test_standalone_joint_callbacks_and_cache_prefixes() {
             expect(calls == depth + 1 && draft.target_position() == depth + 3 && !draft.poisoned(),
                 "standalone callback prefix did not remain usable");
             std::vector<std::uint32_t> expected_draft(depth + 3, hello);
-            expected_draft[0] = expected_draft[1] = spaced_hello;
+            expected_draft[1] = spaced_hello;
             compare_draft_cache(draft, expected_draft);
             TargetFixture ordinary;
             TokenSampler ordinary_sampler({.temperature=0.0F, .top_k=1, .seed=42});
@@ -384,7 +410,7 @@ void test_standalone_rejection_budget_correction_and_regeneration() {
                         expect(*result.carry == hello, "rejection correction changed the target delta law");
                         draft.observe_committed(*result.carry, draft.target_position());
                     }
-                    std::vector<std::uint32_t> expected_draft(rejection + 3, hello); expected_draft[0] = spaced_hello;
+                    std::vector<std::uint32_t> expected_draft(rejection + 3, hello);
                     compare_draft_cache(draft, expected_draft);
                     if (replay == 0) first = sampler.checkpoint();
                     else expect(sampler.checkpoint().same_state(first),
@@ -406,23 +432,33 @@ void test_standalone_ordinary_sync_rebuild_and_fail_closed() {
     draft.observe_committed(hello, 1); // Shared runtime journal repeats accepted chain receipts.
     draft.observe_committed(spaced_hello, 2);
     expect(draft.target_position() == 3, "ordinary/retrieval catch-up duplicated a committed token");
-    const std::array<std::uint32_t, 3> expected {spaced_hello, hello, spaced_hello};
+    const std::array<std::uint32_t, 3> expected {hello, hello, spaced_hello};
     compare_draft_cache(draft, expected);
     refuses([&] { draft.observe_committed(hello, 9); }, "noncausal target frontier was accepted");
     draft.synchronize_context(prompt);
     compare_draft_cache(draft, std::span(expected).first(1));
-    // Fill the legal 2045-token draft prefix with batched prefill, then cross
-    // its reserved-H3 boundary through the ordinary single-token commit path.
-    std::vector<std::uint32_t> long_prefix(2045, hello);
+    // Wrap the native 512-row local rings, then replace the context explicitly.
+    // Gemma3 never silently rebases a suffix at Vicuna's old 2048-token limit.
+    std::vector<std::uint32_t> long_prefix(600, hello);
     draft.synchronize_context(long_prefix);
-    expect(draft.draft_plan_for_testing().position() == 2045,
-        "draft reserved-horizon boundary was not reached exactly");
-    draft.observe_committed(hello, 2045);
-    expect(draft.rebuild_duration_ns() > 0 && draft.draft_plan_for_testing().position() < 2048,
-        "draft context limit did not rebuild an explicitly rebased suffix");
-    std::vector<std::uint32_t> suffix(draft.draft_plan_for_testing().position(), hello);
-    compare_draft_cache(draft, suffix);
-    draft.synchronize_context(prompt);
+    draft.observe_committed(hello, 600);
+    expect(draft.draft_plan_for_testing().position() == 601,
+        "Gemma3 changed its native positions after local-ring wrap");
+    long_prefix.push_back(hello);
+    auto wrapped = draft.checkpoint();
+    draft.synchronize_context(prompt, true);
+    compare_draft_cache(draft, std::span(expected).first(1));
+    draft.restore(wrapped);
+    expect(!wrapped.valid() && draft.target_position() == 601,
+        "context replacement consumed or corrupted the saved native timeline");
+    compare_draft_cache(draft, long_prefix);
+    const std::vector<std::uint32_t> overflow(4097, hello);
+    refuses([&] { draft.synchronize_context(overflow, true); },
+        "context replacement accepted an overflowing target ledger");
+    expect(!draft.poisoned() && draft.target_position() == 601
+            && draft.draft_plan_for_testing().position() == 601,
+        "failed context replacement damaged the prior native timeline");
+    draft.synchronize_context(prompt, true);
     compare_draft_cache(draft, std::span(expected).first(1));
     draft.reset(); expect(draft.target_position() == 0 && draft.draft_plan_for_testing().position() == 0,
         "standalone reset retained a logical cache frontier");
@@ -434,7 +470,7 @@ void test_standalone_ordinary_sync_rebuild_and_fail_closed() {
     invalid_sampling.draft_sampling.temperature = std::numeric_limits<float>::quiet_NaN();
     refuses([&] { StandaloneChatPlan invalid(f.views, f.tokenizer, target.tokenizer, target.plan, invalid_sampling); },
         "standalone plan accepted a nonfinite draft override");
-    invalid_sampling.draft_sampling = {.top_k=32001};
+    invalid_sampling.draft_sampling = {.top_k=(draft_vocabulary + 1U)};
     refuses([&] { StandaloneChatPlan invalid(f.views, f.tokenizer, target.tokenizer, target.plan, invalid_sampling); },
         "standalone plan accepted a draft top-k incompatible with its artifact");
     tensor::backends::metal::set_metal_device_unavailable_for_testing(true);
@@ -461,6 +497,18 @@ void test_standalone_complete_horizon_and_stop_endpoints() {
                     && result.has_next_candidates && draft.target_position() == horizon + 2,
                 "standalone full or conditional verification narrowed the requested horizon");
             expect(!result.rejected, "fully accepted draft chain was counted as a rejection");
+            const auto& native = draft.draft_plan_for_testing();
+            expect(native.position() == horizon + 2U && native.materialized_position() == horizon + 1U,
+                "fully accepted chain did not preserve exactly one pending native emission");
+            auto pending = draft.checkpoint();
+            draft.reset();
+            draft.synchronize_context(prompt);
+            draft.restore(pending);
+            expect(!pending.valid() && native.position() == horizon + 2U
+                    && native.materialized_position() == horizon + 1U,
+                "checkpoint restoration materialized or discarded the accepted pending emission");
+            const std::vector<std::uint32_t> emissions(horizon + 2U, hello);
+            compare_draft_cache(draft, emissions);
         }
         for (bool residual : {false, true}) {
             TargetFixture target;
@@ -496,7 +544,7 @@ void test_standalone_checkpoint_preserves_append_interpretation_and_lifetime() {
         draft.synchronize_context(prompt);
         draft.observe_committed(hello, 1);
         draft.observe_committed(spaced_hello, 2);
-        const std::array<std::uint32_t, 3> expected {spaced_hello, hello, spaced_hello};
+        const std::array<std::uint32_t, 3> expected {hello, hello, spaced_hello};
         auto saved = draft.checkpoint();
         expect(saved.valid(), "standalone snapshot did not issue a live ticket");
         refuses([&] { static_cast<void>(draft.checkpoint()); }, "single-slot standalone snapshot was overwritten");

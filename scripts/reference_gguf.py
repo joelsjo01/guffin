@@ -1,4 +1,4 @@
-"""Minimal strict GGUF-v3 directory reader for the frozen F16 token table."""
+"""Independent GGUF-v3 reader for offline checkpoint reference equations."""
 
 from __future__ import annotations
 
@@ -163,7 +163,7 @@ class GGUFFile:
         try:
             import numpy
         except ImportError as error:
-            raise RuntimeError("numpy is required for offline training") from error
+            raise RuntimeError("numpy is required for offline reference equations") from error
         # GGUF dimensions are fastest-to-slowest. Matrix rows therefore use
         # the second directory dimension and columns use the first.
         return numpy.ndarray(
@@ -183,7 +183,7 @@ class GGUFFile:
         try:
             import numpy
         except ImportError as error:
-            raise RuntimeError("numpy is required for offline training") from error
+            raise RuntimeError("numpy is required for offline reference equations") from error
         dtype = numpy.float32 if entry.ggml_type == 0 else numpy.float16
         byte_count = entry.dimensions[0] * numpy.dtype(dtype).itemsize
         offset = self.data_offset + entry.relative_offset

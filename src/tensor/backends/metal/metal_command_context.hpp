@@ -13,16 +13,6 @@
 
 namespace local_gguf_engine::tensor::backends::metal {
 
-enum class RecurrentStage : std::uint32_t { linear, norm, embedding, join, update, sample, verifier_requests, sample_lossless };
-void prepare_recurrent_pipelines();
-
-namespace draft_detail {
-struct TopKResult {
-    bool final_buffer_is_a = true;
-    std::uint32_t dispatch_count = 0U;
-};
-}
-
 struct MetalCommandStats {
     std::uint32_t command_buffer_count = 0;
     std::uint32_t commit_count = 0;
@@ -380,106 +370,7 @@ public:
         float softcap,
         bool greedy_without_history
     );
-    [[nodiscard]] draft_detail::TopKResult encode_draft_stable_top_k(
-        const BackendBuffer& scores,
-        const BackendBuffer& runs_a,
-        const BackendBuffer& runs_b,
-        const BackendBuffer& status,
-        std::uint32_t row_count,
-        std::uint32_t vocabulary_size,
-        std::uint32_t retain_count
-    );
-    void encode_draft_candidate_union(
-        const BackendBuffer& selected,
-        const BackendBuffer& transition_counts,
-        const BackendBuffer& transition_tokens,
-        const BackendBuffer& history_ids,
-        const BackendBuffer& history_counts,
-        const BackendBuffer& required_ids,
-        const BackendBuffer& required_counts,
-        const BackendBuffer& retrieval_ids,
-        const BackendBuffer& retrieval_counts,
-        const BackendBuffer& candidate_bits,
-        const BackendBuffer& tile_counts,
-        const BackendBuffer& tile_offsets,
-        const BackendBuffer& candidate_ids,
-        const BackendBuffer& candidate_counts,
-        const BackendBuffer& status,
-        std::uint32_t row_count,
-        std::uint32_t vocabulary_size,
-        std::uint32_t selector_count,
-        std::uint32_t transition_width,
-        bool full_vocabulary
-    );
-    void encode_draft_indexed_dot(
-        const BackendBuffer& states,
-        const BackendBuffer& weights,
-        const BackendBuffer& candidate_ids,
-        const BackendBuffer& candidate_counts,
-        const BackendBuffer& output,
-        const BackendBuffer& status,
-        std::uint32_t row_count,
-        std::uint32_t vocabulary_size,
-        std::uint32_t candidate_dispatch_width
-    );
-    void encode_draft_score_correction(
-        const BackendBuffer& scores,
-        const BackendBuffer& corrections,
-        const BackendBuffer& candidate_counts,
-        const BackendBuffer& status,
-        std::uint32_t row_count,
-        std::uint32_t candidate_stride,
-        std::uint32_t candidate_dispatch_width,
-        float softcap
-    );
-    void encode_draft_proposals(
-        const BackendBuffer& candidate_ids,
-        const BackendBuffer& candidate_counts,
-        const BackendBuffer& scores,
-        const BackendBuffer& exp_lut,
-        const BackendBuffer& draws,
-        const BackendBuffer& weights,
-        const BackendBuffer& results,
-        std::uint32_t row_count,
-        std::uint32_t candidate_stride,
-        float temperature
-    );
-    void encode_corrected_logsumexp(
-        const BackendBuffer& logits,
-        const BackendBuffer& logsumexp,
-        const BackendBuffer& status,
-        std::uint32_t row_count,
-        std::uint32_t vocabulary_size,
-        float temperature
-    );
-    void encode_corrected_rank_finalize(
-        const BackendBuffer& sorted,
-        const BackendBuffer& logsumexp,
-        const BackendBuffer& rank_entries,
-        const BackendBuffer& status,
-        std::uint32_t row_count,
-        std::uint32_t vocabulary_size,
-        std::uint32_t rank_width,
-        std::uint32_t output_row_start,
-        float temperature
-    );
-    void encode_arm_s_transition_scores(
-        const BackendBuffer& logits,
-        const BackendBuffer& logsumexp,
-        const BackendBuffer& child_token_ids,
-        std::uint32_t child_token_offset,
-        const BackendBuffer& probabilities,
-        const BackendBuffer& status,
-        std::uint32_t row_count,
-        std::uint32_t vocabulary_size,
-        std::uint32_t output_row_start
-    );
     void encode_memory_barrier();
-    void encode_recurrent_stage(
-        RecurrentStage stage, std::span<const BackendBuffer* const> buffers,
-        const std::array<std::uint32_t,4>& dimensions,
-        const std::array<float,4>& scalars = {}
-    );
     void push_debug_group(std::string_view label);
     void pop_debug_group();
 

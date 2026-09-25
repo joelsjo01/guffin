@@ -1,6 +1,4 @@
 #include "metal_context.hpp"
-#include "learned_recurrent_kernels.hpp"
-#include <mutex>
 
 #if defined(LOCAL_GGUF_ENGINE_TESTING)
 #include "metal_test_hooks.hpp"
@@ -10,36 +8,6 @@
 #include <stdexcept>
 
 namespace local_gguf_engine::tensor::backends::metal {
-
-void prepare_recurrent_pipelines() {
-    static_cast<void>(metal_device_or_throw());
-    static std::once_flag once;
-    std::call_once(once, [] {
-        auto& state=shared_matmul_pipeline_state();
-        MTLCompileOptions* options=[MTLCompileOptions new];
-        options.mathMode=MTLMathModeSafe;
-        options.mathFloatingPointFunctions=MTLMathFloatingPointFunctionsPrecise;
-        NSError* error=nil;
-        auto library=[state.device newLibraryWithSource:
-            [NSString stringWithUTF8String:learned_recurrent_kernel_source]
-            options:options error:&error];
-        if (!library) throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
-            "recurrent library: "+ns_error_message(error,"compile failed"));
-        NSArray<NSString*>* names=@[@"recurrent_linear",@"recurrent_norm",@"recurrent_embedding",
-                                    @"recurrent_join",@"recurrent_update",@"recurrent_sample",
-                                    @"recurrent_verifier_requests",@"recurrent_sample_lossless"];
-        std::array<id<MTLComputePipelineState>,8> ready {};
-        for (NSUInteger i=0;i<ready.size();++i) {
-            auto function=[library newFunctionWithName:names[i]];
-            ready[i]=[state.device newComputePipelineStateWithFunction:function error:&error];
-            if (!ready[i] || ready[i].threadExecutionWidth!=32 || ready[i].maxTotalThreadsPerThreadgroup<256) {
-                throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
-                    "recurrent pipeline: "+ns_error_message(error,"unsupported device"));
-            }
-        }
-        state.recurrent_pipelines=ready;
-    });
-}
 
 namespace {
 
@@ -721,56 +689,8 @@ MatmulPipelineState::MatmulPipelineState() {
         @"target_candidate_batch_top1_f32_kernel",
         "Metal target-candidate batch top-1 pipeline creation failed"
     );
-    draft_topk_tile_pipeline = make_candidate_pipeline(
-        @"draft_topk_tile_f32_kernel", "Metal draft top-k tile pipeline creation failed"
-    );
     draft_topk_merge_pipeline = make_candidate_pipeline(
         @"draft_topk_merge_f32_kernel", "Metal draft top-k merge pipeline creation failed"
-    );
-    draft_clear_u32_pipeline = make_candidate_pipeline(
-        @"draft_clear_u32_kernel", "Metal draft clear pipeline creation failed"
-    );
-    draft_union_mark_selector_pipeline = make_candidate_pipeline(
-        @"draft_union_mark_selector_kernel", "Metal draft selector-union pipeline creation failed"
-    );
-    draft_union_mark_aux_pipeline = make_candidate_pipeline(
-        @"draft_union_mark_aux_kernel", "Metal draft auxiliary-union pipeline creation failed"
-    );
-    draft_union_count_tiles_pipeline = make_candidate_pipeline(
-        @"draft_union_count_tiles_kernel", "Metal draft union tile-count pipeline creation failed"
-    );
-    draft_union_scan_tiles_pipeline = make_candidate_pipeline(
-        @"draft_union_scan_tiles_kernel", "Metal draft union scan pipeline creation failed"
-    );
-    draft_union_scatter_pipeline = make_candidate_pipeline(
-        @"draft_union_scatter_kernel", "Metal draft union scatter pipeline creation failed"
-    );
-    draft_indexed_f16_pipeline = make_candidate_pipeline(
-        @"draft_indexed_f16_kernel", "Metal draft indexed-F16 pipeline creation failed"
-    );
-    draft_indexed_q8_pipeline = make_candidate_pipeline(
-        @"draft_indexed_q8_kernel", "Metal draft indexed-Q8 pipeline creation failed"
-    );
-    draft_indexed_q6_pipeline = make_candidate_pipeline(
-        @"draft_indexed_q6_kernel", "Metal draft indexed-Q6 pipeline creation failed"
-    );
-    draft_indexed_q4_pipeline = make_candidate_pipeline(
-        @"draft_indexed_q4_kernel", "Metal draft indexed-Q4 pipeline creation failed"
-    );
-    draft_score_correct_pipeline = make_candidate_pipeline(
-        @"draft_score_correct_kernel", "Metal draft correction pipeline creation failed"
-    );
-    draft_proposal_pipeline = make_candidate_pipeline(
-        @"draft_proposal_kernel", "Metal draft proposal pipeline creation failed"
-    );
-    corrected_logsumexp_pipeline = make_candidate_pipeline(
-        @"corrected_logsumexp_kernel", "Metal corrected-head logsumexp pipeline creation failed"
-    );
-    corrected_rank_finalize_pipeline = make_candidate_pipeline(
-        @"corrected_rank_finalize_kernel", "Metal corrected-head rank pipeline creation failed"
-    );
-    arm_s_transition_score_pipeline = make_candidate_pipeline(
-        @"arm_s_transition_score_kernel", "Metal Arm-S transition-score pipeline creation failed"
     );
     if (token_candidate_tile_pipeline.maxTotalThreadsPerThreadgroup < 512U
         || token_candidate_top1_pipeline.maxTotalThreadsPerThreadgroup < 512U

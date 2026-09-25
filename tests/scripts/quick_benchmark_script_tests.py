@@ -282,24 +282,29 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 QUICK.validate_decode_attribution(bad, "First")
 
-    def test_recurrent_chat_flags_reach_real_executable(self):
-        with mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
-                mock.patch.object(QUICK, "parse_local", return_value=[]) as parse:
-            QUICK.run_local_chat("engine", "model", 0, recurrent_weights="weights", retrieval=False)
-            command = run.call_args.args[0]
-            self.assertEqual(command[-3:], ["--development-recurrent-weights", "weights", "--no-retrieval"])
-            self.assertNotIn("--no-speculative", command)
-            parse.assert_called_once_with("outerr")
+    def test_archived_controls_are_rejected_before_work(self):
+        for flag, keyword in (("--development-recurrent-weights", "recurrent_weights"),
+                              ("--draft-head", "draft_head")):
+            with self.subTest(flag=flag), mock.patch.object(QUICK, "run_process") as run, \
+                    mock.patch.object(QUICK.time, "sleep") as sleep, \
+                    mock.patch.object(QUICK.sys, "argv", ["quick", "--model", "unused", flag, "unused"]), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    QUICK.main()
+                with self.assertRaises(TypeError):
+                    QUICK.run_local_chat("engine", "model", 240, **{keyword: "unused"})
+                run.assert_not_called()
+                sleep.assert_not_called()
 
     def test_lossless_chat_mode_is_explicit_and_validated(self):
         with mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
                 mock.patch.object(QUICK, "parse_local", return_value=[]):
-            QUICK.run_local_chat("engine", "model", 0, recurrent_weights="weights",
+            QUICK.run_local_chat("engine", "model", 0, draft_model="draft",
                                  speculative_sampling="lossless")
             self.assertEqual(run.call_args.args[0][-2:], ["--speculative-sampling", "lossless"])
         for options in ({"speculative_sampling": "lossless"},
-                        {"speculative_sampling": "unknown", "recurrent_weights": "weights"},
-                        {"speculative_sampling": "lossless", "recurrent_weights": "weights",
+                        {"speculative_sampling": "unknown", "draft_model": "draft"},
+                        {"speculative_sampling": "lossless", "draft_model": "draft",
                          "speculative": False}):
             with self.subTest(options=options), mock.patch.object(QUICK, "run_process") as run:
                 with self.assertRaises(ValueError):
@@ -373,10 +378,8 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
                 run.assert_not_called()
                 sleep.assert_not_called()
         for options in ({}, {"speculative": False},
-                        {"recurrent_weights": "weights", "speculative_sampling": "lossless"},
                         {"draft_model": "draft", "speculative_sampling": "exact-match"},
-                        {"draft_model": "draft", "speculative_sampling": "lossless", "speculative": False},
-                        {"draft_model": "draft", "speculative_sampling": "lossless", "recurrent_weights": "weights"}):
+                        {"draft_model": "draft", "speculative_sampling": "lossless", "speculative": False}):
             with self.subTest(options=options), mock.patch.object(QUICK, "run_process") as run, \
                     mock.patch.object(QUICK.time, "sleep") as sleep:
                 with self.assertRaises(ValueError):
@@ -420,9 +423,6 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             {"draft_model": "draft"},
             {"draft_model": "draft", "speculative_sampling": "exact-match"},
             {"draft_model": "draft", "speculative_sampling": "lossless", "speculative": False},
-            {"draft_model": "draft", "speculative_sampling": "lossless", "recurrent_weights": "weights"},
-            {"draft_model": "draft", "speculative_sampling": "lossless", "draft_head": "f16"},
-            {"draft_model": "draft", "speculative_sampling": "lossless", "draft_head": "q8_0"},
             {"draft_model": "", "speculative_sampling": "lossless"},
             {"draft_horizon": 3},
         ]
@@ -437,7 +437,7 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
                 sleep.assert_not_called()
 
     def test_standalone_tli_benchmark_rejects_execution_fallback(self):
-        record = {"speculative_draft_model": "standalone_vicuna_tli", "speculative_sampling": "lossless",
+        record = {"speculative_draft_model": "standalone_gemma3_tli", "speculative_sampling": "lossless",
                   "learned_horizon": 3, "learned_verification_schedule": "conditional"}
         for field, replacement in (("speculative_draft_model", "recurrent"), ("learned_horizon", 1),
                                    ("speculative_sampling", "exact-match"),
@@ -460,7 +460,7 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             output = io.StringIO()
             with mock.patch.object(sys, "argv", argv), \
                     mock.patch.object(QUICK, "run_local_chat", return_value=[{
-                        "decode_attribution": {"speculative_draft_model": "standalone_vicuna_tli"}
+                        "decode_attribution": {"speculative_draft_model": "standalone_gemma3_tli"}
                     }]) as chat, \
                     mock.patch.object(QUICK, "run_kernel_diagnostics", return_value={}), \
                     mock.patch.object(QUICK, "collect_environment", return_value={}), \
@@ -470,11 +470,13 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             self.assertEqual(protocol["standalone_draft_model_sha256"],
                              hashlib.sha256(b"test draft artifact").hexdigest())
             self.assertEqual(protocol["standalone_draft_horizon"], 23)
-            self.assertEqual(protocol["speculative_draft_model"], "standalone_vicuna_tli")
-            self.assertIsNone(protocol["development_recurrent_weights_sha256"])
+            self.assertEqual(protocol["speculative_draft_model"], "standalone_gemma3_tli")
+            self.assertNotIn("development_recurrent_weights_sha256", protocol)
             self.assertFalse(protocol["cross_mode_token_identity_required"])
-            self.assertEqual(chat.call_args.args[-2:], (str(draft), 23))
-            self.assertEqual(chat.call_args.kwargs, {"draft_sampling": None})
+            self.assertEqual(chat.call_args.kwargs, {
+                "retrieval": True, "speculative_sampling": "lossless",
+                "speculative_schedule": "conditional", "draft_model": str(draft),
+                "draft_horizon": 23, "draft_sampling": None})
 
     def test_main_records_and_passes_draft_sampling_overrides_as_keyword(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -498,8 +500,10 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             self.assertEqual(protocol["standalone_draft_sampling_overrides"], expected)
             self.assertEqual(protocol["decode_attribution_schema"], 5)
             self.assertEqual(protocol["seed"], QUICK.SEED)
-            self.assertEqual(chat.call_args.kwargs, {"draft_sampling": expected})
-            self.assertEqual(chat.call_args.args[-2:], (str(draft), 23))
+            self.assertEqual(chat.call_args.kwargs, {
+                "retrieval": True, "speculative_sampling": "lossless",
+                "speculative_schedule": None, "draft_model": str(draft),
+                "draft_horizon": 23, "draft_sampling": expected})
 
     def test_main_invalid_draft_scalars_fail_before_artifact_process_or_cooldown(self):
         for extra in (["--draft-temperature", "nan"], ["--draft-top-k", "-1"],
@@ -569,13 +573,12 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
         )
 
     def test_lossless_execution_options_are_independent_and_fail_closed(self):
-        choices = {"speculative_schedule": ("conditional", "--speculative-schedule"),
-                   "draft_head": ("q8_0", "--draft-head")}
+        choices = {"speculative_schedule": ("conditional", "--speculative-schedule")}
         for field, (value, flag) in choices.items():
             with self.subTest(field=field), \
                     mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
                     mock.patch.object(QUICK, "parse_local", return_value=[]):
-                QUICK.run_local_chat("engine", "model", 0, recurrent_weights="weights",
+                QUICK.run_local_chat("engine", "model", 0, draft_model="draft",
                                      speculative_sampling="lossless", **{field: value})
                 command = run.call_args.args[0]
                 self.assertEqual(command[command.index(flag) + 1], value)
@@ -586,7 +589,7 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
                 with self.subTest(field=field, mode=mode, option=option), \
                         mock.patch.object(QUICK, "run_process") as run:
                     with self.assertRaises(ValueError):
-                        QUICK.run_local_chat("engine", "model", 0, recurrent_weights="weights",
+                        QUICK.run_local_chat("engine", "model", 0, draft_model="draft",
                                              speculative_sampling=mode, **{field: option})
                     run.assert_not_called()
 

@@ -164,11 +164,9 @@ void emit_text_delta(
 Gemma2ChatSessionState::Gemma2ChatSessionState(
     model_format::GGUFFileBackedModel file, EngineModel model,
     tokenizer::Tokenizer tokenizer, PreparedGemma2Plan prepared,
-    std::shared_ptr<RecurrentWeightsFile> source, std::optional<std::filesystem::path> weights,
     std::shared_ptr<StandaloneDraftArtifact> standalone, std::optional<std::filesystem::path> standalone_path
 ) : file_model_(std::move(file)), model_(std::move(model)),
     tokenizer_(std::move(tokenizer)), prepared_(std::move(prepared)),
-    recurrent_source_(std::move(source)), requested_weights_(std::move(weights)),
     standalone_source_(std::move(standalone)), requested_standalone_(std::move(standalone_path)) {}
 
 Gemma2ChatSessionState Gemma2ChatSessionState::prepare(
@@ -178,26 +176,18 @@ Gemma2ChatSessionState Gemma2ChatSessionState::prepare(
     if (options.backend != runtime::BackendKind::metal) {
         throw std::invalid_argument("Gemma 2 chat session requires Metal backend");
     }
-    if ((options.development_recurrent_weights || options.standalone_draft_model) && !options.speculative_decode) {
-        throw std::invalid_argument("requested recurrent weights conflict with disabled speculation");
-    }
-    validate_recurrent_execution_options(options.speculative_sampling, options.recurrent_execution);
-    if (options.standalone_draft_model && (options.development_recurrent_weights
-        || options.speculative_sampling != SpeculativeSamplingMode::lossless
-        || options.recurrent_execution != RecurrentExecutionOptions{}))
-        throw std::invalid_argument("standalone draft requires lossless sampling without recurrent configuration");
+    if (options.standalone_draft_model && !options.speculative_decode)
+        throw std::invalid_argument("requested standalone draft conflicts with disabled speculation");
+    if (options.standalone_draft_model && options.speculative_sampling != SpeculativeSamplingMode::lossless)
+        throw std::invalid_argument("standalone draft requires lossless sampling");
     if (!options.standalone_draft_model && options.standalone_execution != StandaloneExecutionOptions{})
         throw std::invalid_argument("standalone execution options require a draft artifact");
     if ((options.speculative_sampling != SpeculativeSamplingMode::exact_match
             && options.speculative_sampling != SpeculativeSamplingMode::lossless)
-        || (options.speculative_sampling == SpeculativeSamplingMode::lossless
-            && !options.development_recurrent_weights && !options.standalone_draft_model)) {
-        throw std::invalid_argument("lossless sampling requires explicit recurrent weights");
-    }
+        || (options.speculative_sampling == SpeculativeSamplingMode::lossless && !options.standalone_draft_model))
+        throw std::invalid_argument("lossless sampling requires an explicit standalone draft");
     // Validate sampler before any device allocation, including target-only mode.
     static_cast<void>(TokenSampler(options.sampler));
-    auto source = options.development_recurrent_weights
-        ? std::make_shared<RecurrentWeightsFile>(*options.development_recurrent_weights) : nullptr;
     auto standalone = options.standalone_draft_model
         ? std::make_shared<StandaloneDraftArtifact>(*options.standalone_draft_model) : nullptr;
     if (standalone) {
@@ -205,20 +195,16 @@ Gemma2ChatSessionState Gemma2ChatSessionState::prepare(
             options.standalone_execution.draft_sampling,
             static_cast<std::uint32_t>(standalone->tokenizer().vocabulary().size())));
     }
-    auto model = source || standalone || authenticate_target
+    auto model = standalone || authenticate_target
         ? load_verified_engine_model_from_gguf(file.view(), file.bytes())
         : load_engine_model_from_gguf(file.view());
     auto tokenizer = tokenizer::load_tokenizer_from_gguf_metadata(file.view().directory.metadata);
     auto prepared = standalone
         ? prepare_gemma2_standalone_plan(model, tokenizer, standalone, options.standalone_execution,
             options.output_head_policy)
-        : source
-        ? prepare_gemma2_recurrent_plan(model, source, options.sampler, options.output_head_policy,
-            options.speculative_sampling, options.recurrent_execution)
         : prepare_gemma2_target_only_plan(model, options.output_head_policy);
     return Gemma2ChatSessionState(std::move(file), std::move(model), std::move(tokenizer),
-        std::move(prepared), std::move(source), options.development_recurrent_weights,
-        std::move(standalone), options.standalone_draft_model);
+        std::move(prepared), std::move(standalone), options.standalone_draft_model);
 }
 
 Gemma2ChatSession::Gemma2ChatSession(
@@ -235,7 +221,6 @@ Gemma2ChatSession::Gemma2ChatSession(
       model_(std::move(state.model_)),
       tokenizer_(std::move(state.tokenizer_)),
       prepared_(std::move(state.prepared_)),
-      recurrent_source_(std::move(state.recurrent_source_)),
       standalone_source_(std::move(state.standalone_source_)),
       output_head_policy_(prepared_->target().output_head_policy()),
       reverse_stop_strings_(std::move(options.reverse_stop_strings)),
@@ -244,7 +229,6 @@ Gemma2ChatSession::Gemma2ChatSession(
       context_shift_(options.context_shift),
       speculative_decode_(options.speculative_decode && options.retrieval_decode),
       speculative_sampling_(options.speculative_sampling),
-      recurrent_execution_(options.recurrent_execution),
       standalone_execution_(options.standalone_execution),
       initial_sampler_options_(options.sampler),
       sampler_(initial_sampler_options_),
@@ -256,29 +240,20 @@ Gemma2ChatSession::Gemma2ChatSession(
         throw std::runtime_error("Gemma 2 chat session prepared state requires Gemma 2 model");
     }
     stop_token_ids_ = chat_stop_token_ids(tokenizer_, end_of_turn_token_id_);
-    if (bool(recurrent_source_) != options.development_recurrent_weights.has_value()
-        || bool(standalone_source_) != options.standalone_draft_model.has_value()
+    if (bool(standalone_source_) != options.standalone_draft_model.has_value()
         || state.requested_standalone_ != options.standalone_draft_model
-        || state.requested_weights_ != options.development_recurrent_weights
-        || ((recurrent_source_ || standalone_source_) && !options.speculative_decode)
+        || (standalone_source_ && !options.speculative_decode)
         || output_head_policy_ != resolve_gemma2_output_head_policy(model_.gemma2_config(),
             bind_gemma2_model_weights(model_), options.output_head_policy)) {
         throw std::invalid_argument("prepared session and requested speculation mode differ");
     }
-    if (auto* learned = prepared_->recurrent()) {
-        if (learned->sampling_mode() != options.speculative_sampling
-            || learned->execution_options() != options.recurrent_execution) {
-            throw std::invalid_argument("prepared session and requested sampling law or execution differ");
-        }
-        learned->validate_sampler(options.sampler);
-    } else if (auto* standalone = prepared_->standalone()) {
+    if (auto* standalone = prepared_->standalone()) {
         if (options.speculative_sampling != SpeculativeSamplingMode::lossless
-            || standalone->execution_options() != options.standalone_execution
-            || options.recurrent_execution != RecurrentExecutionOptions{})
+            || standalone->execution_options() != options.standalone_execution)
             throw std::invalid_argument("prepared standalone execution differs from requested configuration");
     } else if (options.speculative_sampling != SpeculativeSamplingMode::exact_match
-        || options.recurrent_execution != RecurrentExecutionOptions{}) {
-        throw std::invalid_argument("lossless sampling requires explicit recurrent weights");
+        || options.standalone_execution != StandaloneExecutionOptions{}) {
+        throw std::invalid_argument("standalone execution requires an explicit draft artifact");
     }
     cache_segments_.reserve(plan().config().context_length);
     for (const auto& token : tokenizer_.vocabulary()) {
@@ -316,7 +291,6 @@ void Gemma2ChatSession::rebuild_durable_cache() {
         restored = segment.end;
     }
     if (restored != tokens.size()) throw std::logic_error("incomplete durable chat cache receipt");
-    if (prepared_->recurrent()) prepared_->recurrent()->invalidate();
     if (prepared_->standalone()) prepared_->standalone()->synchronize_context(tokens);
 }
 
@@ -333,27 +307,6 @@ void Gemma2ChatSession::warm_up_plan() {
     warmup_stats_ = warm_up_gemma2_metal_plan(
         plan(), std::span<const std::uint32_t, 16>(token_ids), sampler_
     );
-    if (auto* learned = prepared_->recurrent()) {
-        // Warm the selected chain and all registered verification tiles.
-        // Scratch/KV writes are outside all logical history.
-        auto warm_sampler = sampler_;
-        const std::array<std::uint32_t, 1> prompt {token_id};
-        warm_sampler.observe_tokens(prompt);
-        static_cast<void>(run_gemma2_metal_resident_prefill(plan(), prompt, 0U,
-            gemma2_input_embedding_scale(model_.gemma2_config().embedding_length),
-            warm_sampler.selection_request()));
-        learned->publish_prefill_origin(0U);
-        warm_sampler.observe_tokens(prompt);
-        const auto stop_warmup = [](const RecurrentCommittedToken&) {
-            return Gemma2MetalTokenStreamDecision::stop_generation;
-        };
-        const auto warmed = learned->run(plan(), warm_sampler, token_id, 1U, 2U, {}, stop_warmup);
-        if (warmed.draft.status != 0U) {
-            throw std::runtime_error("recurrent numeric refusal prevented complete topology warmup");
-        }
-        learned->warm_up_verifier_tiles(plan());
-        learned->invalidate();
-    }
     if (prepared_->standalone()) prepared_->standalone()->warm_up(plan(), sampler_);
     if (!messages_.empty() || !cached_token_ids_.empty() || !turn_cache_positions_.empty()
         || !turn_sampler_states_.empty()) {
@@ -716,7 +669,6 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             clock_,
             speculative_decode_ ? &proposer_ : nullptr,
             turn_options.trace,
-            prepared_->recurrent(),
             &journal,
             prepared_->standalone(),
             rendered_token_ids
@@ -783,14 +735,11 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             .generation = generation_metrics,
             .prompt_processing_duration_ns = prompt_processing_duration_ns,
             .generation_duration_ns = generation_duration_ns,
-            .learned_owned_byte_count = prepared_->recurrent()
-                ? prepared_->recurrent()->owned_bytes() : prepared_->standalone()
-                    ? prepared_->standalone()->owned_bytes() : 0U,
-            .learned_horizon = prepared_->recurrent() ? prepared_->recurrent()->horizon()
-                : prepared_->standalone() ? prepared_->standalone()->horizon() : 0U,
+            .learned_owned_byte_count = prepared_->standalone() ? prepared_->standalone()->owned_bytes() : 0U,
+            .learned_horizon = prepared_->standalone() ? prepared_->standalone()->horizon() : 0U,
             .standalone_draft = prepared_->standalone() != nullptr,
             .standalone_kind = prepared_->standalone() ? prepared_->standalone()->kind()
-                : StandaloneDraftKind::vicuna_68m_f16,
+                : StandaloneDraftKind::gemma3_270m_q8,
             .standalone_execution = standalone_execution_,
             .standalone_prefill_ns = generation.metrics.standalone_prefill_ns,
             .standalone_rebuild_ns = generation.metrics.standalone_rebuild_ns,
@@ -798,7 +747,6 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
                 ? std::optional(prepared_->standalone()->effective_draft_sampler_options(sampler_before_turn.options()))
                 : std::nullopt,
             .speculative_sampling = speculative_sampling_,
-            .recurrent_execution = recurrent_execution_,
             .initial_cache_position = cache_position,
             .reused_cached_token_count = cache_position,
             .selection_mode = sampler_before_turn.is_greedy()
@@ -840,7 +788,6 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
                 // never a speculative performance path or token reselection.
                 rebuild_durable_cache();
             }
-            if (prepared_->recurrent()) prepared_->recurrent()->invalidate();
         } catch (...) { if (prepared_) prepared_->poison(); }
         std::rethrow_exception(original);
     }
@@ -908,7 +855,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::regenerate_last_turn(
                     // equivalent to its original mapped/correction appends.
                     if (standalone) standalone->restore(draft_checkpoint);
                     rebuild_durable_cache();
-                    if (!standalone) prepared_->reset_learned_state();
+                    if (!standalone) prepared_->reset_draft_state();
                 } catch (...) { prepared_->poison(); }
             }
         }
@@ -919,7 +866,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::regenerate_last_turn(
 void Gemma2ChatSession::clear() {
     if (turn_active_) throw std::logic_error("cannot clear an active chat turn");
     if (poisoned()) throw std::logic_error("poisoned chat requires reset");
-    prepared_->reset_learned_state();
+    prepared_->reset_draft_state();
     messages_.clear();
     cached_token_ids_.clear();
     cache_segments_.clear();
@@ -935,9 +882,6 @@ void Gemma2ChatSession::reset() {
     prepared_.reset();
     prepared_.emplace(standalone_source_
         ? prepare_gemma2_standalone_plan(model_, tokenizer_, standalone_source_, standalone_execution_, output_head_policy_)
-        : recurrent_source_
-        ? prepare_gemma2_recurrent_plan(model_, recurrent_source_, initial_sampler_options_, output_head_policy_,
-            speculative_sampling_, recurrent_execution_)
         : prepare_gemma2_target_only_plan(model_, output_head_policy_));
     clear();
     try { warm_up_plan(); }
@@ -948,7 +892,6 @@ void Gemma2ChatSession::reset() {
 void Gemma2ChatSession::set_sampler_options(TokenSamplerOptions options) {
     if (turn_active_ || poisoned()) throw std::logic_error("chat sampler cannot change in this state");
     static_cast<void>(TokenSampler(options));
-    if (prepared_->recurrent()) prepared_->recurrent()->validate_sampler(options);
     initial_sampler_options_ = std::move(options);
     clear();
 }

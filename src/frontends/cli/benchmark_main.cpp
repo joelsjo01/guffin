@@ -1,6 +1,5 @@
 #include "local_gguf_engine/benchmarks/quick_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/feature_capture_benchmark.hpp"
-#include "local_gguf_engine/benchmarks/corrected_vocabulary_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/immutable_weight_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/output_head_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/target_verifier_benchmark.hpp"
@@ -258,10 +257,6 @@ int main(int argc, const char* const* argv) {
             || std::string_view(argv[2]) == "--target-verifier-repeated-root");
     const bool feature_capture_mode = argc == 4
         && std::string_view(argv[2]) == "--feature-capture";
-    const bool corrected_vocabulary_mode = argc == 4
-        && std::string_view(argv[2]) == "--corrected-vocabulary";
-    const bool draft_vocabulary_shape_mode = argc == 3
-        && std::string_view(argv[2]) == "--draft-vocabulary-shapes";
     const bool output_quality_mode = argc >= 3 && std::string_view(argv[2]) == "--output-head-quality";
     const bool storage_mode = argc >= 4 && std::string_view(argv[2]) == "--storage-policy";
     const bool no_copy_mode = argc >= 3 && std::string_view(argv[2]) == "--no-copy-feasibility";
@@ -269,14 +264,11 @@ int main(int argc, const char* const* argv) {
         || (argc == 4 && no_copy_mode && std::string_view(argv[3]) == "--json")
         || (argc == 5 && storage_mode && std::string_view(argv[4]) == "--json");
     if (argc < 2 || (!storage_mode && !no_copy_mode && !output_quality_mode
-            && !width_two_mode && !target_verifier_mode && !feature_capture_mode
-            && !corrected_vocabulary_mode && !draft_vocabulary_shape_mode && argc > 3)
+            && !width_two_mode && !target_verifier_mode && !feature_capture_mode && argc > 3)
         || (storage_mode && argc > 5) || (no_copy_mode && argc > 4)
         || (target_verifier_mode && argc != 4)
         || (feature_capture_mode && argc != 4)
-        || (corrected_vocabulary_mode && argc != 4)
-        || (argc == 3 && !json && !no_copy_mode && !output_quality_mode && !width_two_mode
-            && !draft_vocabulary_shape_mode)
+        || (argc == 3 && !json && !no_copy_mode && !output_quality_mode && !width_two_mode)
         || (output_quality_mode && argc != 4)
         || (storage_mode && argc == 5 && !json) || (no_copy_mode && argc == 4 && !json)) {
         std::cerr << "usage: local-gguf-bench <model.gguf> [--json]\n"
@@ -286,102 +278,12 @@ int main(int argc, const char* const* argv) {
                      "       local-gguf-bench <model.gguf> --target-verifier-forest <rows>\n"
                      "       local-gguf-bench <model.gguf> --target-verifier-repeated-root <beam-width>\n"
                      "       local-gguf-bench <model.gguf> --feature-capture <off|on>\n"
-                     "       local-gguf-bench <model.gguf> --corrected-vocabulary <workload>\n"
-                     "       local-gguf-bench <model.gguf> --draft-vocabulary-shapes\n"
                      "       local-gguf-bench <model.gguf> --output-head-quality --json\n"
                      "       local-gguf-bench <model.gguf> --storage-policy <policy> [--json]\n"
                      "       local-gguf-bench <model.gguf> --no-copy-feasibility [--json]\n";
         return EXIT_FAILURE;
     }
     try {
-        if (draft_vocabulary_shape_mode) {
-            const auto result = local_gguf_engine::benchmarks::run_draft_vocabulary_shape_benchmark(
-                argv[1]
-            );
-            std::cout << result.interpretation_label
-                << "\nstates/candidate k: " << result.state_count << "/"
-                << result.candidate_k
-                << "\nauthenticated fixture/owned weights/scratch bytes: "
-                << result.authenticated_fixture_bytes << "/"
-                << result.owned_weight_bytes << "/" << result.scratch_bytes
-                << "\nverified load/upload/prefill/fixture setup: "
-                << std::fixed << std::setprecision(3)
-                << static_cast<double>(result.verified_load_wall_ns) / 1.0e6 << "/"
-                << static_cast<double>(result.target_upload_wall_ns) / 1.0e6 << "/"
-                << static_cast<double>(result.live_feature_prefill_wall_ns) / 1.0e6 << "/"
-                << static_cast<double>(result.fixture_pack_plan_input_wall_ns) / 1.0e6
-                << " ms\n";
-            for (const auto& measurement : result.measurements) {
-                std::cout << (measurement.invocation_count == 1U
-                        ? "parallel-batched" : "recurrent-per-edge")
-                    << " rows/invocations=" << measurement.row_count << "/"
-                    << measurement.invocation_count
-                    << " wall/GPU="
-                    << static_cast<double>(measurement.wall_duration_ns) / 1.0e6 << "/"
-                    << static_cast<double>(measurement.gpu_duration_ns) / 1.0e6 << " ms"
-                    << " dispatches=" << measurement.dispatch_count
-                    << " optimistic scheduled bytes="
-                    << measurement.optimistic_scheduled_weight_bytes
-                    << " effective lower-bound GB/s="
-                    << measurement.optimistic_effective_bandwidth_gbps
-                    << " conservative fallbacks="
-                    << measurement.conservative_fallback_count
-                    << " proposal sha256=" << measurement.proposal_digest.hex() << '\n';
-            }
-            const auto& pruner = result.arm_s_pruner;
-            std::cout << "Arm-S rank-8 pruner: " << pruner.interpretation_label
-                << "\nraw edges/survivors/fixture threshold="
-                << pruner.raw_edge_count << "/" << pruner.survivor_count << "/"
-                << std::scientific << std::setprecision(8)
-                << pruner.frozen_fixture_threshold
-                << std::fixed << std::setprecision(3)
-                << " wall/GPU=" << static_cast<double>(pruner.wall_duration_ns) / 1.0e6
-                << "/" << static_cast<double>(pruner.gpu_duration_ns) / 1.0e6 << " ms"
-                << " dispatches=" << pruner.dispatch_count
-                << " head MAC/FLOP=" << pruner.head_macs << "/" << pruner.head_flops
-                << " owned/scratch bytes=" << pruner.owned_weight_bytes << "/"
-                << pruner.scratch_bytes
-                << " probability sha256=" << pruner.probability_digest.hex() << '\n';
-            return EXIT_SUCCESS;
-        }
-        if (corrected_vocabulary_mode) {
-            const auto workload = local_gguf_engine::benchmarks::parse_corrected_vocabulary_workload(
-                argv[3]
-            );
-            const auto result = local_gguf_engine::benchmarks::run_corrected_vocabulary_benchmark(
-                argv[1], workload
-            );
-            const auto& execution = result.execution;
-            std::cout << std::fixed << std::setprecision(3)
-                << "corrected vocabulary workload: "
-                << local_gguf_engine::benchmarks::corrected_vocabulary_workload_name(workload)
-                << "\nphysical head rows: " << execution.physical_head_rows
-                << "\nraw lower/upper main/upper stream rows: "
-                << result.workload.raw_lower_main_rows << "/"
-                << result.workload.upper_main_rows << "/"
-                << result.workload.upper_stream_rows
-                << "\nhead MAC/FLOP: " << execution.head_macs << "/"
-                << execution.head_flops
-                << "\nwall/GPU: " << static_cast<double>(execution.wall_duration_ns) / 1.0e6
-                << "/" << static_cast<double>(execution.gpu_duration_ns) / 1.0e6 << " ms"
-                << "\ndispatches/command buffers: " << execution.dispatch_count << "/"
-                << execution.command_buffer_count
-                << "\nscratch bytes: " << execution.scratch_bytes
-                << "\nlogical head-weight bytes: " << execution.logical_head_weight_bytes
-                << "\nrescanned head rows: " << execution.rescanned_head_rows
-                << "\nrank entries: " << result.workload.rank_entry_capacity
-                << "\nrank sha256: " << result.rank_digest.hex()
-                << "\ncompact next-tree nodes/sha256: "
-                << result.compact_next_tree_nodes << "/"
-                << result.compact_next_tree_digest.hex()
-                << "\nverified load/upload/setup/prefill: "
-                << static_cast<double>(result.verified_load_wall_ns) / 1.0e6 << "/"
-                << static_cast<double>(result.target_upload_wall_ns) / 1.0e6 << "/"
-                << static_cast<double>(result.scratch_allocation_wall_ns) / 1.0e6 << "/"
-                << static_cast<double>(result.live_feature_prefill_wall_ns) / 1.0e6
-                << " ms\n";
-            return EXIT_SUCCESS;
-        }
         if (feature_capture_mode) {
             const auto mode = std::string_view(argv[3]);
             if (mode != "off" && mode != "on") {

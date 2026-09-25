@@ -151,6 +151,14 @@ void test_gemma3_control_preserving_injective_bridge() {
     }
     const auto target = load_tokenizer_from_gguf_metadata(target_metadata);
     const auto draft = load_tokenizer_from_gguf_metadata(fixture_gemma3_tokenizer());
+    for (const bool unsupported_target : {false, true}) {
+        bool rejected = false;
+        try {
+            const engine::StandaloneTliMapping invalid(unsupported_target ? draft : target,
+                unsupported_target ? draft : target);
+        } catch (const std::invalid_argument&) { rejected = true; }
+        expect(rejected, "unsupported target/draft tokenizer pair must fail closed");
+    }
     const engine::StandaloneTliMapping mapping(target, draft);
     expect(mapping.target_to_draft()[270] == 271 && mapping.target_to_draft()[271] == 270, "turn controls were mapped by numeric ID");
     expect(mapping.target_to_draft()[2] == 2 && mapping.target_to_draft()[270] != 2, "EOS and EOT conflated");
@@ -179,6 +187,13 @@ void test_gemma3_control_preserving_injective_bridge() {
     expect(mapping.target_to_draft()[272] == engine::StandaloneTliMapping::unmapped
         && mapping.target_to_draft()[0] == engine::StandaloneTliMapping::unmapped,
         "context-only opaque symbols leaked into proposal support");
+    for (const bool invalid_id : {false, true}) {
+        bool rejected = false;
+        try {
+            (void)mapping.append_target_token(invalid_id ? 999U : 270U, {}, scratch, workspace);
+        } catch (const std::exception&) { rejected = true; }
+        expect(rejected, "Gemma bridge accepted invalid token or exhausted correction output");
+    }
     bool failed = false;
     try { (void)mapping.encode_target_context(prompt, {}, scratch, workspace); }
     catch (const std::length_error&) { failed = true; }
@@ -257,104 +272,21 @@ void test_bounded_tokenizer_capacity_and_metadata() {
     expect(failed, "unsupported normalization must not silently become identity");
 }
 
-void test_tli_mapping_and_bounded_context() {
-    const auto target = load_tokenizer_from_gguf_metadata(fixture_tokenizer(false));
-    const auto draft = load_tokenizer_from_gguf_metadata(fixture_tokenizer(true));
-    const engine::StandaloneTliMapping mapping(target, draft);
-    expect(mapping.intersection_size() == 263, "normal/byte TLI intersection mismatch");
-    expect(mapping.target_to_draft()[0] == engine::StandaloneTliMapping::unmapped, "unknown must not be proposed");
-    expect(mapping.draft_to_target()[1] == engine::StandaloneTliMapping::unmapped, "control must not be proposed");
-    tokenizer::TokenizerEncodeWorkspace workspace(64);
-    std::array<std::uint32_t, 64> output {};
-    std::array<char, 64> scratch {};
-    expect(mapping.append_target_token(3, output, scratch, workspace) == 1 && output[0] == 3, "NUL byte mapping mismatch");
-    expect(mapping.append_target_token(1, output, scratch, workspace) == 0, "target special must not add draft BOS");
-    const std::array<std::uint32_t, 3> prompt {1, 262, 2};
-    expect(mapping.encode_target_context(prompt, output, scratch, workspace) == 1 && output[0] == 264,
-        "initial context must skip target specials and apply SP dummy prefix without BOS");
-    const std::array<std::uint32_t, 3> punctuation {260, 35, 36}; // a + byte space + byte '!'
-    expect(mapping.encode_target_context(punctuation, output, scratch, workspace) == 2 && output[0] == 263 && output[1] == 36,
-        "reference target context punctuation cleanup mismatch");
-    const std::array<std::uint32_t, 2> invalid_utf8 {229, 133}; // incomplete E2 82
-    expect(mapping.encode_target_context(invalid_utf8, output, scratch, workspace) == 4
-        && output[0] == 259 && output[1] == 242 && output[2] == 194 && output[3] == 192,
-        "context byte stream must replace one incomplete UTF8 prefix, not each continuation byte");
-    bool failed = false;
-    try { (void)mapping.append_target_token(999, output, scratch, workspace); }
-    catch (const std::invalid_argument&) { failed = true; }
-    expect(failed, "out-of-range TLI token must fail");
-    failed = false;
-    try { (void)mapping.append_target_token(260, {}, scratch, workspace); }
-    catch (const std::length_error&) { failed = true; }
-    expect(failed, "mapped TLI output capacity must fail closed");
-    // Type mismatches cannot be conflated merely because piece text is equal.
-    auto changed = fixture_tokenizer(false);
-    for (auto& entry : changed.entries) if (entry.key == "tokenizer.ggml.token_type") {
-        auto& values = std::get<std::vector<std::int32_t>>(std::get<model_format::GGUFMetadataArray>(entry.value.data).values);
-        values[263] = 4;
-    }
-    const auto target_variant = load_tokenizer_from_gguf_metadata(changed);
-    const engine::StandaloneTliMapping variant(target_variant, draft);
-    expect(variant.target_to_draft()[263] == engine::StandaloneTliMapping::unmapped, "type-mismatched TLI mapping admitted");
-    expect(variant.append_target_token(263, output, scratch, workspace) == 2 && output[0] == 259 && output[1] == 263,
-        "unmapped correction must use legacy dummy prefix, not continuation normalization");
+void test_artifact_sha256_published_vector() {
+    constexpr std::string_view input = "abc";
+    const auto bytes = std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(input.data()), input.size());
+    expect(runtime::sha256(bytes).hex() ==
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "SHA-256 abc vector differs");
 }
 
-void test_vicuna_artifact_goldens_when_available() {
-    const std::filesystem::path path("models/vicuna_68m/vicuna-68m-f16.gguf");
+void test_gemma3_artifact_payload_authentication() {
+    const std::filesystem::path path("models/gemma-3-270m-it-Q8_0.gguf");
     if (!std::filesystem::exists(path)) return;
-    engine::StandaloneDraftArtifact artifact(path);
-    expect(artifact.kind() == engine::StandaloneDraftKind::vicuna_68m_f16 && artifact.context_limit() == 2048,
-        "existing Vicuna artifact identity/context changed");
-    expect(artifact.tensor("lm_head.weight").descriptor().shape == tensor::Shape::from({768, 32000}), "Vicuna full head shape mismatch");
-    expect(artifact.tensor("model.layers.1.mlp.down_proj.weight").descriptor().shape == tensor::Shape::from({3072, 768}), "Vicuna second layer missing/transposed");
-    tokenizer::TokenizerEncodeWorkspace workspace(128);
-    std::array<std::uint32_t, 128> output {};
-    // Transformers 4.50.0 LlamaTokenizer(legacy=True), SentencePiece 0.2.1;
-    // pinned source tokenizer SHA 9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347.
-    const std::pair<std::string, std::vector<std::uint32_t>> goldens[] {
-        {"", {}}, {"Hello world!", {15043, 3186, 29991}},
-        {" Hello  world\n", {29871, 15043, 29871, 3186, 13}},
-        {"\t\n café 😀", {29871, 12, 13, 274, 28059, 29871, 243, 162, 155, 131}},
-        {"你好世界", {29871, 30919, 31076, 30793, 30967}},
-        {std::string("a\0b", 3), {263, 3, 29890}},
-        {"<s>Hello</s>", {1, 15043, 2}}, {"x<unk> y", {921, 0, 29871, 343}},
-        {"foo_bar = 12.5", {7953, 29918, 1646, 353, 29871, 29896, 29906, 29889, 29945}},
-        {"\u3000x\u00a0y", {29871, 30358, 29916, 30081, 29891}},
-        {"▁a", {29871, 263}},
-    };
-    for (const auto& [text, expected] : goldens) {
-        const auto count = artifact.tokenizer().encode_into(text, output, workspace, {.encode_special_tokens = true});
-        expect(std::vector<std::uint32_t>(output.begin(), output.begin() + static_cast<std::ptrdiff_t>(count)) == expected,
-            "real Vicuna tokenizer reference mismatch: " + text);
-    }
-    if (std::filesystem::exists("models/gemma-2-9b-Q4.gguf")) {
-        const auto target_file = model_format::read_file_backed_gguf_model("models/gemma-2-9b-Q4.gguf");
-        const auto target = load_tokenizer_from_gguf_metadata(target_file.view().directory.metadata);
-        const engine::StandaloneTliMapping mapping(target, artifact.tokenizer());
-        expect(mapping.intersection_size() > 30000, "real Gemma/Vicuna TLI vocabulary intersection unexpectedly missing");
-        std::array<char, 128> scratch {};
-        // Independently decoded target pieces and encoded them with pinned HF
-        // LlamaTokenizer(add_special_tokens=False), including leading spaces.
-        const std::pair<std::uint32_t, std::vector<std::uint32_t>> corrections[] {
-            {613, {29871, 281, 29875}}, {636, {274, 2034}}, {662, {5539}},
-            {802, {260, 293}}, {815, {330, 400}}, {817, {269, 291}},
-            {906, {29871, 318, 333}}, {922, {259, 30112}},
-        };
-        for (const auto& [id, expected] : corrections) {
-            const auto count = mapping.append_target_token(id, output, scratch, workspace);
-            expect(std::vector<std::uint32_t>(output.begin(), output.begin() + static_cast<std::ptrdiff_t>(count)) == expected,
-                "real TLI unmapped correction tokenizer golden mismatch");
-        }
-    }
-    bool failed = false;
-    try { (void)artifact.tensor("missing.weight"); }
-    catch (const std::invalid_argument&) { failed = true; }
-    expect(failed, "missing Vicuna tensor must fail closed");
-
     // Corrupt a structurally valid tensor byte: directory/shape validation alone
     // must not authenticate a different model. This copy is test-owned only.
-    std::string temporary_pattern = (std::filesystem::temp_directory_path() / "vicuna-auth-XXXXXX").string();
+    std::string temporary_pattern = (std::filesystem::temp_directory_path() / "gemma3-auth-XXXXXX").string();
     const int descriptor = mkstemp(temporary_pattern.data());
     expect(descriptor >= 0, "could not create artifact authentication fixture");
     close(descriptor);
@@ -373,7 +305,7 @@ void test_vicuna_artifact_goldens_when_available() {
         stream.write(&byte, 1);
         expect(stream.good(), "could not mutate artifact authentication fixture");
     }
-    failed = false;
+    bool failed = false;
     try { engine::StandaloneDraftArtifact corrupt(cleanup.path); }
     catch (const std::invalid_argument&) { failed = true; }
     expect(failed, "valid-layout changed tensor bytes must fail authentication");
@@ -384,7 +316,7 @@ void test_gemma3_artifact_and_tokenizer_goldens_when_available() {
     if (!std::filesystem::exists(path)) return;
     const engine::StandaloneDraftArtifact artifact(path);
     expect(artifact.kind() == engine::StandaloneDraftKind::gemma3_270m_q8 && artifact.context_limit() == 32768,
-        "Gemma3 artifact inherited Vicuna kind/context geometry");
+        "Gemma3 artifact kind/context geometry mismatch");
     expect(artifact.tensor("token_embd.weight").descriptor().shape == tensor::Shape::from({640, 262144}),
         "Gemma3 complete tied head/embedding shape mismatch");
     expect(artifact.tensor("blk.17.attn_q_norm.weight").descriptor().shape == tensor::Shape::from({256}),
@@ -452,16 +384,16 @@ void test_gemma3_artifact_and_tokenizer_goldens_when_available() {
     }
 }
 
-void test_vicuna_rejects_missing_and_unauthenticated_artifacts() {
+void test_standalone_rejects_missing_and_unauthenticated_artifacts() {
     bool failed = false;
-    try { engine::StandaloneDraftArtifact artifact("models/nonexistent-vicuna-draft.gguf"); }
+    try { engine::StandaloneDraftArtifact artifact("models/nonexistent-gemma3-draft.gguf"); }
     catch (const std::exception&) { failed = true; }
     expect(failed, "missing standalone artifact must fail closed");
     if (std::filesystem::exists("models/gemma-2-9b-Q4.gguf")) {
         failed = false;
         try { engine::StandaloneDraftArtifact artifact("models/gemma-2-9b-Q4.gguf"); }
         catch (const std::exception&) { failed = true; }
-        expect(failed, "unrelated model must not load as Vicuna");
+        expect(failed, "unrelated model must not load as a pinned standalone drafter");
     }
 }
 
@@ -519,12 +451,12 @@ std::span<const TestCase> standalone_draft_artifact_test_cases() {
     static constexpr TestCase cases[] {
         {"bounded legacy Llama tokenizer matches independent SP equations", test_bounded_legacy_tokenizer_reference},
         {"bounded tokenizer rejects capacity and unsupported normalization", test_bounded_tokenizer_capacity_and_metadata},
-        {"TLI mapping owns exact token types and bounded context conversion", test_tli_mapping_and_bounded_context},
         {"Gemma3 bounded tokenizer preserves atomic user-defined pieces and literal controls", test_gemma3_bounded_user_defined_and_literal_controls},
         {"Gemma3 TLI bridge preserves typed controls and rejects ambiguous aliases", test_gemma3_control_preserving_injective_bridge},
         {"pinned Gemma3 artifact and independent real tokenizer goldens when available", test_gemma3_artifact_and_tokenizer_goldens_when_available},
-        {"pinned Vicuna artifact and real tokenizer goldens when available", test_vicuna_artifact_goldens_when_available},
-        {"Vicuna artifacts reject missing or unauthenticated sources", test_vicuna_rejects_missing_and_unauthenticated_artifacts},
+        {"artifact SHA-256 matches the published abc vector", test_artifact_sha256_published_vector},
+        {"pinned Gemma3 artifact rejects altered tensor payload bytes", test_gemma3_artifact_payload_authentication},
+        {"standalone artifacts reject missing or unauthenticated sources", test_standalone_rejects_missing_and_unauthenticated_artifacts},
         {"prepared standalone plan authenticates target tokenizer semantics", test_prepared_standalone_authenticates_target_tokenizer},
     };
     return cases;

@@ -1,7 +1,6 @@
 #include "speculative_controller_tests.hpp"
 
 #include "local_gguf_engine/engine/speculative_controller.hpp"
-#include "local_gguf_engine/engine/target_verifier_registry.hpp"
 
 #include <algorithm>
 #include <array>
@@ -826,149 +825,6 @@ void test_source_shaped_redrafter_l5_and_eagle3_depth8() {
         "EAGLE-3 depth-8/60-row final tree was routed through a smaller control");
 }
 
-void test_target_verifier_source_shape_registry_is_complete_and_typed() {
-    const auto shapes = target_verifier_source_shapes();
-    expect(shapes.size() == target_verifier_source_shape_count,
-        "target verifier source-shape registry count drifted");
-    std::array<std::uint32_t, 12> family_counts {};
-    auto saw_cadd_root_only = false;
-    auto saw_cadd_maximum = false;
-    auto saw_treeflash_released = false;
-    auto saw_treeflash_code_m64 = false;
-    auto saw_treeflash_h16_m64 = false;
-    auto saw_pctree_pool_maximum = false;
-    auto saw_dartree_score_maximum = false;
-    auto saw_domino_maximum = false;
-    auto saw_full_path_scaffold = false;
-    auto saw_dblast_maximum = false;
-    auto saw_eagle3_maximum = false;
-    auto saw_redrafter_maximum = false;
-
-    for (std::size_t index = 0U; index < shapes.size(); ++index) {
-        const auto& shape = shapes[index];
-        expect(shape.registry_index == index
-                && shape.physical_target_rows == shape.resolved_budget.input_row_cap
-                && shape.physical_target_rows <= VerifierRowMax
-                && shape.resolved_budget.draft_node_cap <= ExternalTreeDraftNodeMax
-                && shape.maximum_depth <= external_speculation_max_horizon
-                && shape.child_branch_width <= MaterializedDegreeMax
-                && target_verifier_source_mechanism_name(shape.mechanism) != "unknown",
-            "target verifier source shape has stale identity or capacity metadata");
-        const auto family = static_cast<std::size_t>(shape.family);
-        expect(family < family_counts.size(),
-            "target verifier source shape has unknown family");
-        ++family_counts[family];
-
-        if (shape.topology == ProposalGraphKind::repeated_root_beam_batch) {
-            expect(shape.mechanism
-                        == TargetVerifierSourceMechanism::redrafter_mlx_repeated_root
-                    && shape.physical_target_rows == 4U * shape.active_width
-                    && shape.resolved_budget.draft_node_cap == 3U * shape.active_width,
-                "repeated-root source shape was flattened into a unique-root budget");
-        } else {
-            expect(shape.topology == ProposalGraphKind::forest
-                    && shape.resolved_budget.draft_node_cap + 1U
-                        == shape.physical_target_rows,
-                "unique-root source shape has inconsistent resolved rows");
-        }
-        expect((shape.candidate_domain == TargetVerifierCandidateDomain::full_vocabulary)
-                    == (shape.candidate_width == 0U),
-            "source shape conflated full-V and finite candidate domains");
-
-        saw_cadd_root_only = saw_cadd_root_only
-            || (shape.mechanism == TargetVerifierSourceMechanism::caddtree_adaptive
-                && shape.source_budget.value == 0U && shape.physical_target_rows == 1U);
-        saw_cadd_maximum = saw_cadd_maximum
-            || (shape.mechanism == TargetVerifierSourceMechanism::caddtree_adaptive
-                && shape.source_budget.value == 1'024U
-                && shape.physical_target_rows == 1'025U);
-        saw_treeflash_released = saw_treeflash_released
-            || (shape.mechanism
-                    == TargetVerifierSourceMechanism::treeflash_executable_h15_top_k
-                && shape.source_budget.value == 64U
-                && shape.conditioning_width == 16U
-                && shape.candidate_width == 16U
-                && shape.builder.raw_row_count == TreeFlashReleasedCorrectionStateMax
-                && shape.builder.packed_row_count
-                    == TreeFlashReleasedPhysicalCorrectionRowMax);
-        saw_treeflash_code_m64 = saw_treeflash_code_m64
-            || (shape.mechanism
-                    == TargetVerifierSourceMechanism::treeflash_executable_h15_top_k
-                && shape.conditioning_width == 64U
-                && shape.builder.raw_row_count == TreeFlashCodeTransferCorrectionStateMax
-                && shape.builder.packed_row_count == TreeFlashCodePhysicalCorrectionRowMax);
-        saw_treeflash_h16_m64 = saw_treeflash_h16_m64
-            || (shape.mechanism
-                    == TargetVerifierSourceMechanism::treeflash_paper_h16_full_v_lazy
-                && shape.conditioning_width == 64U
-                && shape.builder.raw_row_count == TreeFlashSemanticCorrectionStateMax
-                && shape.builder.packed_row_count == TreeFlashH16PhysicalCorrectionRowMax);
-        saw_pctree_pool_maximum = saw_pctree_pool_maximum
-            || shape.builder.raw_row_count == PCTreePoolMax;
-        saw_dartree_score_maximum = saw_dartree_score_maximum
-            || shape.builder.score_event_count == DARTreeScoreEventMax;
-        saw_domino_maximum = saw_domino_maximum
-            || (shape.family == TargetVerifierSourceFamily::dominotree
-                && shape.source_budget.value == 64U
-                && shape.conditioning_width == 256U
-                && shape.builder.raw_row_count == DominoFrontierGeneratedLedgerMax
-                && shape.builder.kv_row_count == DominoCorrectionLaneStepMax);
-        saw_full_path_scaffold = saw_full_path_scaffold
-            || (shape.family == TargetVerifierSourceFamily::full_path
-                && shape.builder.raw_row_count == FullPathSupertreeMax);
-        saw_dblast_maximum = saw_dblast_maximum
-            || (shape.family == TargetVerifierSourceFamily::dblast
-                && shape.physical_target_rows == DBlastCategoryTrieRowMax);
-        saw_eagle3_maximum = saw_eagle3_maximum
-            || (shape.family == TargetVerifierSourceFamily::eagle3
-                && shape.builder.raw_row_count == EAGLE3RawSupertreeRowMax
-                && shape.physical_target_rows == EAGLE3VerifierRowMax);
-        saw_redrafter_maximum = saw_redrafter_maximum
-            || (shape.mechanism
-                    == TargetVerifierSourceMechanism::redrafter_pytorch_l5_w45_compressed
-                && shape.builder.raw_row_count == ReDrafterRawBeamEntryMax
-                && shape.physical_target_rows == ReDrafterPyTreeRowMax
-                && shape.builder.kv_row_count == ReDrafterPyUnpackedCacheRowMax);
-
-        for (std::size_t prior = 0U; prior < index; ++prior) {
-            const auto& other = shapes[prior];
-            const auto duplicate = shape.mechanism == other.mechanism
-                && shape.source_budget.value == other.source_budget.value
-                && shape.source_budget.root_convention
-                    == other.source_budget.root_convention
-                && shape.maximum_depth == other.maximum_depth
-                && shape.child_branch_width == other.child_branch_width
-                && shape.candidate_domain == other.candidate_domain
-                && shape.candidate_width == other.candidate_width
-                && shape.conditioning_width == other.conditioning_width
-                && shape.active_width == other.active_width
-                && shape.physical_target_rows == other.physical_target_rows;
-            expect(!duplicate, "target verifier source registry contains a duplicate identity");
-        }
-    }
-
-    constexpr std::array<std::uint32_t, 12> expected_family_counts {
-        56U, 7U, 1'025U, 54U, 26U, 18U,
-        12U, 18U, 12U, 4U, 1U, 13U,
-    };
-    expect(family_counts == expected_family_counts,
-        "target verifier source family was narrowed or accidentally crossed");
-    expect(saw_cadd_root_only && saw_cadd_maximum
-            && saw_treeflash_released && saw_treeflash_code_m64
-            && saw_treeflash_h16_m64 && saw_pctree_pool_maximum
-            && saw_dartree_score_maximum && saw_domino_maximum
-            && saw_full_path_scaffold && saw_dblast_maximum
-            && saw_eagle3_maximum && saw_redrafter_maximum,
-        "target verifier source registry lost a required boundary fixture");
-    expect(TreeFlashReleasedRankEntryMax == 3'840U
-            && TreeFlashCodeTop16RankEntryMax == 15'360U
-            && TreeFlashCodeTop64RankEntryMax == 61'440U
-            && TreeFlashH15FullVRankEntryMax == 491'520U
-            && TreeFlashH16FullVRankEntryMax == 492'032U
-            && TreeFlashH16CodeFullVRankEntryMax == 524'288U,
-        "TreeFlash rank-storage capacity contract drifted");
-}
-
 void test_routes_and_proposal_randomness_remain_distinct() {
     BoundedSpeculativeController controller;
     const std::array<std::uint32_t, 3> full {101U, 102U, 103U};
@@ -1135,131 +991,6 @@ void test_graph_schedule_and_capacity_validation_fail_closed() {
     }, "unregistered horizon transition table was generated");
 }
 
-[[nodiscard]] StreamTreeLeaseDescriptor tree(
-    std::uint64_t identity,
-    std::uint32_t root_token = 100U
-) {
-    return StreamTreeLeaseDescriptor {
-        .lease_identity = identity,
-        .session_epoch = 1U,
-        .arena_epoch = 2U,
-        .graph_identity = 100U + identity,
-        .history_digest = 200U + identity,
-        .root_token = root_token,
-        .root_position = 10U,
-    };
-}
-
-void test_arm_s_lease_state_machine_and_poisoning() {
-    StreamLeaseState state {.phase = StreamLeasePhase::unavailable, .session_epoch = 1U};
-    state = transition_stream_lease(state, {.kind = StreamLeaseEventKind::begin_bootstrap}).next_state;
-    expect(state.phase == StreamLeasePhase::pending_bootstrap,
-        "Arm-S bootstrap did not enter pending state");
-    const auto first_tree = tree(1U);
-    state = transition_stream_lease(state, {
-        .kind = StreamLeaseEventKind::bootstrap_completed,
-        .has_tree = true,
-        .tree = first_tree,
-    }).next_state;
-    expect(state.phase == StreamLeasePhase::pending_root_bind && state.has_pending_tree,
-        "Arm-S bootstrap completion did not retain its unpublished tree");
-    const auto bound = transition_stream_lease(state, {
-        .kind = StreamLeaseEventKind::bind_selected_root,
-        .has_tree = true,
-        .tree = first_tree,
-    });
-    state = bound.next_state;
-    expect(state.phase == StreamLeasePhase::steady && state.has_prior_tree
-            && bound.tree_action == NextTreeAction::publish,
-        "Arm-S root bind did not publish exactly one prior-tree lease");
-
-    const auto correction_tree = tree(2U, 333U);
-    state = transition_stream_lease(state, {
-        .kind = StreamLeaseEventKind::verification_mismatch,
-        .has_tree = true,
-        .tree = correction_tree,
-    }).next_state;
-    expect(state.phase == StreamLeasePhase::pending_correction_bind,
-        "Arm-S mismatch did not retain the main-row correction tree");
-    const auto corrected = transition_stream_lease(state, {
-        .kind = StreamLeaseEventKind::bind_correction,
-        .has_tree = true,
-        .tree = correction_tree,
-    });
-    state = corrected.next_state;
-    expect(state.phase == StreamLeasePhase::steady
-            && state.prior_tree.lease_identity == correction_tree.lease_identity
-            && state.prior_tree.graph_identity == correction_tree.graph_identity
-            && corrected.tree_action == NextTreeAction::publish,
-        "Arm-S correction bind published the wrong tree");
-
-    const auto rebased_tree = tree(3U, 444U);
-    const auto rebasing = transition_stream_lease(state, {
-        .kind = StreamLeaseEventKind::begin_rebase,
-        .has_tree = true,
-        .tree = rebased_tree,
-    });
-    expect(rebasing.next_state.phase == StreamLeasePhase::pending_root_bind
-            && rebasing.tree_action == NextTreeAction::rebase,
-        "Arm-S rebase did not invalidate the old prior tree");
-
-    const auto poisoned = transition_stream_lease(state, {.kind = StreamLeaseEventKind::poison});
-    expect(poisoned.next_state.phase == StreamLeasePhase::poisoned
-            && !poisoned.next_state.has_prior_tree,
-        "Arm-S poison retained reusable state");
-    expect_rejected<std::logic_error>([&] {
-        static_cast<void>(transition_stream_lease(
-            poisoned.next_state, {.kind = StreamLeaseEventKind::begin_bootstrap}
-        ));
-    }, "poisoned Arm-S state accepted ordinary reuse");
-    const auto reset = transition_stream_lease(
-        poisoned.next_state, {.kind = StreamLeaseEventKind::authenticated_reset}
-    );
-    expect(reset.next_state.phase == StreamLeasePhase::unavailable,
-        "authenticated Arm-S reset did not clear poison");
-
-    expect_rejected<std::invalid_argument>([&] {
-        auto stale = tree(9U);
-        stale.session_epoch = 2U;
-        static_cast<void>(transition_stream_lease(state, {
-            .kind = StreamLeaseEventKind::publish_next_tree,
-            .has_tree = true,
-            .tree = stale,
-        }));
-    }, "stale Arm-S session lease was accepted");
-    expect_rejected<std::logic_error>([&] {
-        static_cast<void>(transition_stream_lease(
-            state, {.kind = StreamLeaseEventKind::drain_completed}
-        ));
-    }, "illegal Arm-S steady-to-unavailable transition was accepted");
-
-    const auto full_tree = tree(4U, 555U);
-    auto full_pending = transition_stream_lease(state, {
-        .kind = StreamLeaseEventKind::verification_full_match,
-        .has_tree = true,
-        .tree = full_tree,
-    }).next_state;
-    expect(full_pending.phase == StreamLeasePhase::pending_correction_bind,
-        "Arm-S full match did not retain PendingTargetCandidateWithTree state");
-    const auto endpoint = transition_stream_lease(
-        full_pending, {.kind = StreamLeaseEventKind::endpoint}
-    );
-    expect(endpoint.next_state.phase == StreamLeasePhase::draining
-            && endpoint.tree_action == NextTreeAction::discard,
-        "Arm-S endpoint published unused future-tree work");
-    const auto drained = transition_stream_lease(
-        endpoint.next_state, {.kind = StreamLeaseEventKind::drain_completed}
-    );
-    expect(drained.next_state.phase == StreamLeasePhase::unavailable,
-        "Arm-S drain/shutdown did not reach unavailable state");
-
-    expect_rejected<std::logic_error>([&] {
-        static_cast<void>(transition_stream_lease(
-            state, {.kind = StreamLeaseEventKind::verification_mismatch}
-        ));
-    }, "Arm-S mismatch without an attached main-row tree was accepted");
-}
-
 void test_target_integrated_callbacks_discard_unpublished_tree_path() {
     BoundedSpeculativeController controller;
     const auto graph = make_forest_graph();
@@ -1283,97 +1014,6 @@ void test_target_integrated_callbacks_discard_unpublished_tree_path() {
         for (std::size_t event = 0; event < outcome.trace_count; ++event) {
             expect(outcome.trace[event].kind != ControllerTraceEventKind::draft_execution,
                 "target-integrated route was charged an external drafter call");
-        }
-    }
-}
-
-void test_arm_s_raw_pruned_shapes_and_ticket_slices_are_exhaustive() {
-    const std::array<std::array<std::uint32_t, 3>, 7> cells {{
-        {{4U, 3U, 121U}},
-        {{3U, 3U, 40U}},
-        {{4U, 1U, 5U}},
-        {{4U, 2U, 31U}},
-        {{7U, 1U, 8U}},
-        {{15U, 1U, 16U}},
-        {{23U, 1U, 24U}},
-    }};
-    for (const auto& cell : cells) {
-        const auto gamma = cell[0];
-        const auto branching = cell[1];
-        const auto raw_nodes = cell[2];
-        const auto table = generate_registered_stream_transition_table(gamma, branching);
-        expect(table.count == raw_nodes + 1U,
-            "Arm-S survivor transition table omitted a legal pruned count");
-        for (std::uint32_t survivors = 0; survivors <= raw_nodes; ++survivors) {
-            const auto& shape = table.values[survivors];
-            expect(shape.raw_prior_node_count == raw_nodes
-                    && shape.survivor_count == survivors
-                    && shape.upper_row_count == survivors * (gamma + 1U)
-                    && shape.next_node_count == survivors * raw_nodes
-                    && shape.raw_child_count == survivors * gamma * branching,
-                "Arm-S raw/pruned/upper transition shape mismatch");
-        }
-    }
-    const auto primary = make_stream_transition_shape(4U, 3U, 121U);
-    expect(primary.raw_prior_node_count == 121U
-            && primary.upper_row_count == 605U
-            && primary.next_node_count == 14'641U
-            && primary.raw_child_count == 1'452U,
-        "paper-primary gamma4/k3 Arm-S geometry mismatch");
-    expect_rejected<std::overflow_error>([] {
-        static_cast<void>(make_stream_transition_shape(23U, 8U, 1U));
-    }, "impossible exponential Arm-S cross was silently clipped");
-    expect_rejected<std::invalid_argument>([] {
-        static_cast<void>(generate_registered_stream_transition_table(8U, 2U));
-    }, "unregistered Arm-S Cartesian geometry was generated");
-
-    constexpr std::uint32_t gamma = 4U;
-    const auto map = generate_stream_anchor_ticket_map(gamma);
-    expect(map.count == gamma + 1U && map.pool_size == 2U * gamma + 1U,
-        "Arm-S anchor ticket pool size mismatch");
-    for (std::uint32_t anchor = 0; anchor <= gamma; ++anchor) {
-        expect(map.values[anchor].accepted_depth == anchor
-                && map.values[anchor].first_ticket_offset == anchor
-                && map.values[anchor].ticket_count == gamma + 1U
-                && map.values[anchor].first_ticket_offset
-                    + map.values[anchor].ticket_count <= map.pool_size,
-            "Arm-S anchor ticket slice overlaps the wrong target offsets");
-    }
-
-    const auto options = TokenSamplerOptions {
-        .temperature = 0.8F, .top_k = 4U, .top_p = 1.0F, .min_p = 0.0F,
-        .repetition_penalty = 1.0F, .seed = 91U,
-    };
-    TokenSampler sampler(options);
-    const std::uint32_t origin = 77U;
-    sampler.observe_tokens(std::span<const std::uint32_t>(&origin, 1U));
-    const auto pool = sampler.preview_tickets(map.pool_size);
-    std::array<SamplerCheckpoint, gamma + 1U> anchors {};
-    anchors[0] = sampler.checkpoint();
-    auto prefix = sampler.fork();
-    const std::array<TokenLogit, 4> candidates {{
-        {1U, 1.0F}, {2U, 0.4F}, {3U, -0.2F}, {4U, -1.0F},
-    }};
-    for (std::uint32_t depth = 0; depth < gamma; ++depth) {
-        const auto token = prefix.sample_with_ticket(pool.at(depth), candidates);
-        prefix.observe_tokens(std::span<const std::uint32_t>(&token, 1U));
-        anchors[depth + 1U] = prefix.checkpoint();
-    }
-    for (std::uint32_t anchor = 0; anchor <= gamma; ++anchor) {
-        auto ticketed = sampler.fork(anchors[anchor]);
-        auto direct = sampler;
-        direct.adopt_checkpoint(anchors[anchor]);
-        const auto slice = map.values[anchor];
-        for (std::uint32_t offset = 0; offset < slice.ticket_count; ++offset) {
-            const auto absolute = slice.first_ticket_offset + offset;
-            const auto ticketed_token = ticketed.sample_with_ticket(pool.at(absolute), candidates);
-            const auto direct_token = direct.sample(candidates);
-            expect(ticketed_token == direct_token,
-                "Arm-S anchor slice changed a future target draw");
-            ticketed.observe_tokens(std::span<const std::uint32_t>(&ticketed_token, 1U));
-            direct.observe_tokens(std::span<const std::uint32_t>(&direct_token, 1U));
-            expect(ticketed.checkpoint().same_state(direct.checkpoint()),
-                "Arm-S anchor slice diverged from its eventual direct checkpoint");
         }
     }
 }
@@ -1426,56 +1066,6 @@ void test_controller_matches_independent_ordinary_token_callback_and_cache_loop(
                 "controller final sampler state differs from ordinary target decoding");
         }
     }
-}
-
-void test_corrected_trajectory_replay_charges_only_incurred_events() {
-    BoundedSpeculativeController controller;
-    const auto graph = make_chain_graph(3U);
-    const std::array<std::uint32_t, 2> target {101U, 900U};
-    const auto outcome = controller.run(chain_scenario(graph, target, single_tile_schedule(3U)));
-
-    MeasuredConditionalCostTable costs;
-    for (std::size_t event = 0; event < outcome.trace_count; ++event) {
-        const auto key = outcome.trace[event].cost;
-        if (key.kind == ControllerCostKind::none) continue;
-        bool exists = false;
-        for (std::size_t index = 0; index < costs.count; ++index) {
-            exists = exists || costs.values[index].key == key;
-        }
-        if (!exists) {
-            costs.values[costs.count++] = MeasuredConditionalCost {
-                .key = key,
-                .duration_ns = 10.0 + static_cast<double>(static_cast<std::uint8_t>(key.kind)),
-            };
-        }
-    }
-    double expected = 0.0;
-    std::uint32_t expected_events = 0;
-    for (std::size_t event = 0; event < outcome.trace_count; ++event) {
-        if (outcome.trace[event].cost.kind == ControllerCostKind::none) continue;
-        for (std::size_t index = 0; index < costs.count; ++index) {
-            if (costs.values[index].key == outcome.trace[event].cost) {
-                expected += costs.values[index].duration_ns;
-                ++expected_events;
-                break;
-            }
-        }
-    }
-    const auto replay = replay_corrected_trajectory_cost(outcome, costs);
-    expect(replay.duration_ns == expected && replay.charged_event_count == expected_events,
-        "corrected replay did not charge the realized conditional trajectory");
-
-    auto missing = costs;
-    --missing.count;
-    expect_rejected<std::invalid_argument>([&] {
-        static_cast<void>(replay_corrected_trajectory_cost(outcome, missing));
-    }, "trajectory replay accepted a missing measured cost");
-
-    expect(std::abs(diagnostic_iid_expected_tokens(0.5, 3U) - 1.875) < 1.0e-12,
-        "iid diagnostic equation mismatch");
-    expect_rejected<std::invalid_argument>([] {
-        static_cast<void>(diagnostic_iid_expected_tokens(1.1, 3U));
-    }, "iid diagnostic accepted an invalid probability");
 }
 
 void test_live_callback_pause_matches_scripted_controller() {
@@ -1669,21 +1259,14 @@ const TestCase kTests[] = {
         test_repeated_root_beams_preserve_prefix_candidates},
     {"source-shaped ReDrafter L5 and EAGLE3 depth8 are exact",
         test_source_shaped_redrafter_l5_and_eagle3_depth8},
-    {"target verifier source shape registry is complete and typed",
-        test_target_verifier_source_shape_registry_is_complete_and_typed},
     {"routes and proposal randomness remain distinct",
         test_routes_and_proposal_randomness_remain_distinct},
     {"proposal graph schedule and capacity validation fail closed",
         test_graph_schedule_and_capacity_validation_fail_closed},
-    {"Arm-S lease state machine and poisoning", test_arm_s_lease_state_machine_and_poisoning},
     {"target-integrated callbacks discard unpublished tree path",
         test_target_integrated_callbacks_discard_unpublished_tree_path},
-    {"Arm-S raw pruned shapes and ticket slices are exhaustive",
-        test_arm_s_raw_pruned_shapes_and_ticket_slices_are_exhaustive},
     {"controller matches independent ordinary token callback and cache loop",
         test_controller_matches_independent_ordinary_token_callback_and_cache_loop},
-    {"corrected trajectory replay charges only incurred events",
-        test_corrected_trajectory_replay_charges_only_incurred_events},
 };
 
 }  // namespace

@@ -1,8 +1,12 @@
 #pragma once
 
-#include "local_gguf_engine/engine/vicuna_draft.hpp"
+#include "local_gguf_engine/engine/standalone_draft_types.hpp"
+#include "local_gguf_engine/engine/sampling.hpp"
+#include "local_gguf_engine/engine/target_verifier.hpp"
 
 namespace local_gguf_engine::engine {
+
+class StandaloneDraftArtifact;
 
 struct Gemma3DraftProposal {
     // The final token is deliberately pending, not yet forwarded through the
@@ -13,7 +17,7 @@ struct Gemma3DraftProposal {
     std::uint32_t start_position = 0;
     std::uint32_t materialized_end = 0;
     std::uint64_t epoch = 0;
-    VicunaDraftExecutionStats execution;
+    StandaloneDraftExecutionStats execution;
 };
 
 // Complete Q8_0 Gemma3-270M transformer, with an independent native timeline.
@@ -46,17 +50,17 @@ public:
     [[nodiscard]] bool transaction_active() const noexcept;
     void warm_up();
     void reset() noexcept;
-    [[nodiscard]] VicunaDraftExecutionStats begin_transaction();
+    [[nodiscard]] StandaloneDraftExecutionStats begin_transaction();
     // Finalizes and closes the transaction. Prefix includes a possible final
     // pending token: its K/V is materialized only when the next input needs it.
-    [[nodiscard]] VicunaDraftExecutionStats commit_prefix(std::uint32_t position);
+    [[nodiscard]] StandaloneDraftExecutionStats commit_prefix(std::uint32_t position);
     void abort_transaction() noexcept;
     [[nodiscard]] bool can_truncate(std::uint32_t position) const noexcept;
     void truncate(std::uint32_t position);
-    [[nodiscard]] VicunaDraftExecutionStats append(std::span<const std::uint32_t> tokens);
+    [[nodiscard]] StandaloneDraftExecutionStats append(std::span<const std::uint32_t> tokens);
     // Restores a saved, already-selected native emission after replaying its
     // materialized prefix. This is not a proposal or a sampling operation.
-    [[nodiscard]] VicunaDraftExecutionStats restore_pending_token(std::uint32_t token);
+    [[nodiscard]] StandaloneDraftExecutionStats restore_pending_token(std::uint32_t token);
     [[nodiscard]] Gemma3DraftProposal propose(std::uint32_t target_root,
         std::span<const std::uint32_t> proposal_words, const TokenSamplerOptions& options,
         const SamplerHistorySnapshot& history);
@@ -64,7 +68,7 @@ public:
     [[nodiscard]] GatheredDraftTokenDistribution gather(std::uint32_t depth,
         const PreparedTokenDistribution& target);
     [[nodiscard]] std::uint64_t probability_readback_bytes() const noexcept;
-    [[nodiscard]] VicunaDraftExecutionStats read_logits(std::span<float> output);
+    [[nodiscard]] StandaloneDraftExecutionStats read_logits(std::span<float> output);
     // Logical-order diagnostic, limited to materialized rows. Local rows older
     // than their window are not present and are rejected, never fabricated.
     void read_cache(std::uint32_t layer, std::uint32_t first_position,

@@ -64,7 +64,7 @@ struct EngineTensorView {
 
 inline constexpr std::uint32_t engine_model_payload_receipt_version = 1U;
 
-// Computed only for prepared learned-mode plans. Ordinary target-only loading
+// Computed for authenticated speculative plans. Ordinary target-only loading
 // deliberately avoids hashing a multi-gigabyte GGUF on every session start.
 struct EngineModelPayloadReceipt {
     std::uint32_t version = engine_model_payload_receipt_version;
@@ -75,6 +75,17 @@ struct EngineModelPayloadReceipt {
     runtime::Sha256Digest source_tensors;
 
     constexpr bool operator==(const EngineModelPayloadReceipt&) const = default;
+};
+
+// Identity of the actual uploaded target weights, including any prepared
+// output-head conversion. This is separate from the source GGUF identity.
+struct ResidentTargetPayloadReceipt {
+    std::uint32_t version = 1U;
+    std::uint32_t allocation_count = 0U;
+    std::uint64_t byte_count = 0U;
+    runtime::Sha256Digest bytes;
+
+    constexpr bool operator==(const ResidentTargetPayloadReceipt&) const = default;
 };
 
 class EngineModel final {
@@ -102,8 +113,8 @@ private:
     Gemma2ModelConfig gemma2_config_;
     std::vector<EngineTensorView> tensor_views_;
     std::optional<EngineModelPayloadReceipt> payload_receipt_;
-    // Separate from the frozen artifact receipt: legacy trained artifacts retain
-    // their identities, while standalone plans bind the actual source tokenizer.
+    // Standalone plans bind the actual source tokenizer independently of the
+    // target tensor and metadata receipt.
     std::optional<runtime::Sha256Digest> tokenizer_identity_;
 };
 

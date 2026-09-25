@@ -2,11 +2,15 @@
 
 #include "local_gguf_engine/engine/chain_chat.hpp"
 #include "local_gguf_engine/engine/standalone_draft_artifact.hpp"
-#include "local_gguf_engine/engine/vicuna_draft.hpp"
+#include "local_gguf_engine/engine/standalone_draft_types.hpp"
+#include "local_gguf_engine/engine/sampling.hpp"
+#include "local_gguf_engine/engine/target_verifier.hpp"
 
 #include <optional>
 
 namespace local_gguf_engine::engine {
+
+class StandaloneDraftArtifact;
 
 class Gemma3DraftPlan;
 
@@ -37,7 +41,7 @@ struct StandaloneExecutionOptions {
 };
 
 struct StandaloneCycleResult : ChainCycleResult {
-    VicunaDraftExecutionStats draft;
+    StandaloneDraftExecutionStats draft;
 };
 
 struct StandaloneChatCheckpointState;
@@ -77,7 +81,7 @@ public:
     [[nodiscard]] bool poisoned() const noexcept;
     [[nodiscard]] std::uint32_t target_position() const noexcept;
     [[nodiscard]] std::uint64_t rebuild_duration_ns() const noexcept;
-    [[nodiscard]] VicunaDraftExecutionStats execution_stats() const noexcept;
+    [[nodiscard]] StandaloneDraftExecutionStats execution_stats() const noexcept;
     void reset();
     void warm_up(Gemma2MetalModelPlan& target, const TokenSampler& sampler);
     // Rebased prompts discard the old interpretation only after complete
@@ -100,7 +104,7 @@ public:
     StandaloneChatPlan(std::span<const tensor::TensorView> full_draft_tensors,
         const tokenizer::Tokenizer& draft_tokenizer, const tokenizer::Tokenizer& target_tokenizer,
         const Gemma2MetalModelPlan& target, StandaloneExecutionOptions execution);
-    [[nodiscard]] const VicunaDraftPlan& draft_plan_for_testing() const noexcept;
+    [[nodiscard]] const Gemma3DraftPlan& draft_plan_for_testing() const noexcept;
     [[nodiscard]] const Gemma3DraftPlan* gemma3_draft_plan_for_testing() const noexcept;
 #endif
 private:

@@ -7,7 +7,6 @@
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/prepared_gemma2_plan.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
-#include "local_gguf_engine/engine/speculative_artifact.hpp"
 #include "local_gguf_engine/engine/retrieval_proposer.hpp"
 #include "local_gguf_engine/engine/target_verifier.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor.hpp"
@@ -5008,55 +5007,34 @@ void test_prepared_gemma2_plan_authenticates_and_streams_all_prefill_features_wh
     std::vector<std::uint8_t> artifact_payload(
         projection.bytes().begin(), projection.bytes().end()
     );
-    engine::SpeculativeArtifactDescriptor descriptor;
-    descriptor.artifact_id = 77U;
-    descriptor.target.model = *model.payload_receipt();
-    descriptor.target.resident = resident;
-    descriptor.target.config = model.gemma2_config();
-    descriptor.target.output_head_policy = static_cast<std::uint32_t>(
-        Gemma2OutputHeadPolicy::q8_0
-    );
-    descriptor.feature_bank_count = 1U;
-    descriptor.feature_banks[0].bank_id = 1U;
-    descriptor.feature_banks[0].tap_count = 1U;
-    descriptor.feature_banks[0].taps[0] = {
-        .stage = engine::FeatureTapStage::layer_residual,
-        .layer_index = 1U,
-    };
-    descriptor.feature_banks[0].child_count = 1U;
-    descriptor.feature_banks[0].children[0] = {
-        .child_id = 9U,
-        .output_width = 4U,
-        .weight_dtype = DType::f16,
+    engine::FeatureBankSpec bank;
+    bank.bank_id = 1U;
+    bank.tap_count = 1U;
+    bank.taps[0] = {.stage = engine::FeatureTapStage::layer_residual, .layer_index = 1U};
+    bank.child_count = 1U;
+    bank.children[0] = {
+        .child_id = 9U, .output_width = 4U, .weight_dtype = DType::f16,
         .schedule = engine::FeatureProjectionSchedule::eager,
-        .payload_offset = 0U,
-        .payload_byte_count = artifact_payload.size(),
+        .payload_offset = 0U, .payload_byte_count = artifact_payload.size(),
+        .payload_digest = local_gguf_engine::runtime::sha256(artifact_payload),
     };
-    descriptor.draft_cache = {
-        .layer_count = 2U,
-        .stream_count = 1U,
-        .key_width = 4U,
-        .value_width = 4U,
-        .maximum_depth = 23U,
-        .maximum_active_width = 64U,
-        .linear_row_capacity = 23U,
-        .tree_row_capacity = 1'025U,
+    auto features = engine::create_feature_sink_set(std::span(&bank, 1U), artifact_payload,
+        model.gemma2_config().embedding_length, model.gemma2_config().block_count,
+        model.gemma2_config().context_length, 1'025U);
+    auto capture = engine::prepare_gemma2_target_only_plan(model, Gemma2OutputHeadPolicy::q8_0);
+    auto baseline = engine::prepare_gemma2_target_only_plan(model, Gemma2OutputHeadPolicy::q8_0);
+    expect(capture.mode() == engine::PreparedGemma2Mode::target_only
+        && capture.model_receipt() == model.payload_receipt()
+        && capture.resident_receipt() == resident && !capture.artifact_digest(),
+        "prepared target identity differs from its authenticated source/residency");
+    std::uint64_t execution_epoch = 0U;
+    const auto bind_features = [&] {
+        return engine::FeatureSinkBinding {
+            .sinks = &features,
+            .destination = engine::FeatureCaptureDestination::canonical,
+            .execution_epoch = ++execution_epoch,
+        };
     };
-    auto artifact = engine::load_speculative_artifact(
-        engine::encode_fixture_speculative_artifact(descriptor, artifact_payload)
-    );
-    auto learned = engine::prepare_gemma2_fixture_learned_plan(
-        model, std::move(artifact), Gemma2OutputHeadPolicy::q8_0
-    );
-    auto baseline = engine::prepare_gemma2_target_only_plan(
-        model, Gemma2OutputHeadPolicy::q8_0
-    );
-    expect(learned.mode() == engine::PreparedGemma2Mode::fixture_learned
-        && learned.feature_sinks() != nullptr && learned.draft_cache() != nullptr,
-        "learned prepared plan omitted an authenticated component");
-    expect(baseline.mode() == engine::PreparedGemma2Mode::target_only
-        && baseline.feature_sinks() == nullptr && baseline.draft_cache() == nullptr,
-        "target-only prepared plan unexpectedly requires an artifact");
 
     std::vector<std::uint32_t> tokens(130U);
     for (std::size_t index = 0U; index < tokens.size(); ++index) {
@@ -5069,20 +5047,20 @@ void test_prepared_gemma2_plan_authenticates_and_streams_all_prefill_features_wh
         baseline.target(), tokens, 0U, scale
     );
     const auto baseline_logits = copy_tensor_from_backend(baseline_result.logits);
-    auto binding = learned.canonical_feature_binding();
-    const auto learned_result = run_gemma2_metal_resident_prefill(
-        learned.target(), tokens, 0U, scale, std::nullopt, binding
+    auto binding = bind_features();
+    const auto captured_result = run_gemma2_metal_resident_prefill(
+        capture.target(), tokens, 0U, scale, std::nullopt, binding
     );
-    const auto learned_logits = copy_tensor_from_backend(learned_result.logits);
+    const auto captured_logits = copy_tensor_from_backend(captured_result.logits);
     expect(std::equal(
         baseline_logits.bytes().begin(), baseline_logits.bytes().end(),
-        learned_logits.bytes().begin()
+        captured_logits.bytes().begin()
     ), "feature capture changed authoritative prefill logits");
-    expect(learned.feature_sinks()->canonical_frontier() == 130U
-        && learned.feature_sinks()->target_state_view(9U, 0U).has_value()
-        && learned.feature_sinks()->target_state_view(9U, 127U).has_value()
-        && learned.feature_sinks()->target_state_view(9U, 129U).has_value(),
-        "prepared plan did not capture every multi-command prefill row");
+    expect(features.canonical_frontier() == 130U
+        && features.target_state_view(9U, 0U).has_value()
+        && features.target_state_view(9U, 127U).has_value()
+        && features.target_state_view(9U, 129U).has_value(),
+        "feature sink did not capture every multi-command prefill row");
 
     constexpr auto generated_token = std::uint32_t {2U};
     const auto baseline_decode = run_gemma2_metal_resident_decode_step(
@@ -5090,22 +5068,22 @@ void test_prepared_gemma2_plan_authenticates_and_streams_all_prefill_features_wh
         create_gemma2_metal_decode_schedule(baseline.target(), 130U),
         generated_token, scale
     );
-    const auto learned_decode = run_gemma2_metal_resident_decode_step(
-        learned.target(),
-        create_gemma2_metal_decode_schedule(learned.target(), 130U),
+    const auto captured_decode = run_gemma2_metal_resident_decode_step(
+        capture.target(),
+        create_gemma2_metal_decode_schedule(capture.target(), 130U),
         generated_token, scale, std::nullopt,
         Gemma2MetalDecodeOutputMode::logits,
-        learned.canonical_feature_binding()
+        bind_features()
     );
     const auto baseline_decode_logits = copy_tensor_from_backend(baseline_decode.logits);
-    const auto learned_decode_logits = copy_tensor_from_backend(learned_decode.logits);
+    const auto captured_decode_logits = copy_tensor_from_backend(captured_decode.logits);
     expect(std::equal(
         baseline_decode_logits.bytes().begin(), baseline_decode_logits.bytes().end(),
-        learned_decode_logits.bytes().begin()
+        captured_decode_logits.bytes().begin()
     ), "feature capture changed authoritative ordinary-decode logits");
-    expect(learned.feature_sinks()->canonical_frontier() == 131U
-        && learned.feature_sinks()->target_state_view(9U, 130U).has_value(),
-        "prepared plan did not capture an ordinary generated row");
+    expect(features.canonical_frontier() == 131U
+        && features.target_state_view(9U, 130U).has_value(),
+        "feature sink did not capture an ordinary generated row");
 
     constexpr auto endpoint_token = std::uint32_t {3U};
     const auto baseline_endpoint = run_gemma2_metal_resident_decode_step(
@@ -5114,56 +5092,54 @@ void test_prepared_gemma2_plan_authenticates_and_streams_all_prefill_features_wh
         endpoint_token, scale, std::nullopt,
         Gemma2MetalDecodeOutputMode::kv_only
     );
-    const auto learned_endpoint = run_gemma2_metal_resident_decode_step(
-        learned.target(),
-        create_gemma2_metal_decode_schedule(learned.target(), 131U),
+    const auto captured_endpoint = run_gemma2_metal_resident_decode_step(
+        capture.target(),
+        create_gemma2_metal_decode_schedule(capture.target(), 131U),
         endpoint_token, scale, std::nullopt,
         Gemma2MetalDecodeOutputMode::kv_only,
-        learned.canonical_feature_binding()
+        bind_features()
     );
-    expect(!baseline_endpoint.produced_logits && !learned_endpoint.produced_logits
-        && learned.feature_sinks()->canonical_frontier() == 132U
-        && learned.feature_sinks()->target_state_view(9U, 131U).has_value(),
-        "prepared plan did not capture the output-head-elided endpoint row");
-    for (std::size_t layer = 0U; layer < learned.target().kv_cache().size(); ++layer) {
+    expect(!baseline_endpoint.produced_logits && !captured_endpoint.produced_logits
+        && features.canonical_frontier() == 132U
+        && features.target_state_view(9U, 131U).has_value(),
+        "feature sink did not capture the output-head-elided endpoint row");
+    for (std::size_t layer = 0U; layer < capture.target().kv_cache().size(); ++layer) {
         const auto baseline_key = copy_tensor_from_backend(
             baseline.target().kv_cache()[layer].key
         );
-        const auto learned_key = copy_tensor_from_backend(
-            learned.target().kv_cache()[layer].key
+        const auto captured_key = copy_tensor_from_backend(
+            capture.target().kv_cache()[layer].key
         );
         const auto baseline_value = copy_tensor_from_backend(
             baseline.target().kv_cache()[layer].value
         );
-        const auto learned_value = copy_tensor_from_backend(
-            learned.target().kv_cache()[layer].value
+        const auto captured_value = copy_tensor_from_backend(
+            capture.target().kv_cache()[layer].value
         );
         expect(std::equal(
             baseline_key.bytes().begin(), baseline_key.bytes().end(),
-            learned_key.bytes().begin()
+            captured_key.bytes().begin()
         ), "feature capture changed endpoint key-cache bytes");
         expect(std::equal(
             baseline_value.bytes().begin(), baseline_value.bytes().end(),
-            learned_value.bytes().begin()
+            captured_value.bytes().begin()
         ), "feature capture changed endpoint value-cache bytes");
     }
 
-    auto incompatible_descriptor = descriptor;
-    incompatible_descriptor.target.model.whole_gguf.bytes[0] ^= 1U;
-    auto incompatible = engine::load_speculative_artifact(
-        engine::encode_fixture_speculative_artifact(
-            incompatible_descriptor, artifact_payload
-        )
-    );
-    auto rejected = false;
+    auto corrupted_payload = artifact_payload;
+    corrupted_payload[0] ^= 1U;
+    bool rejected = false;
     try {
-        static_cast<void>(engine::prepare_gemma2_fixture_learned_plan(
-            model, std::move(incompatible), Gemma2OutputHeadPolicy::q8_0
-        ));
-    } catch (const engine::SpeculativeArtifactError& error) {
-        rejected = error.code() == engine::SpeculativeArtifactErrorCode::incompatible_target;
-    }
-    expect(rejected, "prepared plan accepted a mismatched verified GGUF identity");
+        static_cast<void>(engine::create_feature_sink_set(std::span(&bank, 1U), corrupted_payload,
+            model.gemma2_config().embedding_length, model.gemma2_config().block_count,
+            model.gemma2_config().context_length, 1'025U));
+    } catch (const std::invalid_argument&) { rejected = true; }
+    expect(rejected, "feature projection accepted bytes that differ from its digest");
+    capture.poison();
+    rejected = false;
+    try { capture.reset_draft_state(); }
+    catch (const std::logic_error&) { rejected = true; }
+    expect(rejected && !capture.ready(), "poisoned prepared target was reset into a usable state");
 }
 
 void test_feature_prefill_failure_at_every_chunk_is_exact_or_poisoned_when_available() {

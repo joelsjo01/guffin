@@ -24,10 +24,10 @@ from pathlib import Path
 import sys
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-from training.speculation.gguf import GGUFError, GGUFFile
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+from reference_gguf import GGUFError, GGUFFile
 
 MODEL_SHA256 = "0ef57d2c838458a1952664260dcba38e5bdda37494f3af732f06e4add24068e3"
 LLAMA_COMMIT = "d48a56effbba99944a677938d4beb63a0065ecdf"

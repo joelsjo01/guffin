@@ -1,6 +1,4 @@
 #include "engine_model_tests.hpp"
-#include "learned_recurrent_tests.hpp"
-#include "draft_vocabulary_tests.hpp"
 #include "feature_bank_tests.hpp"
 #include "quick_benchmark_tests.hpp"
 #include "gemma2_metal_plan_tests.hpp"
@@ -11,7 +9,6 @@
 #include "gguf_tensor_bridge_tests.hpp"
 #include "sampling_tests.hpp"
 #include "speculative_controller_tests.hpp"
-#include "speculation_artifact_tests.hpp"
 #include "retrieval_proposer_tests.hpp"
 #include "tensor_backend_tests.hpp"
 #include "tensor_tests.hpp"
@@ -27,7 +24,6 @@ namespace local_gguf_engine::tests {
 std::span<const TestCase> lossless_sampling_test_cases();
 std::span<const TestCase> standalone_draft_artifact_test_cases();
 std::span<const TestCase> standalone_chat_test_cases();
-std::span<const TestCase> vicuna_draft_test_cases();
 std::span<const TestCase> gemma3_draft_test_cases();
 }
 
@@ -62,18 +58,8 @@ int main() {
     }
     for (const auto& test : local_gguf_engine::tests::standalone_draft_artifact_test_cases()) run_test(test);
     for (const auto& test : local_gguf_engine::tests::standalone_chat_test_cases()) run_test(test);
-    for (const auto& test : local_gguf_engine::tests::vicuna_draft_test_cases()) run_test(test);
     for (const auto& test : local_gguf_engine::tests::gemma3_draft_test_cases()) run_test(test);
     for (const auto& test : local_gguf_engine::tests::speculative_controller_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::speculation_artifact_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::draft_vocabulary_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::learned_recurrent_test_cases()) {
         run_test(test);
     }
     for (const auto& test : local_gguf_engine::tests::retrieval_proposer_test_cases()) {

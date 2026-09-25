@@ -8,7 +8,6 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
-#include <variant>
 
 namespace local_gguf_engine::engine {
 TokenSamplerOptions resolve_standalone_draft_sampler_options(const TokenSamplerOptions& target,
@@ -57,7 +56,6 @@ StandaloneChatCheckpoint& StandaloneChatCheckpoint::operator=(StandaloneChatChec
 }
 namespace {
 constexpr std::size_t absent = std::numeric_limits<std::size_t>::max();
-constexpr std::uint32_t retained_draft_suffix = 1024;
 std::uint64_t now_ns() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -78,7 +76,7 @@ std::vector<std::int32_t> signed_mapping(std::span<const std::uint32_t> mapping)
     }
     return result;
 }
-void add_stats(VicunaDraftExecutionStats& total, const VicunaDraftExecutionStats& value) {
+void add_stats(StandaloneDraftExecutionStats& total, const StandaloneDraftExecutionStats& value) {
 #define ADD(field) if (value.field > std::numeric_limits<decltype(total.field)>::max() - total.field) \
     throw std::overflow_error("standalone draft metric overflow"); total.field += value.field
     ADD(gpu_duration_ns); ADD(wall_duration_ns); ADD(readback_bytes); ADD(uploaded_bytes);
@@ -86,8 +84,8 @@ void add_stats(VicunaDraftExecutionStats& total, const VicunaDraftExecutionStats
     ADD(memory_barrier_count);
 #undef ADD
 }
-VicunaDraftExecutionStats difference(const VicunaDraftExecutionStats& end,
-    const VicunaDraftExecutionStats& start) {
+StandaloneDraftExecutionStats difference(const StandaloneDraftExecutionStats& end,
+    const StandaloneDraftExecutionStats& start) {
     auto result = end;
 #define SUB(field) result.field -= start.field
     SUB(gpu_duration_ns); SUB(wall_duration_ns); SUB(readback_bytes); SUB(uploaded_bytes);
@@ -96,93 +94,6 @@ VicunaDraftExecutionStats difference(const VicunaDraftExecutionStats& end,
 #undef SUB
     return result;
 }
-
-struct DraftChain {
-    std::span<const std::uint32_t> draft_tokens, target_tokens;
-    std::uint64_t epoch;
-    VicunaDraftExecutionStats execution;
-};
-
-// The two implemented runners share proposal-law and chat ownership, not
-// cache layout. In particular, a Gemma ring cannot inherit Vicuna's rewind.
-class StandaloneDraftRunner {
-    using Storage = std::variant<VicunaDraftPlan, Gemma3DraftPlan>;
-    Storage plan_;
-    static Storage create(const StandaloneDraftArtifact& source,
-        std::span<const std::int32_t> mapping, std::uint32_t vocabulary,
-        std::uint32_t horizon, std::uint32_t transaction_capacity) {
-        switch (source.kind()) {
-        case StandaloneDraftKind::vicuna_68m_f16:
-            return Storage(std::in_place_type<VicunaDraftPlan>, source, mapping, vocabulary, horizon);
-        case StandaloneDraftKind::gemma3_270m_q8:
-            return Storage(std::in_place_type<Gemma3DraftPlan>, source, mapping, vocabulary,
-                horizon, transaction_capacity);
-        }
-        throw std::invalid_argument("unsupported authenticated standalone draft kind");
-    }
-public:
-    StandaloneDraftRunner(const StandaloneDraftArtifact& source,
-        std::span<const std::int32_t> mapping, std::uint32_t vocabulary,
-        std::uint32_t horizon, std::uint32_t transaction_capacity)
-        : plan_(create(source, mapping, vocabulary, horizon, transaction_capacity)) {}
-#if defined(LOCAL_GGUF_ENGINE_TESTING)
-    StandaloneDraftRunner(std::span<const tensor::TensorView> tensors,
-        std::span<const std::int32_t> mapping, std::uint32_t vocabulary, std::uint32_t horizon)
-        : plan_(std::in_place_type<VicunaDraftPlan>, tensors, mapping, vocabulary, horizon) {}
-    const VicunaDraftPlan& vicuna_for_testing() const noexcept { return std::get<VicunaDraftPlan>(plan_); }
-    const Gemma3DraftPlan* gemma3_for_testing() const noexcept { return std::get_if<Gemma3DraftPlan>(&plan_); }
-#endif
-    bool transactional() const noexcept { return std::holds_alternative<Gemma3DraftPlan>(plan_); }
-    bool has_pending_token() const noexcept {
-        const auto* p = std::get_if<Gemma3DraftPlan>(&plan_);
-        return p && p->materialized_position() < p->position();
-    }
-    VicunaDraftExecutionStats restore_pending_token(std::uint32_t token) {
-        return std::get<Gemma3DraftPlan>(plan_).restore_pending_token(token);
-    }
-    std::uint32_t context_limit() const noexcept { return transactional() ? 32768U : 2048U; }
-    std::uint32_t position() const noexcept { return std::visit([](const auto& p) { return p.position(); }, plan_); }
-    std::size_t owned_bytes() const noexcept { return std::visit([](const auto& p) { return p.owned_bytes(); }, plan_); }
-    bool poisoned() const noexcept { return std::visit([](const auto& p) { return p.poisoned(); }, plan_); }
-    bool can_truncate(std::uint32_t position) const noexcept {
-        if (const auto* p = std::get_if<Gemma3DraftPlan>(&plan_)) return p->can_truncate(position);
-        return position <= this->position();
-    }
-    void reset() { std::visit([](auto& p) { p.reset(); }, plan_); }
-    void warm_up() { std::visit([](auto& p) { p.warm_up(); }, plan_); }
-    void truncate(std::uint32_t position) { std::visit([&](auto& p) { p.truncate(position); }, plan_); }
-    VicunaDraftExecutionStats begin_transaction() {
-        if (auto* p = std::get_if<Gemma3DraftPlan>(&plan_)) return p->begin_transaction();
-        return {};
-    }
-    VicunaDraftExecutionStats commit_prefix(std::uint32_t position) {
-        if (auto* p = std::get_if<Gemma3DraftPlan>(&plan_)) return p->commit_prefix(position);
-        std::get<VicunaDraftPlan>(plan_).truncate(position);
-        return {};
-    }
-    void abort_transaction() noexcept {
-        if (auto* p = std::get_if<Gemma3DraftPlan>(&plan_)) p->abort_transaction();
-    }
-    VicunaDraftExecutionStats append(std::span<const std::uint32_t> tokens) {
-        return std::visit([&](auto& p) { return p.append(tokens); }, plan_);
-    }
-    DraftChain propose(std::uint32_t root, std::span<const std::uint32_t> words,
-        const TokenSamplerOptions& options, const SamplerHistorySnapshot& history) {
-        return std::visit([&](auto& p) {
-            const auto proposal = p.propose(root, words, options, history);
-            return DraftChain{proposal.draft_tokens, proposal.target_tokens, proposal.epoch, proposal.execution};
-        }, plan_);
-    }
-    GatheredDraftTokenDistribution gather(std::uint32_t depth, const PreparedTokenDistribution& target) {
-        return std::visit([&](auto& p) { return p.gather(depth, target); }, plan_);
-    }
-    std::uint64_t probability_readback_bytes() const noexcept {
-        return std::visit([](const auto& p) { return p.probability_readback_bytes(); }, plan_);
-    }
-    VerifierDeviceInputBinding verifier_inputs(std::uint64_t epoch) const {
-        return std::visit([&](const auto& p) { return p.verifier_inputs(epoch); }, plan_);
-    }
-};
 
 std::uint32_t transaction_capacity(const StandaloneTliMapping& mapping, std::uint32_t horizon) {
     // Reserve both root/correction conversions and an already committed
@@ -200,7 +111,7 @@ struct StandaloneChatPlan::Impl {
     tokenizer::Tokenizer target_tokenizer;
     tokenizer::Tokenizer draft_tokenizer;
     StandaloneTliMapping mapping;
-    StandaloneDraftRunner draft;
+    Gemma3DraftPlan draft;
     ChainChatVerifier verifier;
     StandaloneExecutionOptions execution;
     std::vector<std::uint32_t> target_history, draft_history, encoded;
@@ -225,7 +136,7 @@ struct StandaloneChatPlan::Impl {
         std::make_shared<StandaloneChatCheckpointState>();
     std::uint32_t target_count = 0;
     std::size_t draft_count = 0, base = 0;
-    VicunaDraftExecutionStats stats;
+    StandaloneDraftExecutionStats stats;
     std::uint64_t rebuild_ns = 0;
     bool failed = false;
     bool cycle_active = false;
@@ -238,9 +149,7 @@ struct StandaloneChatPlan::Impl {
               options.horizon, transaction_capacity(mapping, options.horizon)),
           verifier(target, options.horizon, SpeculativeSamplingMode::lossless, options.conditional_verification),
           execution(options), target_history(target.config().context_length),
-          draft_history(source->kind() == StandaloneDraftKind::gemma3_270m_q8 ? source->context_limit()
-              : 3 * text_capacity(tokenizer, target.config().context_length)
-                  + 3 * target.config().context_length + StandaloneDraftArtifact::context_capacity),
+          draft_history(source->context_limit()),
           encoded(draft_history.size()), ends(target_history.size() + 1, absent),
           bases(target_history.size() + 1, absent), text(text_capacity(tokenizer, target.config().context_length)),
           workspace(text.size()), saved(target_history.size(), draft_history.size()) { ends[0] = bases[0] = 0; }
@@ -250,11 +159,11 @@ struct StandaloneChatPlan::Impl {
         const tokenizer::Tokenizer& target_tokens, const Gemma2MetalModelPlan& target,
         StandaloneExecutionOptions options)
         : target_tokenizer(target_tokens), draft_tokenizer(draft_tokens), mapping(target_tokenizer, draft_tokenizer),
-          draft(tensors, signed_mapping(mapping.draft_to_target()), target.config().vocab_size, options.horizon),
+          draft(tensors, signed_mapping(mapping.draft_to_target()), target.config().vocab_size, options.horizon,
+              transaction_capacity(mapping, options.horizon)),
           verifier(target, options.horizon, SpeculativeSamplingMode::lossless, options.conditional_verification),
           execution(options), target_history(target.config().context_length),
-          draft_history(3 * text_capacity(target_tokens, target.config().context_length)
-              + 3 * target.config().context_length + StandaloneDraftArtifact::context_capacity),
+          draft_history(Gemma3DraftPlan::context_capacity),
           encoded(draft_history.size()), ends(target_history.size() + 1, absent),
           bases(target_history.size() + 1, absent), text(text_capacity(target_tokens, target.config().context_length)),
           workspace(text.size()), saved(target_history.size(), draft_history.size()) { ends[0] = bases[0] = 0; }
@@ -266,7 +175,7 @@ struct StandaloneChatPlan::Impl {
     }
     void restore(std::size_t restored_base, std::size_t restored_end) {
         if (restored_base > restored_end || restored_end > draft_history.size()
-            || restored_end - restored_base > draft.context_limit())
+            || restored_end - restored_base > Gemma3DraftPlan::context_capacity)
             throw std::logic_error("invalid standalone draft window receipt");
         const auto started = now_ns();
         draft.reset();
@@ -276,18 +185,15 @@ struct StandaloneChatPlan::Impl {
         base = restored_base;
         rebuild_ns += now_ns() - started;
     }
-    void append_emissions(std::span<const std::uint32_t> tokens, bool reserve_horizon = true) {
+    void append_emissions(std::span<const std::uint32_t> tokens) {
         if (tokens.size() > draft_history.size() - draft_count)
             throw std::length_error("standalone draft emission ledger overflow");
-        const auto reserve = reserve_horizon ? execution.horizon : 0;
-        if (draft.transactional() && tokens.size() + reserve > draft.context_limit() - (draft_count - base))
+        if (tokens.size() > Gemma3DraftPlan::context_capacity - (draft_count - base))
             throw std::length_error("Gemma3 draft context capacity exhausted; target context was not shortened");
         const auto previous = draft_count;
         std::copy(tokens.begin(), tokens.end(), draft_history.begin() + static_cast<std::ptrdiff_t>(draft_count));
         draft_count += tokens.size();
-        if (draft_count - base + reserve > draft.context_limit()) {
-            restore(draft_count - std::min<std::size_t>(retained_draft_suffix, draft_count), draft_count);
-        } else if (!tokens.empty()) {
+        if (!tokens.empty()) {
             add_stats(stats, draft.append(std::span<const std::uint32_t>(draft_history)
                 .subspan(previous, tokens.size())));
         }
@@ -302,10 +208,10 @@ struct StandaloneChatPlan::Impl {
         if (position != target_count) throw std::logic_error("standalone commit target position mismatch");
         if (target_count == target_history.size()) throw std::length_error("standalone target ledger overflow");
         const auto count = mapping.append_target_token(token, encoded, text, workspace);
-        if (draft.transactional() && count > draft.context_limit() - (draft_count - base))
+        if (count > Gemma3DraftPlan::context_capacity - (draft_count - base))
             throw std::length_error("standalone target token exceeds the draft's native context capacity");
         try {
-            append_emissions(std::span<const std::uint32_t>(encoded).first(count), !draft.transactional());
+            append_emissions(std::span<const std::uint32_t>(encoded).first(count));
             record(token);
         } catch (...) { failed = true; throw; }
     }
@@ -327,23 +233,23 @@ StandaloneChatPlan::StandaloneChatPlan(std::span<const tensor::TensorView> tenso
     const tokenizer::Tokenizer& draft_tokenizer, const tokenizer::Tokenizer& target_tokenizer,
     const Gemma2MetalModelPlan& target, StandaloneExecutionOptions options) {
     if (options.horizon == 0 || options.horizon > external_speculation_max_horizon
-        || draft_tokenizer.vocabulary().size() != StandaloneDraftArtifact::vocabulary_size
+        || draft_tokenizer.vocabulary().size() != Gemma3DraftPlan::vocabulary_size
         || target_tokenizer.vocabulary().size() != target.config().vocab_size)
         throw std::invalid_argument("standalone test draft requires complete production geometry");
     static_cast<void>(resolve_standalone_draft_sampler_options(TokenSamplerOptions{}, options.draft_sampling,
-        StandaloneDraftArtifact::vocabulary_size));
+        Gemma3DraftPlan::vocabulary_size));
     impl_ = std::make_unique<Impl>(tensors, draft_tokenizer, target_tokenizer, target, options);
 }
-const VicunaDraftPlan& StandaloneChatPlan::draft_plan_for_testing() const noexcept { return impl_->draft.vicuna_for_testing(); }
+const Gemma3DraftPlan& StandaloneChatPlan::draft_plan_for_testing() const noexcept { return impl_->draft; }
 const Gemma3DraftPlan* StandaloneChatPlan::gemma3_draft_plan_for_testing() const noexcept {
-    return impl_->draft.gemma3_for_testing();
+    return &impl_->draft;
 }
 #endif
 StandaloneChatPlan::StandaloneChatPlan(StandaloneChatPlan&&) noexcept = default;
 StandaloneChatPlan& StandaloneChatPlan::operator=(StandaloneChatPlan&&) noexcept = default;
 std::uint32_t StandaloneChatPlan::horizon() const noexcept { return impl_->execution.horizon; }
 StandaloneDraftKind StandaloneChatPlan::kind() const noexcept {
-    return impl_->source ? impl_->source->kind() : StandaloneDraftKind::vicuna_68m_f16;
+    return StandaloneDraftKind::gemma3_270m_q8;
 }
 const StandaloneExecutionOptions& StandaloneChatPlan::execution_options() const noexcept { return impl_->execution; }
 TokenSamplerOptions StandaloneChatPlan::effective_draft_sampler_options(const TokenSamplerOptions& target) const {
@@ -353,7 +259,7 @@ TokenSamplerOptions StandaloneChatPlan::effective_draft_sampler_options(const To
 bool StandaloneChatPlan::poisoned() const noexcept { return impl_->failed || impl_->draft.poisoned(); }
 std::uint32_t StandaloneChatPlan::target_position() const noexcept { return impl_->target_count; }
 std::uint64_t StandaloneChatPlan::rebuild_duration_ns() const noexcept { return impl_->rebuild_ns; }
-VicunaDraftExecutionStats StandaloneChatPlan::execution_stats() const noexcept { return impl_->stats; }
+StandaloneDraftExecutionStats StandaloneChatPlan::execution_stats() const noexcept { return impl_->stats; }
 std::size_t StandaloneChatPlan::owned_bytes() const noexcept {
     const auto& p = *impl_;
     return sizeof(Impl) + p.draft.owned_bytes() + p.verifier.owned_bytes() + p.saved.owned_bytes()
@@ -375,7 +281,7 @@ StandaloneChatCheckpoint StandaloneChatPlan::checkpoint() {
     std::copy_n(p.ends.begin(), p.target_count + 1, saved.ends.begin());
     std::copy_n(p.bases.begin(), p.target_count + 1, saved.bases.begin());
     saved.target_count = p.target_count; saved.draft_count = p.draft_count; saved.base = p.base;
-    saved.final_token_pending = p.draft.has_pending_token();
+    saved.final_token_pending = p.draft.materialized_position() < p.draft.position();
     ++p.checkpoint_state->epoch; p.checkpoint_state->active = true;
     StandaloneChatCheckpoint result;
     result.state_ = p.checkpoint_state; result.epoch_ = p.checkpoint_state->epoch;
@@ -443,7 +349,7 @@ void StandaloneChatPlan::synchronize_context(std::span<const std::uint32_t> toke
     // the emission ledger or a sliding cache. The encoded scratch is private.
     const auto count = p.mapping.encode_target_context(tokens.subspan(common), p.encoded, p.text, p.workspace);
     if (count > p.draft_history.size() - restored_end
-        || (p.draft.transactional() && count > p.draft.context_limit() - (restored_end - restored_base)))
+        || (count > Gemma3DraftPlan::context_capacity - (restored_end - restored_base)))
         throw std::length_error("standalone converted prompt exceeds its prepared native context capacity");
     try {
         if (replace_context) reset();
@@ -459,7 +365,7 @@ void StandaloneChatPlan::synchronize_context(std::span<const std::uint32_t> toke
             }
         }
         if (common == tokens.size()) return;
-        p.append_emissions(std::span<const std::uint32_t>(p.encoded).first(count), !p.draft.transactional());
+        p.append_emissions(std::span<const std::uint32_t>(p.encoded).first(count));
         for (std::size_t i = common; i < tokens.size(); ++i) {
             p.target_history[i] = tokens[i]; p.ends[i + 1] = p.bases[i + 1] = absent;
         }
@@ -469,10 +375,9 @@ void StandaloneChatPlan::synchronize_context(std::span<const std::uint32_t> toke
 }
 void StandaloneChatPlan::validate_committed_prefix(std::span<const std::uint32_t> tokens) {
     auto& p = *impl_; p.ready();
-    if (!p.draft.transactional()) return; // Vicuna retains its declared suffix-rebuild policy.
     if (tokens.size() > p.target_history.size() - p.target_count)
         throw std::length_error("standalone target commit ledger capacity exhausted");
-    auto available = p.draft.context_limit() - (p.draft_count - p.base);
+    auto available = Gemma3DraftPlan::context_capacity - (p.draft_count - p.base);
     for (const auto token : tokens) {
         const auto count = p.mapping.append_target_token(token, p.encoded, p.text, p.workspace);
         if (count > available)
@@ -505,8 +410,8 @@ StandaloneCycleResult StandaloneChatPlan::run(Gemma2MetalModelPlan& target, Toke
     bool transaction_started = false;
     try {
         const auto root_count = p.mapping.append_target_token(root, p.encoded, p.text, p.workspace);
-        if (p.draft.transactional()) {
-            const auto available = p.draft.context_limit() - (p.draft_count - p.base);
+        {
+            const auto available = Gemma3DraftPlan::context_capacity - (p.draft_count - p.base);
             // The final target correction is not known until verification.
             // Prove room for its complete native encoding before a callback
             // can make any part of this cycle irreversible.

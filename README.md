@@ -5,6 +5,13 @@ The current production path runs Gemma 2 9B Q4 with model-resident Metal
 weights, KV cache, prefill, decode, and sampling. External inference engines
 are used only as references and benchmarks.
 
+The next investigation is Gemma 3 / Gemma 4, but neither is implemented as a
+chat target yet. The existing Gemma 3 270M drafter works with the Gemma 2 target
+as an explicit experiment; it has not earned a default speedup claim. Read
+[what we learned about speculation](docs/SPECULATIVE_DECODING_RETROSPECTIVE.md)
+and [the current boundary and research archive](docs/NEXT_TASK.md) before
+continuing that work.
+
 ## Requirements
 
 - An Apple Silicon Mac. The optimized release build currently targets M4.
@@ -25,9 +32,10 @@ ignored by Git. The commands below assume:
 models/gemma-2-9b-Q4.gguf
 ```
 
-The current plan keeps about `6.84 GB` of weights and reserves about `5.64 GB`
-of F32 KV cache, in addition to macOS and application memory. A low-memory Mac
-may not be able to run this target model.
+Model file size is not the runtime memory footprint. Resident weights, KV
+cache and scratch buffers share unified memory with macOS and other apps.
+Head and context settings affect these allocations; `--decode-diagnostics`
+reports the actual prepared buffers.
 
 ## Quick Start
 
@@ -47,8 +55,8 @@ make MODE=release generate
 The final positional number is the maximum number of new tokens. One-shot
 generation is currently Gemma 2, Metal, and greedy only.
 
-The first run can spend roughly 12 seconds creating the Metal plan before
-prompt processing begins. Startup performance is a known active problem.
+Startup loads the model and prepares its Metal execution plan before prompt
+processing begins.
 
 ## Interactive Chat
 
@@ -100,6 +108,28 @@ Available chat commands:
 End an input line with `\` to continue a prompt on the next line. Successful
 turns print llama.cpp-compatible prompt/generation throughput and internal
 TTFT, plus the raw token counts and durations behind those rates.
+
+## Experimental Gemma 3 Drafter
+
+For the supported, pinned `gemma-3-270m-it-Q8_0.gguf` drafter with the existing
+Gemma 2 target:
+
+```bash
+make MODE=release generate
+./build/release/local-gguf-generate \
+  models/gemma-2-9b-Q4.gguf --chat --backend metal \
+  --draft-model models/gemma-3-270m-it-Q8_0.gguf \
+  --draft-horizon 3 --speculative-sampling lossless \
+  --speculative-schedule conditional --seed 42
+```
+
+This runs the complete native drafter, not an external inference engine. The
+target sampling distribution is preserved, but the same seed can produce
+different text from ordinary generation. Missing or incompatible draft files
+fail explicitly. No Python environment is needed for inference.
+
+Offline Gemma 3 reference checks use optional dependencies listed in
+`scripts/reference_requirements.txt`; the production executable does not.
 
 ## Inspect A GGUF File
 

@@ -3,7 +3,6 @@
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
 #include "local_gguf_engine/engine/model.hpp"
-#include "local_gguf_engine/engine/speculative_artifact.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"

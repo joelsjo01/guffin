@@ -339,7 +339,6 @@ void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan);
     const Gemma2MonotonicClock& clock = {}
 );
 
-class RecurrentChatPlan;
 class StandaloneChatPlan;
 // Borrowed, preallocated turn storage. Updated only once the selected token's
 // K/V is recoverable, before any irreversible callback for that token.
@@ -362,7 +361,6 @@ struct Gemma2GenerationCommitJournal {
     const Gemma2MonotonicClock& clock = {},
     RetrievalProposer* proposer = nullptr,
     const Gemma2GenerationTraceBinding* trace = nullptr,
-    RecurrentChatPlan* learned = nullptr,
     Gemma2GenerationCommitJournal* journal = nullptr,
     StandaloneChatPlan* standalone = nullptr,
     std::span<const std::uint32_t> standalone_context = {}
