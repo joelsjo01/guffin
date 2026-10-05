@@ -1,10 +1,41 @@
 # Performance evidence
 
+## Release benchmarks
+
+**Pending.** The README's release figures and matched llama.cpp comparisons
+remain blank until the next testing pass. No new benchmarks were run for this
+documentation revision.
+
+The pass will cover Gemma 2 ordinary decoding and default suffix retrieval,
+and Gemma 3 ordinary decoding and native 270M H1. It should include short chats
+and longer prompts/conversations, with model-compatible contexts and thermal
+isolation on the fanless M4.
+
+Published comparisons will identify source revisions, exact GGUF artifacts,
+executed weight/cache precision, context, sampler and stopping settings. They
+will retain prompt/output counts, timing boundaries, process memory and system
+conditions. Internal TTFT, first visible text, complete-generation throughput
+and physical footprint measure separate boundaries. Gemma 2's weight
+conversions must be disclosed in comparisons to an unmodified external model.
+
+The current collector is [quick_benchmark.py](../scripts/quick_benchmark.py).
+A new run measures its current executable; it does not reconstruct an earlier
+development snapshot. Historical raw receipts and binaries remain local, so
+public readers can recalculate the totals below but cannot fully replay every
+historical build from this checkout.
+
+## Historical development evidence
+
+The following results preserve earlier experiments and their limitations.
+They are not the pending release benchmark figures.
+
+![Historical Gemma 3 chat throughput and target KV allocation](assets/gemma3-performance.svg)
+
 Guffin's retained changes have measured benefits on an Apple M4: smaller Gemma 3 KV storage, faster large-prompt processing, and a modest Gemma 2 retrieval improvement with unchanged sampled output. Some speculative candidates lost after passing correctness. This page separates those recorded results from hypotheses and from the older llama.cpp reference.
 
 These are development snapshots from September 29 and October 4, 2026, rather than a measurement of today's edited executable. Each configuration has one cooled two-turn conversation, with natural stopping and no output cap. There are no error bars or repeat-run variance estimates. Successful conversations were not rerun for this documentation update.
 
-## What the numbers measure
+### What the numbers measure
 
 The primary rate is `sum(generated_tokens) × 1e9 / sum(generation_completion_ns)`. Completion includes final KV publication, callbacks and result assembly. It excludes prompt processing, startup/model loading and the five-second input pause. The aggregate is weighted by elapsed time; it is not the average of the two displayed rates.
 
@@ -17,7 +48,7 @@ The standard short conversation is:
 
 Changing a mode can change both the natural response and the context seen by the follow-up. A fixed seed does not make those runs identical workloads.
 
-## Gemma 3: ordinary decoding and native H1 speculation
+### Gemma 3: ordinary decoding and native H1 speculation
 
 The September 29 snapshot uses `gemma-3-12b-it-Q4_K_M.gguf`, native Q4_K/Q6_K weights, a Q6_K output head and a **16,384-token allocation**. Retrieval is off. H1 uses the native Gemma 3 270M Q8_0 drafter, its F32 cache, full target verification and lossless speculative sampling.
 
@@ -43,7 +74,7 @@ F16 changes the selected target's arithmetic. Lossless speculation preserves tha
 
 The owner also observed approximately 30–40% faster Gemma 3 chat than llama.cpp in manual use. That remains an informal observation: no frozen, comparable Gemma 3 llama.cpp performance pair is recorded. The four-mode measurements above support a concrete same-engine story without converting that observation into a controlled competitor result.
 
-## Gemma 3: useful ordinary-path improvements
+### Gemma 3: useful ordinary-path improvements
 
 Before the cache change, the September 26 target integration preserved both ordinary F32 responses: 1,506 and 1,026 tokens, with hashes `260ae35592bb6060` / `dd4aadff1d4f599f`. Aggregate completion throughput rose from **9.71 to 10.34 t/s (+6.48%)**. First/follow-up prompt times fell from 0.789661/1.181695 to 0.311648/0.652287 seconds. This is a separate frozen before/after result, not a baseline to mix with the later four-mode chart.
 
@@ -58,7 +89,7 @@ M32 saves **9.478680 seconds of prompt processing** across this conversation, wi
 
 The measured trial also included M16 for short prompts. M16 increased short-chat internal TTFT by about 3.9% and was removed. The measured long route uses M32 throughout its 128-row chunks and 98/69-row tails, so removing M16 leaves that route intact. The retained post-removal executable passed correctness checks; the successful conversation was not repeated. This is why the result is attributed to the measured candidate, not assigned a fresh measurement date to the current build.
 
-## Gemma 2: a small retained gain and a rejected drafter
+### Gemma 2: a small retained gain and a rejected drafter
 
 The October 4 comparison uses `gemma-2-9b-Q4.gguf`, **8,192-token capacity**, F16 KV and the existing default retrieval gate. “Default” here includes retrieval; these are not ordinary `--no-speculative` results. Packed Q4 projections and the shared two-row verification path are retained. The frozen and updated retrieval runs have identical prompt work, token counts, selected-token hashes and retrieval decisions.
 
@@ -72,13 +103,13 @@ The retained port observes **+2.05% aggregate generation**, winning both turns. 
 
 Arm R passed correctness but observed **10.11% lower aggregate throughput** than the updated retrieval path. It accepted 104 of 411 proposed H1 edges (25.30%); proposal cost was about 11.7 ms per cycle on top of roughly 70 ms target verification. Its different, shorter responses also change follow-up history, so the rejected run is not identical work. It ran first and system swap-outs were 45,212 pages, versus 0 for frozen retrieval and 3,616 for updated retrieval. Those counters cannot isolate its memory-pressure effect. The implementation and receipts are retained locally; the recurrent runtime was removed from production.
 
-## What the llama.cpp reference can establish
+### What the llama.cpp reference can establish
 
 The [pinned external reference](LLAMA_CPP_REFERENCE_BASELINE.md) records Gemma 2 on August 6, 2026, with Apple M4, **macOS 26.5.2 (25F84)** and llama.cpp `d48a56effbba99944a677938d4beb63a0065ecdf` / llama-cli 9430. Its natural responses contain 239 and 257 sampled tokens, at the reported **14.1 and 13.9 t/s**; the recorded generation durations are 16.9686 and 18.5227 seconds. This is a historical reference, not a same-condition competitor bar beside October's 16.85 t/s.
 
 There are substantive differences beyond the date. Guffin's Gemma 2 executes Q6 down weights requantized to Q4 and an F16 output head requantized to Q8, retaining a separate F16 embedding. The file name therefore does not mean both engines executed identical weight precision. The responses and prompt-cache work differ, and llama.cpp's sample-to-final-sample timing is not Guffin's complete-generation clock. There is no controlled current percentage advantage or quality-equivalence claim here, and no recorded Gemma 3 llama.cpp timing to fill that gap. The pinned document remains unchanged.
 
-## Receipts and calculation trail
+### Receipts and calculation trail
 
 The raw conversations, frozen executables and per-process traces are local development artifacts under ignored `build/` and `benchmarks/results/`. The filenames below identify provenance; they are deliberately plain text rather than links to files absent from a public checkout. These tables retain counts, timing scopes and identities without publishing the full raw datasets. [Development history](archive/DEVELOPMENT_HISTORY.md) retains the experiment decisions; [the benchmark driver](../scripts/quick_benchmark.py) describes the current collection and validation protocol.
 

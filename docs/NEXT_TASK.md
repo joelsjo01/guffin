@@ -53,13 +53,18 @@ and lifecycle checks, not new performance benchmarks.
 
 ## Documentation completed
 
-The [README](../README.md) now leads with installation/chat and includes
-architecture and H1 diagrams, retained mechanisms and an original performance
-figure. The [retrospective](SPECULATIVE_DECODING_RETROSPECTIVE.md) explains the
-successful and rejected designs. [Performance evidence](PERFORMANCE.md)
-recomputes saved rates using complete-generation timing and states comparison
-limits. The pinned llama.cpp reference and historical archive are unchanged.
-No engine source, models or benchmarks changed during this documentation pass.
+The [README](../README.md) explains the engineering question, architecture,
+useful work shared by H1, ownership/correctness contracts and experimental
+lessons. Release performance fields are explicitly pending. The
+[retrospective](SPECULATIVE_DECODING_RETROSPECTIVE.md) preserves successful and
+rejected designs; [performance evidence](PERFORMANCE.md) separates the planned
+release measurements from historical calculations and their limits. Its older
+figure is historical evidence, rather than a current README headline. The
+pinned llama.cpp reference and archive are unchanged. No engine source, models
+or benchmarks changed during this documentation pass.
+
+The planned next phase is thorough actual-chat testing and matched external
+comparisons. It has not started; this task ends with the documentation revision.
 
 ## Remaining boundaries and release decisions
 

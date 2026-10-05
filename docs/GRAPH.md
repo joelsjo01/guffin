@@ -122,7 +122,6 @@ Owned host views check backing size without repeating full descriptor admission.
 [Performance evidence](PERFORMANCE.md) records saved conversation results,
 complete-generation clocks, configuration identities and comparison limits.
 
-
 - `scripts/gemma3_reference_golden.py`: full-checkpoint Gemma 3 Q8 CPU goldens.
 - `scripts/gemma3_target_reference.py`: bounded Q4_K/Q6_K target logits and KV goldens.
 - `scripts/reference_gguf.py`: independent offline GGUF reader.
