@@ -14,6 +14,8 @@ struct Gemma2AttentionWeights {
     tensor::TensorView key_weight;
     tensor::TensorView value_weight;
     tensor::TensorView output_weight;
+    std::optional<tensor::TensorView> query_norm_weight;
+    std::optional<tensor::TensorView> key_norm_weight;
 };
 
 struct Gemma2FeedForwardWeights {
@@ -37,5 +39,8 @@ struct Gemma2ModelWeights {
 };
 
 [[nodiscard]] Gemma2ModelWeights bind_gemma2_model_weights(const EngineModel& model);
+// Used before residency allocation, including callers supplying borrowed
+// weights directly rather than going through the GGUF binding entry point.
+void validate_gemma3_model_weights(const Gemma2ModelConfig& config, const Gemma2ModelWeights& weights);
 
 }  // namespace local_gguf_engine::engine

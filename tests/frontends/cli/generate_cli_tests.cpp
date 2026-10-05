@@ -12,6 +12,8 @@
 #include "local_gguf_engine/tensor/metal_trace_capture.hpp"
 
 #include "tensor_test_support.hpp"
+#include "gemma3_target_test_support.hpp"
+#include "../../tokenizer/gemma3_chat_template.hpp"
 #include "../../../src/engine/target_verifier_test_hooks.hpp"
 #include "../../../src/engine/prepared_plan_test_hooks.hpp"
 #include "../../../src/tensor/backends/metal/metal_test_hooks.hpp"
@@ -205,7 +207,7 @@ void test_formats_and_validates_chat_decode_attribution() {
         .total = 21U,
     };
     const auto line = format_chat_decode_attribution_line(metrics);
-    expect(line.starts_with("[ Decode: {\"schema_version\":5"),
+    expect(line.starts_with("[ Decode: {\"schema_version\":6"),
         "decode attribution prefix mismatch");
     expect(line.find("\"standalone_effective_sampler\":null") != std::string::npos,
         "target-only diagnostics invent a draft sampler");
@@ -235,6 +237,12 @@ void test_formats_and_validates_chat_decode_attribution() {
     metrics.learned_horizon = 3;
     metrics.generation.learned_cycle_count = 4;
     metrics.generation.learned_accepted_edge_count = 6;
+    metrics.generation.learned_proposed_edge_count = 10;
+    metrics.generation.learned_horizon_histogram[1] = 1;
+    metrics.generation.learned_horizon_histogram[3] = 3;
+    metrics.generation.learned_reached_depth_histogram[0] = 4;
+    metrics.generation.learned_reached_depth_histogram[1] = 3;
+    metrics.generation.learned_reached_depth_histogram[2] = 1;
     metrics.generation.learned_accepted_prefix_histogram[0] = 1;
     metrics.generation.learned_accepted_prefix_histogram[1] = 1;
     metrics.generation.learned_accepted_prefix_histogram[2] = 1;
@@ -250,14 +258,25 @@ void test_formats_and_validates_chat_decode_attribution() {
         "Gemma3 draft attribution inherited Vicuna/F16 identity");
     expect(gemma3_line.find("\"standalone_effective_sampler\":{\"temperature\":0.5,\"top_k\":0,\"top_p\":0.75,\"min_p\":0.125,\"repetition_penalty\":1.5}") != std::string::npos,
         "standalone diagnostics omit actual effective draft scalars or confuse zero with inheritance");
-    expect(gemma3_line.find("\"standalone_draft_sampler\":\"explicit_or_target_scalars_native_history_v1\"") != std::string::npos,
+    expect(gemma3_line.find("\"standalone_draft_sampler\":\"explicit_or_target_scalars_native_history_v2\"") != std::string::npos,
         "standalone sampler identity incorrectly claims unconditional target-scalar inheritance");
+    auto direct_metrics = metrics;
+    direct_metrics.standalone_bounded_repetition_history = true;
+    direct_metrics.model_architecture = local_gguf_engine::engine::ModelArchitecture::gemma3;
+    const auto direct_line = format_chat_decode_attribution_line(direct_metrics);
+    expect(direct_line.find("\"standalone_draft_sampler\":\"explicit_or_target_scalars_target_window_v2\"") != std::string::npos
+        && direct_line.find("\"standalone_repetition_window\":64") != std::string::npos,
+        "direct-ID draft diagnostics lost the actual bounded repetition policy");
     expect(gemma3_line.find("\"learned_accepted_prefix_histogram\":[1,1,1,1,0") != std::string::npos
         && gemma3_line.find("\"learned_rejection_depth_histogram\":[1,1,0") != std::string::npos
         && gemma3_line.find("\"learned_censored_cycle_count\":1") != std::string::npos
         && gemma3_line.find("\"learned_full_accept_count\":1") != std::string::npos
         && gemma3_line.find("\"learned_horizon_limited_cycle_count\":1") != std::string::npos,
         "standalone diagnostics lost prefix/rejection/censoring attribution");
+    expect(gemma3_line.find("\"learned_horizon_histogram\":[0,1,0,3,0") != std::string::npos
+        && gemma3_line.find("\"learned_reached_depth_histogram\":[4,3,1,0") != std::string::npos
+        && gemma3_line.find("\"learned_proposed_edges\":10") != std::string::npos,
+        "standalone diagnostics must report actual work and authoritative depth exposure");
     for (const bool missing : {false, true}) {
         auto malformed = metrics;
         if (missing) malformed.standalone_effective_sampler.reset();
@@ -854,6 +873,407 @@ std::vector<TinyGGUFTensor> tiny_gemma2_generate_cli_tensors_for_sampled_tokens(
 
 std::vector<std::uint8_t> tiny_gemma2_generate_cli_gguf_bytes() {
     return write_tiny_gguf_bytes(tiny_gemma2_generate_cli_metadata(), tiny_gemma2_generate_cli_tensors());
+}
+
+std::vector<std::uint8_t> tiny_gemma3_chat_fixture_bytes(std::uint32_t forced_token = 5U,
+    std::span<const local_gguf_engine::model_format::GGUFMetadataEntry> paired_tokenizer = {}) {
+    local_gguf_engine::tests::Gemma3TargetFixture fixture;
+    auto metadata = fixture.view.directory.metadata.entries;
+    auto tokens = tiny_gemma2_generate_cli_token_texts();
+    auto types = tiny_gemma2_generate_cli_token_types();
+    constexpr std::string_view hex = "0123456789ABCDEF";
+    for (std::uint32_t byte = 0; byte < 256; ++byte) {
+        std::string spelling = "<0x00>";
+        spelling[3] = hex[byte >> 4U];
+        spelling[4] = hex[byte & 15U];
+        tokens.push_back(std::move(spelling));
+        types.push_back(6);
+    }
+    for (auto& entry : tiny_gemma2_generate_cli_metadata()) {
+        if (entry.key.starts_with("tokenizer.")) {
+            if (entry.key == "tokenizer.chat_template") {
+                entry = metadata_string(entry.key, std::string(gemma3_chat_template_fixture));
+            }
+            if (entry.key == "tokenizer.ggml.tokens") entry = metadata_string_array(entry.key, tokens);
+            if (entry.key == "tokenizer.ggml.token_type") entry = metadata_i32_array(entry.key, types);
+            metadata.push_back(std::move(entry));
+        }
+    }
+    metadata.push_back(local_gguf_engine::tests::metadata_f32_array(
+        "tokenizer.ggml.scores", std::vector<float>(tokens.size(), 0.0F)));
+    if (!paired_tokenizer.empty()) {
+        std::erase_if(metadata, [](const auto& entry) { return entry.key.starts_with("tokenizer."); });
+        for (const auto& entry : paired_tokenizer)
+            if (entry.key.starts_with("tokenizer.")) metadata.push_back(entry);
+        const auto tokenizer = local_gguf_engine::tokenizer::load_tokenizer_from_gguf_metadata(
+            local_gguf_engine::tests::metadata_section(metadata));
+        tokens.resize(tokenizer.vocabulary().size());
+    }
+    std::vector<TinyGGUFTensor> tensors;
+    for (const auto& payload : fixture.view.tensor_payloads) {
+        tensors.push_back({payload.tensor.name, payload.tensor.dimensions, payload.tensor.type_id,
+            std::vector<std::uint8_t>(payload.bytes.begin(), payload.bytes.end())});
+    }
+    auto& embedding = tensors.front();
+    embedding.dimensions = {256U, tokens.size()};
+    embedding.bytes.assign(tokens.size() * 210U, 0U);
+    // Exact native Q6_K rows: all tokens embed as e0, chosen token as 2*e0.
+    // Zero transformer projections preserve this direction; tied native head
+    // then uniquely selects the chosen token without a separate output tensor.
+    for (std::uint32_t token = 0; token < tokens.size(); ++token) {
+        const auto offset = token * 210U;
+        embedding.bytes[offset] = 1U;
+        std::fill_n(embedding.bytes.begin() + offset + 128U, 64U, 0xaaU);
+        std::fill_n(embedding.bytes.begin() + offset + 192U, 16U, 1U);
+        embedding.bytes[offset + 209U] = token == forced_token ? 0x40U : 0x3cU;
+    }
+    const auto norm = tensor_f32_vector(std::vector<float>(256U, 1.0F));
+    replace_tiny_tensor(tensors, "output_norm.weight", norm);
+    return write_tiny_gguf_bytes(metadata, tensors);
+}
+
+void test_gemma3_chat_native_target_multiturn_regeneration_and_reset_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const TempBinaryFile file("gemma3-chat-lifecycle", tiny_gemma3_chat_fixture_bytes());
+    auto session = Gemma2ChatSession(read_file_backed_gguf_model(file.path()), {
+        .max_new_tokens = 2, .context_length = 128, .speculative_decode = false, .retrieval_decode = false,
+    });
+    expect(session.context_length() == 128, "Gemma3 runtime capacity must honor explicit context length");
+    expect(session.message_count() == 0 && session.cached_token_count() == 0, "Gemma3 preparation must preserve empty chat state");
+    std::string streamed;
+    const auto first = session.generate_user_turn("\xC2\xA0 Hello \xE3\x80\x80",
+        [&](std::string_view text) { streamed += text; });
+    expect(first.text == "HelloHello" && first.text == streamed, "Gemma3 native tied-head chat did not stream its tokens");
+    expect(first.metrics.model_architecture == local_gguf_engine::engine::ModelArchitecture::gemma3,
+        "Gemma3 chat metrics must identify the actual target family");
+    expect(first.metrics.kv_precision == local_gguf_engine::engine::GemmaKVPrecision::f16
+            && first.metrics.speculative_sampling == local_gguf_engine::engine::SpeculativeSamplingMode::exact_match
+            && !first.metrics.standalone_draft && !first.metrics.retrieval_decode,
+        "Gemma3 target-only defaults must use F16 without inventing a drafter or enabling retrieval");
+    expect(first.metrics.context_capacity == 128, "Gemma3 chat metrics must report runtime capacity");
+    expect(first.metrics.output_head_policy == local_gguf_engine::engine::Gemma2OutputHeadPolicy::q6_k,
+        "Gemma3 default head must retain the native Q6_K checkpoint");
+    expect(std::count(first.rendered_prompt_token_ids.begin(), first.rendered_prompt_token_ids.end(), 2U) == 1,
+        "Gemma3 chat must render one BOS");
+    const auto second = session.generate_user_turn("Hello");
+    expect(second.cache_position > 0 && second.cache_position <= first.cached_token_count,
+        "Gemma3 next turn must reuse the retained target prefix");
+    expect(second.text == first.text && session.message_count() == 4, "Gemma3 multi-turn history/output mismatch");
+    const auto replay = session.regenerate_last_turn();
+    expect(replay.selected_token_ids == second.selected_token_ids && session.message_count() == 4,
+        "Gemma3 regeneration must replace the prior assistant turn");
+    session.clear();
+    expect(session.cached_token_count() == 0 && session.message_count() == 0, "Gemma3 clear must reset cache and history");
+    expect(session.generate_user_turn("Hello").text == first.text, "Gemma3 clear changed target execution");
+    session.reset();
+    expect(session.cached_token_count() == 0 && session.message_count() == 0, "Gemma3 reset must reset cache and history");
+}
+
+void test_gemma3_chat_context_shift_and_failed_turn_preserve_state_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const TempBinaryFile file("gemma3-chat-context", tiny_gemma3_chat_fixture_bytes());
+    for (const auto precision : {local_gguf_engine::engine::GemmaKVPrecision::f32,
+                                 local_gguf_engine::engine::GemmaKVPrecision::f16}) {
+        auto session = Gemma2ChatSession(read_file_backed_gguf_model(file.path()), {
+            .max_new_tokens = 1, .context_length = 32, .kv_precision = precision, .context_shift = true,
+            .speculative_decode = false, .retrieval_decode = false,
+        });
+        bool shifted = false;
+        for (std::size_t turn = 0; turn < 8; ++turn) {
+            const auto result = session.generate_user_turn("Hello");
+            if (!result.rebuilt_context) continue;
+            shifted = true;
+            expect(result.cache_position == 0 && result.trimmed_turn_count > 0 && result.cached_token_count <= 32,
+                "Gemma3 context shift must rebuild retained turns within capacity");
+            const auto replay = session.regenerate_last_turn();
+            expect(replay.selected_token_ids == result.selected_token_ids
+                    && result.metrics.kv_precision == precision && replay.metrics.kv_precision == precision,
+                "Gemma3 regeneration after local-ring/context rebuild changed target tokens or KV precision");
+            break;
+        }
+        expect(shifted, "Gemma3 context fixture must exercise a rebuild");
+        const auto cached = session.cached_token_count();
+        const auto messages = session.message_count();
+        try {
+            (void)session.generate_user_turn(std::string(256, 'x'));
+            throw TestFailure("Gemma3 oversized turn should fail");
+        } catch (const Gemma2ChatContextError&) {}
+        expect(session.cached_token_count() == cached && session.message_count() == messages && !session.poisoned(),
+            "Gemma3 rejected oversized turn mutated valid retained state");
+        const auto recovery = session.generate_user_turn("Hello");
+        expect(recovery.text == "Hello" && recovery.metrics.kv_precision == precision,
+            "Gemma3 failed-turn recovery cannot continue with its prepared KV precision");
+    }
+}
+
+void test_gemma3_chat_callback_failure_cancellation_and_stops_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const TempBinaryFile file("gemma3-chat-callback", tiny_gemma3_chat_fixture_bytes());
+    const auto options = Gemma2ChatSessionOptions {
+        .max_new_tokens = 3, .context_length = 128, .speculative_decode = false, .retrieval_decode = false,
+    };
+    auto session = Gemma2ChatSession(read_file_backed_gguf_model(file.path()), options);
+    std::size_t deliveries = 0;
+    try {
+        (void)session.generate_user_turn("Hello", [&](std::string_view value) {
+            expect(value == "Hello", "Gemma3 callback should receive the committed visible token");
+            ++deliveries;
+            throw std::runtime_error("injected Gemma3 text consumer failure");
+        });
+        throw TestFailure("Gemma3 callback exception must propagate");
+    } catch (const std::runtime_error& error) {
+        expect(std::string_view(error.what()) == "injected Gemma3 text consumer failure", "Gemma3 callback error changed");
+    }
+    expect(deliveries == 1 && !session.poisoned() && session.message_count() == 2,
+        "Gemma3 callback failure must preserve its committed turn prefix");
+    expect(session.regenerate_last_turn().text == "HelloHelloHello", "Gemma3 regeneration after callback error failed");
+    bool stopped = false;
+    const auto cancelled = session.generate_user_turn("Hello", Gemma2ChatTurnOptions {
+        .on_text_delta = [&](std::string_view) { stopped = true; }, .should_stop = [&] { return stopped; },
+    });
+    expect(cancelled.interrupted && cancelled.text == "Hello" && cancelled.selected_token_ids.size() == 1,
+        "Gemma3 cancellation must retain exactly the delivered token prefix");
+    for (const auto token : {1U, 107U}) {
+        const TempBinaryFile stop_file("gemma3-chat-stop-" + std::to_string(token), tiny_gemma3_chat_fixture_bytes(token));
+        auto stop_session = Gemma2ChatSession(read_file_backed_gguf_model(stop_file.path()), options);
+        const auto result = stop_session.generate_user_turn("Hello");
+        expect(result.text.empty() && result.stop_token_id == token && result.generated_token_ids.empty(),
+            "Gemma3 target EOS/end-of-turn must stop without visible control text");
+    }
+    auto reverse_options = options;
+    reverse_options.reverse_stop_strings = {"HelloHello"};
+    auto reverse_session = Gemma2ChatSession(read_file_backed_gguf_model(file.path()), reverse_options);
+    std::string reverse_stream;
+    const auto reversed = reverse_session.generate_user_turn("Hello", [&](std::string_view text) { reverse_stream += text; });
+    expect(reversed.reverse_stop_string == "HelloHello" && reversed.text.empty() && reverse_stream.empty()
+        && reversed.generated_token_ids.empty(), "Gemma3 reverse stop must withhold matched text and clean visible history");
+    expect(reverse_session.generate_user_turn("Hello").reverse_stop_string == "HelloHello",
+        "Gemma3 reverse-stop cache receipt must remain usable by the next turn");
+}
+
+void test_gemma3_chat_without_retrieval_exceeds_8192_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const TempBinaryFile file("gemma3-long-chat", tiny_gemma3_chat_fixture_bytes());
+    // Gemma3's default disables retrieval, independently of native speculation.
+    Gemma2ChatSession session(read_file_backed_gguf_model(file.path()), {
+        .max_new_tokens = 1U, .context_length = 16384U,
+    });
+    std::string prompt;
+    for (std::uint32_t i = 0; i < 8200U; ++i) prompt += "Hello";
+    const auto first = session.generate_user_turn(prompt);
+    expect(first.text == "Hello" && session.cached_token_count() > 8192U,
+        "disabled retrieval must not impose its capacity on native Gemma3 chat");
+    const auto follow = session.generate_user_turn("Hello");
+    expect(follow.text == "Hello" && follow.metrics.reused_cached_token_count > 8192U,
+        "long Gemma3 chat must preserve prefix reuse");
+    expect(session.regenerate_last_turn().text == "Hello", "long native chat regeneration failed");
+    const auto cached = session.cached_token_count();
+    const auto messages = session.message_count();
+    bool rejected = false;
+    try { (void)session.generate_user_turn(prompt + prompt); }
+    catch (const Gemma2ChatContextError&) { rejected = true; }
+    expect(rejected && session.cached_token_count() == cached && session.message_count() == messages,
+        "model context admission must still reject oversize turns without mutating long history");
+}
+
+void test_gemma3_chat_cli_context_option_and_unavailable_device() {
+    const TempBinaryFile file("gemma3-chat-cli", tiny_gemma3_chat_fixture_bytes());
+    const auto path = file.path().string();
+    for (const std::string precision : {"", "auto", "f32", "f16"}) {
+        std::istringstream input("/tokens\nHello\nHello\n/regen\n/clear\nHello\n/reset\nHello\n/exit\n");
+        std::ostringstream output, error;
+        std::vector<std::string> arguments {"local-gguf-generate", path, "--chat", "--max-new-tokens", "1",
+            "--greedy", "--context-size", "64", "--no-speculative", "--decode-diagnostics"};
+        if (!precision.empty()) arguments.insert(arguments.end(), {"--kv-cache", precision});
+        std::vector<const char*> args;
+        for (const auto& argument : arguments) args.push_back(argument.c_str());
+        const auto result = run_generate(static_cast<int>(args.size()), args.data(), input, output, error);
+        if (!tensor_backend_is_available(BackendKind::metal)) {
+            expect(result == EXIT_FAILURE && error.str().find("Metal backend unavailable") != std::string::npos,
+                "Gemma3 unavailable Metal must report failure without a CPU fallback");
+        } else {
+            expect(result == EXIT_SUCCESS && error.str().empty(), "Gemma3 chat CLI execution failed");
+            expect(output.str().find("tokens: cached=0 remaining=64 max-new-tokens=1") != std::string::npos,
+                "Gemma3 CLI must report configured context, not model maximum");
+            expect(chat_timing_line_count(output.str()) == 5,
+                "Gemma3 CLI two turns, regeneration, clear and reset must complete");
+            expect(output.str().find("Hello") != std::string::npos, "Gemma3 CLI must emit native target text");
+            const auto resolved = precision == "f32" ? "f32" : "f16";
+            const auto needle = std::string("\"kv_cache_dtype\":\"") + resolved + "\"";
+            std::size_t matches = 0;
+            for (std::size_t pos = 0; (pos = output.str().find(needle, pos)) != std::string::npos; pos += needle.size())
+                ++matches;
+            expect(matches == 5, "Gemma3 precision must survive follow-up, regeneration, clear and reset");
+        }
+    }
+    for (const auto& arguments : std::vector<std::vector<std::string>> {
+        {"--context-size"}, {"--context-size", "0"}, {"--context-size", "-1"},
+        {"--context-size", "4294967296"}, {"--context-size", "64", "--context-size", "32"},
+    }) {
+        std::ostringstream bad_output, bad_error;
+        expect(run_generate_chat_with_extra_arguments(file.path(), arguments, bad_output, bad_error) == EXIT_FAILURE
+            && bad_error.str().find("--context-size") != std::string::npos && bad_output.str().empty(),
+            "Gemma3 invalid context option must fail before chat starts");
+    }
+    for (const auto& arguments : std::vector<std::vector<std::string>> {
+        {"--kv-cache"}, {"--kv-cache", "bf16"}, {"--kv-cache", ""},
+        {"--kv-cache", "f16", "--kv-cache", "f32"},
+        {"--kv-cache", "auto", "--kv-cache", "auto"},
+    }) {
+        std::ostringstream bad_output, bad_error;
+        expect(run_generate_chat_with_extra_arguments(file.path(), arguments, bad_output, bad_error) == EXIT_FAILURE
+            && bad_error.str().find("--kv-cache") != std::string::npos && bad_output.str().empty(),
+            "Gemma3 invalid or repeated KV precision must fail before chat starts");
+    }
+    if (tensor_backend_is_available(BackendKind::metal)) {
+        using local_gguf_engine::engine::GemmaKVPrecision;
+        for (const auto prepared_precision : {GemmaKVPrecision::f16, GemmaKVPrecision::f32})
+        for (const auto requested : {GemmaKVPrecision::automatic, GemmaKVPrecision::f16, GemmaKVPrecision::f32}) {
+            Gemma2ChatSessionOptions options {.max_new_tokens = 1, .context_length = 64,
+                .kv_precision = prepared_precision,
+                .speculative_decode = false};
+            auto prepared = local_gguf_engine::engine::Gemma2ChatSessionState::prepare(
+                read_file_backed_gguf_model(file.path()), options);
+            options.kv_precision = requested;
+            const auto resolved = requested == GemmaKVPrecision::f32 ? GemmaKVPrecision::f32 : GemmaKVPrecision::f16;
+            if (prepared_precision == resolved) {
+                Gemma2ChatSession compatible(std::move(prepared), options);
+                expect(compatible.generate_user_turn("Hello").metrics.kv_precision == resolved,
+                    "prepared session rejected or changed a compatible automatic/explicit precision");
+                continue;
+            }
+            try {
+                Gemma2ChatSession mismatched(std::move(prepared), options);
+                throw TestFailure("prepared target accepted a different requested numerical policy");
+            } catch (const std::invalid_argument& exception) {
+                expect(std::string(exception.what()).find("KV precision differ") != std::string::npos,
+                    "prepared precision mismatch must explain the incompatible policy");
+            }
+        }
+    }
+
+}
+
+void test_gemma3_paired_chat_public_path_and_capacity_when_available() {
+    const std::filesystem::path draft_path = "models/gemma-3-270m-it-Q8_0.gguf";
+    if (!tensor_backend_is_available(BackendKind::metal) || !std::filesystem::exists(draft_path)) return;
+    const auto draft_file = read_file_backed_gguf_model(draft_path);
+    // A full vocabulary/native Gemma3 target fixture makes preparation and
+    // public chat deterministic while the drafter executes all actual weights.
+    // This is lifecycle evidence, never a model-quality or speed benchmark.
+    constexpr std::uint32_t selected = 9259;
+    const TempBinaryFile target("gemma3-paired-public", tiny_gemma3_chat_fixture_bytes(
+        selected, draft_file.view().directory.metadata.entries));
+    for (const auto precision : {local_gguf_engine::engine::GemmaKVPrecision::f32,
+                                 local_gguf_engine::engine::GemmaKVPrecision::f16})
+    for (const bool conditional : {false, true}) {
+        Gemma2ChatSession session(read_file_backed_gguf_model(target.path()), {
+            .max_new_tokens = 3, .context_length = 64, .kv_precision = precision, .retrieval_decode = false,
+            .standalone_draft_model = draft_path,
+            .standalone_execution = {.horizon = 3, .conditional_verification = conditional},
+            .speculative_sampling = local_gguf_engine::engine::SpeculativeSamplingMode::lossless,
+            .sampler = {.temperature = 0.0F},
+        });
+        const auto first = session.generate_user_turn("Hello");
+        expect(first.selected_token_ids == std::vector<std::uint32_t>(3, selected)
+            && first.metrics.standalone_draft && first.metrics.standalone_bounded_repetition_history
+            && first.metrics.generation.learned_cycle_count > 0
+            && first.metrics.generation.learned_proposed_edge_count > 0,
+            "Gemma3 paired public chat did not execute native lossless proposals");
+        const auto replay = session.regenerate_last_turn();
+        expect(replay.selected_token_ids == first.selected_token_ids
+            && first.metrics.kv_precision == precision && replay.metrics.kv_precision == precision,
+            "Gemma3 paired regeneration changed its target law or KV precision");
+        const auto followup = session.generate_user_turn("Again");
+        expect(followup.selected_token_ids == first.selected_token_ids
+            && followup.metrics.reused_cached_token_count > 0,
+            "Gemma3 paired follow-up lost its retained target/draft history");
+    }
+    try {
+        Gemma2ChatSession oversized(read_file_backed_gguf_model(target.path()), {
+            .context_length = 65536,
+            .standalone_draft_model = draft_path,
+            .speculative_sampling = local_gguf_engine::engine::SpeculativeSamplingMode::lossless,
+        });
+        throw TestFailure("Gemma3 paired preparation exceeded the draft model context");
+    } catch (const std::length_error& error) {
+        expect(std::string(error.what()).find("32768") != std::string::npos,
+            "Gemma3 paired capacity refusal omitted its draft context limit");
+    }
+}
+
+void test_gemma3_paired_defaults_match_explicit_f16_h1_lossless_when_available() {
+    namespace engine = local_gguf_engine::engine;
+    const std::filesystem::path draft_path = "models/gemma-3-270m-it-Q8_0.gguf";
+    if (!tensor_backend_is_available(BackendKind::metal) || !std::filesystem::exists(draft_path)) return;
+    const auto draft_file = read_file_backed_gguf_model(draft_path);
+    const TempBinaryFile target("gemma3-paired-defaults", tiny_gemma3_chat_fixture_bytes(
+        9259, draft_file.view().directory.metadata.entries));
+    engine::SamplerCheckpoint default_checkpoint;
+    std::vector<std::uint32_t> default_tokens;
+    std::vector<std::string> default_hashes;
+    for (const bool explicit_options : {false, true}) {
+        Gemma2ChatSessionOptions options {.max_new_tokens = 3, .context_length = 64,
+            .standalone_draft_model = draft_path,
+            .sampler = {.temperature = 0.8F, .top_k = 1U, .seed = 42U}};
+        if (explicit_options) {
+            options.kv_precision = engine::GemmaKVPrecision::f16;
+            options.standalone_execution = {.horizon = 1U, .conditional_verification = false};
+            options.speculative_sampling = engine::SpeculativeSamplingMode::lossless;
+        }
+        {
+            Gemma2ChatSession session(read_file_backed_gguf_model(target.path()), options);
+            for (unsigned turn = 0; turn < 3; ++turn) {
+                if (turn == 2) session.reset();
+                const auto result = turn == 1 ? session.regenerate_last_turn() : session.generate_user_turn("Hello");
+                expect(result.metrics.kv_precision == engine::GemmaKVPrecision::f16
+                        && result.metrics.standalone_draft && !result.metrics.retrieval_decode
+                        && result.metrics.speculative_sampling == engine::SpeculativeSamplingMode::lossless
+                        && result.metrics.learned_horizon == 1U
+                        && !result.metrics.standalone_execution.conditional_verification
+                        && result.metrics.generation.learned_cycle_count > 0U
+                        && result.metrics.generation.learned_proposed_edge_count > 0U,
+                    "paired engine defaults did not execute F16 H1 full lossless speculation");
+                if (!explicit_options && turn == 0) {
+                    default_tokens = result.selected_token_ids;
+                    default_checkpoint = session.sampler_for_testing().checkpoint();
+                } else {
+                    expect(result.selected_token_ids == default_tokens
+                            && session.sampler_for_testing().checkpoint().same_state(default_checkpoint),
+                        "paired defaults differ from explicit controls after generation, regeneration or reset");
+                }
+            }
+        }
+        std::vector<std::string> arguments {"local-gguf-generate", target.path().string(), "--chat",
+            "--draft-model", draft_path.string(), "--max-new-tokens", "3", "--context-size", "64",
+            "--temperature", "0.8", "--top-k", "1", "--seed", "42", "--decode-diagnostics"};
+        if (explicit_options) arguments.insert(arguments.end(), {"--kv-cache", "f16", "--draft-horizon", "1",
+            "--speculative-sampling", "lossless", "--speculative-schedule", "full"});
+        std::vector<const char*> argv;
+        for (const auto& argument : arguments) argv.push_back(argument.c_str());
+        std::istringstream input("Hello\n/regen\n/reset\nHello\n/exit\n");
+        std::ostringstream output, error;
+        expect(run_generate(static_cast<int>(argv.size()), argv.data(), input, output, error) == EXIT_SUCCESS
+                && error.str().empty(), "minimal/explicit paired CLI failed: " + error.str());
+        std::istringstream lines(output.str());
+        std::vector<std::string> hashes;
+        for (std::string line; std::getline(lines, line);) {
+            constexpr std::string_view marker = "\"selected_token_hash\":\"";
+            const auto begin = line.find(marker);
+            if (begin == std::string::npos) continue;
+            expect(line.find("\"kv_cache_dtype\":\"f16\"") != std::string::npos
+                    && line.find("\"speculative_sampling\":\"lossless\"") != std::string::npos
+                    && line.find("\"learned_horizon\":1,") != std::string::npos
+                    && line.find("\"learned_verification_schedule\":\"full\"") != std::string::npos
+                    && line.find("\"learned_proposed_edges\":0,") == std::string::npos,
+                "minimal paired CLI receipts do not describe actual F16 H1 full lossless execution");
+            hashes.push_back(line.substr(begin + marker.size(), 16));
+        }
+        expect(hashes.size() == 3 && hashes[0] == hashes[1] && hashes[0] == hashes[2],
+            "paired CLI regeneration/reset changed seeded target selection");
+        if (!explicit_options) default_hashes = hashes;
+        else expect(hashes == default_hashes, "minimal paired CLI differs from explicit F16/H1/lossless/full flags");
+    }
 }
 
 void test_runs_generate_gemma2_default_greedy_when_available() {
@@ -1508,7 +1928,7 @@ void test_runs_generate_chat_decode_diagnostics_only_when_requested_when_availab
     );
     expect(exit_code == EXIT_SUCCESS && error.str().empty(),
         "decode-diagnostic chat invocation failed");
-    expect(output.str().find("[ Decode: {\"schema_version\":5") != std::string::npos,
+    expect(output.str().find("[ Decode: {\"schema_version\":6") != std::string::npos,
         "requested decode attribution record is missing");
 }
 
@@ -1980,6 +2400,7 @@ void test_standalone_engine_configuration_fails_before_model_or_device_work() {
             break;
         case 5:
             options.standalone_draft_model = "/unused-native-draft.gguf";
+            options.speculative_sampling = engine::SpeculativeSamplingMode::exact_match;
             break;
         }
         bool refused = false;
@@ -2002,6 +2423,8 @@ void test_standalone_tli_cli_rejects_missing_and_conflicting_configuration() {
         {"--draft-model", "/missing-gemma3-draft.gguf", "--speculative-sampling", "lossless"},
         {"--draft-model", "/missing-gemma3-draft.gguf", "--speculative-sampling", "lossless", "--no-speculative"},
         {"--draft-model", "/missing-gemma3-draft.gguf", "--speculative-sampling", "lossless", "--backend", "cpu"},
+        {"--draft-model", "/missing-gemma3-draft.gguf", "--no-speculative"},
+        {"--draft-model", "/missing-gemma3-draft.gguf", "--backend", "cpu"},
         {"--draft-horizon"}, {"--draft-horizon", "3"}, {"--draft-horizon", "0"},
         {"--draft-horizon", "-1"}, {"--draft-horizon", "24"}, {"--draft-horizon", "3.0"},
         {"--draft-horizon", "18446744073709551616"},
@@ -2074,7 +2497,7 @@ void test_standalone_draft_sampling_cli_propagates_effective_values_when_availab
     std::string inherited_hash;
     for (const bool override : {false, true}) {
         std::vector<std::string> arguments {"local-gguf-generate", model.path().string(), "--chat", "--max-new-tokens", "1",
-            "--draft-model", draft.string(), "--draft-horizon", "1", "--speculative-sampling", "lossless",
+            "--draft-model", draft.string(),
             "--output-head", "q8_0",
             "--temperature", "0.5", "--top-k", "2", "--top-p", "0.75", "--min-p", "0.125",
             "--repeat-penalty", "1.5", "--seed", "42", "--decode-diagnostics"};
@@ -2162,6 +2585,13 @@ void test_gemma3_real_artifact_failed_regeneration_when_available() {
 }
 
 const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
+    {"Gemma3 native target chat preserves multi-turn regeneration and reset", test_gemma3_chat_native_target_multiturn_regeneration_and_reset_when_available},
+    {"Gemma3 chat context shift and failed turn preserve state", test_gemma3_chat_context_shift_and_failed_turn_preserve_state_when_available},
+    {"Gemma3 chat callback failure cancellation and stops preserve committed prefix", test_gemma3_chat_callback_failure_cancellation_and_stops_when_available},
+    {"Gemma3 chat without retrieval preserves history beyond 8192", test_gemma3_chat_without_retrieval_exceeds_8192_when_available},
+    {"Gemma3 chat CLI handles context option and unavailable device", test_gemma3_chat_cli_context_option_and_unavailable_device},
+    {"Gemma3 paired public chat regeneration follow-up and capacity", test_gemma3_paired_chat_public_path_and_capacity_when_available},
+    {"Gemma3 paired defaults match explicit F16 H1 lossless engine and CLI execution", test_gemma3_paired_defaults_match_explicit_f16_h1_lossless_when_available},
     {"archived draft controls fail closed", test_archived_draft_controls_fail_closed},
     {"standalone engine configuration fails closed before artifact or device work", test_standalone_engine_configuration_fails_before_model_or_device_work},
     {"real Gemma3 failed regeneration and context shifts preserve own sampling state when available", test_gemma3_real_artifact_failed_regeneration_when_available},

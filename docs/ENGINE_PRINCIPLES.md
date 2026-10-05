@@ -35,9 +35,9 @@ This file defines the project's permanent engineering and coding principles.
 - Make performance-sensitive state persistent when its lifetime is persistent.
   Avoid hidden copies, implicit format conversions, temporary allocations, and
   synchronization inside cheap-looking abstractions.
-- Keep changes small and coherent, but not artificially tiny. A slice should
-  prove one useful behavior or hypothesis end to end and stop at a clean
-  boundary.
+- Complete the agreed implementation end to end. Let architecture and useful
+  outcomes determine the scope of a change; avoid artificial iteration limits,
+  temporary substitutes, and unnecessary approval boundaries.
 - Do not mix performance work with unrelated cleanup, broad refactors, or new
   features. Remove rejected candidates and temporary instrumentation.
 

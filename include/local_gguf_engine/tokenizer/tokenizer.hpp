@@ -90,6 +90,9 @@ struct ChatMessage {
 class TokenizerEncodeWorkspace final {
 public:
     explicit TokenizerEncodeWorkspace(std::size_t max_input_bytes);
+    // Checked preallocation estimate for the supported libc++ runtime. Includes
+    // reserve alignment slack; owned_bytes() records actual capacities later.
+    [[nodiscard]] static std::size_t estimate_owned_bytes(std::size_t max_input_bytes);
     [[nodiscard]] std::size_t owned_bytes() const noexcept;
 private:
     friend class Tokenizer;

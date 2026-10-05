@@ -13,6 +13,9 @@
 
 namespace local_gguf_engine::tensor::backends::metal {
 
+// Shares the arena's validation word with device-input bits 1, 2 and 4.
+inline constexpr std::uint32_t verifier_kv_nonfinite_status = 8U;
+
 struct MetalCommandStats {
     std::uint32_t command_buffer_count = 0;
     std::uint32_t commit_count = 0;
@@ -50,7 +53,9 @@ struct MetalCommandStats {
 // constant buffers in the token hot path.
 class MetalCommandContext final {
 public:
-    explicit MetalCommandContext(std::string_view label, bool concurrent_compute = false);
+    explicit MetalCommandContext(
+        std::string_view label, bool concurrent_compute = false, bool precise_math = false
+    );
     // Reuses engine-owned host storage. Metal command buffers/encoders remain
     // single-use driver objects; this is not a claim of zero driver allocation.
     void restart();
@@ -82,10 +87,24 @@ public:
         std::uint32_t row_count = 0,
         std::uint64_t output_byte_offset = 0
     );
+    // Prompt prefill may opt into native F32 matrix accumulation. Target
+    // decode and verification share a batch-independent packed-weight core.
+    // Producer sums use [row][256-value block][8 workers][4 components].
+    // They share the input lifetime and require an existing producer barrier.
     void encode_verifier_matmul(
         const BackendBuffer& input,
         const BackendBuffer& weight,
         const BackendBuffer& output,
+        std::uint32_t row_count,
+        bool allow_prefill_matrix = false,
+        const BackendBuffer* q4_input_sums = nullptr
+    );
+    // Native K-quant head rows use the same arithmetic as target projections.
+    void encode_target_head_rows(
+        const BackendBuffer& input,
+        std::uint32_t input_row_start,
+        const BackendBuffer& weight,
+        const BackendBuffer& logits_tile,
         std::uint32_t row_count
     );
     void encode_target_head_q8_rows(
@@ -126,13 +145,25 @@ public:
         const BackendBuffer& status_u32,
         std::uint32_t row_count
     );
+    // Each head has its own RMS denominator and shares the learned norm vector.
+    // Input and output may alias. Gemma 3's released 12B head width is 256.
+    void encode_head_rms_norm(
+        const BackendBuffer& input,
+        const BackendBuffer& weight,
+        const BackendBuffer& output,
+        float epsilon,
+        std::uint32_t row_count,
+        std::uint32_t head_count,
+        std::uint32_t head_dimension
+    );
     void encode_rms_norm(
         const BackendBuffer& input,
         const BackendBuffer& weight,
         const BackendBuffer& output,
         float epsilon,
         std::uint32_t row_count = 0,
-        std::uint32_t input_row_start = 0
+        std::uint32_t input_row_start = 0,
+        const BackendBuffer* q4_input_sums = nullptr
     );
     void encode_rms_norm_add(
         const BackendBuffer& input,
@@ -279,7 +310,8 @@ public:
         std::uint32_t head_count,
         std::uint32_t head_dimension,
         std::uint32_t rope_dimension_count,
-        float frequency_base
+        float frequency_base,
+        float frequency_scale = 1.0F
     );
     void encode_verifier_kv_store(
         const BackendBuffer& raw_key,
@@ -291,8 +323,13 @@ public:
         std::uint32_t head_count,
         std::uint32_t head_dimension,
         std::uint32_t rope_dimension_count,
-        float frequency_base
+        float frequency_base,
+        float frequency_scale = 1.0F,
+        const BackendBuffer* numerical_status = nullptr
     );
+    // Schedules are CPU-staged shared storage, complete before this call and
+    // immutable until command completion. Dispatch sizing reads that host data;
+    // no preceding GPU command may produce or modify these schedule rows.
     void encode_verifier_attention(
         const BackendBuffer& query,
         const BackendBuffer& resident_key,
@@ -313,7 +350,8 @@ public:
         std::uint32_t key_dimension,
         std::uint32_t value_dimension,
         float scale,
-        float logit_softcap
+        float logit_softcap,
+        const BackendBuffer* q4_input_sums = nullptr
     );
     void encode_verifier_kv_scatter(
         const BackendBuffer& private_key,
@@ -342,7 +380,8 @@ public:
         const BackendBuffer& gate,
         const BackendBuffer& up,
         const BackendBuffer& output,
-        std::uint64_t element_count = 0
+        std::uint64_t element_count = 0,
+        const BackendBuffer* q4_input_sums = nullptr
     );
     void encode_softcap(
         const BackendBuffer& input,

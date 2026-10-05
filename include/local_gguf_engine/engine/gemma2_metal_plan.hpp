@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <array>
 #include <vector>
 
@@ -16,6 +17,7 @@ enum class Gemma2OutputHeadPolicy : std::uint32_t {
     automatic = 0U,
     f16 = 1U,
     q8_0 = 2U,
+    q6_k = 3U,
 };
 
 [[nodiscard]] const char* gemma2_output_head_policy_name(Gemma2OutputHeadPolicy policy) noexcept;
@@ -32,6 +34,8 @@ struct Gemma2MetalAttentionWeightBuffers {
     tensor::BackendBuffer key_weight;
     tensor::BackendBuffer value_weight;
     tensor::BackendBuffer output_weight;
+    std::optional<tensor::BackendBuffer> query_norm_weight;
+    std::optional<tensor::BackendBuffer> key_norm_weight;
 };
 
 struct Gemma2MetalFeedForwardWeightBuffers {
@@ -221,6 +225,7 @@ struct Gemma2MetalLayerSchedule {
 
 struct Gemma2MetalVerificationStateAccess;
 struct ResidentTargetPayloadReceipt;
+class Gemma2MetalTargetVerifierPlan;
 
 class Gemma2MetalModelPlan final {
 public:
@@ -255,6 +260,7 @@ public:
     [[nodiscard]] std::size_t uploaded_weight_byte_count() const noexcept;
     [[nodiscard]] std::size_t kv_cache_byte_count() const noexcept;
     [[nodiscard]] std::size_t scratch_byte_count() const noexcept;
+    [[nodiscard]] std::shared_ptr<Gemma2MetalTargetVerifierPlan>& target_execution_workspace() noexcept;
     [[nodiscard]] std::array<std::uintptr_t, 4> allocation_identities() const noexcept;
     [[nodiscard]] bool has_pending_verification() const noexcept;
     [[nodiscard]] bool pending_verification_completed() const noexcept;
@@ -295,6 +301,7 @@ private:
     std::uint32_t pending_verification_position_ = 0;
     std::uint32_t pending_verification_row_count_ = 0;
     std::uint32_t provisionally_committed_token_count_ = 0;
+    std::shared_ptr<Gemma2MetalTargetVerifierPlan> target_execution_workspace_;
 };
 
 class Gemma2MetalSchedule final {
@@ -343,14 +350,29 @@ private:
     std::uint32_t total_kv_token_count_ = 0;
 };
 
+struct Gemma3MetalMemoryEstimate {
+    std::size_t weights = 0;
+    std::size_t kv_cache = 0;
+    // Includes the lazily prepared ordinary execution arena, not a speculative arena.
+    std::size_t scratch = 0;
+};
+// Descriptor accounting only: validates the native Gemma 3 layout without
+// uploading weights or allocating device storage. Tested against owned ledgers.
+[[nodiscard]] Gemma3MetalMemoryEstimate estimate_gemma3_metal_memory(
+    const Gemma2ModelConfig& config, const Gemma2ModelWeights& weights);
+
 [[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const EngineModel& model,
-    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic
+    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic,
+    std::uint32_t context_length = 0U,
+    GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic
 );
 [[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const EngineModel& model,
     Gemma2OutputHeadPolicy policy,
-    ResidentTargetPayloadReceipt& resident_receipt
+    ResidentTargetPayloadReceipt& resident_receipt,
+    std::uint32_t context_length = 0U,
+    GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic
 );
 [[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const Gemma2ModelConfig& config,

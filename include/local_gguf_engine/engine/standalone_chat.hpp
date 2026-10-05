@@ -15,8 +15,9 @@ class StandaloneDraftArtifact;
 class Gemma3DraftPlan;
 
 // Absent scalars inherit the authoritative target settings. Only q changes:
-// proposal randomness remains checkpoint-owned and native draft repetition
-// history remains the complete retained draft context, not a new window.
+// proposal randomness remains checkpoint-owned. Direct-ID Gemma3 pairs inherit
+// the target repetition window; the generic TLI path retains full native
+// history because its token positions need not match target positions.
 struct StandaloneDraftSamplingOptions {
     std::optional<float> temperature;
     std::optional<std::uint32_t> top_k;
@@ -34,7 +35,7 @@ struct StandaloneDraftSamplingOptions {
     std::uint32_t draft_vocabulary_size);
 
 struct StandaloneExecutionOptions {
-    std::uint32_t horizon = 3;
+    std::uint32_t horizon = 1;
     bool conditional_verification = false;
     StandaloneDraftSamplingOptions draft_sampling {};
     friend bool operator==(const StandaloneExecutionOptions&, const StandaloneExecutionOptions&) = default;
@@ -73,7 +74,14 @@ public:
     StandaloneChatPlan& operator=(StandaloneChatPlan&&) noexcept;
     StandaloneChatPlan(const StandaloneChatPlan&) = delete;
     StandaloneChatPlan& operator=(const StandaloneChatPlan&) = delete;
+    [[nodiscard]] static std::size_t estimate_owned_bytes(const Gemma2ModelConfig& target,
+        const tokenizer::Tokenizer& target_tokenizer, const tokenizer::Tokenizer& draft_tokenizer,
+        const StandaloneTliMapping& mapping, StandaloneExecutionOptions execution);
     [[nodiscard]] std::uint32_t horizon() const noexcept;
+    [[nodiscard]] bool direct_ids() const noexcept;
+    // Includes the already-selected root in remaining. Zero selects ordinary
+    // execution; capacity decisions precede any proposal random preview.
+    [[nodiscard]] std::uint32_t cycle_horizon(std::uint32_t position, std::size_t remaining) const noexcept;
     [[nodiscard]] StandaloneDraftKind kind() const noexcept;
     [[nodiscard]] const StandaloneExecutionOptions& execution_options() const noexcept;
     [[nodiscard]] TokenSamplerOptions effective_draft_sampler_options(const TokenSamplerOptions& target) const;
@@ -87,6 +95,14 @@ public:
     // Rebased prompts discard the old interpretation only after complete
     // conversion/capacity validation has succeeded.
     void synchronize_context(std::span<const std::uint32_t> target_tokens, bool replace_context = false);
+    // Direct-ID admission before the first target callback can run while the
+    // draft still owns the previous turn's cache. Neither ledger is mutated.
+    void validate_direct_context(std::span<const std::uint32_t> target_tokens,
+        std::span<const std::uint32_t> suffix = {}) const;
+    // A target-committed token normally remains a saved native pending emission.
+    // An existing pending prefix is materialized with the new token through
+    // ordinary append; both cases require a synchronized direct-ID prefix.
+    void observe_committed_pending(std::uint32_t token, std::uint32_t target_position);
     // Dry-run the complete native conversion before an ordinary/retrieval
     // target transaction publishes these tokens. No cache/ledger/RNG mutation.
     void validate_committed_prefix(std::span<const std::uint32_t> tokens);
@@ -106,6 +122,7 @@ public:
         const Gemma2MetalModelPlan& target, StandaloneExecutionOptions execution);
     [[nodiscard]] const Gemma3DraftPlan& draft_plan_for_testing() const noexcept;
     [[nodiscard]] const Gemma3DraftPlan* gemma3_draft_plan_for_testing() const noexcept;
+    [[nodiscard]] std::size_t tokenizer_workspace_bytes_for_testing() const noexcept;
 #endif
 private:
     struct Impl;

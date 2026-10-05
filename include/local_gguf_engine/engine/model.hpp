@@ -16,6 +16,7 @@ namespace local_gguf_engine::engine {
 enum class EngineModelErrorCode {
     missing_metadata,
     invalid_metadata_type,
+    invalid_metadata_value,
     unsupported_architecture,
     duplicate_tensor_name,
     missing_tensor,
@@ -36,7 +37,15 @@ private:
 
 enum class ModelArchitecture {
     gemma2,
+    gemma3,
 };
+
+enum class GemmaKVPrecision { automatic, f32, f16 };
+
+[[nodiscard]] GemmaKVPrecision resolve_gemma_kv_precision(
+    ModelArchitecture architecture, GemmaKVPrecision requested
+);
+[[nodiscard]] std::string_view gemma_kv_precision_name(GemmaKVPrecision precision) noexcept;
 
 struct Gemma2ModelConfig {
     std::uint32_t context_length = 0;
@@ -54,8 +63,34 @@ struct Gemma2ModelConfig {
     float final_logit_softcap = 0.0F;
     bool uses_tied_output_weight = false;
 
+    // Shared resident execution policy. The historical type name is retained
+    // so Gemma 2 cache, chat and transaction ownership remain one foundation.
+    ModelArchitecture architecture = ModelArchitecture::gemma2;
+    // Zero on legacy hand-built Gemma 2 fixtures means context_length.
+    std::uint32_t model_context_length = 0;
+    std::uint32_t attention_global_layer_period = 2;
+    float rope_freq_base = 10000.0F;
+    float local_rope_freq_base = 10000.0F;
+    float rope_freq_scale = 1.0F;
+    bool uses_qk_norm = false;
+    // Source metadata leaves this automatic, resolving to F16 for both Gemma
+    // families. Gemma 3 also supports explicit F32. A resident plan owns one
+    // resolved precision for durable, current-chunk, private and rollback K/V.
+    GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic;
+
     constexpr bool operator==(const Gemma2ModelConfig&) const = default;
 };
+
+[[nodiscard]] bool gemma_layer_uses_sliding_window(
+    const Gemma2ModelConfig& config, std::uint32_t layer_index
+) noexcept;
+[[nodiscard]] float gemma_layer_rope_freq_base(
+    const Gemma2ModelConfig& config, std::uint32_t layer_index
+) noexcept;
+[[nodiscard]] float gemma_layer_rope_freq_scale(
+    const Gemma2ModelConfig& config, std::uint32_t layer_index
+) noexcept;
+[[nodiscard]] tensor::DType gemma_kv_dtype(const Gemma2ModelConfig& config);
 
 struct EngineTensorView {
     std::string name;

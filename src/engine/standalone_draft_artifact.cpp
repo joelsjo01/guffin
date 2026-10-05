@@ -3,6 +3,8 @@
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <cstring>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -32,14 +34,19 @@ bool shared_gemma_control(std::string_view text) {
     return text == "<bos>" || text == "<eos>" || text == "<start_of_turn>" || text == "<end_of_turn>";
 }
 
+bool gemma_proposal_eligible(const tokenizer::Tokenizer& tokenizer, std::uint32_t id) {
+    const auto& token = tokenizer.vocabulary()[id];
+    if (tokenizer.special_tokens().unknown_token_id == id) return false;
+    if (tokenizer.token_id_is_special(id)) return shared_gemma_control(token.text);
+    return token.type == 1 || token.type == 4 || token.type == 6;
+}
+
 std::optional<std::string> gemma_mapping_key(const tokenizer::Tokenizer& tokenizer, std::uint32_t id) {
     const auto& token = tokenizer.vocabulary()[id];
-    if (tokenizer.special_tokens().unknown_token_id == id) return std::nullopt;
+    if (!gemma_proposal_eligible(tokenizer, id)) return std::nullopt;
     if (tokenizer.token_id_is_special(id)) {
-        if (!shared_gemma_control(token.text)) return std::nullopt;
         return "c" + token.text;
     }
-    if (token.type != 1 && token.type != 4 && token.type != 6) return std::nullopt;
     std::string key(1, static_cast<char>(*token.type));
     if (token.type == 4) {
         // GGUF converts only whitespace-only SP user-defined ▁ runs into
@@ -54,6 +61,63 @@ std::optional<std::string> gemma_mapping_key(const tokenizer::Tokenizer& tokeniz
     }
     key += token.text;
     return key;
+}
+
+void validate_gemma3_direct_ids(const tokenizer::Tokenizer& target, const tokenizer::Tokenizer& draft) {
+    const auto fail = [](std::string_view detail) {
+        throw std::invalid_argument("Gemma3 direct-ID tokenizer mismatch: " + std::string(detail));
+    };
+    if (target.model() != draft.model() || target.vocabulary().size() != draft.vocabulary().size())
+        fail("model or vocabulary size");
+    const auto& ts = target.special_tokens();
+    const auto& ds = draft.special_tokens();
+    if (ts.bos_token_id != ds.bos_token_id || ts.eos_token_id != ds.eos_token_id
+        || ts.unknown_token_id != ds.unknown_token_id || ts.add_bos_token != ds.add_bos_token
+        || ts.add_eos_token != ds.add_eos_token)
+        fail("special IDs or insertion flags");
+    const auto require_role = [&](std::optional<std::uint32_t> id, std::string_view text, std::int32_t type) {
+        if (!id || *id >= target.vocabulary().size() || target.vocabulary()[*id].text != text
+            || target.vocabulary()[*id].type != type) fail("missing or invalid Gemma control role");
+    };
+    require_role(ts.bos_token_id, "<bos>", 3);
+    require_role(ts.eos_token_id, "<eos>", 3);
+    // The downloaded Gemma3 converter represents <unk> as CONTROL (3), not
+    // SentencePiece UNKNOWN (2). Its optional explicit ID still owns the role;
+    // the spelling remains special even when neither file declares that ID.
+    if (ts.unknown_token_id) {
+        const auto& unknown = target.vocabulary()[*ts.unknown_token_id];
+        if (unknown.text != "<unk>" || (unknown.type != 2 && unknown.type != 3))
+            fail("invalid unknown control role");
+    }
+    bool start_of_turn = false, end_of_turn = false;
+    for (std::uint32_t id = 0; id < target.vocabulary().size(); ++id) {
+        const auto& t = target.vocabulary()[id];
+        const auto& d = draft.vocabulary()[id];
+        if (t.text != d.text || !t.score || !d.score
+            || std::bit_cast<std::uint32_t>(*t.score) != std::bit_cast<std::uint32_t>(*d.score))
+            fail("piece or score at ID " + std::to_string(id));
+        // The released 12B and 270M GGUFs differ only in these image-marker
+        // types. Both spellings are special under the Gemma3 profile and are
+        // excluded from proposals. Other control/user-defined changes fail.
+        const bool image_marker = t.text == "<start_of_image>" || t.text == "<end_of_image>";
+        const bool compatible_image_type = image_marker && (t.type == 3 || t.type == 4)
+            && (d.type == 3 || d.type == 4);
+        if ((t.type != d.type && !compatible_image_type)
+            || target.token_id_is_special(id) != draft.token_id_is_special(id))
+            fail("piece type or special semantics at ID " + std::to_string(id));
+        if (t.text == "<start_of_turn>" || t.text == "<end_of_turn>") {
+            if (t.type != 3 || d.type != 3) fail("invalid turn control type");
+            if (t.text == "<start_of_turn>") start_of_turn = true;
+            else end_of_turn = true;
+        }
+    }
+    if (!start_of_turn || !end_of_turn) fail("missing turn control");
+    // Constructing a Gemma3 Tokenizer already validates identity normalization,
+    // no dummy prefix/collapse, and the complete byte fallback. Its remaining
+    // consumed semantics are checked above. add_sep_token is not consumed by
+    // this runtime. The target renders chat exactly once; no draft template is
+    // executed. Neither this compatibility proof nor image-type normalization
+    // changes either tokenizer's authenticated identity.
 }
 
 }  // namespace
@@ -89,6 +153,21 @@ StandaloneTliMapping::StandaloneTliMapping(
         || draft.vocabulary().size() >= static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::invalid_argument("TLI vocabulary exceeds signed device token capacity");
     }
+    if (target.profile() == tokenizer::TokenizerProfile::gemma3) {
+        validate_gemma3_direct_ids(target, draft);
+        for (std::uint32_t id = 0; id < target.vocabulary().size(); ++id) {
+            if (!gemma_proposal_eligible(draft, id)) continue;
+            draft_to_target_[id] = id;
+            target_to_draft_[id] = id;
+            ++intersection_size_;
+        }
+        if (!intersection_size_) throw std::invalid_argument("empty Gemma3 proposal support");
+        // This bound follows from the total conditioning identity, including
+        // controls outside proposal support and incomplete UTF-8 byte runs.
+        direct_ids_ = true;
+        max_append_tokens_ = 1;
+        return;
+    }
     std::size_t maximum_piece_bytes = 0;
     for (const auto& token : target.vocabulary()) maximum_piece_bytes = std::max(maximum_piece_bytes, token.text.size());
     if (maximum_piece_bytes > (std::numeric_limits<std::size_t>::max() - 3U) / 3U) {
@@ -97,7 +176,7 @@ StandaloneTliMapping::StandaloneTliMapping(
     // UTF-8 replacement and SP whitespace escaping expand each input byte by
     // at most three. Fallback emits at most one token per normalized byte.
     max_append_tokens_ = maximum_piece_bytes * 3U;
-    if (target.profile() != tokenizer::TokenizerProfile::gemma2) throw std::invalid_argument("Gemma3 bridge requires a Gemma2 target tokenizer");
+    if (target.profile() != tokenizer::TokenizerProfile::gemma2) throw std::invalid_argument("Gemma3 bridge requires a Gemma2 or compatible Gemma3 target tokenizer");
     std::unordered_map<std::string, std::uint32_t> target_ids;
     target_ids.reserve(target.vocabulary().size());
     for (std::uint32_t id = 0; id < target.vocabulary().size(); ++id) {
@@ -134,14 +213,39 @@ std::span<const std::uint32_t> StandaloneTliMapping::draft_to_target() const noe
 std::span<const std::uint32_t> StandaloneTliMapping::target_to_draft() const noexcept { return target_to_draft_; }
 std::size_t StandaloneTliMapping::intersection_size() const noexcept { return intersection_size_; }
 std::size_t StandaloneTliMapping::max_append_tokens() const noexcept { return max_append_tokens_; }
+bool StandaloneTliMapping::direct_ids() const noexcept { return direct_ids_; }
 std::size_t StandaloneTliMapping::owned_bytes() const noexcept {
     return (draft_to_target_.capacity() + target_to_draft_.capacity() + target_control_context_.capacity()) * sizeof(std::uint32_t);
+}
+
+std::size_t StandaloneTliMapping::append_target_token(
+    std::uint32_t token, std::span<std::uint32_t> output
+) const {
+    if (!direct_ids_) throw std::logic_error("TLI conversion requires a text workspace");
+    if (token >= target_to_draft_.size()) throw std::invalid_argument("TLI target token out of range");
+    if (output.empty()) throw std::length_error("TLI output capacity exhausted");
+    output[0] = token;
+    return 1;
+}
+
+std::size_t StandaloneTliMapping::encode_target_context(
+    std::span<const std::uint32_t> tokens, std::span<std::uint32_t> output
+) const {
+    if (!direct_ids_) throw std::logic_error("TLI conversion requires a text workspace");
+    if (tokens.size() > output.size()) throw std::length_error("TLI output capacity exhausted");
+    for (const auto token : tokens)
+        if (token >= target_to_draft_.size()) throw std::invalid_argument("TLI target token out of range");
+    // Validation precedes copying so an invalid history leaves its destination
+    // unchanged. memmove also permits in-place compaction of a native ledger.
+    if (!tokens.empty()) std::memmove(output.data(), tokens.data(), tokens.size_bytes());
+    return tokens.size();
 }
 
 std::size_t StandaloneTliMapping::append_target_token(
     std::uint32_t token, std::span<std::uint32_t> output,
     std::span<char> scratch, tokenizer::TokenizerEncodeWorkspace& workspace
 ) const {
+    if (direct_ids_) return append_target_token(token, output);
     if (token >= target_to_draft_.size()) throw std::invalid_argument("TLI target token out of range");
     if (target_to_draft_[token] != unmapped) {
         if (output.empty()) throw std::length_error("TLI output capacity exhausted");
@@ -168,6 +272,7 @@ std::size_t StandaloneTliMapping::encode_target_context(
     std::span<const std::uint32_t> tokens, std::span<std::uint32_t> output,
     std::span<char> scratch, tokenizer::TokenizerEncodeWorkspace& workspace
 ) const {
+    if (direct_ids_) return encode_target_context(tokens, output);
     // Retokenize ordinary spans together (including complete UTF-8 byte
     // runs), but never strip or re-detect semantic target control tokens.
     // Literal control-looking user text remains ordinary text.

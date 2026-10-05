@@ -138,6 +138,7 @@ public:
     ValidatedVerifierEncodeRequest& operator=(ValidatedVerifierEncodeRequest&&) noexcept = default;
 
     [[nodiscard]] const VerifierEncodeRequest& request() const noexcept;
+    [[nodiscard]] bool validated_for(const Gemma2ModelConfig& target) const noexcept;
 
 private:
     friend ValidatedVerifierEncodeRequest validate_verifier_encode_request(
@@ -145,25 +146,34 @@ private:
         std::uint32_t,
         std::uint32_t,
         std::uint32_t,
+        std::uint32_t,
         std::uint32_t
     );
-    explicit ValidatedVerifierEncodeRequest(const VerifierEncodeRequest& request);
+    explicit ValidatedVerifierEncodeRequest(
+        const VerifierEncodeRequest& request,
+        std::array<std::uint32_t, 5> validation_shape
+    );
     // A validated request is an immutable, non-owning capability. Its request
     // must outlive the capability and the synchronous encode that consumes it.
     // The large fixed-capacity request therefore remains in caller-owned,
     // preallocated storage rather than being copied through stack frames or
     // retained by an asynchronous target transaction.
     const VerifierEncodeRequest* request_ = nullptr;
+    // Vocabulary, layers, context capacity, local window, global-layer period.
+    // Encoding binds these proof inputs to the actual target in constant time;
+    // a proof for a larger context or different mask cannot authorize this one.
+    std::array<std::uint32_t, 5> validation_shape_ {};
 };
 
-static_assert(sizeof(ValidatedVerifierEncodeRequest) == sizeof(const void*));
+static_assert(sizeof(ValidatedVerifierEncodeRequest) <= sizeof(const void*) + 6U * sizeof(std::uint32_t));
 
 [[nodiscard]] VerifierTopologyDescriptor make_verifier_topology_descriptor(
     const ValidatedProposalGraph& graph,
     const ChainVerifierSchedule& chain_schedule,
     std::uint32_t layer_count,
     std::uint32_t context_length,
-    std::uint32_t sliding_window
+    std::uint32_t sliding_window,
+    std::uint32_t global_layer_period = 2U
 );
 
 [[nodiscard]] ValidatedVerifierEncodeRequest validate_verifier_encode_request(
@@ -171,7 +181,8 @@ static_assert(sizeof(ValidatedVerifierEncodeRequest) == sizeof(const void*));
     std::uint32_t vocabulary_size,
     std::uint32_t layer_count,
     std::uint32_t context_length,
-    std::uint32_t sliding_window
+    std::uint32_t sliding_window,
+    std::uint32_t global_layer_period = 2U
 );
 
 ValidatedVerifierEncodeRequest validate_verifier_encode_request(
@@ -179,7 +190,8 @@ ValidatedVerifierEncodeRequest validate_verifier_encode_request(
     std::uint32_t,
     std::uint32_t,
     std::uint32_t,
-    std::uint32_t
+    std::uint32_t,
+    std::uint32_t = 2U
 ) = delete;
 
 // Produces the one causally eligible tile view of a validated full chain.
@@ -191,7 +203,8 @@ void make_chain_verifier_tile_request(
     std::uint32_t tile_index,
     std::uint32_t layer_count,
     std::uint32_t context_length,
-    std::uint32_t sliding_window
+    std::uint32_t sliding_window,
+    std::uint32_t global_layer_period = 2U
 );
 
 struct TargetSelectionWorkspace {
@@ -238,6 +251,8 @@ struct Gemma2MetalTargetVerifierScratch {
     tensor::BackendBuffer feed_forward_gated;
     tensor::BackendBuffer projected_feed_forward_output;
     tensor::BackendBuffer feed_forward_residual;
+    // Reused after each existing projection barrier, bounded to scalar/H1 rows.
+    std::optional<tensor::BackendBuffer> q4_input_sums;
     std::vector<Gemma2MetalTargetVerifierKVLayer> kv_layers;
     TargetSelectionWorkspace selection;
 };
@@ -252,7 +267,8 @@ public:
         std::uint32_t layer_count,
         std::uint32_t vocabulary_size,
         std::uintptr_t target_weight_identity,
-        std::size_t allocated_byte_count
+        std::size_t allocated_byte_count,
+        bool precise_math = false
     );
 
     [[nodiscard]] const Gemma2MetalTargetVerifierScratch& scratch() const noexcept;
@@ -276,6 +292,10 @@ private:
     std::size_t allocated_byte_count_ = 0;
     std::vector<CompactTokenCandidates> completion_candidates_;
 };
+
+// The same descriptor ledger as the prepared arena; no device work is performed.
+[[nodiscard]] std::size_t estimate_target_verifier_bytes(
+    const Gemma2ModelConfig& config, std::uint32_t row_capacity);
 
 [[nodiscard]] Gemma2MetalTargetVerifierPlan create_gemma2_metal_target_verifier_plan(
     const Gemma2MetalModelPlan& target,

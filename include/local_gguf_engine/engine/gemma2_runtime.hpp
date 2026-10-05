@@ -66,6 +66,11 @@ struct Gemma2GenerationMetrics {
     std::uint64_t proposer_duration_ns = 0;
     std::uint32_t learned_cycle_count = 0;
     std::uint32_t learned_accepted_edge_count = 0;
+    std::uint64_t learned_proposed_edge_count = 0;
+    // Actual H for each launched cycle, including shortened budget/context
+    // tails. Reached depths count only adopted accept/residual decisions.
+    std::array<std::uint32_t, external_speculation_max_horizon + 1> learned_horizon_histogram {};
+    std::array<std::uint32_t, external_speculation_max_horizon> learned_reached_depth_histogram {};
     // Durable accepted-prefix lengths, not eagerly computed previews. Depth
     // zero denotes rejection of the first proposal. Terminal truncations are
     // kept separate so they cannot be mistaken for failed draft predictions.

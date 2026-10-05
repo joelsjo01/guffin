@@ -151,15 +151,17 @@ void test_gemma3_control_preserving_injective_bridge() {
     }
     const auto target = load_tokenizer_from_gguf_metadata(target_metadata);
     const auto draft = load_tokenizer_from_gguf_metadata(fixture_gemma3_tokenizer());
+    const auto legacy = load_tokenizer_from_gguf_metadata(fixture_tokenizer(true));
     for (const bool unsupported_target : {false, true}) {
         bool rejected = false;
         try {
-            const engine::StandaloneTliMapping invalid(unsupported_target ? draft : target,
+            const engine::StandaloneTliMapping invalid(unsupported_target ? legacy : target,
                 unsupported_target ? draft : target);
         } catch (const std::invalid_argument&) { rejected = true; }
         expect(rejected, "unsupported target/draft tokenizer pair must fail closed");
     }
     const engine::StandaloneTliMapping mapping(target, draft);
+    expect(!mapping.direct_ids() && mapping.max_append_tokens() > 1, "Gemma2 TLI incorrectly became an identity bridge");
     expect(mapping.target_to_draft()[270] == 271 && mapping.target_to_draft()[271] == 270, "turn controls were mapped by numeric ID");
     expect(mapping.target_to_draft()[2] == 2 && mapping.target_to_draft()[270] != 2, "EOS and EOT conflated");
     expect(mapping.target_to_draft()[266] == 266, "typed whitespace alias missing");
@@ -198,6 +200,10 @@ void test_gemma3_control_preserving_injective_bridge() {
     try { (void)mapping.encode_target_context(prompt, {}, scratch, workspace); }
     catch (const std::length_error&) { failed = true; }
     expect(failed, "control-preserving context capacity overflow must fail");
+    failed = false;
+    try { (void)mapping.encode_target_context(prompt, output); }
+    catch (const std::logic_error&) { failed = true; }
+    expect(failed, "cross-generation context conversion cannot omit its workspace");
 
     auto ambiguous = target_metadata;
     for (auto& entry : ambiguous.entries) if (entry.key == "tokenizer.ggml.tokens") {
@@ -220,6 +226,158 @@ void test_gemma3_control_preserving_injective_bridge() {
     const auto opaque_count = opaque_mapping.append_target_token(272, output, scratch, workspace);
     expect(opaque_count > 1 && draft.decode(std::span(output).first(opaque_count)) == "<opaque_control>",
         "opaque control without identical draft symbol did not retain its literal context");
+}
+
+model_format::GGUFMetadataSection fixture_direct_gemma3_tokenizer(bool draft) {
+    auto metadata = fixture_gemma3_tokenizer();
+    for (auto& entry : metadata.entries) {
+        auto* array = std::get_if<model_format::GGUFMetadataArray>(&entry.value.data);
+        if (!array) continue;
+        if (entry.key == "tokenizer.ggml.tokens") {
+            auto& values = std::get<std::vector<std::string>>(array->values);
+            values.insert(values.end(), {"<start_of_image>", "<end_of_image>", "<pad>"});
+        } else if (entry.key == "tokenizer.ggml.scores") {
+            auto& values = std::get<std::vector<float>>(array->values);
+            values.insert(values.end(), 3, -1000);
+        } else if (entry.key == "tokenizer.ggml.token_type") {
+            auto& values = std::get<std::vector<std::int32_t>>(array->values);
+            values[0] = 3; // The released Gemma3 GGUF marks <unk> as CONTROL.
+            values.insert(values.end(), {draft ? 4 : 3, draft ? 4 : 3, 3});
+        }
+    }
+    if (draft) metadata.entries.push_back(metadata_bool("tokenizer.ggml.add_sep_token", false));
+    return metadata;
+}
+
+void test_gemma3_direct_ids_preserve_total_conditioning() {
+    const auto target = load_tokenizer_from_gguf_metadata(fixture_direct_gemma3_tokenizer(false));
+    const auto draft = load_tokenizer_from_gguf_metadata(fixture_direct_gemma3_tokenizer(true));
+    const auto target_identity = target.identity(), draft_identity = draft.identity();
+    expect(target_identity != draft_identity, "image-type fixture must retain different authenticated identities");
+    const engine::StandaloneTliMapping mapping(target, draft);
+    expect(mapping.direct_ids() && mapping.max_append_tokens() == 1, "validated Gemma3 bridge must advertise one-ID conditioning");
+    expect(target.identity() == target_identity && draft.identity() == draft_identity,
+        "bridge compatibility must not rewrite authenticated tokenizer identities");
+    std::array<std::uint32_t, 384> output {};
+    for (std::uint32_t id = 0; id < target.vocabulary().size(); ++id) {
+        expect(mapping.append_target_token(id, output) == 1 && output[0] == id,
+            "one-token bound must cover every ID, including excluded controls");
+        const auto mapped = mapping.draft_to_target()[id];
+        expect(mapped == engine::StandaloneTliMapping::unmapped
+            || (mapped == id && mapping.target_to_draft()[id] == id), "direct proposal map is not injective");
+    }
+    for (const auto id : {0U, 272U, 273U, 274U, 275U}) {
+        expect(mapping.draft_to_target()[id] == engine::StandaloneTliMapping::unmapped
+            && mapping.target_to_draft()[id] == engine::StandaloneTliMapping::unmapped,
+            "context-only unknown/reserved/image/pad ID leaked into proposal support");
+    }
+    for (const auto id : {1U, 2U, 3U, 262U, 266U, 270U, 271U})
+        expect(mapping.target_to_draft()[id] == id, "ordinary/byte/shared-control proposal support lost");
+    // Deliberately noncanonical BPE segmentation, incomplete UTF-8 bytes and
+    // every class of excluded control must survive without decode/re-encode.
+    const std::array<std::uint32_t, 12> prompt {1, 270, 260, 261, 229, 133, 0, 272, 273, 274, 275, 271};
+    expect(mapping.encode_target_context(prompt, output) == prompt.size()
+        && std::equal(prompt.begin(), prompt.end(), output.begin()), "direct history was retokenized or lost controls");
+    tokenizer::TokenizerEncodeWorkspace no_text_capacity(0);
+    expect(mapping.encode_target_context(prompt, output, {}, no_text_capacity) == prompt.size(),
+        "legacy overload should bypass text workspace in direct mode");
+    expect(mapping.append_target_token(273, output, {}, no_text_capacity) == 1 && output[0] == 273,
+        "legacy append overload should preserve context-only IDs without workspace");
+    auto overlapping = prompt;
+    expect(mapping.encode_target_context(std::span(overlapping).subspan(1), overlapping) == prompt.size() - 1
+        && std::equal(prompt.begin() + 1, prompt.end(), overlapping.begin()), "direct in-place history copy corrupted IDs");
+    expect(mapping.encode_target_context({}, {}) == 0, "empty direct history needs no storage");
+    output.fill(9876);
+    const std::array<std::uint32_t, 2> invalid {1, static_cast<std::uint32_t>(target.vocabulary().size())};
+    bool failed = false;
+    try { (void)mapping.encode_target_context(invalid, output); }
+    catch (const std::invalid_argument&) { failed = true; }
+    expect(failed && output[0] == 9876, "invalid direct history must fail before changing its destination");
+    for (const bool append : {false, true}) {
+        failed = false;
+        try {
+            if (append) (void)mapping.append_target_token(1, {});
+            else (void)mapping.encode_target_context(prompt, std::span(output).first(prompt.size() - 1));
+        } catch (const std::length_error&) { failed = true; }
+        expect(failed, "direct history/correction must check output capacity");
+    }
+    failed = false;
+    try { (void)mapping.append_target_token(invalid.back(), output); }
+    catch (const std::invalid_argument&) { failed = true; }
+    expect(failed, "direct correction must check vocabulary bounds");
+    auto undeclared_metadata = fixture_direct_gemma3_tokenizer(false);
+    std::erase_if(undeclared_metadata.entries, [](const auto& entry) {
+        return entry.key == "tokenizer.ggml.unknown_token_id";
+    });
+    const auto undeclared = load_tokenizer_from_gguf_metadata(undeclared_metadata);
+    const engine::StandaloneTliMapping undeclared_mapping(undeclared, undeclared);
+    expect(undeclared_mapping.direct_ids() && undeclared_mapping.append_target_token(0, output) == 1
+        && output[0] == 0 && undeclared_mapping.draft_to_target()[0] == engine::StandaloneTliMapping::unmapped,
+        "matching optional unknown-ID absence must preserve special conditioning without a proposal");
+}
+
+void test_gemma3_direct_ids_reject_semantic_mismatches() {
+    const auto target_metadata = fixture_direct_gemma3_tokenizer(false);
+    const auto draft = load_tokenizer_from_gguf_metadata(fixture_direct_gemma3_tokenizer(true));
+    for (const std::string_view mutation : {"permuted IDs", "piece", "score", "score sign", "type", "opaque control type",
+            "image type", "size", "BOS ID", "EOS ID", "unknown ID", "add BOS", "add EOS", "normalization",
+            "pretokenizer", "normalizer", "collapse", "escaping"}) {
+        auto metadata = target_metadata;
+        for (auto& entry : metadata.entries) {
+            if (entry.key == "tokenizer.ggml.tokens") {
+                auto& values = std::get<std::vector<std::string>>(std::get<model_format::GGUFMetadataArray>(entry.value.data).values);
+                if (mutation == "permuted IDs") std::swap(values[260], values[261]);
+                if (mutation == "piece") values[265] = "z";
+                if (mutation == "size") values.pop_back();
+            } else if (entry.key == "tokenizer.ggml.scores") {
+                auto& values = std::get<std::vector<float>>(std::get<model_format::GGUFMetadataArray>(entry.value.data).values);
+                if (mutation == "score") values[260] += 1;
+                if (mutation == "score sign") values[1] = -0.0F;
+                if (mutation == "size") values.pop_back();
+            } else if (entry.key == "tokenizer.ggml.token_type") {
+                auto& values = std::get<std::vector<std::int32_t>>(std::get<model_format::GGUFMetadataArray>(entry.value.data).values);
+                if (mutation == "type") values[260] = 4;
+                if (mutation == "opaque control type") values[272] = 4;
+                if (mutation == "image type") values[273] = 1;
+                if (mutation == "size") values.pop_back();
+            }
+            if ((mutation == "BOS ID" && entry.key == "tokenizer.ggml.bos_token_id")
+                || (mutation == "EOS ID" && entry.key == "tokenizer.ggml.eos_token_id")
+                || (mutation == "unknown ID" && entry.key == "tokenizer.ggml.unknown_token_id"))
+                entry = metadata_u32(entry.key, 260);
+            if (mutation == "add BOS" && entry.key == "tokenizer.ggml.add_bos_token") entry = metadata_bool(entry.key, false);
+            if (mutation == "add EOS" && entry.key == "tokenizer.ggml.add_eos_token") entry = metadata_bool(entry.key, true);
+            if (mutation == "normalization" && entry.key == "tokenizer.ggml.add_space_prefix") entry = metadata_bool(entry.key, true);
+            if (mutation == "normalizer" && entry.key == "tokenizer.ggml.normalizer") entry = metadata_string(entry.key, "nfkc");
+        }
+        if (mutation == "pretokenizer") metadata.entries.push_back(metadata_string("tokenizer.ggml.pre", "changed"));
+        if (mutation == "collapse") metadata.entries.push_back(metadata_bool("tokenizer.ggml.remove_extra_whitespaces", true));
+        if (mutation == "escaping") metadata.entries.push_back(metadata_bool("tokenizer.ggml.escape_whitespaces", false));
+        bool failed = false;
+        try {
+            const auto target = load_tokenizer_from_gguf_metadata(metadata);
+            const engine::StandaloneTliMapping mapping(target, draft);
+        } catch (const std::exception&) { failed = true; }
+        expect(failed, "direct-ID compatibility accepted changed " + std::string(mutation));
+    }
+    // Matching malformed role metadata is not enough: both sides must still
+    // have the Gemma control contract, rather than merely matching each other.
+    for (const bool missing_turn : {false, true}) {
+        auto metadata = target_metadata;
+        for (auto& entry : metadata.entries) {
+            if (missing_turn && entry.key == "tokenizer.ggml.tokens") {
+                auto& values = std::get<std::vector<std::string>>(std::get<model_format::GGUFMetadataArray>(entry.value.data).values);
+                values[271] = "<unused_end>";
+            }
+            if (!missing_turn && entry.key == "tokenizer.ggml.bos_token_id") entry = metadata_u32(entry.key, 260);
+        }
+        bool failed = false;
+        try {
+            const auto malformed = load_tokenizer_from_gguf_metadata(metadata);
+            const engine::StandaloneTliMapping mapping(malformed, malformed);
+        } catch (const std::invalid_argument&) { failed = true; }
+        expect(failed, "matching malformed Gemma control semantics accepted");
+    }
 }
 
 void test_bounded_legacy_tokenizer_reference() {
@@ -248,6 +406,16 @@ void test_bounded_legacy_tokenizer_reference() {
 }
 
 void test_bounded_tokenizer_capacity_and_metadata() {
+    for (const std::size_t bound : {0U, 1U, 7U, 31U, 128U, 4096U}) {
+        const tokenizer::TokenizerEncodeWorkspace prepared(bound);
+        const auto estimate = tokenizer::TokenizerEncodeWorkspace::estimate_owned_bytes(bound);
+        expect(estimate >= prepared.owned_bytes() && estimate - prepared.owned_bytes() <= 32,
+            "tokenizer preallocation estimate must cover real reserved capacities with bounded slack");
+    }
+    bool estimate_failed = false;
+    try { (void)tokenizer::TokenizerEncodeWorkspace::estimate_owned_bytes(std::numeric_limits<std::size_t>::max()); }
+    catch (const std::length_error&) { estimate_failed = true; }
+    expect(estimate_failed, "tokenizer preallocation estimate must reject arithmetic overflow without allocation");
     const auto model = load_tokenizer_from_gguf_metadata(fixture_tokenizer(true));
     tokenizer::TokenizerEncodeWorkspace workspace(2);
     std::array<std::uint32_t, 10> output {};
@@ -272,13 +440,49 @@ void test_bounded_tokenizer_capacity_and_metadata() {
     expect(failed, "unsupported normalization must not silently become identity");
 }
 
-void test_artifact_sha256_published_vector() {
-    constexpr std::string_view input = "abc";
-    const auto bytes = std::span<const std::uint8_t>(
-        reinterpret_cast<const std::uint8_t*>(input.data()), input.size());
-    expect(runtime::sha256(bytes).hex() ==
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-        "SHA-256 abc vector differs");
+void test_artifact_sha256_published_vectors_and_streaming() {
+    // Standard SHA-256 known answers, including the 56-byte padding boundary
+    // and the million-'a' multi-block vector. Chunking must not alter receipts.
+    const std::pair<std::string, std::string_view> vectors[] {
+        {"", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        {"abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+        {"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"},
+        {std::string(1000000, 'a'), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"},
+    };
+    for (const auto& [input, expected] : vectors) {
+        const auto bytes = std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(input.data()), input.size());
+        expect(runtime::sha256(bytes).hex() == expected, "SHA-256 published known answer differs");
+        for (const std::size_t chunk : {1U, 55U, 56U, 63U, 64U, 65U, 4096U}) {
+            runtime::Sha256 streamed;
+            streamed.update({});
+            for (std::size_t offset = 0; offset < bytes.size(); offset += chunk)
+                streamed.update(bytes.subspan(offset, std::min(chunk, bytes.size() - offset)));
+            streamed.update({});
+            expect(streamed.finalize().hex() == expected, "SHA-256 streaming changed a published digest");
+        }
+    }
+}
+
+void test_artifact_sha256_state_lifecycle() {
+    constexpr std::array<std::uint8_t, 3> abc {'a', 'b', 'c'};
+    runtime::Sha256 prefix;
+    prefix.update(std::span(abc).first(1));
+    auto copied = prefix;
+    copied.update(std::span(abc).subspan(1));
+    expect(copied.finalize() == runtime::sha256(abc), "copied SHA-256 state lost its pending prefix");
+    expect(prefix.finalize() == runtime::sha256(std::span(abc).first(1)),
+        "updating a copied SHA-256 state changed the original");
+    for (const auto action : {0U, 1U, 2U}) {
+        bool failed = false;
+        try {
+            if (action == 0) prefix.update({});
+            else if (action == 1) prefix.update(abc);
+            else (void)prefix.finalize();
+        } catch (const std::logic_error&) { failed = true; }
+        expect(failed, "finalized SHA-256 state accepted another operation");
+    }
 }
 
 void test_gemma3_artifact_payload_authentication() {
@@ -353,6 +557,38 @@ void test_gemma3_artifact_and_tokenizer_goldens_when_available() {
         expect(std::vector<std::uint32_t>(output.begin(), output.begin() + static_cast<std::ptrdiff_t>(count)) == expected,
             "real Gemma3 independent tokenizer golden mismatch: " + text);
         expect(workspace.owned_bytes() == owned, "Gemma3 bounded tokenizer grew steady-loop storage");
+    }
+    if (std::filesystem::exists("models/gemma-3-12b-it-Q4_K_M.gguf")) {
+        const auto target_file = model_format::read_file_backed_gguf_model("models/gemma-3-12b-it-Q4_K_M.gguf");
+        const auto target = load_tokenizer_from_gguf_metadata(target_file.view().directory.metadata);
+        const engine::StandaloneTliMapping mapping(target, artifact.tokenizer());
+        expect(mapping.direct_ids() && mapping.max_append_tokens() == 1 && target.vocabulary().size() == 262144,
+            "downloaded Gemma3 pair did not establish total one-ID conditioning");
+        expect(target.identity() != artifact.tokenizer().identity(),
+            "downloaded image-token metadata differences must retain distinct authenticated identities");
+        std::size_t differing_types = 0;
+        for (std::uint32_t id = 0; id < target.vocabulary().size(); ++id) {
+            expect(mapping.append_target_token(id, output) == 1 && output[0] == id,
+                "downloaded Gemma3 correction map is not total");
+            if (target.vocabulary()[id].type == artifact.tokenizer().vocabulary()[id].type) continue;
+            ++differing_types;
+            expect((id == 255999 || id == 256000) && target.vocabulary()[id].type == 3
+                && artifact.tokenizer().vocabulary()[id].type == 4,
+                "downloaded pair has an unaudited token-type difference");
+        }
+        expect(differing_types == 2, "downloaded pair no longer matches the audited image-marker conversion");
+        for (const auto id : {0U, 3U, 4U, 6U, 255999U, 256000U}) {
+            expect(mapping.target_to_draft()[id] == engine::StandaloneTliMapping::unmapped,
+                "downloaded context-only controls leaked into proposal support");
+        }
+        expect(mapping.target_to_draft()[5] == 5, "downloaded ordinary [multimodal] added symbol lost its existing proposal semantics");
+        for (const auto& [text, expected] : goldens) {
+            const auto target_ids = target.encode(text, {.encode_special_tokens = true});
+            expect(target_ids == expected, "Gemma3 target differs from independent shared tokenizer golden");
+            const auto count = mapping.encode_target_context(target_ids, output);
+            expect(count == expected.size() && std::equal(expected.begin(), expected.end(), output.begin()),
+                "downloaded Gemma3 direct prompt changed independently verified IDs");
+        }
     }
     if (!std::filesystem::exists("models/gemma-2-9b-Q4.gguf")) return;
     const auto target_file = model_format::read_file_backed_gguf_model("models/gemma-2-9b-Q4.gguf");
@@ -453,8 +689,11 @@ std::span<const TestCase> standalone_draft_artifact_test_cases() {
         {"bounded tokenizer rejects capacity and unsupported normalization", test_bounded_tokenizer_capacity_and_metadata},
         {"Gemma3 bounded tokenizer preserves atomic user-defined pieces and literal controls", test_gemma3_bounded_user_defined_and_literal_controls},
         {"Gemma3 TLI bridge preserves typed controls and rejects ambiguous aliases", test_gemma3_control_preserving_injective_bridge},
+        {"Gemma3 direct-ID bridge preserves total conditioning independently of proposals", test_gemma3_direct_ids_preserve_total_conditioning},
+        {"Gemma3 direct-ID bridge rejects semantic and control mismatches", test_gemma3_direct_ids_reject_semantic_mismatches},
         {"pinned Gemma3 artifact and independent real tokenizer goldens when available", test_gemma3_artifact_and_tokenizer_goldens_when_available},
-        {"artifact SHA-256 matches the published abc vector", test_artifact_sha256_published_vector},
+        {"artifact SHA-256 matches published vectors across streaming boundaries", test_artifact_sha256_published_vectors_and_streaming},
+        {"artifact SHA-256 copied state and finalization lifecycle remain isolated", test_artifact_sha256_state_lifecycle},
         {"pinned Gemma3 artifact rejects altered tensor payload bytes", test_gemma3_artifact_payload_authentication},
         {"standalone artifacts reject missing or unauthenticated sources", test_standalone_rejects_missing_and_unauthenticated_artifacts},
         {"prepared standalone plan authenticates target tokenizer semantics", test_prepared_standalone_authenticates_target_tokenizer},

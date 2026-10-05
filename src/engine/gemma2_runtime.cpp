@@ -5,6 +5,7 @@
 
 #include "feature_bank_runtime.hpp"
 #include "gemma2_verification_state_access.hpp"
+#include "gemma_target_runtime.hpp"
 #include "prepared_plan_test_hooks.hpp"
 
 #include "../tensor/backends/metal/metal_command_context.hpp"
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -246,6 +248,10 @@ Gemma2MetalResidentDecodeResult run_gemma2_metal_resident_decode_step(
         throw std::invalid_argument("Gemma2 KV-only decode cannot request token selection");
     }
 
+    if (plan.config().architecture == ModelArchitecture::gemma3) {
+        return run_gemma3_resident_decode(plan, decode.cache_position(), token_id,
+            embedding_scale, selection_request, feature_sink, output_mode, completion);
+    }
     namespace metal = tensor::backends::metal;
     metal::MetalCommandContext command("Gemma2 resident decode", true);
     const auto& config = plan.config();
@@ -541,6 +547,12 @@ Gemma2MetalVerifierResult run_gemma2_metal_width_two_verifier(
         }
     }
 
+    if (gemma_target_uses_shared_retrieval(plan)) {
+        if (plan.config().sliding_window < 2U)
+            throw std::invalid_argument("width-two verification requires two local cache positions");
+        return run_gemma_target_width_two_verifier(plan, verifier.cache_position(), token_ids,
+            embedding_scale, selection_requests);
+    }
     namespace metal = tensor::backends::metal;
     metal::MetalCommandContext command("Gemma2 width-two verifier", true);
     const auto& config = plan.config();
@@ -797,7 +809,8 @@ Gemma2MetalVerifierCommitResult commit_gemma2_metal_width_two_verification(
     Gemma2MetalDecodeExecutionStats execution;
     if (accepted_token_count < 2U) {
         namespace metal = tensor::backends::metal;
-        metal::MetalCommandContext command("Gemma2 width-two KV suffix rollback", true);
+        metal::MetalCommandContext command("Gemma2 width-two KV suffix rollback", true,
+            plan.config().architecture == ModelArchitecture::gemma3);
         const auto position = plan.pending_verification_position() + accepted_token_count;
         const auto rollback_count = 2U - accepted_token_count;
         const auto& scratch = plan.verifier_scratch();
@@ -843,7 +856,8 @@ Gemma2MetalVerifierCommitResult provisionally_commit_gemma2_metal_width_two_veri
     Gemma2MetalDecodeExecutionStats execution;
     if (accepted_token_count < 2U) {
         namespace metal = tensor::backends::metal;
-        metal::MetalCommandContext command("Gemma2 provisional width-two KV suffix rollback", true);
+        metal::MetalCommandContext command("Gemma2 provisional width-two KV suffix rollback", true,
+            plan.config().architecture == ModelArchitecture::gemma3);
         const auto position = plan.pending_verification_position() + accepted_token_count;
         const auto& scratch = plan.verifier_scratch();
         for (std::size_t layer = 0; layer < plan.kv_cache().size(); ++layer) {
@@ -889,7 +903,8 @@ Gemma2MetalVerifierCommitResult finalize_gemma2_metal_width_two_verification(
     Gemma2MetalDecodeExecutionStats execution;
     if (retained_token_count < provisional) {
         namespace metal = tensor::backends::metal;
-        metal::MetalCommandContext command("Gemma2 provisional width-two KV rollback", true);
+        metal::MetalCommandContext command("Gemma2 provisional width-two KV rollback", true,
+            plan.config().architecture == ModelArchitecture::gemma3);
         const auto position = plan.pending_verification_position() + retained_token_count;
         const auto rollback_count = provisional - retained_token_count;
         const auto& scratch = plan.verifier_scratch();
@@ -957,6 +972,10 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
         }
     }
 
+    if (plan.config().architecture == ModelArchitecture::gemma3) {
+        return run_gemma3_resident_prefill(plan, prompt_token_ids, cache_position,
+            embedding_scale, selection_request, feature_sink, completion);
+    }
     namespace metal = tensor::backends::metal;
     const auto& config = plan.config();
     const auto& scratch = plan.prefill_scratch();
@@ -1556,14 +1575,18 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         throw std::invalid_argument("standalone draft context does not match target prefill");
     const auto draft_before = standalone ? standalone->execution_stats() : StandaloneDraftExecutionStats{};
     const auto rebuild_before = standalone ? standalone->rebuild_duration_ns() : 0U;
-
+    // Publish the first ordinary target token before spending time on a draft
+    // whose context is not needed to select that token. The deferred owner is
+    // synchronized before returning or beginning any speculative cycle.
+    bool draft_context_deferred = standalone && standalone->direct_ids();
+    if (draft_context_deferred) standalone->validate_direct_context(standalone_context);
 
     const auto prompt_token_count = checked_prompt_token_count(prompt_token_ids);
     Gemma2GenerationMetrics metrics {
         .prefill_started_ns = monotonic_now_ns(clock),
         .newly_evaluated_prompt_token_count = prompt_token_count,
     };
-    if (standalone) {
+    if (standalone && !draft_context_deferred) {
         const auto started = monotonic_now_ns(clock);
         // A fresh/rebased target context is a new prompt interpretation, not
         // a continuation of any coincidentally matching old generated prefix.
@@ -1616,7 +1639,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
     bool inside_standalone_cycle = false;
     const auto record_commit = [&](std::uint32_t token, std::uint32_t cached) {
         if (journal) journal->record(token, cached, sampler);
-        if (standalone) {
+        if (standalone && !draft_context_deferred) {
             const auto started = monotonic_now_ns(clock);
             standalone->observe_committed(token, cached - 1U);
             if (!inside_standalone_cycle) {
@@ -1631,7 +1654,8 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
     const auto preflight_draft_commit = [&](std::span<const std::uint32_t> tokens, bool inside_decode) {
         if (!standalone || standalone->kind() != StandaloneDraftKind::gemma3_270m_q8) return;
         const auto started = monotonic_now_ns(clock);
-        standalone->validate_committed_prefix(tokens);
+        if (draft_context_deferred) standalone->validate_direct_context(standalone_context, tokens);
+        else standalone->validate_committed_prefix(tokens);
         const auto completed = monotonic_now_ns(clock);
         const auto duration = elapsed_ns(started, completed);
         metrics.standalone_draft_wall_ns += duration;
@@ -1695,7 +1719,7 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         }
 
         const auto remaining = max_new_tokens - selected_token_ids.size();
-        const bool verifier_can_fit = remaining > 0U
+        const bool verifier_can_fit = !draft_context_deferred && remaining > 0U
             && cached_token_count + 2U <= plan.config().context_length
             && !token_is_stop(selected_token_id, stop_token_ids);
         RetrievalProposal proposal;
@@ -1858,9 +1882,9 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
 
         // The standalone draft runs after the frozen retrieval gate. The
         // controller owns the accepted prefix and any already-selected carry.
-        if (standalone != nullptr && remaining > 0U
+        if (standalone != nullptr && !draft_context_deferred && remaining > 0U
             && !token_is_stop(selected_token_id, stop_token_ids)
-            && standalone->horizon() + 1U <= plan.config().context_length - cached_token_count) {
+            && standalone->cycle_horizon(cached_token_count, remaining + 1U) != 0) {
             const auto begin = monotonic_now_ns(clock);
             if (metrics.decode_token_count == 0U) metrics.decode_started_ns = begin;
             const auto on_committed = [&](const ChainCommittedToken& token) {
@@ -1896,10 +1920,15 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
             metrics.learned_draft_gpu_ns += cycle.draft.gpu_duration_ns;
             ++metrics.learned_cycle_count;
             metrics.learned_accepted_edge_count += cycle.accepted_edges;
-            const auto horizon = standalone->horizon();
+            const auto horizon = cycle.proposal_count;
             if (cycle.accepted_edges > horizon || horizon > external_speculation_max_horizon
-                || (cycle.rejected && cycle.accepted_edges == horizon))
+                || horizon == 0 || (cycle.rejected && cycle.accepted_edges == horizon))
                 throw std::logic_error("invalid committed speculative acceptance receipt");
+            metrics.learned_proposed_edge_count += horizon;
+            ++metrics.learned_horizon_histogram[horizon];
+            const auto reached = cycle.accepted_edges + (cycle.rejected ? 1U : 0U);
+            for (std::uint32_t depth = 0; depth < reached; ++depth)
+                ++metrics.learned_reached_depth_histogram[depth];
             ++metrics.learned_accepted_prefix_histogram[cycle.accepted_edges];
             if (cycle.rejected) ++metrics.learned_rejection_depth_histogram[cycle.accepted_edges];
             else if (cycle.accepted_edges == horizon) ++metrics.learned_full_accept_count;
@@ -1965,23 +1994,50 @@ Gemma2MetalPlanGeneratedTokens generate_gemma2_metal_tokens_with_plan_impl(
         }
 
         record_commit(selected_token_id, cached_token_count);
+        const auto synchronize_deferred_draft = [&] {
+            if (!draft_context_deferred) return;
+            const auto started = monotonic_now_ns(clock);
+            standalone->synchronize_context(standalone_context, cache_position == 0);
+            const auto synchronized = monotonic_now_ns(clock);
+            standalone->observe_committed_pending(selected_token_id, cached_token_count - 1U);
+            const auto completed = monotonic_now_ns(clock);
+            metrics.standalone_prefill_ns += elapsed_ns(started, synchronized);
+            const auto duration = elapsed_ns(started, completed);
+            metrics.standalone_draft_wall_ns += duration;
+            metrics.decode_duration_ns += duration;
+            metrics.decode_completed_ns = completed;
+            draft_context_deferred = false;
+        };
         if (token_is_stop(selected_token_id, stop_token_ids)) {
+            synchronize_deferred_draft();
             stop_token_id = selected_token_id;
             metrics.stop_reason = Gemma2GenerationStopReason::stop_token;
             break;
         }
 
         generated_token_ids.push_back(selected_token_id);
+        auto decision = Gemma2MetalTokenStreamDecision::continue_generation;
         if (on_token) {
-            const auto decision = on_token(Gemma2MetalGeneratedTokenEvent {
-                .token_id = selected_token_id,
-                .generated_token_count = generated_token_ids.size(),
-                .cached_token_count = cached_token_count,
-            });
-            if (decision == Gemma2MetalTokenStreamDecision::stop_generation) {
-                metrics.stop_reason = Gemma2GenerationStopReason::callback_stop;
-                break;
+            try {
+                decision = on_token(Gemma2MetalGeneratedTokenEvent {
+                    .token_id = selected_token_id,
+                    .generated_token_count = generated_token_ids.size(),
+                    .cached_token_count = cached_token_count,
+                });
+            } catch (...) {
+                // The target/journal already own this delivered prefix. Finish
+                // draft recovery even when the callback throws, then preserve
+                // that original exception. Draft failure marks its own owner
+                // poisoned, so the session cannot silently reuse stale state.
+                const auto original = std::current_exception();
+                try { synchronize_deferred_draft(); } catch (...) {}
+                std::rethrow_exception(original);
             }
+        }
+        synchronize_deferred_draft();
+        if (decision == Gemma2MetalTokenStreamDecision::stop_generation) {
+            metrics.stop_reason = Gemma2GenerationStopReason::callback_stop;
+            break;
         }
         if (selected_token_ids.size() == max_new_tokens) {
             break;

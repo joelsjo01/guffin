@@ -101,6 +101,13 @@ struct RMSNormDimensions {
     float epsilon;
 };
 
+struct HeadRMSNormDimensions {
+    std::uint32_t rows;
+    std::uint32_t head_count;
+    std::uint32_t head_dimension;
+    float epsilon;
+};
+
 struct RoPEByHeadsDimensions {
     std::uint32_t rows;
     std::uint32_t head_count;
@@ -254,6 +261,7 @@ struct VerifierRoPEDimensions {
     std::uint32_t head_dimension;
     std::uint32_t rope_dimension_count;
     float frequency_base;
+    float frequency_scale;
 };
 
 struct VerifierKVStoreDimensions {
@@ -262,6 +270,7 @@ struct VerifierKVStoreDimensions {
     std::uint32_t head_dimension;
     std::uint32_t rope_dimension_count;
     float frequency_base;
+    float frequency_scale;
 };
 
 struct VerifierAttentionDimensions {
@@ -337,6 +346,123 @@ void require_capacity(const BackendBuffer& buffer, std::uint64_t bytes, const ch
     }
 }
 
+void require_disjoint_ranges(
+    const BackendBuffer& first, std::uint64_t first_bytes,
+    const BackendBuffer& second, std::uint64_t second_bytes,
+    const char* name
+) {
+    const auto& first_storage = storage(first);
+    const auto& second_storage = storage(second);
+    if (first_storage.buffer() != second_storage.buffer()) return;
+    const auto first_offset = metal_buffer_binding_offset(first_storage, 0U);
+    const auto second_offset = metal_buffer_binding_offset(second_storage, 0U);
+    if (first_offset < second_offset + second_bytes
+        && second_offset < first_offset + first_bytes) {
+        throw std::invalid_argument(std::string("Metal resident execution ") + name + " buffers overlap");
+    }
+}
+
+[[nodiscard]] std::uint64_t q4_input_element_count(
+    const BackendBuffer& input, std::uint32_t row_count
+) {
+    const auto& descriptor = input.descriptor();
+    if (descriptor.dtype != DType::f32 || descriptor.packing != TensorPacking::canonical
+        || descriptor.shape.rank() != 2U || row_count == 0U
+        || row_count > descriptor.shape.dimension(0)
+        || descriptor.shape.dimension(1) == 0U
+        || descriptor.shape.dimension(1) % 256U != 0U) {
+        throw std::invalid_argument("Metal Q4 input sums require canonical F32 rows and a 256-aligned width");
+    }
+    const auto shared = u32(descriptor.shape.dimension(1), "Q4 input-sum shared width");
+    const auto elements = static_cast<std::uint64_t>(row_count) * shared;
+    static_cast<void>(u32(elements, "Q4 input-sum element addressing"));
+    require_capacity(input, elements * sizeof(float), "Q4 input-sum input");
+    return elements;
+}
+
+void require_q4_input_sum_capacity(const BackendBuffer& sums, std::uint64_t input_elements) {
+    if (sums.descriptor().dtype != DType::f32
+        || sums.descriptor().packing != TensorPacking::canonical) {
+        throw std::invalid_argument("Metal Q4 input sums require canonical F32 storage");
+    }
+    require_capacity(sums, input_elements / 8U * sizeof(float), "Q4 input sums");
+}
+
+void require_f32_storage(const BackendBuffer& buffer, std::uint64_t elements, const char* name) {
+    if (buffer.descriptor().dtype != DType::f32
+        || buffer.descriptor().packing != TensorPacking::canonical)
+        throw std::invalid_argument(std::string("Metal Q4 sum producer requires canonical F32 ") + name);
+    static_cast<void>(u32(elements, name));
+    require_capacity(buffer, elements * sizeof(float), name);
+}
+
+struct PackedRowDispatch {
+    id<MTLComputePipelineState> pipeline;
+    std::uint32_t rows_per_group;
+    std::uint32_t columns_per_group = 4U;
+    std::uint32_t threads_per_group = 64U;
+};
+
+[[nodiscard]] PackedRowDispatch packed_row_dispatch(
+    MatmulPipelineState& state, const TensorDescriptor& weight,
+    std::uint64_t shared, std::uint32_t rows, bool allow_prefill_matrix = false,
+    bool prepared_q4 = false
+) {
+    const auto dtype = weight.dtype;
+    const auto packing = weight.packing;
+    if (packing == TensorPacking::kquant_columns8) {
+        // Packed shaders form byte offsets with uint arithmetic. Bound the
+        // physical payload, including padded columns, before selecting them.
+        if (weight.byte_count > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("Metal columns8 weight payload exceeds 32-bit shader addressing");
+        }
+        if ((dtype == DType::q4_k ? state.columns8_q4_rows[0] : state.columns8_q6_rows[0]) == nil) {
+            throw std::invalid_argument("Columns8 weights require prepared Metal pipelines");
+        }
+        if (allow_prefill_matrix && rows > 8U && state.columns8_gemma2_prompt[0] != nil) {
+            const bool exact16 = rows == 16U && weight.shape.dimension(1) % 64U == 0U;
+            return {state.columns8_gemma2_prompt[exact16 ? 1U : 0U],
+                exact16 ? 16U : 32U, 64U, exact16 ? 64U : 128U};
+        }
+        if (allow_prefill_matrix && rows >= 4U && state.gemma3_prompt_matrix[1][0][0] != nil) {
+            const auto tile = rows >= 32U ? 1U : 0U;
+            return {state.gemma3_prompt_matrix[1][dtype == DType::q4_k ? 0U : 1U][tile],
+                tile == 1U ? 32U : 8U, 32U, 128U};
+        }
+        const auto tile = rows == 1U ? 1U : 2U;
+        return {dtype == DType::q4_k ? (prepared_q4 ? state.columns8_q4_prepared_rows[tile - 1U]
+            : state.columns8_q4_rows[tile - 1U])
+            : state.columns8_q6_rows[tile - 1U], tile,
+            dtype == DType::q4_k ? 8U : 16U, 128U};
+    }
+    if (packing != TensorPacking::canonical) {
+        throw std::invalid_argument("Metal packed projection has an unknown weight packing");
+    }
+    if (allow_prefill_matrix && rows >= 4U && state.gemma3_prompt_matrix[0][0][0] != nil) {
+        const auto tile = rows >= 32U ? 1U : 0U;
+        return {state.gemma3_prompt_matrix[0][dtype == DType::q4_k ? 0U : 1U][tile],
+            tile == 1U ? 32U : 8U, 32U, 128U};
+    }
+    // Keep the retained Q4 scalar kernel; the shared two-row kernel preserves
+    // its exact per-worker arithmetic. Two-row tiles bound register use for
+    // larger batches. Q6 uses one common factored core for ordinary and verifier.
+    if (state.gemma3_q4_shared_two_pipeline != nil && (dtype == DType::q6_k || rows > 1U)) {
+        const auto tile = rows == 1U ? 1U : 2U;
+        return {dtype == DType::q4_k ? state.gemma3_q4_shared_two_pipeline
+            : (tile == 1U ? state.gemma3_q6_shared_one_pipeline : state.gemma3_q6_shared_two_pipeline),
+            tile, dtype == DType::q4_k ? 8U : 16U, 128U};
+    }
+    const auto blocks = shared / 256U;
+    if (dtype == DType::q4_k) {
+        return {blocks == 14U ? state.matmul_q4_k_packed_row_batch_14_pipeline
+            : blocks == 16U ? state.matmul_q4_k_packed_row_batch_16_pipeline
+            : state.matmul_q4_k_packed_row_batch_pipeline, 2U};
+    }
+    return {blocks == 14U ? state.matmul_q6_k_packed_row_batch_14_pipeline
+        : blocks == 56U ? state.matmul_q6_k_packed_row_batch_56_pipeline
+        : state.matmul_q6_k_packed_row_batch_pipeline, 2U};
+}
+
 [[nodiscard]] id<MTLComputePipelineState> f16_matmul_pipeline(
     MatmulPipelineState& state,
     DType dtype
@@ -366,6 +492,16 @@ std::uint32_t gemma2_decode_attention_partition_count(
     return 32U;
 }
 
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+BackendBuffer shared_metal_buffer_view_for_testing(
+    const BackendBuffer& parent, TensorDescriptor descriptor, std::size_t byte_offset
+) {
+    const auto& owner = storage(parent);
+    return make_metal_backend_buffer_view(std::move(descriptor), owner.buffer(),
+        metal_buffer_binding_offset(owner, byte_offset));
+}
+#endif
+
 struct MetalCommandContext::Impl {
     std::string command_label;
     MatmulPipelineState* state = nullptr;
@@ -379,30 +515,48 @@ struct MetalCommandContext::Impl {
     std::uint32_t debug_group_depth = 0;
 
     void end_compute_encoding() noexcept {
-        if (active_compute_encoder != nil) {
-            [active_compute_encoder endEncoding];
-            active_compute_encoder = nil;
+        @autoreleasepool {
+            if (active_compute_encoder != nil) {
+                [active_compute_encoder endEncoding];
+                active_compute_encoder = nil;
+            }
         }
     }
 
-    [[nodiscard]] id<MTLComputeCommandEncoder> compute_encoder(const char* label) {
+    void create_command_buffer() {
+        // Metal's convenience constructors return autoreleased objects. Keep
+        // the ARC-owned reference while draining that temporary ownership here;
+        // callers are C++ and need not run an Objective-C event-loop pool.
+        // Otherwise discarded commands retain queue slots and model buffers.
+        @autoreleasepool {
+            command_buffer = [state->queue commandBuffer];
+            if (command_buffer == nil) {
+                throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                    "Metal resident execution command buffer creation failed");
+            }
+            command_buffer.label = [NSString stringWithUTF8String:command_label.c_str()];
+        }
+    }
+
+    [[nodiscard]] id<MTLComputeCommandEncoder> const& compute_encoder(const char* label) {
         if (submitted) {
             throw std::logic_error("Metal resident execution command buffer was already submitted");
         }
-        if (active_compute_encoder != nil) {
-            return active_compute_encoder;
-        }
-        active_compute_encoder = concurrent_compute
-            ? [command_buffer computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]
-            : [command_buffer computeCommandEncoder];
         if (active_compute_encoder == nil) {
-            throw metal_error(
-                runtime::BackendErrorCode::metal_execution_failed,
-                std::string("Metal resident execution compute encoder creation failed: ") + label
-            );
+            @autoreleasepool {
+                active_compute_encoder = concurrent_compute
+                    ? [command_buffer computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]
+                    : [command_buffer computeCommandEncoder];
+                if (active_compute_encoder == nil) {
+                    throw metal_error(
+                        runtime::BackendErrorCode::metal_execution_failed,
+                        std::string("Metal resident execution compute encoder creation failed: ") + label
+                    );
+                }
+                active_compute_encoder.label = [NSString stringWithUTF8String:label];
+                ++stats.compute_encoder_count;
+            }
         }
-        active_compute_encoder.label = [NSString stringWithUTF8String:label];
-        ++stats.compute_encoder_count;
         return active_compute_encoder;
     }
 
@@ -448,22 +602,19 @@ void read_shared_metal_buffer_bytes(
     );
 }
 
-MetalCommandContext::MetalCommandContext(std::string_view label, bool concurrent_compute)
+MetalCommandContext::MetalCommandContext(
+    std::string_view label, bool concurrent_compute, bool precise_math
+)
     : impl_(std::make_unique<Impl>()) {
-    impl_->command_label = label;
-    impl_->concurrent_compute = concurrent_compute;
-    impl_->state = &shared_matmul_pipeline_state();
-    impl_->owns_trace_capture = begin_trace_capture_if_armed(label, impl_->state->queue);
-    impl_->command_buffer = [impl_->state->queue commandBuffer];
-    if (impl_->command_buffer == nil) {
-        throw metal_error(
-            runtime::BackendErrorCode::metal_execution_failed,
-            "Metal resident execution command buffer creation failed"
-        );
+    @autoreleasepool {
+        impl_->command_label = label;
+        impl_->concurrent_compute = concurrent_compute;
+        impl_->state = precise_math ? &shared_precise_matmul_pipeline_state()
+            : &shared_matmul_pipeline_state();
+        impl_->owns_trace_capture = begin_trace_capture_if_armed(label, impl_->state->queue);
+        impl_->create_command_buffer();
+        impl_->stats.command_buffer_count = 1;
     }
-    const std::string owned_label(label);
-    impl_->command_buffer.label = [NSString stringWithUTF8String:owned_label.c_str()];
-    impl_->stats.command_buffer_count = 1;
 }
 
 void MetalCommandContext::restart() {
@@ -473,11 +624,9 @@ void MetalCommandContext::restart() {
     }
     impl_->end_compute_encoding();
     if (impl_->owns_trace_capture) finish_trace_capture(false);
-    auto label = impl_->command_buffer.label;
-    impl_->command_buffer = [impl_->state->queue commandBuffer];
-    if (!impl_->command_buffer) throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
-        "Metal resident command buffer renewal failed");
-    impl_->command_buffer.label = label;
+    // Release a discarded command's queue slot before requesting its replacement.
+    impl_->command_buffer = nil;
+    impl_->create_command_buffer();
     impl_->stats = {};
     impl_->stats.command_buffer_count = 1;
     impl_->submitted = false;
@@ -518,6 +667,16 @@ void MetalCommandContext::encode_embedding(
     std::uint32_t token_offset,
     std::uint32_t token_count
 ) {
+    const auto dtype = weight.descriptor().dtype;
+    if (weight.descriptor().packing != TensorPacking::canonical) {
+        throw std::invalid_argument("Metal embedding requires canonical weight packing");
+    }
+    if (dtype != DType::f16 && dtype != DType::q6_k) {
+        throw std::invalid_argument("Metal embedding requires F16 or native Q6_K weights");
+    }
+    if (dtype == DType::q6_k && weight.descriptor().shape.dimension(0) % 256U != 0U) {
+        throw std::invalid_argument("Metal Q6_K embedding width must be 256-aligned");
+    }
     const auto& weight_storage = storage(weight);
     const auto hidden = weight.descriptor().shape.dimension(0);
     const auto vocab = weight.descriptor().shape.dimension(1);
@@ -532,7 +691,8 @@ void MetalCommandContext::encode_embedding(
         .scale = scale,
     };
     auto encoder = impl_->compute_encoder("Gemma2 embedding");
-    [encoder setComputePipelineState:impl_->state->embedding_pipeline];
+    [encoder setComputePipelineState:dtype == DType::q6_k
+        ? impl_->state->embedding_q6_pipeline : impl_->state->embedding_pipeline];
     bind_buffer(encoder, token_ids, 0);
     [encoder setBuffer:weight_storage.buffer()
                 offset:metal_buffer_binding_offset(weight_storage)
@@ -556,6 +716,12 @@ void MetalCommandContext::encode_matmul(
     std::uint64_t output_byte_offset
 ) {
     const auto input_rows = input.descriptor().shape.dimension(0);
+    const bool packed_prompt = weight.descriptor().packing == TensorPacking::kquant_columns8
+        && weight.descriptor().dtype == DType::q4_k
+        && impl_->state->columns8_gemma2_prompt[0] != nil;
+    if (weight.descriptor().packing != TensorPacking::canonical && !packed_prompt) {
+        throw std::invalid_argument("Generic Metal matmul requires canonical weight packing");
+    }
     const auto rows = row_count == 0U ? input_rows : row_count;
     if (rows > input_rows) {
         throw std::invalid_argument(
@@ -585,9 +751,20 @@ void MetalCommandContext::encode_matmul(
     F16MatmulDispatch f16_dispatch;
     id<MTLComputePipelineState> pipeline = nil;
     if (quantized) {
-        quantized_dispatch = select_quantized_matmul_dispatch(
-            *impl_->state, weight.descriptor().dtype, rows, shared, columns
-        );
+        if (packed_prompt) {
+            // Gemma 2 prefill retains its original operation graph, row-offset
+            // stores and half-operand matrix arithmetic with a packed source.
+            const auto dispatch = packed_row_dispatch(*impl_->state, weight.descriptor(),
+                shared, u32(rows, "packed prompt rows"), true);
+            quantized_dispatch = {dispatch.pipeline,
+                MTLSizeMake((columns + dispatch.columns_per_group - 1U) / dispatch.columns_per_group,
+                    (rows + dispatch.rows_per_group - 1U) / dispatch.rows_per_group, 1U),
+                MTLSizeMake(dispatch.threads_per_group, 1U, 1U)};
+        } else {
+            quantized_dispatch = select_quantized_matmul_dispatch(
+                *impl_->state, weight.descriptor().dtype, rows, shared, columns
+            );
+        }
         pipeline = quantized_dispatch.pipeline;
         if (weight.descriptor().dtype == DType::q8_0) {
             ++impl_->stats.q8_decode_projection_count;
@@ -640,8 +817,12 @@ void MetalCommandContext::encode_verifier_matmul(
     const BackendBuffer& input,
     const BackendBuffer& weight,
     const BackendBuffer& output,
-    std::uint32_t row_count
+    std::uint32_t row_count,
+    bool allow_prefill_matrix,
+    const BackendBuffer* q4_input_sums
 ) {
+    if (q4_input_sums != nullptr && input.descriptor().shape.rank() != 2U)
+        throw std::invalid_argument("Metal Q4 sum execution requires matrix input rows");
     if (row_count == 0U || row_count > input.descriptor().shape.dimension(0)) {
         throw std::invalid_argument("Metal verifier matmul row count is invalid");
     }
@@ -653,6 +834,29 @@ void MetalCommandContext::encode_verifier_matmul(
     require_capacity(output,
         static_cast<std::uint64_t>(row_count) * columns * sizeof(float),
         "verifier matmul output");
+    if (q4_input_sums != nullptr) {
+        if (allow_prefill_matrix || weight.descriptor().dtype != DType::q4_k
+            || weight.descriptor().packing != TensorPacking::kquant_columns8
+            || impl_->state->columns8_q4_prepared_rows[0] == nil
+            || row_count > 2U
+            || output.descriptor().dtype != DType::f32
+            || output.descriptor().packing != TensorPacking::canonical) {
+            throw std::invalid_argument("Metal prepared Q4 projection requires compact Q4 execution without prefill");
+        }
+        const auto input_elements = q4_input_element_count(input, row_count);
+        require_q4_input_sum_capacity(*q4_input_sums, input_elements);
+        const auto output_elements = static_cast<std::uint64_t>(row_count)
+            * u32(columns, "prepared Q4 output width");
+        static_cast<void>(u32(output_elements, "prepared Q4 output element addressing"));
+        require_disjoint_ranges(input, input_elements * sizeof(float), *q4_input_sums,
+            input_elements / 8U * sizeof(float), "prepared Q4 input/sums");
+        require_disjoint_ranges(output, output_elements * sizeof(float), *q4_input_sums,
+            input_elements / 8U * sizeof(float), "prepared Q4 output/sums");
+        require_disjoint_ranges(weight, weight.descriptor().byte_count, *q4_input_sums,
+            input_elements / 8U * sizeof(float), "prepared Q4 weight/sums");
+        require_disjoint_ranges(input, input_elements * sizeof(float), output,
+            output_elements * sizeof(float), "prepared Q4 input/output");
+    }
     const MatmulDimensions dims {
         .rows = row_count,
         .shared = u32(shared, "verifier matmul shared"),
@@ -665,18 +869,14 @@ void MetalCommandContext::encode_verifier_matmul(
         if (shared % 256U != 0U) {
             throw std::invalid_argument("Metal verifier K-quant shared width must be 256-aligned");
         }
-        const auto blocks = shared / 256U;
+        const auto dispatch = packed_row_dispatch(*impl_->state, weight.descriptor(),
+            shared, row_count, allow_prefill_matrix, q4_input_sums != nullptr);
+        pipeline = dispatch.pipeline;
         if (weight.descriptor().dtype == DType::q4_k) {
-            pipeline = blocks == 14U ? impl_->state->matmul_q4_k_packed_row_batch_14_pipeline
-                : blocks == 16U ? impl_->state->matmul_q4_k_packed_row_batch_16_pipeline
-                : impl_->state->matmul_q4_k_packed_row_batch_pipeline;
             if (row_count == 1U) ++impl_->stats.q4_decode_projection_count;
             else if (row_count <= 8U) ++impl_->stats.q4_small_batch_projection_count;
             else ++impl_->stats.q4_generic_tiled_projection_count;
         } else {
-            pipeline = blocks == 14U ? impl_->state->matmul_q6_k_packed_row_batch_14_pipeline
-                : blocks == 56U ? impl_->state->matmul_q6_k_packed_row_batch_56_pipeline
-                : impl_->state->matmul_q6_k_packed_row_batch_pipeline;
             if (row_count == 1U) ++impl_->stats.q6_decode_projection_count;
             else if (row_count <= 8U) ++impl_->stats.q6_small_batch_projection_count;
             else ++impl_->stats.q6_generic_tiled_projection_count;
@@ -686,12 +886,13 @@ void MetalCommandContext::encode_verifier_matmul(
         bind_buffer(encoder, weight, 1);
         bind_buffer(encoder, output, 2);
         [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+        if (q4_input_sums != nullptr) bind_buffer(encoder, *q4_input_sums, 4U);
         [encoder dispatchThreadgroups:MTLSizeMake(
-                                          static_cast<NSUInteger>((columns + 3U) / 4U),
-                                          static_cast<NSUInteger>((row_count + 1U) / 2U),
+                                          static_cast<NSUInteger>((columns + dispatch.columns_per_group - 1U) / dispatch.columns_per_group),
+                                          static_cast<NSUInteger>((row_count + dispatch.rows_per_group - 1U) / dispatch.rows_per_group),
                                           1U
                                       )
-                  threadsPerThreadgroup:MTLSizeMake(64U, 1U, 1U)];
+                  threadsPerThreadgroup:MTLSizeMake(dispatch.threads_per_group, 1U, 1U)];
     } else {
         pipeline = f16_matmul_pipeline(*impl_->state, weight.descriptor().dtype);
         const auto dispatch = select_f16_matmul_dispatch(*impl_->state, row_count, columns);
@@ -704,6 +905,48 @@ void MetalCommandContext::encode_verifier_matmul(
         [encoder dispatchThreadgroups:dispatch.threadgroups
                   threadsPerThreadgroup:dispatch.threads_per_threadgroup];
     }
+    ++impl_->stats.compute_dispatch_count;
+}
+
+void MetalCommandContext::encode_target_head_rows(
+    const BackendBuffer& input,
+    std::uint32_t input_row_start,
+    const BackendBuffer& weight,
+    const BackendBuffer& logits_tile,
+    std::uint32_t row_count
+) {
+    if (weight.descriptor().dtype == DType::q8_0) {
+        encode_target_head_q8_rows(input, input_row_start, weight, logits_tile, row_count);
+        return;
+    }
+    if ((weight.descriptor().dtype != DType::q4_k && weight.descriptor().dtype != DType::q6_k)
+        || row_count == 0U || input.descriptor().dtype != DType::f32
+        || logits_tile.descriptor().dtype != DType::f32
+        || input_row_start > input.descriptor().shape.dimension(0)
+        || row_count > input.descriptor().shape.dimension(0) - input_row_start) {
+        throw std::invalid_argument("Metal native target-head row tile is invalid");
+    }
+    const auto shared = input.descriptor().shape.dimension(1);
+    const auto columns = weight.descriptor().shape.dimension(1);
+    if (shared != weight.descriptor().shape.dimension(0) || shared % 256U != 0U) {
+        throw std::invalid_argument("Metal native K-quant target-head layout is invalid");
+    }
+    require_capacity(logits_tile,
+        static_cast<std::uint64_t>(row_count) * columns * sizeof(float), "target-head logits tile");
+    const MatmulDimensions dims {row_count, u32(shared, "head shared"), u32(columns, "head columns")};
+    auto encoder = impl_->compute_encoder("Native K-quant target-head row tile");
+    const auto dispatch = packed_row_dispatch(*impl_->state, weight.descriptor(),
+        shared, row_count);
+    [encoder setComputePipelineState:dispatch.pipeline];
+    bind_buffer(encoder, input, 0, static_cast<std::uint64_t>(input_row_start) * shared * sizeof(float));
+    bind_buffer(encoder, weight, 1);
+    bind_buffer(encoder, logits_tile, 2);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((columns + dispatch.columns_per_group - 1U) / dispatch.columns_per_group),
+                                      (row_count + dispatch.rows_per_group - 1U) / dispatch.rows_per_group, 1U)
+              threadsPerThreadgroup:MTLSizeMake(dispatch.threads_per_group, 1U, 1U)];
+    if (weight.descriptor().dtype == DType::q4_k) ++impl_->stats.q4_small_batch_projection_count;
+    else ++impl_->stats.q6_small_batch_projection_count;
     ++impl_->stats.compute_dispatch_count;
 }
 
@@ -928,20 +1171,75 @@ void MetalCommandContext::encode_f16_row_scatter(
     ++impl_->stats.compute_dispatch_count;
 }
 
+void MetalCommandContext::encode_head_rms_norm(
+    const BackendBuffer& input,
+    const BackendBuffer& weight,
+    const BackendBuffer& output,
+    float epsilon,
+    std::uint32_t row_count,
+    std::uint32_t head_count,
+    std::uint32_t head_dimension
+) {
+    if (row_count == 0U || head_count == 0U || head_dimension != 256U
+        || !std::isfinite(epsilon) || epsilon <= 0.0F
+        || input.descriptor().dtype != DType::f32 || weight.descriptor().dtype != DType::f32
+        || output.descriptor().dtype != DType::f32) {
+        throw std::invalid_argument("Metal per-head RMSNorm requires F32 256-wide heads and positive epsilon");
+    }
+    const auto bytes = static_cast<std::uint64_t>(row_count) * head_count * head_dimension * sizeof(float);
+    require_capacity(input, bytes, "head RMSNorm input");
+    require_capacity(output, bytes, "head RMSNorm output");
+    require_capacity(weight, head_dimension * sizeof(float), "head RMSNorm weight");
+    const HeadRMSNormDimensions dims {row_count, head_count, head_dimension, epsilon};
+    auto encoder = impl_->compute_encoder("Per-head RMSNorm");
+    [encoder setComputePipelineState:impl_->state->head_rms_norm_pipeline];
+    bind_buffer(encoder, input, 0);
+    bind_buffer(encoder, weight, 1);
+    bind_buffer(encoder, output, 2);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake(head_count, row_count, 1U)
+              threadsPerThreadgroup:MTLSizeMake(32U, 1U, 1U)];
+    ++impl_->stats.compute_dispatch_count;
+}
+
 void MetalCommandContext::encode_rms_norm(
     const BackendBuffer& input,
     const BackendBuffer& weight,
     const BackendBuffer& output,
     float epsilon,
     std::uint32_t row_count,
-    std::uint32_t input_row_start
+    std::uint32_t input_row_start,
+    const BackendBuffer* q4_input_sums
 ) {
+    if (q4_input_sums != nullptr && input.descriptor().shape.rank() != 2U)
+        throw std::invalid_argument("Metal Q4 sum execution requires matrix input rows");
     const auto rows = row_count == 0U ? input.descriptor().shape.dimension(0) : row_count;
     const auto hidden = input.descriptor().shape.dimension(1);
     if (static_cast<std::uint64_t>(input_row_start) + rows > input.descriptor().shape.dimension(0)) {
         throw std::invalid_argument("Metal resident execution RMSNorm input row range is invalid");
     }
     require_capacity(output, rows * hidden * sizeof(float), "RMSNorm output");
+    if (q4_input_sums != nullptr) {
+        if (impl_->state->rms_norm_q4_sums_pipeline == nil)
+            throw std::invalid_argument("Metal Q4 RMSNorm sums require prepared target pipelines");
+        const auto input_elements = q4_input_element_count(input,
+            u32(std::uint64_t(input_row_start) + rows, "Q4 RMSNorm input rows"));
+        const auto output_elements = rows * hidden;
+        require_f32_storage(weight, hidden, "Q4 RMSNorm weight");
+        require_f32_storage(output, output_elements, "Q4 RMSNorm output");
+        require_q4_input_sum_capacity(*q4_input_sums, output_elements);
+        const auto sum_bytes = output_elements / 8U * sizeof(float);
+        require_disjoint_ranges(input, input_elements * sizeof(float), *q4_input_sums,
+            sum_bytes, "Q4 RMSNorm input/sums");
+        require_disjoint_ranges(weight, hidden * sizeof(float), *q4_input_sums,
+            sum_bytes, "Q4 RMSNorm weight/sums");
+        require_disjoint_ranges(output, output_elements * sizeof(float), *q4_input_sums,
+            sum_bytes, "Q4 RMSNorm output/sums");
+        require_disjoint_ranges(input, input_elements * sizeof(float), output,
+            output_elements * sizeof(float), "Q4 RMSNorm input/output");
+        require_disjoint_ranges(weight, hidden * sizeof(float), output,
+            output_elements * sizeof(float), "Q4 RMSNorm weight/output");
+    }
     const RMSNormDimensions dims {
         .rows = u32(rows, "RMSNorm rows"),
         .hidden = u32(hidden, "RMSNorm hidden"),
@@ -949,11 +1247,13 @@ void MetalCommandContext::encode_rms_norm(
         .epsilon = epsilon,
     };
     auto encoder = impl_->compute_encoder("Gemma2 RMSNorm");
-    [encoder setComputePipelineState:impl_->state->rms_norm_pipeline];
+    [encoder setComputePipelineState:q4_input_sums != nullptr
+        ? impl_->state->rms_norm_q4_sums_pipeline : impl_->state->rms_norm_pipeline];
     bind_buffer(encoder, input, 0);
     bind_buffer(encoder, weight, 1);
     bind_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
+    if (q4_input_sums != nullptr) bind_buffer(encoder, *q4_input_sums, 4U);
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(rows), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     ++impl_->stats.compute_dispatch_count;
@@ -1118,7 +1418,8 @@ void MetalCommandContext::encode_gemma2_kv_cache_copy(
     const auto& source_v = source_value.descriptor();
     const auto& destination = destination_key.descriptor();
     const auto& destination_v = destination_value.descriptor();
-    if (token_count == 0U || source.dtype != DType::f16 || destination.dtype != DType::f16
+    if (token_count == 0U || (source.dtype != DType::f16 && source.dtype != DType::f32)
+        || destination.dtype != source.dtype
         || source.shape.rank() != 3U || destination.shape.rank() != 3U
         || source.shape.dimension(0) != static_cast<std::uint64_t>(source_row_mask) + 1U
         || destination.shape.dimension(0) != static_cast<std::uint64_t>(destination_row_mask) + 1U
@@ -1138,7 +1439,8 @@ void MetalCommandContext::encode_gemma2_kv_cache_copy(
         .destination_row_mask = destination_row_mask,
     };
     auto encoder = impl_->compute_encoder("Gemma2 F16 KV-cache copy");
-    [encoder setComputePipelineState:impl_->state->gemma2_kv_cache_copy_pipeline];
+    [encoder setComputePipelineState:source.dtype == DType::f32
+        ? impl_->state->kv_cache_copy_f32_pipeline : impl_->state->gemma2_kv_cache_copy_pipeline];
     bind_buffer(encoder, source_key, 0);
     bind_buffer(encoder, source_value, 1);
     bind_buffer(encoder, destination_key, 2);
@@ -1643,12 +1945,13 @@ void MetalCommandContext::encode_verifier_rope(
     std::uint32_t head_count,
     std::uint32_t head_dimension,
     std::uint32_t rope_dimension_count,
-    float frequency_base
+    float frequency_base,
+    float frequency_scale
 ) {
     if (row_count == 0U || head_count == 0U || head_dimension == 0U
         || rope_dimension_count == 0U || rope_dimension_count > head_dimension
         || (rope_dimension_count & 1U) != 0U || !std::isfinite(frequency_base)
-        || frequency_base <= 0.0F) {
+        || frequency_base <= 0.0F || !std::isfinite(frequency_scale) || frequency_scale <= 0.0F) {
         throw std::invalid_argument("Metal verifier RoPE parameters are invalid");
     }
     const auto row_width = static_cast<std::uint64_t>(head_count) * head_dimension;
@@ -1659,7 +1962,7 @@ void MetalCommandContext::encode_verifier_rope(
     require_capacity(positions, static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t),
         "verifier RoPE positions");
     const VerifierRoPEDimensions dims {
-        row_count, head_count, head_dimension, rope_dimension_count, frequency_base,
+        row_count, head_count, head_dimension, rope_dimension_count, frequency_base, frequency_scale,
     };
     auto encoder = impl_->compute_encoder("Gemma2 verifier query RoPE");
     [encoder setComputePipelineState:impl_->state->verifier_rope_pipeline];
@@ -1682,8 +1985,20 @@ void MetalCommandContext::encode_verifier_kv_store(
     std::uint32_t head_count,
     std::uint32_t head_dimension,
     std::uint32_t rope_dimension_count,
-    float frequency_base
+    float frequency_base,
+    float frequency_scale,
+    const BackendBuffer* numerical_status
 ) {
+    const auto cache_dtype = private_key.descriptor().dtype;
+    if ((cache_dtype != DType::f16 && cache_dtype != DType::f32)
+        || private_value.descriptor().dtype != cache_dtype
+        || raw_key.descriptor().dtype != DType::f32 || raw_value.descriptor().dtype != DType::f32
+        || !std::isfinite(frequency_base) || frequency_base <= 0.0F
+        || !std::isfinite(frequency_scale) || frequency_scale <= 0.0F) {
+        throw std::invalid_argument("Metal private K/V dtype or RoPE frequency is invalid");
+    }
+    const std::uint64_t cache_element_bytes = cache_dtype == DType::f32 ? sizeof(float) : sizeof(std::uint16_t);
+    require_capacity(positions, static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t), "private K/V positions");
     const auto row_width = static_cast<std::uint64_t>(head_count) * head_dimension;
     if (row_count == 0U || row_width == 0U || rope_dimension_count > head_dimension
         || (rope_dimension_count & 1U) != 0U) {
@@ -1693,21 +2008,33 @@ void MetalCommandContext::encode_verifier_kv_store(
         "verifier raw key");
     require_capacity(raw_value, static_cast<std::uint64_t>(row_count) * row_width * sizeof(float),
         "verifier raw value");
-    require_capacity(private_key, static_cast<std::uint64_t>(row_count) * row_width * sizeof(std::uint16_t),
+    require_capacity(private_key, static_cast<std::uint64_t>(row_count) * row_width * cache_element_bytes,
         "verifier private key");
-    require_capacity(private_value, static_cast<std::uint64_t>(row_count) * row_width * sizeof(std::uint16_t),
+    require_capacity(private_value, static_cast<std::uint64_t>(row_count) * row_width * cache_element_bytes,
         "verifier private value");
+    if (numerical_status != nullptr) {
+        if (cache_dtype != DType::f16 || impl_->state->verifier_kv_store_f16_checked_pipeline == nil)
+            throw std::invalid_argument("Metal checked K/V store requires precise F16 cache storage");
+        require_f32_storage(*numerical_status, 1U, "verifier K/V numerical status");
+        for (const auto* source : {&raw_key, &raw_value, &positions, &private_key, &private_value})
+            require_disjoint_ranges(*source, source->descriptor().byte_count, *numerical_status,
+                sizeof(std::uint32_t), "K/V numerical status and storage");
+    }
     const VerifierKVStoreDimensions dims {
-        row_count, head_count, head_dimension, rope_dimension_count, frequency_base,
+        row_count, head_count, head_dimension, rope_dimension_count, frequency_base, frequency_scale,
     };
     auto encoder = impl_->compute_encoder("Gemma2 verifier private K/V store");
-    [encoder setComputePipelineState:impl_->state->verifier_kv_store_pipeline];
+    [encoder setComputePipelineState:numerical_status != nullptr
+        ? impl_->state->verifier_kv_store_f16_checked_pipeline
+        : (cache_dtype == DType::f32
+            ? impl_->state->verifier_kv_store_f32_pipeline : impl_->state->verifier_kv_store_pipeline)];
     bind_buffer(encoder, raw_key, 0);
     bind_buffer(encoder, raw_value, 1);
     bind_buffer(encoder, positions, 2);
     bind_buffer(encoder, private_key, 3);
     bind_buffer(encoder, private_value, 4);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
+    if (numerical_status != nullptr) bind_buffer(encoder, *numerical_status, 6U);
     [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(row_width), row_count, 1U)
           threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
     ++impl_->stats.compute_dispatch_count;
@@ -1733,25 +2060,79 @@ void MetalCommandContext::encode_verifier_attention(
     std::uint32_t key_dimension,
     std::uint32_t value_dimension,
     float scale,
-    float logit_softcap
+    float logit_softcap,
+    const BackendBuffer* q4_input_sums
 ) {
     if (row_count == 0U || kv_head_count == 0U
         || query_head_count != 2U * kv_head_count
         || key_dimension != value_dimension || key_dimension != 256U
         || !std::isfinite(scale) || scale <= 0.0F
-        || !std::isfinite(logit_softcap) || logit_softcap <= 0.0F) {
-        throw std::invalid_argument("Metal verifier attention supports the exact Gemma2 grouped-head layout");
+        || !std::isfinite(logit_softcap) || logit_softcap < 0.0F) {
+        throw std::invalid_argument("Metal verifier attention supports the two query heads per KV head and head width 256");
     }
-    require_capacity(schedules,
-        schedule_byte_offset + static_cast<std::uint64_t>(row_count)
-            * sizeof(engine::VerifierRowAttention),
-        "verifier attention schedules");
+    const auto cache_dtype = resident_key.descriptor().dtype;
+    if ((cache_dtype != DType::f16 && cache_dtype != DType::f32)
+        || resident_value.descriptor().dtype != cache_dtype
+        || private_key.descriptor().dtype != cache_dtype || private_value.descriptor().dtype != cache_dtype) {
+        throw std::invalid_argument("Metal verifier attention K/V storage dtypes must agree");
+    }
+    const auto row_elements = static_cast<std::uint64_t>(row_count) * query_head_count;
+    const auto fused_attention_pipeline = cache_dtype == DType::f32
+        ? impl_->state->verifier_attention_q4_sums_pipeline
+        : impl_->state->verifier_attention_q4_sums_f16_pipeline;
+    if (q4_input_sums != nullptr) {
+        if (fused_attention_pipeline == nil)
+            throw std::invalid_argument("Metal Q4 attention sums require prepared target attention");
+        const auto elements = std::uint64_t(u32(row_elements, "Q4 attention row heads")) * value_dimension;
+        require_f32_storage(query, elements, "Q4 attention query");
+        require_f32_storage(output, elements, "Q4 attention output");
+        require_q4_input_sum_capacity(*q4_input_sums, elements);
+        for (const auto* source : {&query, &resident_key, &resident_value, &private_key, &private_value,
+                 &schedules, &ancestors, &output, &partial_output, &partial_maxima, &partial_denominators})
+            require_disjoint_ranges(*source, source->descriptor().byte_count, *q4_input_sums,
+                elements / 8U * sizeof(float), "Q4 attention storage/sums");
+    }
+    require_capacity(query, row_elements * key_dimension * sizeof(float), "verifier query");
+    require_capacity(output, row_elements * value_dimension * sizeof(float), "verifier attention output");
+    require_capacity(partial_output, row_elements * engine::gemma2_decode_attention_max_partitions
+        * value_dimension * sizeof(float), "verifier partial output");
+    require_capacity(partial_maxima, row_elements * engine::gemma2_decode_attention_max_partitions
+        * sizeof(float), "verifier partial maxima");
+    require_capacity(partial_denominators, row_elements * engine::gemma2_decode_attention_max_partitions
+        * sizeof(float), "verifier partial denominators");
+    static_assert(sizeof(engine::VerifierRowAttention) == 4U * sizeof(std::uint32_t));
+    const auto schedule_bytes = static_cast<std::uint64_t>(row_count)
+        * sizeof(engine::VerifierRowAttention);
+    if (schedule_byte_offset % alignof(std::uint32_t) != 0U
+        || schedule_byte_offset > schedules.descriptor().byte_count
+        || schedule_bytes > schedules.descriptor().byte_count - schedule_byte_offset) {
+        throw std::invalid_argument("Metal verifier attention schedule extent is invalid");
+    }
+    // Both ordinary and graph execution stage these immutable rows on the CPU.
+    // Reading shared staging here avoids an extra schedule representation or a
+    // GPU readback. Buffer-view and operation offsets are both applied below.
+    const auto* schedule_data = static_cast<const std::byte*>(
+        metal_buffer_contents(storage(schedules), schedule_byte_offset));
+    std::uint32_t maximum_tokens = 0U;
+    for (std::uint32_t row = 0U; row < row_count; ++row) {
+        std::array<std::uint32_t, 4> packed;
+        std::memcpy(packed.data(), schedule_data + row * sizeof(packed), sizeof(packed));
+        const auto tokens = static_cast<std::uint64_t>(packed[1]) + packed[3];
+        if (tokens == 0U || tokens > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("Metal verifier attention token count is invalid");
+        }
+        maximum_tokens = std::max(maximum_tokens, static_cast<std::uint32_t>(tokens));
+    }
+    const auto maximum_partitions = gemma2_decode_attention_partition_count(maximum_tokens);
     const VerifierAttentionDimensions dims {
         row_count, cache_row_mask, query_head_count, kv_head_count,
         key_dimension, value_dimension, scale, logit_softcap,
     };
     auto encoder = impl_->compute_encoder("Gemma2 verifier tree attention");
-    [encoder setComputePipelineState:impl_->state->verifier_attention_pipeline];
+    [encoder setComputePipelineState:q4_input_sums != nullptr
+        ? fused_attention_pipeline
+        : (cache_dtype == DType::f32 ? impl_->state->verifier_attention_f32_pipeline
+            : impl_->state->verifier_attention_pipeline)];
     bind_buffer(encoder, query, 0);
     bind_buffer(encoder, resident_key, 1);
     bind_buffer(encoder, resident_value, 2);
@@ -1764,20 +2145,26 @@ void MetalCommandContext::encode_verifier_attention(
     bind_buffer(encoder, partial_maxima, 9);
     bind_buffer(encoder, partial_denominators, 10);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:11];
+    if (q4_input_sums != nullptr) bind_buffer(encoder, *q4_input_sums, 12U);
     [encoder dispatchThreadgroups:MTLSizeMake(kv_head_count,
-                                      engine::gemma2_decode_attention_max_partitions,
+                                      maximum_partitions,
                                       row_count)
               threadsPerThreadgroup:MTLSizeMake(128U, 1U, 1U)];
     ++impl_->stats.compute_dispatch_count;
+    // One-partition rows already write final output. Keep the fixed partial
+    // stride and each shader row's partition/reduction order for every other case.
+    if (maximum_partitions == 1U) return;
     encode_memory_barrier();
     encoder = impl_->compute_encoder("Gemma2 verifier tree attention reduction");
-    [encoder setComputePipelineState:impl_->state->verifier_attention_reduce_pipeline];
+    [encoder setComputePipelineState:q4_input_sums != nullptr
+        ? impl_->state->verifier_attention_reduce_q4_sums_pipeline : impl_->state->verifier_attention_reduce_pipeline];
     bind_buffer(encoder, partial_output, 0);
     bind_buffer(encoder, partial_maxima, 1);
     bind_buffer(encoder, partial_denominators, 2);
     bind_buffer(encoder, schedules, 3, schedule_byte_offset);
     bind_buffer(encoder, output, 4);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
+    if (q4_input_sums != nullptr) bind_buffer(encoder, *q4_input_sums, 6U);
     [encoder dispatchThreadgroups:MTLSizeMake(kv_head_count, row_count, 1U)
               threadsPerThreadgroup:MTLSizeMake(32U, 1U, 1U)];
     ++impl_->stats.compute_dispatch_count;
@@ -1794,15 +2181,23 @@ void MetalCommandContext::encode_verifier_kv_scatter(
     std::uint32_t row_width,
     std::uint32_t destination_row_mask
 ) {
-    if (row_count == 0U || row_count > engine::external_speculation_max_horizon + 1U
+    if (row_count == 0U || row_count > engine::VerifierRowMax
         || row_width == 0U) {
         throw std::invalid_argument("Metal verifier accepted-path scatter extent is invalid");
     }
+    const auto dtype = private_key.descriptor().dtype;
+    if ((dtype != DType::f16 && dtype != DType::f32)
+        || private_value.descriptor().dtype != dtype || resident_key.descriptor().dtype != dtype
+        || resident_value.descriptor().dtype != dtype) {
+        throw std::invalid_argument("Metal K/V scatter storage dtypes must agree");
+    }
+    require_capacity(selected_nodes, static_cast<std::uint64_t>(row_count) * sizeof(std::uint32_t), "K/V scatter selected rows");
     const VerifierKVScatterDimensions dims {
         row_count, row_width, destination_position, destination_row_mask,
     };
     auto encoder = impl_->compute_encoder("Gemma2 verifier accepted-path K/V scatter");
-    [encoder setComputePipelineState:impl_->state->verifier_kv_scatter_pipeline];
+    [encoder setComputePipelineState:dtype == DType::f32
+        ? impl_->state->verifier_kv_scatter_f32_pipeline : impl_->state->verifier_kv_scatter_pipeline];
     bind_buffer(encoder, private_key, 0);
     bind_buffer(encoder, private_value, 1);
     bind_buffer(encoder, selected_nodes, 2);
@@ -1860,19 +2255,43 @@ void MetalCommandContext::encode_gelu_tanh_multiply(
     const BackendBuffer& gate,
     const BackendBuffer& up,
     const BackendBuffer& output,
-    std::uint64_t element_count
+    std::uint64_t element_count,
+    const BackendBuffer* q4_input_sums
 ) {
     const auto elements = element_count == 0U ? gate.descriptor().element_count : element_count;
     require_capacity(up, elements * sizeof(float), "GELU-tanh up");
     require_capacity(output, elements * sizeof(float), "GELU-tanh output");
+    if (q4_input_sums != nullptr) {
+        if (impl_->state->gelu_tanh_multiply_q4_sums_pipeline == nil
+            || gate.descriptor().shape.rank() != 2U)
+            throw std::invalid_argument("Metal Q4 GELU sums require prepared target matrix rows");
+        const auto width = gate.descriptor().shape.dimension(1);
+        if (width == 0U || width % 256U != 0U || elements == 0U || elements % width != 0U)
+            throw std::invalid_argument("Metal Q4 GELU sum extent requires complete 256-aligned rows");
+        static_cast<void>(q4_input_element_count(gate, u32(elements / width, "Q4 GELU rows")));
+        require_f32_storage(up, elements, "Q4 GELU up");
+        require_f32_storage(output, elements, "Q4 GELU output");
+        require_q4_input_sum_capacity(*q4_input_sums, elements);
+        const auto sum_bytes = elements / 8U * sizeof(float);
+        for (const auto* source : {&gate, &up, &output})
+            require_disjoint_ranges(*source, elements * sizeof(float), *q4_input_sums,
+                sum_bytes, "Q4 GELU values/sums");
+        require_disjoint_ranges(gate, elements * sizeof(float), output,
+            elements * sizeof(float), "Q4 GELU gate/output");
+        require_disjoint_ranges(up, elements * sizeof(float), output,
+            elements * sizeof(float), "Q4 GELU up/output");
+    }
     const ElementwiseDimensions dims {.elements = u32(elements, "GELU-tanh elements")};
     auto encoder = impl_->compute_encoder("Gemma2 GELU-tanh multiply");
-    [encoder setComputePipelineState:impl_->state->gelu_tanh_multiply_pipeline];
+    [encoder setComputePipelineState:q4_input_sums != nullptr
+        ? impl_->state->gelu_tanh_multiply_q4_sums_pipeline : impl_->state->gelu_tanh_multiply_pipeline];
     bind_buffer(encoder, gate, 0);
     bind_buffer(encoder, up, 1);
     bind_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
-    [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
+    if (q4_input_sums != nullptr) bind_buffer(encoder, *q4_input_sums, 4U);
+    const auto threads = q4_input_sums != nullptr ? elements / 8U : elements;
+    [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((threads + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     ++impl_->stats.compute_dispatch_count;
 }
@@ -1907,8 +2326,8 @@ std::uint32_t MetalCommandContext::encode_token_candidates(
         || request.base_candidate_count != request.top_k + request.history_token_count) {
         throw std::invalid_argument("Metal token-candidate request is outside product bounds");
     }
-    if (!std::isfinite(softcap) || softcap <= 0.0F) {
-        throw std::invalid_argument("Metal token-candidate softcap must be finite and positive");
+    if (!std::isfinite(softcap) || softcap < 0.0F) {
+        throw std::invalid_argument("Metal token-candidate softcap must be finite and nonnegative");
     }
     const auto columns64 = logits.descriptor().shape.dimension(logits.descriptor().shape.rank() - 1U);
     const auto columns = u32(columns64, "token-candidate columns");
@@ -1995,8 +2414,8 @@ std::uint32_t MetalCommandContext::encode_token_candidates_width_two(
     const std::array<engine::TokenSelectionRequest, 2>& requests,
     float softcap
 ) {
-    if (!std::isfinite(softcap) || softcap <= 0.0F) {
-        throw std::invalid_argument("Metal batched token-candidate softcap must be finite and positive");
+    if (!std::isfinite(softcap) || softcap < 0.0F) {
+        throw std::invalid_argument("Metal batched token-candidate softcap must be finite and nonnegative");
     }
     const auto columns = u32(
         logits.descriptor().shape.dimension(logits.descriptor().shape.rank() - 1U),
@@ -2111,7 +2530,7 @@ std::uint32_t MetalCommandContext::encode_target_token_candidates(
         || row_count > engine::target_selection_batch_rows
         || first_request_row > workspace.row_capacity
         || row_count > workspace.row_capacity - first_request_row
-        || !std::isfinite(softcap) || softcap <= 0.0F) {
+        || !std::isfinite(softcap) || softcap < 0.0F) {
         throw std::invalid_argument("Metal target-candidate row tile is invalid");
     }
     const auto columns = u32(
@@ -2209,7 +2628,9 @@ void MetalCommandContext::push_debug_group(std::string_view label) {
     if (label.empty()) throw std::invalid_argument("Metal debug group label must not be empty");
     const std::string owned_label(label);
     auto encoder = impl_->compute_encoder("Gemma2 diagnostic groups");
-    [encoder pushDebugGroup:[NSString stringWithUTF8String:owned_label.c_str()]];
+    @autoreleasepool {
+        [encoder pushDebugGroup:[NSString stringWithUTF8String:owned_label.c_str()]];
+    }
     ++impl_->debug_group_depth;
 }
 
@@ -2229,6 +2650,7 @@ MetalCommandStats MetalCommandContext::commit() {
         throw std::logic_error("Metal command buffer has unclosed debug groups");
     }
     impl_->end_compute_encoding();
+    keep_metal_buffers_resident();
     impl_->submitted = true;
     [impl_->command_buffer commit];
     ++impl_->stats.commit_count;

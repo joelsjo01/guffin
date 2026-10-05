@@ -9,9 +9,12 @@
 
 namespace local_gguf_engine::tensor {
 
+enum class TensorPacking : std::uint8_t { canonical, kquant_columns8 };
+
 struct TensorDescriptor {
     Shape shape;
     DType dtype = DType::f32;
+    TensorPacking packing = TensorPacking::canonical;
     std::uint64_t element_count = 0;
     std::size_t byte_count = 0;
 
@@ -20,11 +23,16 @@ struct TensorDescriptor {
         const Shape& shape,
         DType dtype
     );
+    [[nodiscard]] static TensorDescriptor from_interleaved_kquant_weight_matrix(
+        const Shape& shape,
+        DType dtype
+    );
 
     constexpr bool operator==(const TensorDescriptor&) const = default;
 
 private:
-    TensorDescriptor(Shape shape, DType dtype, std::uint64_t element_count, std::size_t byte_count);
+    TensorDescriptor(Shape shape, DType dtype, std::uint64_t element_count, std::size_t byte_count,
+        TensorPacking packing = TensorPacking::canonical);
 };
 
 class TensorView;

@@ -32,12 +32,16 @@ struct Gemma2ChatSessionOptions {
     std::size_t max_new_tokens = 0;
     runtime::BackendKind backend = runtime::BackendKind::metal;
     Gemma2OutputHeadPolicy output_head_policy = Gemma2OutputHeadPolicy::automatic;
+    std::uint32_t context_length = 0;
+    GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic;
     bool context_shift = false;
     bool speculative_decode = true;
-    bool retrieval_decode = true;
+    // Unset preserves the measured Gemma 2 default; Gemma 3 starts target-only.
+    std::optional<bool> retrieval_decode;
     std::optional<std::filesystem::path> standalone_draft_model;
     StandaloneExecutionOptions standalone_execution;
-    SpeculativeSamplingMode speculative_sampling = SpeculativeSamplingMode::exact_match;
+    // Unset selects lossless with an explicit drafter, exact-match otherwise.
+    std::optional<SpeculativeSamplingMode> speculative_sampling;
     std::vector<std::string> reverse_stop_strings;
     TokenSamplerOptions sampler;
     Gemma2MonotonicClock clock;
@@ -62,6 +66,7 @@ struct Gemma2ChatTurnMetrics {
     std::size_t learned_owned_byte_count = 0;
     std::uint32_t learned_horizon = 0;
     bool standalone_draft = false;
+    bool standalone_bounded_repetition_history = false;
     StandaloneDraftKind standalone_kind = StandaloneDraftKind::gemma3_270m_q8;
     StandaloneExecutionOptions standalone_execution;
     std::uint64_t standalone_prefill_ns = 0;
@@ -76,6 +81,10 @@ struct Gemma2ChatTurnMetrics {
     std::uint32_t trimmed_turn_count = 0;
     bool rebuilt_context = false;
     Gemma2OutputHeadPolicy output_head_policy = Gemma2OutputHeadPolicy::f16;
+    ModelArchitecture model_architecture = ModelArchitecture::gemma2;
+    std::uint32_t context_capacity = 0;
+    GemmaKVPrecision kv_precision = GemmaKVPrecision::f16;
+    bool retrieval_decode = false;
     std::size_t resident_weight_byte_count = 0;
     std::size_t resident_kv_cache_byte_count = 0;
     std::size_t resident_scratch_byte_count = 0;
@@ -214,6 +223,7 @@ private:
     std::optional<PreparedGemma2Plan> prepared_;
     std::shared_ptr<StandaloneDraftArtifact> standalone_source_;
     Gemma2OutputHeadPolicy output_head_policy_;
+    GemmaKVPrecision kv_precision_;
     std::vector<OwnedChatMessage> messages_;
     std::vector<std::uint32_t> cached_token_ids_;
     // Preserve numerical execution boundaries for exceptional recovery:
@@ -230,6 +240,7 @@ private:
     std::vector<std::string> reverse_stop_strings_;
     std::optional<std::uint32_t> end_of_turn_token_id_;
     std::size_t max_new_tokens_ = 0;
+    std::uint32_t context_length_ = 0;
     bool context_shift_ = false;
     bool speculative_decode_ = true;
     SpeculativeSamplingMode speculative_sampling_ = SpeculativeSamplingMode::exact_match;

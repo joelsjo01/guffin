@@ -70,12 +70,20 @@ id<MTLDevice> metal_device_or_throw() {
     return device;
 }
 
-MatmulPipelineState::MatmulPipelineState() {
+MatmulPipelineState::MatmulPipelineState(bool precise_math) {
     device = metal_device_or_throw();
 
     NSError* library_error = nil;
     NSString* source = [NSString stringWithUTF8String:metal_kernel_source()];
-    id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&library_error];
+    // Gemma 3 has one explicit numerical policy for ordinary and batched
+    // execution. Preserve the established Gemma 2 compiler defaults.
+    MTLCompileOptions* options = nil;
+    if (precise_math) {
+        options = [MTLCompileOptions new];
+        options.mathMode = MTLMathModeSafe;
+        options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
+    }
+    id<MTLLibrary> library = [device newLibraryWithSource:source options:options error:&library_error];
     if (library == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
@@ -154,10 +162,24 @@ MatmulPipelineState::MatmulPipelineState() {
         NSString* function_name,
         NSUInteger constant_index,
         std::uint16_t constant_value,
-        const char* description
+        const char* description,
+        std::uint16_t parallel_rows = 1U,
+        bool columns8 = false
     ) {
         MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
         [constants setConstantValue:&constant_value type:MTLDataTypeUShort atIndex:constant_index];
+        if ([function_name isEqualToString:@"matmul_f32_q4_k_packed_row_batch_kernel"]
+            || [function_name isEqualToString:@"matmul_f32_q6_k_packed_row_batch_kernel"]) {
+            [constants setConstantValue:&parallel_rows type:MTLDataTypeUShort atIndex:5];
+        }
+        if ([function_name isEqualToString:@"gemma3_matmul_f32_kquant_shared_kernel"]
+            || [function_name isEqualToString:@"gemma3_matmul_f32_columns8_kernel"]
+            || [function_name isEqualToString:@"gemma3_matmul_f32_columns8_prepared_kernel"]) {
+            [constants setConstantValue:&parallel_rows type:MTLDataTypeUShort atIndex:6];
+        }
+        if ([function_name hasPrefix:@"gemma3_matmul_f32_kquant_matrix"]) {
+            [constants setConstantValue:&columns8 type:MTLDataTypeBool atIndex:7];
+        }
         NSError* function_error = nil;
         id<MTLFunction> function = [library newFunctionWithName:function_name
                                                  constantValues:constants
@@ -185,11 +207,13 @@ MatmulPipelineState::MatmulPipelineState() {
     auto make_tiled_pipeline = [library, this](
         std::uint16_t dtype,
         bool exact_16,
-        const char* description
+        const char* description,
+        bool columns8 = false
     ) {
         MTLFunctionConstantValues* constants = [[MTLFunctionConstantValues alloc] init];
         [constants setConstantValue:&dtype type:MTLDataTypeUShort atIndex:2];
         [constants setConstantValue:&exact_16 type:MTLDataTypeBool atIndex:3];
+        [constants setConstantValue:&columns8 type:MTLDataTypeBool atIndex:7];
         NSError* function_error = nil;
         id<MTLFunction> function = [library newFunctionWithName:@"matmul_f32_kquant_tiled_kernel"
                                                  constantValues:constants
@@ -213,6 +237,97 @@ MatmulPipelineState::MatmulPipelineState() {
         }
         return pipeline;
     };
+
+    {
+        if (precise_math) {
+            verifier_kv_store_f16_checked_pipeline = make_pipeline(
+                @"verifier_kv_store_f16_checked_kernel", "F16 K/V store with numerical status");
+        }
+        // The packed Gemma 2 body keeps the established compiler policy. Its
+        // R1/R2 consumers and fused producers come from that same library.
+        if (!precise_math) {
+            columns8_gemma2_prompt[0] = make_tiled_pipeline(0, false,
+                "Gemma2 packed half-operand prompt", true);
+            columns8_gemma2_prompt[1] = make_tiled_pipeline(0, true,
+                "Gemma2 packed exact16 half-operand prompt", true);
+        }
+        const std::array<NSString*, 2> prompt_matrix_names = {
+            @"gemma3_matmul_f32_kquant_matrix_kernel",
+            @"gemma3_matmul_f32_kquant_matrix_m32_kernel"};
+        for (std::uint16_t packing = 0; precise_math && packing < 2; ++packing) {
+            for (std::uint16_t dtype = 0; dtype < 2; ++dtype) {
+                for (std::uint16_t tile = 0; tile < prompt_matrix_names.size(); ++tile) {
+                    auto& pipeline = gemma3_prompt_matrix[packing][dtype][tile];
+                    pipeline = make_specialized_pipeline(prompt_matrix_names[tile], 2, dtype,
+                        "Gemma3 F32 prompt matrix", 1, packing == 1);
+                    if (pipeline.threadExecutionWidth != 32U
+                        || pipeline.maxTotalThreadsPerThreadgroup < 128U)
+                        throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                            "Metal prompt matrices require four 32-lane SIMD groups");
+                }
+            }
+        }
+        if (precise_math) {
+            gemma3_q4_shared_two_pipeline = make_specialized_pipeline(
+                @"gemma3_matmul_f32_kquant_shared_kernel", 2, 0, "Gemma3 Q4 two shared rows", 2
+            );
+            gemma3_q6_shared_one_pipeline = make_specialized_pipeline(
+                @"gemma3_matmul_f32_kquant_shared_kernel", 2, 1, "Gemma3 Q6 one shared row", 1
+            );
+            gemma3_q6_shared_two_pipeline = make_specialized_pipeline(
+                @"gemma3_matmul_f32_kquant_shared_kernel", 2, 1, "Gemma3 Q6 two shared rows", 2
+            );
+        }
+        for (std::uint16_t rows = 1; rows <= 2; ++rows) {
+            columns8_q4_rows[rows - 1] = make_specialized_pipeline(
+                @"gemma3_matmul_f32_columns8_kernel", 2, 0, "Columns8 Q4 rows", rows);
+            columns8_q4_prepared_rows[rows - 1] = make_specialized_pipeline(
+                @"gemma3_matmul_f32_columns8_prepared_kernel", 2, 0,
+                "Columns8 Q4 rows with producer sums", rows);
+            if (precise_math) columns8_q6_rows[rows - 1] = make_specialized_pipeline(
+                @"gemma3_matmul_f32_columns8_kernel", 2, 1, "Columns8 Q6 rows", rows);
+        }
+        rms_norm_q4_sums_pipeline = make_pipeline(
+            @"rms_norm_q4_sums_f32_kernel", "RMSNorm with Q4 input sums");
+        gelu_tanh_multiply_q4_sums_pipeline = make_pipeline(
+            @"gelu_tanh_multiply_q4_sums_f32_kernel", "GELU with Q4 input sums");
+        verifier_attention_q4_sums_pipeline = make_pipeline(
+            @"verifier_attention_q4_sums_f32_cache_kernel", "Attention with Q4 input sums");
+        verifier_attention_q4_sums_f16_pipeline = make_pipeline(
+            @"verifier_attention_q4_sums_f16_cache_kernel", "F16 cache attention with Q4 input sums");
+        verifier_attention_reduce_q4_sums_pipeline = make_pipeline(
+            @"verifier_attention_reduce_q4_sums_f32_kernel", "Attention reduction with Q4 input sums");
+        for (const auto& pipeline : {rms_norm_q4_sums_pipeline,
+                 gelu_tanh_multiply_q4_sums_pipeline}) {
+            if (pipeline.threadExecutionWidth != 32U || pipeline.maxTotalThreadsPerThreadgroup < 256U)
+                throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                    "Metal Q4 sum producers require eight 32-lane SIMD groups");
+        }
+        for (const auto& pipeline : {verifier_attention_q4_sums_pipeline,
+                 verifier_attention_q4_sums_f16_pipeline}) {
+            if (pipeline.threadExecutionWidth != 32U || pipeline.maxTotalThreadsPerThreadgroup < 128U)
+                throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                    "Metal Q4 attention sum producers require four 32-lane SIMD groups");
+        }
+        if (verifier_attention_reduce_q4_sums_pipeline.threadExecutionWidth != 32U
+            || verifier_attention_reduce_q4_sums_pipeline.maxTotalThreadsPerThreadgroup < 32U)
+            throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                "Metal Q4 attention sum producers require 32-lane SIMD groups");
+        for (const auto& pipeline : {
+                 columns8_q4_rows[0], columns8_q4_rows[1],
+                 columns8_q4_prepared_rows[0], columns8_q4_prepared_rows[1],
+                 columns8_q6_rows[0], columns8_q6_rows[1],
+             }) {
+            if (pipeline == nil && !precise_math) continue;
+            if (pipeline == nil || pipeline.threadExecutionWidth != 32U
+                || pipeline.maxTotalThreadsPerThreadgroup < 128U) {
+                throw metal_error(
+                    runtime::BackendErrorCode::metal_execution_failed,
+                    "Metal columns8 projections require four 32-lane SIMD groups"
+                );
+            }
+        }
+    }
 
     matvec_q8_0_packed_pipeline = make_specialized_pipeline(
         @"matvec_f32_q8_0_packed_kernel", 4, 0, "Q8_0 packed decode matvec"
@@ -592,6 +707,24 @@ MatmulPipelineState::MatmulPipelineState() {
         );
     }
 
+    embedding_q6_pipeline = make_pipeline(
+        @"embed_q6_k_gguf_weight_token_ids_kernel", "native Q6_K token embedding"
+    );
+    head_rms_norm_pipeline = make_pipeline(
+        @"head_rms_norm_f32_kernel", "per-head RMS normalization"
+    );
+    kv_cache_copy_f32_pipeline = make_pipeline(
+        @"kv_cache_copy_f32_kernel", "F32 K/V cache copy"
+    );
+    verifier_kv_store_f32_pipeline = make_pipeline(
+        @"verifier_kv_store_f32_kernel", "F32 private K/V store"
+    );
+    verifier_kv_scatter_f32_pipeline = make_pipeline(
+        @"verifier_kv_scatter_f32_kernel", "F32 accepted-path K/V scatter"
+    );
+    verifier_attention_f32_pipeline = make_pipeline(
+        @"verifier_attention_f32_cache_kernel", "F32 prefix and private attention"
+    );
     verifier_rope_pipeline = make_pipeline(
         @"verifier_rope_f32_by_positions_kernel", "target verifier query RoPE"
     );
@@ -722,6 +855,13 @@ MatmulPipelineState& shared_matmul_pipeline_state() {
     }
 #endif
     static MatmulPipelineState state;
+    return state;
+}
+
+MatmulPipelineState& shared_precise_matmul_pipeline_state() {
+    // Check availability even after process-lifetime pipeline initialization.
+    static_cast<void>(metal_device_or_throw());
+    static MatmulPipelineState state(true);
     return state;
 }
 

@@ -488,7 +488,7 @@ TargetVerifierEpisodeResult run_gemma2_metal_target_verifier_chain_episode(
             make_chain_verifier_tile_request(
                 workspace.tile_request, full_request, tile_index,
                 target.config().block_count, target.config().context_length,
-                target.config().sliding_window
+                target.config().sliding_window, target.config().attention_global_layer_period
             );
             active_tile_metadata.input_row_count =
                 workspace.tile_request.topology.input_row_count;
@@ -507,7 +507,7 @@ TargetVerifierEpisodeResult run_gemma2_metal_target_verifier_chain_episode(
             auto validated_tile = validate_verifier_encode_request(
                 workspace.tile_request, target.config().vocab_size,
                 target.config().block_count, target.config().context_length,
-                target.config().sliding_window
+                target.config().sliding_window, target.config().attention_global_layer_period
             );
             active_ticket.emplace(encode_gemma2_metal_target_verifier(
                 target, verifier, validated_tile, embedding_scale
@@ -618,7 +618,7 @@ TargetVerifierEpisodeResult run_gemma2_metal_target_verifier_forest_episode(
     auto validated = validate_verifier_encode_request(
         workspace.tile_request, target.config().vocab_size,
         target.config().block_count, target.config().context_length,
-        target.config().sliding_window
+        target.config().sliding_window, target.config().attention_global_layer_period
     );
     auto ticket = encode_gemma2_metal_target_verifier(
         target, verifier, validated, embedding_scale

@@ -4,6 +4,7 @@
 #include "draft_cache_runtime.hpp"
 #include "gemma2_verification_state_access.hpp"
 #include "target_verifier_test_hooks.hpp"
+#include "gemma_target_runtime.hpp"
 #include "../tensor/backends/metal/metal_command_context.hpp"
 
 #include <algorithm>
@@ -23,9 +24,6 @@ namespace local_gguf_engine::engine {
 namespace metal = tensor::backends::metal;
 
 namespace {
-
-constexpr float gemma2_rope_frequency_base = 10000.0F;
-constexpr std::uint32_t accepted_backup_row_mask = 31U;
 
 class UnsubmittedFeatureCaptureGuard final {
 public:
@@ -226,6 +224,20 @@ void validate_plan_binding(
         || verifier.vocabulary_size() != target.config().vocab_size) {
         throw std::invalid_argument("target verifier arena belongs to a different target plan");
     }
+    for (std::uint32_t layer = 0; layer < target.config().block_count; ++layer) {
+        if (request.topology.attention.layer_uses_sliding_window[layer]
+            != gemma_layer_uses_sliding_window(target.config(), layer)) {
+            throw std::invalid_argument("target verifier attention pattern does not match bound model");
+        }
+    }
+    if (target.config().architecture == ModelArchitecture::gemma3) {
+        for (std::uint32_t row = 0; row < request.topology.input_row_count; ++row) {
+            if (static_cast<std::uint32_t>(request.topology.depths[row])
+                    - request.topology.root_source_depth + 1U > target.config().sliding_window) {
+                throw std::invalid_argument("target verifier causal path exceeds the local cache window");
+            }
+        }
+    }
     if (request.topology.input_row_count > verifier.row_capacity()) {
         throw std::length_error("target verifier request exceeds its shape-owned arena");
     }
@@ -261,8 +273,11 @@ struct TargetVerifierRuntimeState final {
     Gemma2MetalModelPlan* target = nullptr;
     Gemma2MetalTargetVerifierPlan* verifier = nullptr;
     TargetVerifierTicketMetadata metadata;
-    metal::MetalCommandContext command {"Gemma2 target verifier", true};
-    metal::MetalCommandContext commit_command {"Gemma2 verifier K/V commit or restore", true};
+    explicit TargetVerifierRuntimeState(bool precise)
+        : command("Gemma target verifier", true, precise),
+          commit_command("Gemma verifier K/V commit or restore", true, precise) {}
+    metal::MetalCommandContext command;
+    metal::MetalCommandContext commit_command;
     std::uint64_t epoch = 0;
     VerifierTransactionState state = VerifierTransactionState::idle;
     std::uint32_t selector_dispatch_count = 0;
@@ -272,14 +287,27 @@ struct TargetVerifierRuntimeState final {
     DraftCacheBinding draft_cache;
 
 };
-std::shared_ptr<TargetVerifierRuntimeState> make_target_verifier_runtime_state() {
-    return std::make_shared<TargetVerifierRuntimeState>();
+std::shared_ptr<TargetVerifierRuntimeState> make_target_verifier_runtime_state(bool precise_math) {
+    return std::make_shared<TargetVerifierRuntimeState>(precise_math);
 }
 struct TargetVerifierRuntimeAccess {
     static std::shared_ptr<TargetVerifierRuntimeState> get(Gemma2MetalTargetVerifierPlan& plan) {
         return plan.runtime_;
     }
 };
+
+metal::MetalCommandContext& target_workspace_command(Gemma2MetalTargetVerifierPlan& workspace) {
+    auto runtime = TargetVerifierRuntimeAccess::get(workspace);
+    if (runtime->state != VerifierTransactionState::idle)
+        throw std::logic_error("ordinary execution workspace has an outstanding ticket");
+    runtime->command.restart();
+    return runtime->command;
+}
+
+CompactTokenCandidates target_workspace_completed_candidates(
+    Gemma2MetalTargetVerifierPlan& workspace, const Gemma2MetalSelectionWorkspace& selection) {
+    return TargetVerifierRuntimeAccess::get(workspace)->command.read_token_candidates(selection);
+}
 
 TargetVerificationTicket::TargetVerificationTicket(std::shared_ptr<TargetVerifierRuntimeState> impl)
     : impl_(std::move(impl)), lease_epoch_(impl_->epoch) {}
@@ -342,6 +370,9 @@ TargetVerificationTicket encode_gemma2_metal_target_verifier(
     if (!std::isfinite(embedding_scale) || embedding_scale <= 0.0F) {
         throw std::invalid_argument("target verifier embedding scale must be finite and positive");
     }
+    if (!request.validated_for(target.config())) {
+        throw std::invalid_argument("target verifier validation shape does not match bound model");
+    }
     const auto& encoded = request.request();
     validate_plan_binding(target, verifier, encoded);
     auto runtime = TargetVerifierRuntimeAccess::get(verifier);
@@ -400,152 +431,9 @@ TargetVerificationTicket encode_gemma2_metal_target_verifier(
         target.config().vocab_size
     );
     command->encode_memory_barrier();
-    command->encode_embedding(
-        *token_source,
-        target.weights().token_embedding_weight,
-        scratch.feed_forward_residual,
-        embedding_scale,
-        token_offset,
-        topology.input_row_count
-    );
-    command->encode_memory_barrier();
-    if (feature_sink_bound(feature_sink)) {
-        FeatureSinkRuntimeAccess::encode_tap(
-            feature_sink, *command, FeatureTapStage::embedding_residual, 0U,
-            scratch.feed_forward_residual, 0U, topology.input_row_count
-        );
-    }
-
+    encode_gemma_target_blocks(*command, target, scratch, verifier.row_capacity(),
+        topology.input_row_count, *token_source, token_offset, embedding_scale, feature_sink);
     const auto& config = target.config();
-    const auto attention_scale = 1.0F
-        / std::sqrt(static_cast<float>(config.attention_key_length));
-    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
-        const auto& block = target.weights().blocks[layer];
-        const auto& cache = target.kv_cache()[layer];
-        const auto& private_cache = scratch.kv_layers[layer];
-        command->encode_rms_norm(
-            scratch.feed_forward_residual,
-            block.attention.attention_norm_weight,
-            scratch.normalized_hidden,
-            config.rms_norm_epsilon,
-            topology.input_row_count
-        );
-        command->encode_memory_barrier();
-        command->encode_verifier_matmul(
-            scratch.normalized_hidden, block.attention.query_weight,
-            scratch.raw_query, topology.input_row_count
-        );
-        command->encode_verifier_matmul(
-            scratch.normalized_hidden, block.attention.key_weight,
-            scratch.raw_key, topology.input_row_count
-        );
-        command->encode_verifier_matmul(
-            scratch.normalized_hidden, block.attention.value_weight,
-            scratch.raw_value, topology.input_row_count
-        );
-        command->encode_memory_barrier();
-        command->encode_verifier_rope(
-            scratch.raw_query, scratch.absolute_position_staging, scratch.query,
-            topology.input_row_count, config.attention_head_count,
-            config.attention_key_length, config.attention_key_length,
-            gemma2_rope_frequency_base
-        );
-        command->encode_verifier_kv_store(
-            scratch.raw_key, scratch.raw_value, scratch.absolute_position_staging,
-            private_cache.private_key, private_cache.private_value,
-            topology.input_row_count, config.attention_head_count_kv,
-            config.attention_key_length, config.attention_key_length,
-            gemma2_rope_frequency_base
-        );
-        command->encode_memory_barrier();
-        const auto schedule_offset = static_cast<std::uint64_t>(layer)
-            * verifier.row_capacity() * 4U * sizeof(std::uint32_t);
-        command->encode_verifier_attention(
-            scratch.query, cache.key, cache.value,
-            private_cache.private_key, private_cache.private_value,
-            scratch.attention_schedule_staging, schedule_offset,
-            scratch.ancestor_index_staging,
-            scratch.attention_output, scratch.attention_partial_output,
-            scratch.attention_partial_maxima, scratch.attention_partial_denominators,
-            topology.input_row_count, cache.row_mask,
-            config.attention_head_count, config.attention_head_count_kv,
-            config.attention_key_length, config.attention_value_length,
-            attention_scale, config.attention_logit_softcap
-        );
-        command->encode_memory_barrier();
-        command->encode_verifier_matmul(
-            scratch.attention_output, block.attention.output_weight,
-            scratch.projected_attention_output, topology.input_row_count
-        );
-        command->encode_memory_barrier();
-        command->encode_rms_norm_add(
-            scratch.projected_attention_output,
-            block.attention.post_attention_norm_weight,
-            scratch.feed_forward_residual,
-            scratch.post_attention_residual,
-            config.rms_norm_epsilon,
-            topology.input_row_count
-        );
-        command->encode_memory_barrier();
-        command->encode_rms_norm(
-            scratch.post_attention_residual,
-            block.feed_forward.feed_forward_norm_weight,
-            scratch.normalized_feed_forward_input,
-            config.rms_norm_epsilon,
-            topology.input_row_count
-        );
-        command->encode_memory_barrier();
-        command->encode_verifier_matmul(
-            scratch.normalized_feed_forward_input, block.feed_forward.gate_weight,
-            scratch.feed_forward_gate, topology.input_row_count
-        );
-        command->encode_verifier_matmul(
-            scratch.normalized_feed_forward_input, block.feed_forward.up_weight,
-            scratch.feed_forward_up, topology.input_row_count
-        );
-        command->encode_memory_barrier();
-        command->encode_gelu_tanh_multiply(
-            scratch.feed_forward_gate, scratch.feed_forward_up,
-            scratch.feed_forward_gated,
-            static_cast<std::uint64_t>(topology.input_row_count)
-                * config.feed_forward_length
-        );
-        command->encode_memory_barrier();
-        command->encode_verifier_matmul(
-            scratch.feed_forward_gated, block.feed_forward.down_weight,
-            scratch.projected_feed_forward_output, topology.input_row_count
-        );
-        command->encode_memory_barrier();
-        command->encode_rms_norm_add(
-            scratch.projected_feed_forward_output,
-            block.feed_forward.post_feed_forward_norm_weight,
-            scratch.post_attention_residual,
-            scratch.feed_forward_residual,
-            config.rms_norm_epsilon,
-            topology.input_row_count
-        );
-        command->encode_memory_barrier();
-        if (feature_sink_bound(feature_sink)) {
-            FeatureSinkRuntimeAccess::encode_tap(
-                feature_sink, *command, FeatureTapStage::layer_residual,
-                static_cast<std::uint16_t>(layer), scratch.feed_forward_residual,
-                0U, topology.input_row_count
-            );
-        }
-    }
-
-    command->encode_rms_norm(
-        scratch.feed_forward_residual, target.weights().output_norm_weight,
-        scratch.normalized_hidden, config.rms_norm_epsilon,
-        topology.input_row_count
-    );
-    command->encode_memory_barrier();
-    if (feature_sink_bound(feature_sink)) {
-        FeatureSinkRuntimeAccess::encode_tap(
-            feature_sink, *command, FeatureTapStage::final_normalized, 0U,
-            scratch.normalized_hidden, 0U, topology.input_row_count
-        );
-    }
     auto selector_dispatches = std::uint32_t {0};
     for (std::uint32_t first = 0; first < topology.input_row_count;
          first += static_cast<std::uint32_t>(target_selection_batch_rows)) {
@@ -553,7 +441,7 @@ TargetVerificationTicket encode_gemma2_metal_target_verifier(
             static_cast<std::uint32_t>(target_selection_batch_rows),
             topology.input_row_count - first
         );
-        command->encode_target_head_q8_rows(
+        command->encode_target_head_rows(
             scratch.normalized_hidden, first, target.weights().output_weight,
             scratch.selection.logits_tile, rows
         );
@@ -641,6 +529,9 @@ TargetVerifierCompletionResult complete_gemma2_metal_target_verifier(
         const auto status = ticket.impl_->command.read_verifier_status(
             ticket.impl_->verifier->scratch().input_status
         );
+        if ((status & metal::verifier_kv_nonfinite_status) != 0U) {
+            throw std::overflow_error("Gemma 3 F16 KV storage produced nonfinite values");
+        }
         if (status != 0U) {
             throw std::invalid_argument("target verifier rejected malformed device input");
         }
@@ -689,7 +580,7 @@ TargetVerifierCommitReceipt provisionally_commit_gemma2_metal_target_verifier(
         throw std::logic_error("target verifier provisional commit requires completion");
     }
     const auto& metadata = ticket.impl_->metadata;
-    if (selected_node_path.empty()
+    if (selected_node_path.empty() || selected_node_path.size() > metadata.input_row_count
         || selected_node_path.size() > external_speculation_max_horizon + 1U) {
         throw std::invalid_argument("target verifier selected path extent is invalid");
     }
@@ -727,15 +618,21 @@ TargetVerifierCommitReceipt provisionally_commit_gemma2_metal_target_verifier(
         command.encode_memory_barrier();
         const auto& config = ticket.impl_->target->config();
         const auto row_width = config.attention_head_count_kv * config.attention_key_length;
+        // Backups read independent durable layers; join all old-row reads once
+        // before publishing any selected private rows into those ring slots.
         for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
             const auto& cache = ticket.impl_->target->kv_cache()[layer];
             const auto& private_cache = ticket.impl_->verifier->scratch().kv_layers[layer];
-            command.encode_gemma2_kv_cache_copy(
-                cache.key, cache.value,
+            const auto backup_mask = static_cast<std::uint32_t>(
+                private_cache.accepted_backup_key.descriptor().shape.dimension(0)) - 1U;
+            command.encode_gemma2_kv_cache_copy(cache.key, cache.value,
                 private_cache.accepted_backup_key, private_cache.accepted_backup_value,
-                position, count, cache.row_mask, accepted_backup_row_mask
-            );
-            command.encode_memory_barrier();
+                position, count, cache.row_mask, backup_mask);
+        }
+        command.encode_memory_barrier();
+        for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+            const auto& cache = ticket.impl_->target->kv_cache()[layer];
+            const auto& private_cache = ticket.impl_->verifier->scratch().kv_layers[layer];
             command.encode_verifier_kv_scatter(
                 private_cache.private_key, private_cache.private_value,
                 ticket.impl_->verifier->scratch().selected_path_staging,
@@ -809,10 +706,12 @@ TargetVerifierCommitReceipt finalize_gemma2_metal_target_verifier(
         for (std::uint32_t layer = 0; layer < ticket.impl_->target->config().block_count; ++layer) {
             const auto& cache = ticket.impl_->target->kv_cache()[layer];
             const auto& private_cache = ticket.impl_->verifier->scratch().kv_layers[layer];
+            const auto backup_mask = static_cast<std::uint32_t>(
+                private_cache.accepted_backup_key.descriptor().shape.dimension(0)) - 1U;
             command.encode_gemma2_kv_cache_copy(
                 private_cache.accepted_backup_key, private_cache.accepted_backup_value,
                 cache.key, cache.value, position, count,
-                accepted_backup_row_mask, cache.row_mask
+                backup_mask, cache.row_mask
             );
         }
         try {

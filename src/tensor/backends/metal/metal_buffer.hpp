@@ -18,10 +18,15 @@ public:
         id<MTLBuffer> buffer,
         std::size_t base_byte_offset = 0
     );
+    ~MetalBackendBufferStorage() override;
+    MetalBackendBufferStorage(const MetalBackendBufferStorage&) = delete;
+    MetalBackendBufferStorage& operator=(const MetalBackendBufferStorage&) = delete;
 
     [[nodiscard]] runtime::BackendKind backend() const noexcept override;
     [[nodiscard]] const TensorDescriptor& descriptor() const noexcept override;
-    [[nodiscard]] id<MTLBuffer> buffer() const noexcept;
+    // Borrow the owned ARC reference; returning id by value would add an
+    // autorelease whose lifetime can outlive a C++ caller's entire model.
+    [[nodiscard]] id<MTLBuffer> const& buffer() const noexcept;
     [[nodiscard]] std::size_t base_byte_offset() const noexcept;
     [[nodiscard]] std::size_t parent_byte_count() const noexcept;
     [[nodiscard]] std::uintptr_t parent_allocation_identity() const noexcept;
@@ -31,6 +36,9 @@ private:
     id<MTLBuffer> buffer_ = nil;
     std::size_t base_byte_offset_ = 0;
 };
+
+// Renew the idle residency window for owned target and draft buffers.
+void keep_metal_buffers_resident();
 
 [[nodiscard]] const MetalBackendBufferStorage& require_metal_backend_buffer(
     const detail::BackendBufferStorage& storage

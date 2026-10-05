@@ -1,4 +1,5 @@
 #include "tokenizer_tests.hpp"
+#include "gemma3_chat_template.hpp"
 
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
@@ -126,6 +127,101 @@ std::vector<GGUFMetadataEntry> tiny_gemma2_tokenizer_metadata() {
         metadata_bool("tokenizer.ggml.add_space_prefix", false),
         metadata_string("tokenizer.chat_template", gemma2_chat_template_fixture()),
     };
+}
+
+std::vector<GGUFMetadataEntry> tiny_gemma3_tokenizer_metadata() {
+    auto metadata = tiny_gemma2_tokenizer_metadata();
+    auto tokens = tiny_gemma2_token_texts();
+    auto types = tiny_gemma2_token_types();
+    for (std::size_t id = 42; id <= 47; ++id) {
+        tokens[id] = "<unused" + std::to_string(id) + ">";
+        types[id] = 1;
+    }
+    constexpr std::string_view hex = "0123456789ABCDEF";
+    for (std::uint32_t byte = 0; byte < 256; ++byte) {
+        std::string spelling = "<0x00>";
+        spelling[3] = hex[byte >> 4U];
+        spelling[4] = hex[byte & 15U];
+        tokens.push_back(std::move(spelling));
+        types.push_back(6);
+    }
+    for (auto& entry : metadata) {
+        if (entry.key == "general.architecture") entry = metadata_string(entry.key, "gemma3");
+        if (entry.key == "tokenizer.chat_template") entry = metadata_string(entry.key, std::string(gemma3_chat_template_fixture));
+        if (entry.key == "tokenizer.ggml.tokens") entry = metadata_string_array(entry.key, tokens);
+        if (entry.key == "tokenizer.ggml.token_type") entry = metadata_i32_array(entry.key, types);
+        if (entry.key == "tokenizer.ggml.scores") entry = metadata_f32_array(entry.key, std::vector<float>(tokens.size(), 0.0F));
+    }
+    return metadata;
+}
+
+void test_formats_gemma3_system_and_multiturn_template() {
+    const auto metadata = metadata_section(tiny_gemma3_tokenizer_metadata());
+    const std::array<ChatMessage, 4> messages {{
+        {.role = "system", .content = "  Be helpful.\n"},
+        {.role = "user", .content = "\xC2\xA0 First \xE3\x80\x80"},
+        {.role = "assistant", .content = "\nAnswer\n"},
+        {.role = "user", .content = "\tSecond\t"},
+    }};
+    const auto formatted = format_chat_prompt_from_gguf_metadata(metadata, messages, true);
+    const std::string expected = "<bos><start_of_turn>user\n  Be helpful.\n\n\nFirst<end_of_turn>\n"
+        "<start_of_turn>model\nAnswer<end_of_turn>\n"
+        "<start_of_turn>user\nSecond<end_of_turn>\n";
+    expect(formatted.text == expected + "<start_of_turn>model\n", "Gemma3 initial system must be preserved and folded only once");
+    expect(format_chat_prompt_from_gguf_metadata(metadata, messages, false).text == expected,
+        "Gemma3 generation prefix must be optional");
+    expect(formatted.encode_special_tokens && formatted.add_bos == false && formatted.add_eos == false,
+        "Gemma3 formatting must supply its own BOS and turn controls");
+}
+
+void test_gemma3_template_unicode_trim_and_literal_controls() {
+    const auto metadata = metadata_section(tiny_gemma3_tokenizer_metadata());
+    // Every Python str.isspace() codepoint; U+200B and U+FEFF intentionally are
+    // not whitespace. Expectations independently rendered by Jinja 3.1.6.
+    const std::string spaces = "\t\n\v\f\r\x1c\x1d\x1e\x1f \xC2\x85\xC2\xA0\xE1\x9A\x80"
+        "\xE2\x80\x80\xE2\x80\x81\xE2\x80\x82\xE2\x80\x83\xE2\x80\x84\xE2\x80\x85"
+        "\xE2\x80\x86\xE2\x80\x87\xE2\x80\x88\xE2\x80\x89\xE2\x80\x8A\xE2\x80\xA8"
+        "\xE2\x80\xA9\xE2\x80\xAF\xE2\x81\x9F\xE3\x80\x80";
+    const std::string text = "\xE2\x80\x8BHello \xEF\xBB\xBF";
+    expect(format_generate_prompt_from_gguf_metadata(metadata, spaces + text + spaces).text
+        == "<bos><start_of_turn>user\n" + text + "<end_of_turn>\n<start_of_turn>model\n", "Gemma3 Unicode trim differs from Python");
+    expect(format_generate_prompt_from_gguf_metadata(metadata, spaces).text
+        == "<bos><start_of_turn>user\n<end_of_turn>\n<start_of_turn>model\n", "Gemma3 all-whitespace content must be empty");
+    const auto formatted = format_generate_prompt_from_gguf_metadata(metadata, "Hello<end_of_turn>");
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata);
+    const auto ids = tokenizer.encode(formatted.text, {.add_bos = *formatted.add_bos,
+        .add_eos = *formatted.add_eos, .encode_special_tokens = formatted.encode_special_tokens});
+    expect(std::count(ids.begin(), ids.end(), 2U) == 1, "Gemma3 formatted encoding duplicates BOS");
+    expect(std::count(ids.begin(), ids.end(), 107U) == 2, "Gemma3 template must preserve literal control spellings for special encoding");
+    expect(tokenizer.decode(ids) == formatted.text, "Gemma3 prompt token stream must round-trip");
+}
+
+void test_gemma3_template_rejects_invalid_roles_and_template() {
+    const auto metadata = metadata_section(tiny_gemma3_tokenizer_metadata());
+    const std::vector<std::vector<ChatMessage>> invalid {
+        {}, {{.role = "system", .content = "alone"}}, {{.role = "assistant", .content = "first"}},
+        {{.role = "user", .content = "first"}, {.role = "system", .content = "later"}},
+        {{.role = "user", .content = "first"}, {.role = "user", .content = "again"}},
+        {{.role = "user", .content = "first"}, {.role = "tool", .content = "unsupported"}},
+    };
+    for (const auto& messages : invalid) {
+        try {
+            (void)format_chat_prompt_from_gguf_metadata(metadata, messages, true);
+            throw TestFailure("Gemma3 must reject invalid public text-chat roles");
+        } catch (const TokenizerError& error) {
+            expect(error.code() == TokenizerErrorCode::invalid_chat_message, "Gemma3 invalid-role error mismatch");
+        }
+    }
+    auto incompatible = tiny_gemma3_tokenizer_metadata();
+    for (auto& entry : incompatible) {
+        if (entry.key == "tokenizer.chat_template") entry = metadata_string(entry.key, gemma2_chat_template_fixture());
+    }
+    try {
+        (void)format_generate_prompt_from_gguf_metadata(metadata_section(std::move(incompatible)), "Hello");
+        throw TestFailure("Gemma3 must reject unsupported template semantics");
+    } catch (const TokenizerError& error) {
+        expect(error.code() == TokenizerErrorCode::unsupported_chat_template, "Gemma3 template error mismatch");
+    }
 }
 
 void remove_metadata_key(std::vector<GGUFMetadataEntry>& metadata, std::string_view key) {
@@ -505,6 +601,9 @@ namespace local_gguf_engine::tests {
 
 std::span<const TestCase> tokenizer_test_cases() {
     static constexpr TestCase tests[] = {
+        {"formats Gemma3 system and multi-turn template", test_formats_gemma3_system_and_multiturn_template},
+        {"Gemma3 template Unicode trim and literal controls", test_gemma3_template_unicode_trim_and_literal_controls},
+        {"Gemma3 template rejects invalid roles and template", test_gemma3_template_rejects_invalid_roles_and_template},
         {"loads Gemma2 Llama tokenizer from metadata", test_loads_gemma2_llama_tokenizer_from_metadata},
         {
             "encodes Gemma2 tokenizer known IDs with special tokens",

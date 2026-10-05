@@ -1,5 +1,7 @@
 #pragma once
 
+#include <CommonCrypto/CommonDigest.h>
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -25,12 +27,8 @@ public:
     [[nodiscard]] Sha256Digest finalize();
 
 private:
-    void transform(const std::uint8_t* block);
-
-    std::array<std::uint32_t, 8> state_ {};
-    std::array<std::uint8_t, 64> pending_ {};
+    CC_SHA256_CTX state_ {};
     std::uint64_t byte_count_ = 0;
-    std::size_t pending_count_ = 0;
     bool finalized_ = false;
 };
 

@@ -8,6 +8,7 @@
 #include "local_gguf_engine/tensor/f16.hpp"
 
 #include <cstring>
+#include <stdexcept>
 
 namespace local_gguf_engine::tensor::ops {
 
@@ -42,6 +43,9 @@ void require_f32_f16_matmul_gguf_weight_operands(const TensorStorage& left, cons
 }
 
 void require_quantized_gguf_weight_descriptor(const TensorDescriptor& descriptor) {
+    if (descriptor.packing != TensorPacking::canonical) {
+        throw std::invalid_argument("GGUF weight matmul requires canonical tensor packing");
+    }
     if (descriptor.dtype == DType::q8_0 || descriptor.dtype == DType::q4_k || descriptor.dtype == DType::q6_k) {
         return;
     }

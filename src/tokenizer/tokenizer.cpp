@@ -408,6 +408,21 @@ void validate_token_id(
         && chat_template.find("<start_of_turn>model") != std::string_view::npos;
 }
 
+[[nodiscard]] bool supports_gemma3_it_template(std::string_view chat_template) noexcept {
+    return chat_template.find("{{ bos_token }}") != std::string_view::npos
+        && chat_template.find("messages[0]['role'] == 'system'") != std::string_view::npos
+        && chat_template.find("first_user_prefix = messages[0]['content'] + '\n\n'") != std::string_view::npos
+        && chat_template.find("loop_messages = messages[1:]") != std::string_view::npos
+        && chat_template.find("(message['role'] == 'user') != (loop.index0 % 2 == 0)") != std::string_view::npos
+        && chat_template.find("Conversation roles must alternate") != std::string_view::npos
+        && chat_template.find("set role = \"model\"") != std::string_view::npos
+        && chat_template.find("(first_user_prefix if loop.first else \"\")") != std::string_view::npos
+        && chat_template.find("message['content'] | trim") != std::string_view::npos
+        && chat_template.find("<end_of_turn>\n") != std::string_view::npos
+        && chat_template.find("add_generation_prompt") != std::string_view::npos
+        && chat_template.find("<start_of_turn>model\n") != std::string_view::npos;
+}
+
 [[nodiscard]] bool is_ascii_whitespace(char character) noexcept {
     return character == ' '
         || character == '\t'
@@ -429,6 +444,36 @@ void validate_token_id(
     }
 
     return text.substr(begin, end - begin);
+}
+
+[[nodiscard]] std::size_t python_whitespace_prefix_bytes(std::string_view text) noexcept {
+    if (text.empty()) return 0;
+    const auto first = static_cast<unsigned char>(text[0]);
+    // Jinja's trim filter uses Python str.strip(), including U+001C..U+001F.
+    // Keep invalid UTF-8 and non-whitespace bytes intact for tokenizer fallback.
+    if ((first >= 0x09 && first <= 0x0d) || (first >= 0x1c && first <= 0x20)) return 1;
+    if (text.size() >= 2 && first == 0xc2
+        && (static_cast<unsigned char>(text[1]) == 0x85 || static_cast<unsigned char>(text[1]) == 0xa0)) return 2;
+    if (text.size() < 3) return 0;
+    const auto second = static_cast<unsigned char>(text[1]);
+    const auto third = static_cast<unsigned char>(text[2]);
+    if ((first == 0xe1 && second == 0x9a && third == 0x80)
+        || (first == 0xe2 && second == 0x80 && ((third >= 0x80 && third <= 0x8a) || third == 0xa8 || third == 0xa9 || third == 0xaf))
+        || (first == 0xe2 && second == 0x81 && third == 0x9f)
+        || (first == 0xe3 && second == 0x80 && third == 0x80)) return 3;
+    return 0;
+}
+
+[[nodiscard]] std::string_view trim_python_whitespace(std::string_view text) noexcept {
+    while (const auto count = python_whitespace_prefix_bytes(text)) text.remove_prefix(count);
+    while (!text.empty()) {
+        auto last = text.size() - 1;
+        while (last > 0 && (static_cast<unsigned char>(text[last]) & 0xc0U) == 0x80U) --last;
+        const auto count = python_whitespace_prefix_bytes(text.substr(last));
+        if (count == 0 || count != text.size() - last) break;
+        text.remove_suffix(count);
+    }
+    return text;
 }
 
 [[nodiscard]] std::string token_text_for_id(
@@ -513,6 +558,35 @@ void validate_token_id(
     };
 }
 
+[[nodiscard]] PromptFormatResult format_gemma3_it_chat_prompt(
+    const GGUFMetadataSection& metadata,
+    std::span<const ChatMessage> messages,
+    bool add_generation_prompt
+) {
+    if (messages.empty()) throw TokenizerError(TokenizerErrorCode::invalid_chat_message, "messages");
+    const bool has_system = messages.front().role == "system";
+    const auto conversation = messages.subspan(has_system ? 1 : 0);
+    if (conversation.empty()) throw TokenizerError(TokenizerErrorCode::invalid_chat_message, "missing user message");
+    std::string formatted = bos_token_text(metadata);
+    for (std::size_t index = 0; index < conversation.size(); ++index) {
+        // Public text-chat roles are user/assistant/model. System is only legal
+        // first, where the released template folds its *untrimmed* content into
+        // the first user turn. Later user/assistant contents use Unicode trim.
+        const auto role = gemma2_output_role_for_message(conversation[index], index);
+        formatted += "<start_of_turn>";
+        formatted += role;
+        formatted.push_back('\n');
+        if (index == 0 && has_system) {
+            formatted += messages.front().content;
+            formatted += "\n\n";
+        }
+        formatted += trim_python_whitespace(conversation[index].content);
+        formatted += "<end_of_turn>\n";
+    }
+    if (add_generation_prompt) formatted += "<start_of_turn>model\n";
+    return {.text = std::move(formatted), .encode_special_tokens = true, .add_bos = false, .add_eos = false};
+}
+
 void append_sentencepiece_decoded_text(std::string& output, std::string_view token_text) {
     constexpr std::string_view space_marker = "\xE2\x96\x81";
     std::size_t offset = 0;
@@ -579,6 +653,9 @@ PromptFormatResult format_chat_prompt_from_gguf_metadata(
     if (architecture == "gemma2" && supports_gemma2_it_template(*chat_template)) {
         return format_gemma2_it_chat_prompt(metadata, messages, add_generation_prompt);
     }
+    if (architecture == "gemma3" && supports_gemma3_it_template(*chat_template)) {
+        return format_gemma3_it_chat_prompt(metadata, messages, add_generation_prompt);
+    }
 
     throw TokenizerError(TokenizerErrorCode::unsupported_chat_template, "tokenizer.chat_template");
 }
@@ -596,7 +673,8 @@ PromptFormatResult format_generate_prompt_from_gguf_metadata(
     }
 
     const auto architecture = require_metadata_string(metadata, "general.architecture");
-    if (architecture == "gemma2" && supports_gemma2_it_template(*chat_template)) {
+    if ((architecture == "gemma2" && supports_gemma2_it_template(*chat_template))
+        || (architecture == "gemma3" && supports_gemma3_it_template(*chat_template))) {
         const ChatMessage message {
             .role = "user",
             .content = prompt,
@@ -1088,9 +1166,7 @@ std::optional<std::pair<std::uint32_t, std::size_t>> Tokenizer::added_token_matc
 
 TokenizerEncodeWorkspace::TokenizerEncodeWorkspace(std::size_t max_input_bytes)
     : max_input_bytes_(max_input_bytes) {
-    if (max_input_bytes > (std::numeric_limits<std::size_t>::max() - 16U) / 12U) {
-        throw std::length_error("tokenizer workspace capacity overflow");
-    }
+    static_cast<void>(estimate_owned_bytes(max_input_bytes));
     const auto bound = max_input_bytes * 3U + 3U;
     escaped_.reserve(bound);
     // Normalization expands bytes, not symbol count: every input byte yields
@@ -1098,6 +1174,19 @@ TokenizerEncodeWorkspace::TokenizerEncodeWorkspace(std::size_t max_input_bytes)
     // heap entries, and there are at most n-1 merges.
     symbols_.reserve(max_input_bytes + 1U);
     candidates_.reserve((max_input_bytes + 1U) * 3U);
+}
+
+std::size_t TokenizerEncodeWorkspace::estimate_owned_bytes(std::size_t max_input_bytes) {
+    // libc++ reserves vector storage at the requested count and rounds string
+    // storage to an allocation boundary. Thirty-two extra bytes cover that
+    // rounding, the terminator and the empty string's inline capacity on the
+    // supported Mac runtime. This excludes allocator bookkeeping like the
+    // actual owned_bytes() ledger; it is not a process-RSS estimate.
+    constexpr auto per_input = 3U + sizeof(Symbol) + 3U * sizeof(Bigram);
+    constexpr auto fixed = 3U + 32U + sizeof(Symbol) + 3U * sizeof(Bigram);
+    if (max_input_bytes > (std::numeric_limits<std::size_t>::max() - fixed) / per_input)
+        throw std::length_error("tokenizer workspace capacity overflow");
+    return max_input_bytes * per_input + fixed;
 }
 
 std::size_t TokenizerEncodeWorkspace::owned_bytes() const noexcept {

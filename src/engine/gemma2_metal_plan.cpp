@@ -1,9 +1,11 @@
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
+#include "local_gguf_engine/engine/target_verifier.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
+#include "local_gguf_engine/tensor/kquant_packing.hpp"
 #include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
 
@@ -14,6 +16,8 @@
 #include <span>
 #include <stdexcept>
 #include <utility>
+
+#include "../tensor/backends/metal_backend.hpp"
 
 namespace local_gguf_engine::engine {
 
@@ -40,11 +44,25 @@ public:
 
     void add(std::string_view label, tensor::TensorView view) {
         if (!enabled_) return;
+        const auto& descriptor = view.descriptor();
+        if (descriptor.packing == tensor::TensorPacking::kquant_columns8) {
+            // Canonical receipts retain their original byte stream. An
+            // impossible label length frames the execution-layout version
+            // before the physical payload it authenticates.
+            constexpr std::string_view layout =
+                "local-gguf-engine/kquant-columns8/v1";
+            add_u64(std::numeric_limits<std::uint64_t>::max());
+            add_u64(layout.size());
+            hash_.update(std::span<const std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(layout.data()), layout.size()
+            ));
+        } else if (descriptor.packing != tensor::TensorPacking::canonical) {
+            throw std::invalid_argument("resident target receipt has an unknown tensor packing");
+        }
         add_u64(label.size());
         hash_.update(std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(label.data()), label.size()
         ));
-        const auto& descriptor = view.descriptor();
         add_u32(static_cast<std::uint32_t>(descriptor.dtype));
         add_u32(static_cast<std::uint32_t>(descriptor.shape.rank()));
         for (std::size_t index = 0U; index < descriptor.shape.rank(); ++index) {
@@ -168,6 +186,10 @@ void checked_add_decode_bytes(std::uint64_t& total, std::size_t byte_count) {
              }) {
             checked_add_decode_bytes(bytes.norms, norm->descriptor().byte_count);
         }
+        if (block.attention.query_norm_weight) {
+            checked_add_decode_bytes(bytes.norms, block.attention.query_norm_weight->descriptor().byte_count);
+            checked_add_decode_bytes(bytes.norms, block.attention.key_norm_weight->descriptor().byte_count);
+        }
     }
     bytes.output_head = weights.output_weight.descriptor().byte_count;
     checked_add_decode_bytes(bytes.norms, weights.output_norm_weight.descriptor().byte_count);
@@ -198,6 +220,62 @@ void checked_add_decode_bytes(std::uint64_t& total, std::size_t byte_count) {
     return tensor::copy_tensor_view_to_backend(view, gemma_backend);
 }
 
+[[nodiscard]] TensorDescriptor gemma3_projection_descriptor(tensor::TensorView view) {
+    const auto& descriptor = view.descriptor();
+    if (descriptor.dtype == DType::q4_k || descriptor.dtype == DType::q6_k) {
+        return TensorDescriptor::from_interleaved_kquant_weight_matrix(
+            descriptor.shape, descriptor.dtype);
+    }
+    return descriptor;
+}
+
+[[nodiscard]] std::size_t gemma3_resident_weight_bytes(
+    const Gemma2ModelConfig& config, const Gemma2ModelWeights& weights
+) {
+    std::size_t bytes = 0U;
+    const auto native = [&](tensor::TensorView view) {
+        checked_add_bytes(bytes, view.descriptor().byte_count);
+    };
+    native(weights.token_embedding_weight);
+    native(weights.output_norm_weight);
+    if (!config.uses_tied_output_weight) native(weights.output_weight);
+    for (const auto& block : weights.blocks) {
+        for (const auto* projection : {
+                 &block.attention.query_weight, &block.attention.key_weight,
+                 &block.attention.value_weight, &block.attention.output_weight,
+                 &block.feed_forward.gate_weight, &block.feed_forward.up_weight,
+                 &block.feed_forward.down_weight,
+             }) {
+            checked_add_bytes(bytes, gemma3_projection_descriptor(*projection).byte_count);
+        }
+        for (const auto* norm : {
+                 &block.attention.attention_norm_weight,
+                 &block.attention.post_attention_norm_weight,
+                 &block.feed_forward.feed_forward_norm_weight,
+                 &block.feed_forward.post_feed_forward_norm_weight,
+             }) native(*norm);
+        native(block.attention.query_norm_weight.value());
+        native(block.attention.key_norm_weight.value());
+    }
+    return bytes;
+}
+
+enum class ProjectionPacking { canonical, q4_columns8, kquant_columns8 };
+
+[[nodiscard]] tensor::BackendBuffer upload_projection_weight(
+    tensor::TensorView view, std::size_t& uploaded_byte_count,
+    ResidentPayloadHasher& hasher, std::string_view label, ProjectionPacking packing
+) {
+    if ((packing != ProjectionPacking::canonical && view.descriptor().dtype == DType::q4_k)
+        || (packing == ProjectionPacking::kquant_columns8 && view.descriptor().dtype == DType::q6_k)) {
+        // Only this tensor's packed staging storage is live during upload;
+        // the resident allocation replaces its GGUF representation.
+        const auto packed = tensor::repack_kquant_weight_columns8(view);
+        return upload_weight(packed.view(), uploaded_byte_count, hasher, label);
+    }
+    return upload_weight(view, uploaded_byte_count, hasher, label);
+}
+
 [[nodiscard]] tensor::BackendBuffer allocate_buffer(
     const TensorDescriptor& descriptor,
     std::size_t& allocated_byte_count
@@ -210,8 +288,10 @@ void checked_add_decode_bytes(std::uint64_t& total, std::size_t byte_count) {
     return TensorDescriptor::from(Shape::from(dimensions), DType::f32);
 }
 
-[[nodiscard]] TensorDescriptor f16_descriptor(std::initializer_list<std::uint64_t> dimensions) {
-    return TensorDescriptor::from(Shape::from(dimensions), DType::f16);
+[[nodiscard]] TensorDescriptor kv_descriptor(
+    const Gemma2ModelConfig& config, std::initializer_list<std::uint64_t> dimensions
+) {
+    return TensorDescriptor::from(Shape::from(dimensions), gemma_kv_dtype(config));
 }
 
 [[nodiscard]] bool is_power_of_two(std::uint32_t value) noexcept {
@@ -251,16 +331,23 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     const Gemma2AttentionWeights& weights,
     std::size_t& uploaded_byte_count,
     ResidentPayloadHasher& hasher,
-    std::uint32_t block_index
+    std::uint32_t block_index,
+    ProjectionPacking packing
 ) {
     const auto prefix = "blk." + std::to_string(block_index) + ".";
     return Gemma2MetalAttentionWeightBuffers {
         .attention_norm_weight = upload_weight(weights.attention_norm_weight, uploaded_byte_count, hasher, prefix + "attn_norm.weight"),
         .post_attention_norm_weight = upload_weight(weights.post_attention_norm_weight, uploaded_byte_count, hasher, prefix + "post_attention_norm.weight"),
-        .query_weight = upload_weight(weights.query_weight, uploaded_byte_count, hasher, prefix + "attn_q.weight"),
-        .key_weight = upload_weight(weights.key_weight, uploaded_byte_count, hasher, prefix + "attn_k.weight"),
-        .value_weight = upload_weight(weights.value_weight, uploaded_byte_count, hasher, prefix + "attn_v.weight"),
-        .output_weight = upload_weight(weights.output_weight, uploaded_byte_count, hasher, prefix + "attn_output.weight"),
+        .query_weight = upload_projection_weight(weights.query_weight, uploaded_byte_count, hasher, prefix + "attn_q.weight", packing),
+        .key_weight = upload_projection_weight(weights.key_weight, uploaded_byte_count, hasher, prefix + "attn_k.weight", packing),
+        .value_weight = upload_projection_weight(weights.value_weight, uploaded_byte_count, hasher, prefix + "attn_v.weight", packing),
+        .output_weight = upload_projection_weight(weights.output_weight, uploaded_byte_count, hasher, prefix + "attn_output.weight", packing),
+        .query_norm_weight = weights.query_norm_weight
+            ? std::optional(upload_weight(*weights.query_norm_weight, uploaded_byte_count, hasher, prefix + "attn_q_norm.weight"))
+            : std::nullopt,
+        .key_norm_weight = weights.key_norm_weight
+            ? std::optional(upload_weight(*weights.key_norm_weight, uploaded_byte_count, hasher, prefix + "attn_k_norm.weight"))
+            : std::nullopt,
     };
 }
 
@@ -269,25 +356,25 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     std::size_t& uploaded_byte_count,
     bool requantize_q6_down,
     ResidentPayloadHasher& hasher,
-    std::uint32_t block_index
+    std::uint32_t block_index,
+    ProjectionPacking packing
 ) {
     const auto prefix = "blk." + std::to_string(block_index) + ".";
     auto down_weight = [&]() {
         if (requantize_q6_down && weights.down_weight.descriptor().dtype == DType::q6_k) {
             auto quantized = tensor::requantize_q6_k_gguf_weight_q4_k(weights.down_weight);
-            checked_add_bytes(uploaded_byte_count, quantized.descriptor().byte_count);
-            hasher.add(prefix + "ffn_down.weight:q6_k->q4_k", quantized.view());
-            return tensor::copy_tensor_to_backend(quantized, gemma_backend);
+            return upload_projection_weight(quantized.view(), uploaded_byte_count,
+                hasher, prefix + "ffn_down.weight:q6_k->q4_k", packing);
         }
-        return upload_weight(
-            weights.down_weight, uploaded_byte_count, hasher, prefix + "ffn_down.weight"
+        return upload_projection_weight(
+            weights.down_weight, uploaded_byte_count, hasher, prefix + "ffn_down.weight", packing
         );
     }();
     return Gemma2MetalFeedForwardWeightBuffers {
         .feed_forward_norm_weight = upload_weight(weights.feed_forward_norm_weight, uploaded_byte_count, hasher, prefix + "ffn_norm.weight"),
         .post_feed_forward_norm_weight = upload_weight(weights.post_feed_forward_norm_weight, uploaded_byte_count, hasher, prefix + "post_ffw_norm.weight"),
-        .gate_weight = upload_weight(weights.gate_weight, uploaded_byte_count, hasher, prefix + "ffn_gate.weight"),
-        .up_weight = upload_weight(weights.up_weight, uploaded_byte_count, hasher, prefix + "ffn_up.weight"),
+        .gate_weight = upload_projection_weight(weights.gate_weight, uploaded_byte_count, hasher, prefix + "ffn_gate.weight", packing),
+        .up_weight = upload_projection_weight(weights.up_weight, uploaded_byte_count, hasher, prefix + "ffn_up.weight", packing),
         .down_weight = std::move(down_weight),
     };
 }
@@ -296,7 +383,8 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     const Gemma2ModelWeights& weights,
     std::size_t& uploaded_byte_count,
     bool requantize_q6_down,
-    ResidentPayloadHasher& hasher
+    ResidentPayloadHasher& hasher,
+    ProjectionPacking packing
 ) {
     std::vector<Gemma2MetalBlockWeightBuffers> blocks;
     blocks.reserve(weights.blocks.size());
@@ -306,11 +394,11 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
         blocks.push_back(Gemma2MetalBlockWeightBuffers {
             .attention = upload_attention_weights(
                 block.attention, uploaded_byte_count, hasher,
-                static_cast<std::uint32_t>(block_index)
+                static_cast<std::uint32_t>(block_index), packing
             ),
             .feed_forward = upload_feed_forward_weights(
                 block.feed_forward, uploaded_byte_count, requantize_q6_down,
-                hasher, static_cast<std::uint32_t>(block_index)
+                hasher, static_cast<std::uint32_t>(block_index), packing
             ),
         });
     }
@@ -323,7 +411,8 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     std::size_t& uploaded_byte_count,
     Gemma2OutputHeadPolicy output_head_policy,
     bool retained_target,
-    ResidentPayloadHasher& hasher
+    ResidentPayloadHasher& hasher,
+    ProjectionPacking packing
 ) {
     auto token_embedding_weight = upload_weight(
         weights.token_embedding_weight, uploaded_byte_count, hasher, "token_embd.weight"
@@ -349,7 +438,7 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
         ),
         .output_weight = std::move(output_weight),
         .blocks = upload_block_weights(
-            weights, uploaded_byte_count, retained_target, hasher
+            weights, uploaded_byte_count, retained_target, hasher, packing
         ),
     };
 }
@@ -360,7 +449,7 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
 ) {
     const auto& embedding = weights.token_embedding_weight;
     const auto& output = weights.output_weight;
-    return config.uses_tied_output_weight
+    return config.architecture == ModelArchitecture::gemma2 && config.uses_tied_output_weight
         && config.embedding_length == 3584U
         && config.block_count == 42U
         && config.feed_forward_length == 14336U
@@ -380,14 +469,14 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     std::vector<Gemma2MetalKVCacheLayer> layers;
     layers.reserve(config.block_count);
     for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
-        const auto rows = gemma2_layer_uses_sliding_window(layer)
+        const auto rows = gemma_layer_uses_sliding_window(config, layer)
             ? config.sliding_window
             : config.context_length;
         layers.push_back(Gemma2MetalKVCacheLayer {
-            .key = allocate_buffer(f16_descriptor({
+            .key = allocate_buffer(kv_descriptor(config, {
                 rows, config.attention_head_count_kv, config.attention_key_length,
             }), allocated_byte_count),
-            .value = allocate_buffer(f16_descriptor({
+            .value = allocate_buffer(kv_descriptor(config, {
                 rows, config.attention_head_count_kv, config.attention_value_length,
             }), allocated_byte_count),
             .row_capacity = rows,
@@ -458,7 +547,7 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     std::size_t& allocated_byte_count
 ) {
     constexpr std::uint64_t rows = 2U;
-    const auto staged_kv_descriptor = f16_descriptor({
+    const auto staged_kv_descriptor = kv_descriptor(config, {
         rows, config.attention_head_count_kv, config.attention_key_length,
     });
     std::vector<Gemma2MetalVerifierKVBackupLayer> kv_backups;
@@ -513,7 +602,8 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     const auto hidden_workspace = allocate_buffer(
         f32_descriptor({tokens, config.embedding_length}), allocated_byte_count
     );
-    const auto attention_score_workspace = allocate_buffer(
+    const auto attention_score_workspace = config.architecture == ModelArchitecture::gemma3
+        ? hidden_workspace : allocate_buffer(
         f32_descriptor({tokens, config.attention_head_count, config.context_length}),
         allocated_byte_count
     );
@@ -527,10 +617,10 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
         .raw_key = allocate_buffer(f32_descriptor({tokens, attention_key_width(config)}), allocated_byte_count),
         .query = allocate_buffer(f32_descriptor({tokens, attention_query_width(config)}), allocated_byte_count),
         .value = allocate_buffer(f32_descriptor({tokens, attention_value_width(config)}), allocated_byte_count),
-        .current_chunk_key = allocate_buffer(f16_descriptor({
+        .current_chunk_key = allocate_buffer(kv_descriptor(config, {
             tokens, config.attention_head_count_kv, config.attention_key_length,
         }), allocated_byte_count),
-        .current_chunk_value = allocate_buffer(f16_descriptor({
+        .current_chunk_value = allocate_buffer(kv_descriptor(config, {
             tokens, config.attention_head_count_kv, config.attention_value_length,
         }), allocated_byte_count),
         .attention_scores = attention_score_workspace,
@@ -588,7 +678,7 @@ void require_power_of_two_cache_layout(const Gemma2ModelConfig& config) {
     for (std::uint32_t layer_index = 0; layer_index < config.block_count; ++layer_index) {
         layers.push_back(Gemma2MetalLayerState {
             .layer_index = layer_index,
-            .uses_sliding_window = gemma2_layer_uses_sliding_window(layer_index),
+            .uses_sliding_window = gemma_layer_uses_sliding_window(config, layer_index),
         });
     }
 
@@ -659,6 +749,7 @@ const char* gemma2_output_head_policy_name(Gemma2OutputHeadPolicy policy) noexce
         case Gemma2OutputHeadPolicy::automatic: return "automatic";
         case Gemma2OutputHeadPolicy::f16: return "f16";
         case Gemma2OutputHeadPolicy::q8_0: return "q8_0";
+        case Gemma2OutputHeadPolicy::q6_k: return "q6_k";
     }
     return "unknown";
 }
@@ -668,6 +759,15 @@ Gemma2OutputHeadPolicy resolve_gemma2_output_head_policy(
     const Gemma2ModelWeights& weights,
     Gemma2OutputHeadPolicy requested_policy
 ) {
+    if (config.architecture == ModelArchitecture::gemma3) {
+        if (requested_policy != Gemma2OutputHeadPolicy::automatic && requested_policy != Gemma2OutputHeadPolicy::q6_k) {
+            throw std::invalid_argument("Gemma 3 target requires its native Q6_K output head");
+        }
+        if (weights.output_weight.descriptor().dtype != DType::q6_k) {
+            throw std::invalid_argument("Gemma 3 target output weight must be Q6_K");
+        }
+        return Gemma2OutputHeadPolicy::q6_k;
+    }
     switch (requested_policy) {
         case Gemma2OutputHeadPolicy::f16:
         case Gemma2OutputHeadPolicy::q8_0:
@@ -676,6 +776,8 @@ Gemma2OutputHeadPolicy resolve_gemma2_output_head_policy(
             return is_retained_gemma2_9b_target(config, weights)
                 ? Gemma2OutputHeadPolicy::q8_0
                 : Gemma2OutputHeadPolicy::f16;
+        case Gemma2OutputHeadPolicy::q6_k:
+            throw std::invalid_argument("Q6_K output-head policy requires Gemma 3");
     }
 
     // Policy values cross CLI/configuration and evidence-artifact boundaries.
@@ -863,7 +965,12 @@ std::size_t Gemma2MetalModelPlan::kv_cache_byte_count() const noexcept {
 }
 
 std::size_t Gemma2MetalModelPlan::scratch_byte_count() const noexcept {
-    return scratch_byte_count_;
+    return scratch_byte_count_ + (target_execution_workspace_
+        ? target_execution_workspace_->allocated_byte_count() : 0U);
+}
+
+std::shared_ptr<Gemma2MetalTargetVerifierPlan>& Gemma2MetalModelPlan::target_execution_workspace() noexcept {
+    return target_execution_workspace_;
 }
 
 std::array<std::uintptr_t, 4> Gemma2MetalModelPlan::allocation_identities() const noexcept {
@@ -922,13 +1029,48 @@ const std::vector<Gemma2MetalLayerSchedule>& Gemma2MetalSchedule::layers() const
 namespace {
 
 [[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan_impl(
-    const Gemma2ModelConfig& config,
+    Gemma2ModelConfig config,
     const Gemma2ModelWeights& weights,
     Gemma2OutputHeadPolicy policy,
     ResidentTargetPayloadReceipt* receipt
 ) {
-    require_metal_available();
+    config.kv_precision = resolve_gemma_kv_precision(config.architecture, config.kv_precision);
+    if (config.architecture == ModelArchitecture::gemma3) {
+        validate_gemma3_model_weights(config, weights);
+    }
     require_power_of_two_cache_layout(config);
+    if (config.model_context_length != 0U && config.context_length > config.model_context_length) {
+        throw std::invalid_argument("Gemma runtime context exceeds model context length");
+    }
+    require_metal_available();
+
+    if (config.architecture == ModelArchitecture::gemma3) {
+        // Fail before uploading weights when even immutable weights and durable
+        // cache exceed this device's resident-work budget. Scratch and other
+        // processes still require measured headroom; this is not a free-RAM test.
+        std::size_t minimum_bytes = gemma3_resident_weight_bytes(config, weights);
+        for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+            const auto rows = gemma_layer_uses_sliding_window(config, layer)
+                ? config.sliding_window : config.context_length;
+            const auto cache = kv_descriptor(config,
+                {rows, config.attention_head_count_kv, config.attention_key_length});
+            checked_add_bytes(minimum_bytes, cache.byte_count);
+            checked_add_bytes(minimum_bytes, cache.byte_count);
+        }
+        if (const auto memory = tensor::backends::metal::memory_info()) {
+            const auto budget = std::min(memory->recommended_working_set_bytes,
+                memory->physical_memory_bytes);
+            if (minimum_bytes > budget || memory->current_allocated_bytes > budget - minimum_bytes) {
+                throw std::invalid_argument("Gemma 3 context capacity "
+                    + std::to_string(config.context_length)
+                    + " requires at least " + std::to_string(minimum_bytes)
+                    + " resident bytes before scratch, exceeding the available engine Metal budget "
+                    + std::to_string(budget > memory->current_allocated_bytes
+                        ? budget - memory->current_allocated_bytes : 0U)
+                    + "; select a smaller --context-size");
+            }
+        }
+    }
 
     std::size_t uploaded_weight_byte_count = 0;
     std::size_t kv_cache_byte_count = 0;
@@ -937,9 +1079,15 @@ namespace {
     const auto retained_target = is_retained_gemma2_9b_target(config, weights);
     const auto resolved_policy = resolve_gemma2_output_head_policy(config, weights, policy);
     ResidentPayloadHasher resident_hasher(receipt != nullptr);
+    // Gemma 2's Q6 V projections retain their original worker/reduction order.
+    // Packing only Q4 preserves that target while sharing its dominant body
+    // projections across R1/R2; each tensor still has one resident payload.
     auto resident_weights = upload_model_weights(
         weights, uploaded_weight_byte_count, resolved_policy, retained_target,
-        resident_hasher
+        resident_hasher, config.architecture == ModelArchitecture::gemma3
+            ? ProjectionPacking::kquant_columns8
+            : retained_target && resolved_policy == Gemma2OutputHeadPolicy::q8_0
+                ? ProjectionPacking::q4_columns8 : ProjectionPacking::canonical
     );
     auto kv_cache = allocate_kv_cache(config, kv_cache_byte_count);
     auto prefill_scratch = allocate_prefill_scratch(config, scratch_byte_count);
@@ -970,25 +1118,104 @@ namespace {
 
 }  // namespace
 
+Gemma3MetalMemoryEstimate estimate_gemma3_metal_memory(
+    const Gemma2ModelConfig& requested_config, const Gemma2ModelWeights& weights) {
+    auto config = requested_config;
+    config.kv_precision = resolve_gemma_kv_precision(config.architecture, config.kv_precision);
+    if (config.architecture != ModelArchitecture::gemma3)
+        throw std::invalid_argument("Gemma 3 memory accounting requires a Gemma 3 target");
+    validate_gemma3_model_weights(config, weights);
+    require_power_of_two_cache_layout(config);
+    if (config.model_context_length && config.context_length > config.model_context_length)
+        throw std::invalid_argument("Gemma runtime context exceeds model context length");
+    Gemma3MetalMemoryEstimate result;
+    result.weights = gemma3_resident_weight_bytes(config, weights);
+    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        const auto rows = gemma_layer_uses_sliding_window(config, layer) ? config.sliding_window : config.context_length;
+        checked_add_bytes(result.kv_cache, kv_descriptor(config,
+            {rows, config.attention_head_count_kv, config.attention_key_length}).byte_count);
+        checked_add_bytes(result.kv_cache, kv_descriptor(config,
+            {rows, config.attention_head_count_kv, config.attention_value_length}).byte_count);
+    }
+    const auto add = [&](std::initializer_list<std::uint64_t> dimensions, DType dtype = DType::f32) {
+        checked_add_bytes(result.scratch, TensorDescriptor::from(Shape::from(dimensions), dtype).byte_count);
+    };
+    constexpr auto prompt = gemma2_metal_prefill_chunk_size;
+    // Unique ordinary prefill allocations: aliases are deliberately counted once.
+    add({config.context_length});
+    add({3U, prompt, config.embedding_length});
+    add({2U, prompt, config.attention_head_count, config.attention_key_length});
+    add({prompt, config.attention_head_count_kv, config.attention_key_length});
+    add({prompt, config.attention_head_count_kv, config.attention_value_length});
+    add({prompt, config.attention_head_count_kv, config.attention_key_length}, gemma_kv_dtype(config));
+    add({prompt, config.attention_head_count_kv, config.attention_value_length}, gemma_kv_dtype(config));
+    add({prompt, config.attention_head_count, config.attention_value_length});
+    add({2U, prompt, config.feed_forward_length});
+    add({config.embedding_length});
+    add({config.vocab_size});
+    // The existing scalar and width-two workspaces own separate intermediates.
+    for (const auto rows : {1U, 2U}) {
+        add({rows});
+        add({6U, rows, config.embedding_length});
+        add({2U, rows, config.attention_head_count, config.attention_key_length});
+        add({rows, config.attention_head_count_kv, config.attention_key_length});
+        add({rows, config.attention_head_count_kv, config.attention_value_length});
+        add({gemma2_decode_attention_max_partitions, gemma2_decode_attention_query_heads,
+            gemma2_decode_attention_head_dimension + 2U});
+        add({rows, config.attention_head_count, config.attention_value_length});
+        add({3U, rows, config.feed_forward_length});
+        add({rows, config.vocab_size});
+    }
+    add({config.block_count, 2U, config.attention_head_count_kv,
+        std::uint64_t(config.attention_key_length) + config.attention_value_length}, gemma_kv_dtype(config));
+    const auto tiles = (std::uint64_t(config.vocab_size) + gemma2_metal_selection_tile_size - 1U)
+        / gemma2_metal_selection_tile_size;
+    add({4U, tiles, token_sampler_max_base_candidates, sizeof(TokenLogit) / sizeof(float)});
+    add({2U, 2U + token_sampler_max_candidates * sizeof(TokenLogit) / sizeof(float)});
+    add({2U, token_sampler_max_repetition_window});
+    checked_add_bytes(result.scratch, estimate_target_verifier_bytes(config, prompt));
+    return result;
+}
+
 Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const EngineModel& model,
-    Gemma2OutputHeadPolicy policy
+    Gemma2OutputHeadPolicy policy,
+    std::uint32_t context_length,
+    GemmaKVPrecision kv_precision
 ) {
     const auto weights = bind_gemma2_model_weights(model);
+    auto config = model.gemma2_config();
+    config.kv_precision = resolve_gemma_kv_precision(config.architecture, kv_precision);
+    if (context_length != 0U) {
+        if (context_length > (config.model_context_length == 0U ? config.context_length : config.model_context_length)) {
+            throw std::invalid_argument("Gemma runtime context exceeds model context length");
+        }
+        config.context_length = context_length;
+    }
     return create_gemma2_metal_model_plan_impl(
-        model.gemma2_config(), weights, policy, nullptr
+        config, weights, policy, nullptr
     );
 }
 
 Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const EngineModel& model,
     Gemma2OutputHeadPolicy policy,
-    ResidentTargetPayloadReceipt& resident_receipt
+    ResidentTargetPayloadReceipt& resident_receipt,
+    std::uint32_t context_length,
+    GemmaKVPrecision kv_precision
 ) {
     const auto weights = bind_gemma2_model_weights(model);
+    auto config = model.gemma2_config();
+    config.kv_precision = resolve_gemma_kv_precision(config.architecture, kv_precision);
+    if (context_length != 0U) {
+        if (context_length > (config.model_context_length == 0U ? config.context_length : config.model_context_length)) {
+            throw std::invalid_argument("Gemma runtime context exceeds model context length");
+        }
+        config.context_length = context_length;
+    }
     auto receipt = ResidentTargetPayloadReceipt {};
     auto plan = create_gemma2_metal_model_plan_impl(
-        model.gemma2_config(), weights, policy, &receipt
+        config, weights, policy, &receipt
     );
     resident_receipt = receipt;
     return plan;

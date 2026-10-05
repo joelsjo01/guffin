@@ -41,10 +41,10 @@ public:
 private:
     friend PreparedGemma2Plan prepare_gemma2_standalone_plan(
         const EngineModel&, const tokenizer::Tokenizer&, std::shared_ptr<StandaloneDraftArtifact>,
-        StandaloneExecutionOptions, Gemma2OutputHeadPolicy
+        StandaloneExecutionOptions, Gemma2OutputHeadPolicy, std::uint32_t, GemmaKVPrecision
     );
     friend PreparedGemma2Plan prepare_gemma2_target_only_plan(
-        const EngineModel&, Gemma2OutputHeadPolicy
+        const EngineModel&, Gemma2OutputHeadPolicy, std::uint32_t, GemmaKVPrecision
     );
     PreparedGemma2Plan(PreparedGemma2Mode, Gemma2MetalModelPlan,
         std::optional<EngineModelPayloadReceipt>, std::optional<ResidentTargetPayloadReceipt>,
@@ -62,11 +62,15 @@ private:
 [[nodiscard]] PreparedGemma2Plan prepare_gemma2_standalone_plan(
     const EngineModel& verified_model, const tokenizer::Tokenizer& target_tokenizer,
     std::shared_ptr<StandaloneDraftArtifact> source, StandaloneExecutionOptions execution,
-    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic
+    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic,
+    std::uint32_t context_length = 0U,
+    GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic
 );
 [[nodiscard]] PreparedGemma2Plan prepare_gemma2_target_only_plan(
     const EngineModel& model,
-    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic
+    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic,
+    std::uint32_t context_length = 0U,
+    GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic
 );
 
 } // namespace local_gguf_engine::engine

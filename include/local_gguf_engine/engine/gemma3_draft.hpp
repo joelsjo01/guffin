@@ -35,13 +35,20 @@ public:
     Gemma3DraftPlan(const StandaloneDraftArtifact& artifact,
         std::span<const std::int32_t> draft_to_target,
         std::uint32_t target_vocabulary_size, std::uint32_t horizon_capacity = 3,
-        std::uint32_t transaction_capacity = 256);
+        std::uint32_t transaction_capacity = 256,
+        std::uint32_t context_rows = context_capacity);
     ~Gemma3DraftPlan();
     Gemma3DraftPlan(Gemma3DraftPlan&&) noexcept;
     Gemma3DraftPlan& operator=(Gemma3DraftPlan&&) noexcept;
     Gemma3DraftPlan(const Gemma3DraftPlan&) = delete;
     Gemma3DraftPlan& operator=(const Gemma3DraftPlan&) = delete;
 
+    // Pure resident-layout estimate, including the full tied Q8 model, private
+    // state, probability receipts and reverse mapping. No Metal allocation.
+    [[nodiscard]] static std::size_t estimate_owned_bytes(std::uint32_t target_vocabulary_size,
+        std::uint32_t horizon_capacity = 3, std::uint32_t transaction_capacity = 256,
+        std::uint32_t context_rows = context_capacity);
+    [[nodiscard]] std::uint32_t prepared_context_capacity() const noexcept;
     [[nodiscard]] std::uint32_t position() const noexcept;
     [[nodiscard]] std::uint32_t materialized_position() const noexcept;
     [[nodiscard]] std::uint32_t horizon_capacity() const noexcept;
@@ -61,9 +68,15 @@ public:
     // Restores a saved, already-selected native emission after replaying its
     // materialized prefix. This is not a proposal or a sampling operation.
     [[nodiscard]] StandaloneDraftExecutionStats restore_pending_token(std::uint32_t token);
+    // Optional known root tokens and a prior pending token are ingested in the
+    // same command submission as drafting. start_position is after that input.
+    // Direct-ID pairing can explicitly use options.repetition_window on native
+    // history; the default preserves the legacy full-prefix draft law.
     [[nodiscard]] Gemma3DraftProposal propose(std::uint32_t target_root,
         std::span<const std::uint32_t> proposal_words, const TokenSamplerOptions& options,
-        const SamplerHistorySnapshot& history);
+        const SamplerHistorySnapshot& history,
+        std::span<const std::uint32_t> appended_tokens = {},
+        bool bounded_repetition_history = false);
     [[nodiscard]] VerifierDeviceInputBinding verifier_inputs(std::uint64_t epoch) const;
     [[nodiscard]] GatheredDraftTokenDistribution gather(std::uint32_t depth,
         const PreparedTokenDistribution& target);
@@ -79,9 +92,10 @@ public:
     // final norm; per layer q,k,v,o,gate,up,down,input,postattn,preff,postff,qnorm,knorm).
     Gemma3DraftPlan(std::span<const tensor::TensorView> tensors,
         std::span<const std::int32_t> map, std::uint32_t target_vocabulary,
-        std::uint32_t horizon_capacity, std::uint32_t transaction_capacity = 256);
+        std::uint32_t horizon_capacity, std::uint32_t transaction_capacity = 256,
+        std::uint32_t context_rows = context_capacity);
     void sample_logits_for_testing(std::span<const float> logits, std::uint32_t word,
-        const TokenSamplerOptions& options);
+        const TokenSamplerOptions& options, bool bounded_repetition_history = false);
     // Attention boundary fixture only: a declared prefix of exactly-zero K/V.
     // Does not claim those synthetic rows are a transformer-generated prompt.
     void seed_zero_cache_prefix_for_testing(std::uint32_t position);

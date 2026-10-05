@@ -35,9 +35,13 @@ tensor::DType dtype_from_gguf_tensor_type(std::uint32_t type_id) {
 }
 
 tensor::TensorDescriptor tensor_descriptor_from_gguf_tensor_info(const GGUFTensorInfo& tensor) {
+    const auto shape = shape_from_gguf_tensor_info(tensor);
+    const auto dtype = dtype_from_gguf_tensor_type(tensor.type_id);
+    if (shape.rank() == 2U && tensor::dtype_layout(dtype).block_element_count > 1U) {
+        return tensor::TensorDescriptor::from_quantized_gguf_weight_matrix(shape, dtype);
+    }
     return tensor::TensorDescriptor::from(
-        shape_from_gguf_tensor_info(tensor),
-        dtype_from_gguf_tensor_type(tensor.type_id)
+        shape, dtype
     );
 }
 

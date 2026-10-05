@@ -21,6 +21,7 @@ ENGINE_SOURCES := \
 	src/engine/gemma2_metal_plan.cpp \
 	src/engine/gemma2_reference.cpp \
 	src/engine/gemma2_runtime.cpp \
+	src/engine/gemma_target_runtime.cpp \
 	src/engine/chain_chat.mm \
 	src/engine/standalone_chat.cpp \
 	src/engine/standalone_draft_artifact.cpp \
@@ -50,6 +51,7 @@ ENGINE_SOURCES := \
 	src/tensor/backends/metal_backend.mm \
 	src/tensor/dtype.cpp \
 	src/tensor/f16.cpp \
+	src/tensor/kquant_packing.cpp \
 	src/tensor/layout.cpp \
 	src/tensor/ops/attention.cpp \
 	src/tensor/ops/elementwise.cpp \
@@ -96,6 +98,9 @@ TEST_SOURCES := \
 	tests/engine/standalone_draft_artifact_tests.cpp \
 	tests/engine/standalone_chat_tests.cpp \
 	tests/engine/gemma3_draft_tests.cpp \
+	tests/engine/gemma3_model_plan_tests.cpp \
+	tests/engine/gemma3_target_runtime_tests.cpp \
+	tests/tensor/gemma3_metal_tests.cpp \
 	tests/engine/engine_model_tests.cpp \
 	tests/engine/feature_bank_tests.cpp \
 	tests/engine/gemma2_reference_tests.cpp \

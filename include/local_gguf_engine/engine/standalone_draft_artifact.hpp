@@ -50,6 +50,17 @@ public:
     [[nodiscard]] std::size_t intersection_size() const noexcept;
     [[nodiscard]] std::size_t owned_bytes() const noexcept;
     [[nodiscard]] std::size_t max_append_tokens() const noexcept;
+    [[nodiscard]] bool direct_ids() const noexcept;
+
+    // Available only after the complete Gemma3 ID/semantic compatibility
+    // proof. Conditioning includes every vocabulary ID, independently of the
+    // narrower proposal maps above, and needs no text/tokenizer workspace.
+    [[nodiscard]] std::size_t append_target_token(
+        std::uint32_t target_token, std::span<std::uint32_t> output
+    ) const;
+    [[nodiscard]] std::size_t encode_target_context(
+        std::span<const std::uint32_t> target_tokens, std::span<std::uint32_t> output
+    ) const;
 
     // Mapped corrections retain their exact draft ID. Shared Gemma control
     // roles are preserved; identity/no-dummy-prefix encoding never interprets
@@ -75,6 +86,7 @@ private:
     std::vector<std::uint32_t> target_control_context_;
     std::size_t intersection_size_ = 0;
     std::size_t max_append_tokens_ = 0;
+    bool direct_ids_ = false;
 };
 
 }  // namespace local_gguf_engine::engine

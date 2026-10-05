@@ -14,8 +14,32 @@ namespace local_gguf_engine::tensor::backends::metal {
 
 struct MatmulPipelineState {
     id<MTLDevice> device = nil;
+    // Packed Gemma 2 retains its half-operand prompt tiles and F32 accumulation.
+    // [M32/M16] for Q4; separate from Gemma 3's F32 prompt contract.
+    id<MTLComputePipelineState> columns8_gemma2_prompt[2] = {};
+    // [canonical/columns8][Q4/Q6][M8/M32], precise prompt arithmetic.
+    std::array<std::array<std::array<id<MTLComputePipelineState>, 2>, 2>, 2>
+        gemma3_prompt_matrix = {};
+    id<MTLComputePipelineState> gemma3_q4_shared_two_pipeline = nil;
+    id<MTLComputePipelineState> gemma3_q6_shared_one_pipeline = nil;
+    id<MTLComputePipelineState> gemma3_q6_shared_two_pipeline = nil;
+    std::array<id<MTLComputePipelineState>, 2> columns8_q4_rows = {nil, nil};
+    std::array<id<MTLComputePipelineState>, 2> columns8_q4_prepared_rows = {nil, nil};
+    id<MTLComputePipelineState> rms_norm_q4_sums_pipeline = nil;
+    id<MTLComputePipelineState> gelu_tanh_multiply_q4_sums_pipeline = nil;
+    id<MTLComputePipelineState> verifier_attention_q4_sums_pipeline = nil;
+    id<MTLComputePipelineState> verifier_attention_q4_sums_f16_pipeline = nil;
+    id<MTLComputePipelineState> verifier_attention_reduce_q4_sums_pipeline = nil;
+    std::array<id<MTLComputePipelineState>, 2> columns8_q6_rows = {nil, nil};
     id<MTLComputePipelineState> matmul_f16_simd_pipeline = nil;
     id<MTLComputePipelineState> embedding_pipeline = nil;
+    id<MTLComputePipelineState> embedding_q6_pipeline = nil;
+    id<MTLComputePipelineState> head_rms_norm_pipeline = nil;
+    id<MTLComputePipelineState> kv_cache_copy_f32_pipeline = nil;
+    id<MTLComputePipelineState> verifier_kv_store_f32_pipeline = nil;
+    id<MTLComputePipelineState> verifier_kv_store_f16_checked_pipeline = nil;
+    id<MTLComputePipelineState> verifier_kv_scatter_f32_pipeline = nil;
+    id<MTLComputePipelineState> verifier_attention_f32_pipeline = nil;
     id<MTLComputePipelineState> matvec_q8_0_packed_pipeline = nil;
     id<MTLComputePipelineState> matvec_q8_0_packed_112_pipeline = nil;
     id<MTLComputePipelineState> matmul_q8_0_width_two_pipeline = nil;
@@ -86,7 +110,7 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> draft_topk_merge_pipeline = nil;
     id<MTLCommandQueue> queue = nil;
 
-    MatmulPipelineState();
+    explicit MatmulPipelineState(bool precise_math = false);
 };
 
 struct QuantizedMatmulDispatch {
@@ -112,6 +136,7 @@ struct F16MatmulDispatch {
 [[nodiscard]] id<MTLDevice> system_metal_device() noexcept;
 [[nodiscard]] id<MTLDevice> metal_device_or_throw();
 [[nodiscard]] MatmulPipelineState& shared_matmul_pipeline_state();
+[[nodiscard]] MatmulPipelineState& shared_precise_matmul_pipeline_state();
 [[nodiscard]] F16MatmulDispatch select_f16_matmul_dispatch(
     MatmulPipelineState& state,
     std::uint64_t rows,

@@ -5,12 +5,131 @@
 #include "local_gguf_engine/runtime/backend_error.hpp"
 
 #include <cstring>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
+#include <unordered_map>
 #include <utility>
 
 namespace local_gguf_engine::tensor::backends::metal {
+
+namespace {
+
+// Retaining MTLBuffer objects alone does not keep their backing memory resident
+// between turns. Match ggml 0.13.1's 500 ms requests and three-minute idle window.
+// One set covers both numerical targets and the drafter without extra GPU work.
+class MetalBufferResidency final {
+public:
+    MetalBufferResidency() {
+        if (@available(macOS 15.0, *)) {
+            @autoreleasepool {
+                auto* descriptor = [MTLResidencySetDescriptor new];
+                descriptor.label = @"local-gguf-engine model buffers";
+                descriptor.initialCapacity = 256;
+                NSError* error = nil;
+                set_ = [metal_device_or_throw() newResidencySetWithDescriptor:descriptor error:&error];
+                if (set_ == nil) {
+                    throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                        "Metal residency set creation failed: " + ns_error_message(error, "unknown error"));
+                }
+            }
+            worker_ = std::thread([this] {
+                std::unique_lock lock(mutex_);
+                while (!stopping_) {
+                    if (!owners_.empty() && now_ns() < active_until_ns_.load(std::memory_order_relaxed)) {
+                        @autoreleasepool { [set_ requestResidency]; }
+                    }
+                    wake_.wait_for(lock, std::chrono::milliseconds(500), [this] { return stopping_; });
+                }
+            });
+        }
+    }
+
+    ~MetalBufferResidency() {
+        {
+            std::lock_guard lock(mutex_);
+            stopping_ = true;
+        }
+        wake_.notify_one();
+        if (worker_.joinable()) worker_.join();
+        if (@available(macOS 15.0, *)) {
+            @autoreleasepool {
+                [set_ endResidency];
+                [set_ removeAllAllocations];
+                [set_ commit];
+                set_ = nil;
+            }
+        }
+    }
+
+    void add(id<MTLBuffer> buffer) {
+        if (@available(macOS 15.0, *)) {
+            std::lock_guard lock(mutex_);
+            // Packed projections and cache views share a parent allocation.
+            // Only its first owner adds it; only its last owner removes it.
+            auto& count = owners_[identity(buffer)];
+            if (count++ == 0) {
+                @autoreleasepool {
+                    [set_ addAllocation:buffer];
+                    [set_ commit];
+                    [set_ requestResidency];
+                }
+            }
+            keep_alive();
+        }
+    }
+
+    void remove(id<MTLBuffer> buffer) noexcept {
+        if (@available(macOS 15.0, *)) {
+            std::lock_guard lock(mutex_);
+            const auto entry = owners_.find(identity(buffer));
+            if (entry == owners_.end() || --entry->second != 0) return;
+            @autoreleasepool {
+                [set_ removeAllocation:buffer];
+                [set_ commit];
+                owners_.erase(entry);
+                if (owners_.empty()) [set_ endResidency];
+            }
+        }
+    }
+
+    void keep_alive() noexcept {
+        active_until_ns_.store(now_ns() + 180'000'000'000LL, std::memory_order_relaxed);
+    }
+
+private:
+    static std::int64_t now_ns() noexcept {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    static std::uintptr_t identity(id<MTLBuffer> buffer) noexcept {
+        return reinterpret_cast<std::uintptr_t>((__bridge const void*)buffer);
+    }
+
+    id<MTLResidencySet> set_ = nil;
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    std::unordered_map<std::uintptr_t, std::size_t> owners_;
+    std::atomic<std::int64_t> active_until_ns_ {0};
+    bool stopping_ = false;
+    std::thread worker_;
+};
+
+MetalBufferResidency& buffer_residency() {
+    static MetalBufferResidency residency;
+    return residency;
+}
+
+} // namespace
+
+void keep_metal_buffers_resident() {
+    buffer_residency().keep_alive();
+}
 
 MetalBackendBufferStorage::MetalBackendBufferStorage(
     const TensorStorage& storage,
@@ -26,6 +145,12 @@ MetalBackendBufferStorage::MetalBackendBufferStorage(
     : descriptor_(std::move(descriptor)),
       buffer_(buffer),
       base_byte_offset_(base_byte_offset) {
+    if (descriptor_.packing != TensorPacking::canonical
+        && (descriptor_.packing != TensorPacking::kquant_columns8
+            || descriptor_ != TensorDescriptor::from_interleaved_kquant_weight_matrix(
+                descriptor_.shape, descriptor_.dtype))) {
+        throw std::invalid_argument("Metal buffer has an inconsistent execution-packing descriptor");
+    }
     if (buffer_ == nil) throw std::invalid_argument("Metal backend buffer must not be nil");
     if (base_byte_offset_ % alignof(std::uint32_t) != 0U) {
         throw std::invalid_argument("Metal backend buffer base offset must be four-byte aligned");
@@ -34,6 +159,11 @@ MetalBackendBufferStorage::MetalBackendBufferStorage(
         || descriptor_.byte_count > buffer_.length - base_byte_offset_) {
         throw std::out_of_range("Metal backend buffer view exceeds its parent allocation");
     }
+    buffer_residency().add(buffer_);
+}
+
+MetalBackendBufferStorage::~MetalBackendBufferStorage() {
+    buffer_residency().remove(buffer_);
 }
 
 runtime::BackendKind MetalBackendBufferStorage::backend() const noexcept {
@@ -44,7 +174,7 @@ const TensorDescriptor& MetalBackendBufferStorage::descriptor() const noexcept {
     return descriptor_;
 }
 
-id<MTLBuffer> MetalBackendBufferStorage::buffer() const noexcept {
+id<MTLBuffer> const& MetalBackendBufferStorage::buffer() const noexcept {
     return buffer_;
 }
 
@@ -112,7 +242,11 @@ void* metal_buffer_contents(
     const MetalBackendBufferStorage& storage,
     std::uint64_t operation_byte_offset
 ) {
-    void* contents = storage.buffer().contents;
+    // Metal marks contents as an interior pointer. An explicitly scoped
+    // strong receiver prevents ARC from autoreleasing the owner to extend
+    // that pointer's lifetime; the caller already owns storage for every use.
+    id<MTLBuffer> __attribute__((objc_precise_lifetime)) buffer = storage.buffer();
+    void* contents = buffer.contents;
     if (contents == nullptr) {
         throw std::logic_error("Metal private buffer contents are not CPU-accessible");
     }
@@ -125,8 +259,11 @@ BackendBuffer copy_tensor_to_metal_backend(const TensorStorage& storage) {
 
 BackendBuffer copy_tensor_view_to_metal_backend(const TensorView& view) {
     @autoreleasepool {
-        auto& state = shared_matmul_pipeline_state();
-        id<MTLBuffer> buffer = [state.device newBufferWithBytes:view.bytes().data()
+        id<MTLDevice> device = metal_device_or_throw();
+        if (view.bytes().size() > device.maxBufferLength) {
+            throw std::invalid_argument("Metal tensor upload exceeds the device maxBufferLength");
+        }
+        id<MTLBuffer> buffer = [device newBufferWithBytes:view.bytes().data()
                                                          length:static_cast<NSUInteger>(view.bytes().size())
                                                         options:MTLResourceStorageModeShared];
         if (buffer == nil) {
@@ -145,8 +282,11 @@ BackendBuffer copy_tensor_view_to_metal_backend(const TensorView& view) {
 
 BackendBuffer allocate_metal_backend_buffer(const TensorDescriptor& descriptor) {
     @autoreleasepool {
-        auto& state = shared_matmul_pipeline_state();
-        id<MTLBuffer> buffer = [state.device newBufferWithLength:static_cast<NSUInteger>(descriptor.byte_count)
+        id<MTLDevice> device = metal_device_or_throw();
+        if (descriptor.byte_count > device.maxBufferLength) {
+            throw std::invalid_argument("Metal tensor allocation exceeds the device maxBufferLength");
+        }
+        id<MTLBuffer> buffer = [device newBufferWithLength:static_cast<NSUInteger>(descriptor.byte_count)
                                                          options:MTLResourceStorageModeShared];
         if (buffer == nil) {
             throw runtime::BackendError(

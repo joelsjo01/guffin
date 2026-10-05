@@ -570,7 +570,9 @@ struct TensorTypeLayout {
         return tensor_element_count(tensor);
     }
 
-    return tensor.dimensions.back();
+    // GGUF stores the contiguous dimension first. The number of output rows
+    // (including vocabulary size) does not need quantization-block alignment.
+    return tensor.dimensions.front();
 }
 
 [[nodiscard]] std::size_t tensor_payload_byte_count(const GGUFTensorInfo& tensor) {

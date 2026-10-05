@@ -30,6 +30,10 @@
 #include <utility>
 #include <vector>
 
+#ifndef LOCAL_GGUF_ENGINE_BUILD
+#define LOCAL_GGUF_ENGINE_BUILD "unknown"
+#endif
+
 namespace local_gguf_engine::frontends::cli {
 
 namespace {
@@ -125,10 +129,11 @@ void write_generate_usage(std::ostream& error) {
           << "       local-gguf-generate <model.gguf> --chat [--max-new-tokens N]"
           << " [--greedy | --temperature T [--top-k K] [--top-p P] [--min-p P]"
           << " [--repeat-penalty R] [--seed S]] [--backend cpu|metal]"
-          << " [--reverse-prompt TEXT] [--context-shift]"
-          << " [--output-head f16|q8_0]"
+          << " [--reverse-prompt TEXT] [--context-shift] [--context-size TOKENS]"
+          << " [--kv-cache auto|f32|f16]"
+          << " [--output-head f16|q8_0|q6_k]"
           << " [--no-speculative]"
-          << " [--no-retrieval]"
+          << " [--retrieval | --no-retrieval]"
           << " [--draft-model <native.gguf>] [--draft-horizon <1..23>]"
           << " [--draft-temperature T] [--draft-top-k K] [--draft-top-p P]"
           << " [--draft-min-p P] [--draft-repeat-penalty R]"
@@ -340,18 +345,20 @@ struct ParsedChatCommand {
         .seed = TokenSamplerOptions::random_seed,
         .repetition_window = 64U,
     };
+    std::uint32_t context_length = 0;
+    engine::GemmaKVPrecision kv_precision = engine::GemmaKVPrecision::automatic;
+    bool kv_precision_requested = false;
     bool context_shift = false;
     bool greedy_requested = false;
     bool temperature_requested = false;
     bool sampled_modifier_requested = false;
     bool decode_diagnostics = false;
     bool speculative_decode = true;
-    bool retrieval_decode = true;
+    std::optional<bool> retrieval_decode;
     std::optional<std::filesystem::path> standalone_draft_model;
     engine::StandaloneExecutionOptions standalone_execution;
     bool draft_horizon_requested = false;
-    engine::SpeculativeSamplingMode speculative_sampling = engine::SpeculativeSamplingMode::exact_match;
-    bool speculative_sampling_requested = false;
+    std::optional<engine::SpeculativeSamplingMode> speculative_sampling;
     bool schedule_requested = false;
     engine::Gemma2OutputHeadPolicy output_head_policy = engine::Gemma2OutputHeadPolicy::automatic;
     std::optional<std::string> metal_capture_path;
@@ -418,12 +425,16 @@ private:
             command.speculative_decode = false;
             continue;
         }
+        if (option == "--retrieval") {
+            command.retrieval_decode = true;
+            continue;
+        }
         if (option == "--no-retrieval") {
             command.retrieval_decode = false;
             continue;
         }
         if (option == "--speculative-sampling") {
-            if (command.speculative_sampling_requested || index + 1 >= argc) {
+            if (command.speculative_sampling || index + 1 >= argc) {
                 error << "error: --speculative-sampling requires one exact-match or lossless value\n";
                 return false;
             }
@@ -432,7 +443,6 @@ private:
                 error << "error: --speculative-sampling requires exact-match or lossless\n";
                 return false;
             }
-            command.speculative_sampling_requested = true;
             command.speculative_sampling = value == "lossless"
                 ? engine::SpeculativeSamplingMode::lossless : engine::SpeculativeSamplingMode::exact_match;
             continue;
@@ -508,18 +518,47 @@ private:
             ++index;
             continue;
         }
+        if (option == "--context-size") {
+            std::uint64_t value = 0;
+            if (command.context_length != 0U || index + 1 >= argc
+                || !parse_u64(argv[index + 1], value) || value == 0U
+                || value > std::numeric_limits<std::uint32_t>::max()) {
+                error << "error: --context-size requires one positive 32-bit token count\n";
+                return false;
+            }
+            command.context_length = static_cast<std::uint32_t>(value);
+            ++index;
+            continue;
+        }
+        if (option == "--kv-cache") {
+            if (command.kv_precision_requested || index + 1 >= argc) {
+                error << "error: --kv-cache requires one of auto, f32, or f16, exactly once\n";
+                return false;
+            }
+            const std::string_view value(argv[++index]);
+            if (value == "auto") command.kv_precision = engine::GemmaKVPrecision::automatic;
+            else if (value == "f32") command.kv_precision = engine::GemmaKVPrecision::f32;
+            else if (value == "f16") command.kv_precision = engine::GemmaKVPrecision::f16;
+            else {
+                error << "error: --kv-cache must be auto, f32, or f16\n";
+                return false;
+            }
+            command.kv_precision_requested = true;
+            continue;
+        }
         if (option == "--output-head") {
             if (index + 1 >= argc) {
                 write_generate_usage(error);
-                error << "error: --output-head requires f16 or q8_0\n";
+                error << "error: --output-head requires f16, q8_0, or q6_k\n";
                 return false;
             }
             const std::string_view value(argv[++index]);
             if (value == "f16") command.output_head_policy = engine::Gemma2OutputHeadPolicy::f16;
             else if (value == "q8_0") command.output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0;
+            else if (value == "q6_k") command.output_head_policy = engine::Gemma2OutputHeadPolicy::q6_k;
             else {
                 write_generate_usage(error);
-                error << "error: --output-head must be f16 or q8_0\n";
+                error << "error: --output-head must be f16, q8_0, or q6_k\n";
                 return false;
             }
             continue;
@@ -659,10 +698,10 @@ private:
 
     if (command.standalone_draft_model
         && (!command.speculative_decode
-            || !command.speculative_sampling_requested
-            || command.speculative_sampling != engine::SpeculativeSamplingMode::lossless
+            || (command.speculative_sampling
+                && command.speculative_sampling != engine::SpeculativeSamplingMode::lossless)
             || command.options.backend != BackendKind::metal)) {
-        error << "error: --draft-model requires Metal and explicit lossless speculation,"
+        error << "error: --draft-model requires Metal and lossless speculation,"
               << " and conflicts with --no-speculative\n";
         return false;
     }
@@ -672,17 +711,18 @@ private:
     }
     if (command.standalone_execution.draft_sampling != engine::StandaloneDraftSamplingOptions{}
         && !command.standalone_draft_model) {
-        error << "error: draft sampling overrides require --draft-model and explicit lossless speculation\n";
+        error << "error: draft sampling overrides require --draft-model and lossless speculation\n";
         return false;
     }
     const bool has_draft = command.standalone_draft_model.has_value();
-    if (command.speculative_sampling_requested && (!has_draft || !command.speculative_decode)) {
+    if (command.speculative_sampling && (!has_draft || !command.speculative_decode)) {
         error << "error: --speculative-sampling requires a draft configuration and enabled speculation\n";
         return false;
     }
     if (command.schedule_requested
         && (!has_draft || !command.speculative_decode
-            || command.speculative_sampling != engine::SpeculativeSamplingMode::lossless)) {
+            || (command.speculative_sampling
+                && command.speculative_sampling != engine::SpeculativeSamplingMode::lossless))) {
         error << "error: speculative execution options require a draft configuration and lossless sampling\n";
         return false;
     }
@@ -745,7 +785,7 @@ private:
 }
 
 [[nodiscard]] std::string unsupported_generation_architecture_message(ModelArchitecture architecture) {
-    return "local-gguf-generate supports Gemma 2 generation only; architecture '"
+    return "local-gguf-generate supports Gemma 2 and Gemma 3 generation; architecture '"
         + std::string(model_architecture_name(architecture))
         + "' is unsupported";
 }
@@ -781,7 +821,8 @@ private:
     const GenerateOptions& options
 ) {
     const auto model = load_engine_model_from_gguf(model_view);
-    if (model.architecture() != ModelArchitecture::gemma2) {
+    if (model.architecture() != ModelArchitecture::gemma2
+        && model.architecture() != ModelArchitecture::gemma3) {
         throw std::runtime_error(unsupported_generation_architecture_message(model.architecture()));
     }
 
@@ -810,6 +851,8 @@ int run_generate_chat(
             .max_new_tokens = command.max_new_tokens,
             .backend = command.options.backend,
             .output_head_policy = command.output_head_policy,
+            .context_length = command.context_length,
+            .kv_precision = command.kv_precision,
             .context_shift = command.context_shift,
             .speculative_decode = command.speculative_decode,
             .retrieval_decode = command.retrieval_decode,
@@ -957,7 +1000,7 @@ std::string format_chat_timing_detail_line(const engine::Gemma2ChatTurnMetrics& 
 }
 
 std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetrics& metrics) {
-    constexpr std::uint32_t schema_version = 5U;
+    constexpr std::uint32_t schema_version = 6U;
     if (metrics.standalone_draft != metrics.standalone_effective_sampler.has_value()) {
         throw std::logic_error("standalone diagnostics require the actual effective draft sampler");
     }
@@ -1030,6 +1073,12 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
 
     std::ostringstream json;
     json << "[ Decode: {\"schema_version\":" << schema_version
+         << ",\"engine_build\":\"" << LOCAL_GGUF_ENGINE_BUILD << "\""
+         << ",\"model_architecture\":\"" << model_architecture_name(metrics.model_architecture) << "\""
+         << ",\"retrieval_decode\":" << (metrics.retrieval_decode ? "true" : "false")
+         << ",\"context_capacity\":" << metrics.context_capacity
+         << ",\"kv_cache_dtype\":\""
+         << engine::gemma_kv_precision_name(metrics.kv_precision) << "\""
          << ",\"selected_tokens\":" << metrics.generation.selected_token_count
          << ",\"selected_token_hash\":\"" << token_hash.str() << "\""
          << ",\"decoded_tokens\":" << metrics.generation.decode_token_count
@@ -1058,6 +1107,7 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"scheduled_bytes_basis\":\"one_row_equivalent_not_physical_bandwidth\""
          << ",\"learned_cycles\":" << metrics.generation.learned_cycle_count
          << ",\"learned_accepted_edges\":" << metrics.generation.learned_accepted_edge_count
+         << ",\"learned_proposed_edges\":" << metrics.generation.learned_proposed_edge_count
          << ",\"learned_numeric_refusals\":" << metrics.generation.learned_numeric_refusal_count
          << ",\"learned_draft_ns\":" << metrics.generation.learned_draft_duration_ns
          << ",\"learned_draft_gpu_ns\":" << metrics.generation.learned_draft_gpu_ns
@@ -1072,8 +1122,16 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
          << ",\"standalone_draft_command_buffer_count\":" << metrics.generation.standalone_draft_command_buffer_count
          << ",\"standalone_draft_compute_dispatch_count\":" << metrics.generation.standalone_draft_compute_dispatch_count
          << ",\"standalone_draft_sampler\":\""
-         << (metrics.standalone_draft ? "explicit_or_target_scalars_native_history_v1" : "none") << "\""
-         << ",\"standalone_effective_sampler\":";
+         << (metrics.standalone_draft
+             ? (metrics.standalone_bounded_repetition_history
+                 ? "explicit_or_target_scalars_target_window_v2"
+                 : "explicit_or_target_scalars_native_history_v2")
+             : "none") << "\""
+         << ",\"standalone_repetition_window\":";
+    if (metrics.standalone_bounded_repetition_history && metrics.standalone_effective_sampler)
+        json << metrics.standalone_effective_sampler->repetition_window;
+    else json << "null";
+    json << ",\"standalone_effective_sampler\":";
     if (metrics.standalone_effective_sampler) {
         const auto& sampler = *metrics.standalone_effective_sampler;
         // Emit round-trippable F32 values actually consumed by the draft, not
@@ -1087,7 +1145,17 @@ std::string format_chat_decode_attribution_line(const engine::Gemma2ChatTurnMetr
              << ",\"repetition_penalty\":" << sampler.repetition_penalty << '}';
         json.precision(precision);
     } else json << "null";
-    json << ",\"learned_accepted_prefix_histogram\":[";
+    json << ",\"learned_horizon_histogram\":[";
+    for (std::size_t index = 0; index < metrics.generation.learned_horizon_histogram.size(); ++index) {
+        if (index) json << ',';
+        json << metrics.generation.learned_horizon_histogram[index];
+    }
+    json << "],\"learned_reached_depth_histogram\":[";
+    for (std::size_t index = 0; index < metrics.generation.learned_reached_depth_histogram.size(); ++index) {
+        if (index) json << ',';
+        json << metrics.generation.learned_reached_depth_histogram[index];
+    }
+    json << "],\"learned_accepted_prefix_histogram\":[";
     for (std::size_t index = 0; index < metrics.generation.learned_accepted_prefix_histogram.size(); ++index) {
         if (index) json << ',';
         json << metrics.generation.learned_accepted_prefix_histogram[index];

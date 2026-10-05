@@ -13,7 +13,8 @@ Performance goal: beat `llama.cpp` on selected local GGUF models and
 quantization formats on this machine. Broad portability and model coverage are
 secondary.
 
-Current main target: fast local Gemma 2 9B Q4 on Metal.
+Current main target: fast local Gemma 3 12B Q4_K_M on Metal, with the existing
+Gemma 3 270M drafter. Preserve the working Gemma 2 path.
 
 ## Non-Negotiable Boundaries
 
@@ -22,8 +23,8 @@ Current main target: fast local Gemma 2 9B Q4 on Metal.
   APIs.
 - Reference libraries may support benchmarks, compatibility checks, golden
   outputs, and debugging, but must not execute the production path.
-- The Gemma 2 9B Q4 product path is Metal-first and model-resident. CPU work is
-  correctness scaffolding, not a parallel product runtime.
+- The Gemma 3 12B and retained Gemma 2 product paths are Metal-first and
+  model-resident. CPU work is correctness scaffolding, not a parallel product runtime.
 - Keep engine logic separate from CLI, server, UI, scripts, diagnostics, and benchmarks.
 - Runtime inference must work locally without network access.
 - Production dependencies must not provide inference execution or tensor
@@ -46,8 +47,9 @@ Do not bulk-read docs or source trees when the task has a narrower route.
 
 1. Follow the objective, constraints, verification, and stop condition in
    `docs/NEXT_TASK.md`; do not silently broaden the task.
-2. Inspect the relevant implementation and tests, then make the smallest
-   coherent change that proves the intended behavior or hypothesis end to end.
+2. Inspect the relevant implementation and tests, then complete the authorized
+   implementation end to end. Choose boundaries for sound architecture and
+   useful results, not for artificially small changes or repeated approvals.
 3. Add deterministic automated coverage for behavior changes. Metal work needs
    parity or golden evidence and unavailable-device behavior; CLI/API work needs
    success and failure paths.
@@ -82,7 +84,7 @@ Build and run the canonical local benchmark with:
 
 ```sh
 make MODE=release benchmark
-scripts/quick_benchmark.py --model models/gemma-2-9b-Q4.gguf
+scripts/quick_benchmark.py --model models/gemma-3-12b-it-Q4_K_M.gguf --no-speculative --skip-kernels
 ```
 
 It drives the actual local chat executable through the fixed two-turn sampled

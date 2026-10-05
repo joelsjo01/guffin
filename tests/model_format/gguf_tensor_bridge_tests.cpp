@@ -113,6 +113,17 @@ void test_converts_q6_k_gguf_payload_view_to_tensor_storage() {
     expect(loaded.storage.bytes()[209] == 0x40, "loaded Q6_K final byte mismatch");
 }
 
+void test_native_gguf_quantized_rows_use_first_dimension() {
+    const auto bytes = fixture("valid-q6-k-gguf-row-matrix");
+    const auto model = read_gguf_model_view(bytes);
+    const auto loaded = load_gguf_tensor_payload(model.tensor_payloads.front());
+    expect(loaded.storage.descriptor().shape == Shape::from({256U, 3U}), "native GGUF matrix shape changed");
+    expect(loaded.storage.descriptor().byte_count == 3U * 210U,
+        "three GGUF rows must consume exactly three Q6_K blocks");
+    expect(loaded.storage.bytes()[210U] == 1U && loaded.storage.bytes()[420U] == 2U,
+        "GGUF row payload ordering changed");
+}
+
 void test_rejects_unsupported_gguf_tensor_type_in_bridge() {
     const GGUFTensorPayloadView payload {
         .tensor = GGUFTensorInfo {
@@ -165,7 +176,7 @@ void test_rejects_invalid_q4_k_gguf_tensor_row_size_in_bridge() {
     const GGUFTensorPayloadView payload {
         .tensor = GGUFTensorInfo {
             .name = "q4_bad",
-            .dimensions = std::vector<std::uint64_t> {2, 128},
+            .dimensions = std::vector<std::uint64_t> {128, 2},
             .type_id = 12,
             .offset = 0,
             .file_offset = 0,
@@ -239,6 +250,7 @@ void test_rejects_q4_k_gguf_tensor_payload_size_mismatch_in_bridge() {
 }
 
 const local_gguf_engine::tests::TestCase kGGUFTensorBridgeTests[] = {
+    {"native GGUF quantized matrices use first-dimension row packing", test_native_gguf_quantized_rows_use_first_dimension},
     {"converts GGUF payload view to tensor storage", test_converts_gguf_payload_view_to_tensor_storage},
     {"views GGUF payload without copying", test_views_gguf_payload_without_copying},
     {

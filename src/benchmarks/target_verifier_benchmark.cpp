@@ -380,8 +380,10 @@ TargetVerifierBenchmarkResult run_target_verifier_benchmark(
             : linear_schedule(input_row_count);
     auto file_model = model_format::read_file_backed_gguf_model(model_path);
     auto model = engine::load_engine_model_from_gguf(file_model.view());
+    const auto gemma3 = model.architecture() == engine::ModelArchitecture::gemma3;
     auto plan = engine::create_gemma2_metal_model_plan(
-        model, engine::Gemma2OutputHeadPolicy::q8_0
+        model, gemma3 ? engine::Gemma2OutputHeadPolicy::automatic
+                      : engine::Gemma2OutputHeadPolicy::q8_0
     );
     const auto& config = plan.config();
     constexpr auto root_position = std::uint32_t {16U};
@@ -428,12 +430,25 @@ TargetVerifierBenchmarkResult run_target_verifier_benchmark(
             throw std::logic_error("target verifier benchmark ordinary row has no candidates");
         }
         ordinary_candidates[row] = *decoded.candidates;
-        const auto hidden = copy_f32_values(plan.decode_scratch().normalized_hidden);
-        std::copy_n(
-            hidden.begin(), config.embedding_length,
-            ordinary_final_hidden.data()
-                + static_cast<std::size_t>(row) * config.embedding_length
-        );
+        auto* hidden_destination = ordinary_final_hidden.data()
+            + static_cast<std::size_t>(row) * config.embedding_length;
+        if (gemma3) {
+            // Ordinary Gemma 3 uses row zero of the shared block workspace.
+            // Read only that row; copying its full 128-row capacity would
+            // inflate the ordinary timing with unrelated diagnostic traffic.
+            const auto& workspace = plan.target_execution_workspace();
+            if (!workspace) {
+                throw std::logic_error("Gemma 3 ordinary benchmark has no execution workspace");
+            }
+            const auto hidden = tensor::copy_backend_buffer_bytes(
+                workspace->scratch().normalized_hidden, 0U,
+                static_cast<std::size_t>(config.embedding_length) * sizeof(float)
+            );
+            std::memcpy(hidden_destination, hidden.data(), hidden.size());
+        } else {
+            const auto hidden = copy_f32_values(plan.decode_scratch().normalized_hidden);
+            std::copy_n(hidden.begin(), config.embedding_length, hidden_destination);
+        }
         ordinary_gpu_ns += decoded.execution.gpu_duration_ns;
         if (row + 1U < path_row_count) {
             current_token = path_sampler.sample(
@@ -467,7 +482,7 @@ TargetVerifierBenchmarkResult run_target_verifier_benchmark(
     auto request = std::make_unique<engine::VerifierEncodeRequest>();
     request->topology = engine::make_verifier_topology_descriptor(
         *graph, chain_schedule, config.block_count,
-        config.context_length, config.sliding_window
+        config.context_length, config.sliding_window, config.attention_global_layer_period
     );
     request->selection_request_count = input_row_count;
     request->sampler_options = options;
@@ -512,7 +527,7 @@ TargetVerifierBenchmarkResult run_target_verifier_benchmark(
             plan, verifier,
             engine::validate_verifier_encode_request(
                 *local_request, config.vocab_size, config.block_count,
-                config.context_length, config.sliding_window
+                config.context_length, config.sliding_window, config.attention_global_layer_period
             ),
             scale
         );
@@ -630,7 +645,7 @@ TargetVerifierBenchmarkResult run_target_verifier_benchmark(
     auto validated_episode = std::make_unique<engine::ValidatedVerifierEncodeRequest>(
         engine::validate_verifier_encode_request(
             *episode_request, config.vocab_size, config.block_count,
-            config.context_length, config.sliding_window
+            config.context_length, config.sliding_window, config.attention_global_layer_period
         )
     );
     auto episode_workspace = std::make_unique<engine::TargetVerifierEpisodeWorkspace>();

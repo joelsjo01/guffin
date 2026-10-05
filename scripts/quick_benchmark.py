@@ -80,10 +80,29 @@ def validate_acceptance_accounting(record, name):
             or sum(i * n for i, n in enumerate(prefix)) != record["learned_accepted_edges"] \
             or any(prefix[horizon + 1:]) or any(rejection[horizon:]) \
             or any(n > prefix[i] for i, n in enumerate(rejection)) \
-            or full != (prefix[horizon] if horizon else 0) or limited > full \
+            or (record["schema_version"] < 6 and full != (prefix[horizon] if horizon else 0)) or limited > full \
             or censored + full + sum(rejection) != record["learned_cycles"] \
             or (not horizon and record["learned_cycles"]):
         raise RuntimeError(f"local {name} inconsistent acceptance/rejection/censor counts")
+    if record["schema_version"] >= 6:
+        horizons = record.get("learned_horizon_histogram")
+        reached = record.get("learned_reached_depth_histogram")
+        proposed = record.get("learned_proposed_edges")
+        if not isinstance(horizons, list) or len(horizons) != 24 \
+                or not isinstance(reached, list) or len(reached) != 23 \
+                or any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 0xffffffff
+                       for v in horizons + reached) \
+                or isinstance(proposed, bool) or not isinstance(proposed, int) or not 0 <= proposed <= 0xffffffffffffffff:
+            raise RuntimeError(f"local {name} invalid actual-horizon accounting")
+        if horizons[0] or any(horizons[horizon + 1:]) \
+                or sum(horizons) != record["learned_cycles"] \
+                or sum(i * n for i, n in enumerate(horizons)) != proposed \
+                or record["learned_accepted_edges"] > proposed \
+                or full < prefix[horizon] \
+                or full > sum(min(prefix[i], horizons[i]) for i in range(1, 24)) \
+                or any(reached[i] != sum(prefix[i + 1:]) + rejection[i]
+                       or reached[i] > sum(horizons[i + 1:]) for i in range(23)):
+            raise RuntimeError(f"local {name} inconsistent actual-horizon/exposure counts")
 
 
 def parse_local(output):
@@ -123,7 +142,7 @@ def parse_local(output):
 
 def validate_decode_attribution(turn, name):
     record = turn.get("decode_attribution")
-    if not isinstance(record, dict) or record.get("schema_version") not in (3, 4, 5):
+    if not isinstance(record, dict) or record.get("schema_version") not in (3, 4, 5, 6):
         raise RuntimeError(f"local {name} decode attribution schema mismatch")
     if record["schema_version"] >= 4:
         for field in ("generation_completion_ns", "full_turn_ns", "first_text_ns", "learned_owned_bytes",
@@ -139,7 +158,7 @@ def validate_decode_attribution(turn, name):
             raise RuntimeError(f"local {name} invalid first-text clock ordering")
         if record["learned_accepted_edges"] > record["learned_cycles"] * record["learned_horizon"]:
             raise RuntimeError(f"local {name} learned accepted-prefix count exceeds capacity")
-        if record["schema_version"] == 5:
+        if record["schema_version"] >= 5:
             validate_acceptance_accounting(record, name)
         if record.get("scheduled_bytes_basis") != "one_row_equivalent_not_physical_bandwidth":
             raise RuntimeError(f"local {name} scheduled-byte interpretation is missing")
@@ -155,14 +174,23 @@ def validate_decode_attribution(turn, name):
                 raise RuntimeError(f"local {name} invalid speculative draft identity")
             if draft_model in STANDALONE_DRAFT_HEADS and (
                     record.get("speculative_sampling") != "lossless"
-                    or record.get("standalone_draft_sampler") != (
-                        "explicit_or_target_scalars_native_history_v1" if record["schema_version"] == 5
-                        else "target_scalars_native_history_v1")
+                    or record.get("standalone_draft_sampler") not in (
+                        ("explicit_or_target_scalars_native_history_v2",
+                         "explicit_or_target_scalars_target_window_v2") if record["schema_version"] >= 6 else
+                        ("explicit_or_target_scalars_native_history_v1",) if record["schema_version"] == 5
+                        else ("target_scalars_native_history_v1",))
                     or record.get("learned_draft_head") != STANDALONE_DRAFT_HEADS[draft_model]
                     or not 1 <= record["learned_horizon"] <= 23):
                 raise RuntimeError(f"local {name} inconsistent standalone TLI metrics")
             if draft_model in STANDALONE_DRAFT_HEADS:
-                if record["schema_version"] == 5:
+                if record["schema_version"] >= 6:
+                    bounded_history = record["standalone_draft_sampler"] == "explicit_or_target_scalars_target_window_v2"
+                    window = record.get("standalone_repetition_window")
+                    if (bounded_history and (record.get("model_architecture") != "gemma3"
+                            or isinstance(window, bool) or not isinstance(window, int) or not 0 <= window <= 64)) \
+                            or (not bounded_history and window is not None):
+                        raise RuntimeError(f"local {name} inconsistent draft repetition history")
+                if record["schema_version"] >= 5:
                     effective = record.get("standalone_effective_sampler")
                     try:
                         validate_draft_sampling(effective, 262144 if draft_model == "standalone_gemma3_tli" else 32000)
@@ -180,7 +208,7 @@ def validate_decode_attribution(turn, name):
                 if record["standalone_draft_gpu_ns"] < record["learned_draft_gpu_ns"] \
                         or record["standalone_draft_wall_ns"] < record["learned_draft_ns"]:
                     raise RuntimeError(f"local {name} all-work draft totals omit cycle work")
-            elif record["schema_version"] == 5 and record.get("standalone_effective_sampler") is not None:
+            elif record["schema_version"] >= 5 and record.get("standalone_effective_sampler") is not None:
                 raise RuntimeError(f"local {name} non-standalone mode reported a draft sampler")
     token_hash = record.get("selected_token_hash")
     if not isinstance(token_hash, str) or len(token_hash) != 16 \
@@ -278,15 +306,16 @@ def validate_decode_attribution(turn, name):
 
 def validate_speculation_options(speculative, speculative_sampling,
                                  speculative_schedule, draft_model, draft_horizon, draft_sampling=None):
+    effective_sampling = speculative_sampling or ("lossless" if draft_model else "exact-match")
     if draft_sampling is not None:
         validate_draft_sampling(draft_sampling)
-        if not draft_model or speculative_sampling != "lossless" or not speculative:
-            raise ValueError("draft-only sampling requires an explicit lossless standalone model")
+        if not draft_model or effective_sampling != "lossless" or not speculative:
+            raise ValueError("draft-only sampling requires a lossless standalone model")
     if speculative_sampling not in (None, "exact-match", "lossless"):
         raise ValueError("unsupported speculative sampling mode")
     if not speculative and draft_model:
         raise ValueError("requested draft conflicts with disabled speculation")
-    if draft_model is not None and (not draft_model or speculative_sampling != "lossless"):
+    if draft_model is not None and (not draft_model or effective_sampling != "lossless"):
         raise ValueError("standalone draft requires an explicit model and lossless sampling")
     if draft_horizon is not None and (not draft_model or isinstance(draft_horizon, bool)
                                       or not isinstance(draft_horizon, int)
@@ -295,15 +324,18 @@ def validate_speculation_options(speculative, speculative_sampling,
     if speculative_sampling is not None and (not speculative or not draft_model):
         raise ValueError("speculative sampling mode requires a draft configuration and enabled speculation")
     if speculative_schedule is not None and (speculative_schedule not in ("full", "conditional")
-                                             or speculative_sampling != "lossless"):
+                                             or not speculative or not draft_model
+                                             or effective_sampling != "lossless"):
         raise ValueError("--speculative-schedule requires a supported value and lossless sampling")
 
 
 def run_local_chat(binary, model, cooldown, speculative=True, *, retrieval=True,
                    speculative_sampling=None, speculative_schedule=None, draft_model=None,
-                   draft_horizon=None, draft_sampling=None):
+                   draft_horizon=None, draft_sampling=None, context_size=None, kv_cache=None):
     validate_speculation_options(speculative, speculative_sampling,
                                  speculative_schedule, draft_model, draft_horizon, draft_sampling)
+    if kv_cache is not None and kv_cache not in ("auto", "f32", "f16"):
+        raise ValueError("KV cache precision must be auto, f32, or f16")
     if cooldown:
         print(f"cooling down for {cooldown:g}s before local chat...", file=sys.stderr)
         time.sleep(cooldown)
@@ -311,6 +343,12 @@ def run_local_chat(binary, model, cooldown, speculative=True, *, retrieval=True,
         binary, model, "--chat", "--backend", "metal", "--seed", str(SEED),
         "--decode-diagnostics",
     ]
+    if context_size is not None:
+        if isinstance(context_size, bool) or not isinstance(context_size, int) or context_size <= 0:
+            raise ValueError("context size must be a positive integer")
+        command.extend(["--context-size", str(context_size)])
+    if kv_cache is not None:
+        command.extend(["--kv-cache", kv_cache])
     if not speculative:
         command.append("--no-speculative")
     if draft_model:
@@ -330,12 +368,16 @@ def run_local_chat(binary, model, cooldown, speculative=True, *, retrieval=True,
         "[ Detail:",
     )
     turns = parse_local(stdout + stderr)
+    for turn in turns:
+        actual = turn["decode_attribution"].get("kv_cache_dtype")
+        if kv_cache in ("f32", "f16") and actual != kv_cache:
+            raise RuntimeError("requested KV cache precision does not match chat execution")
     if draft_model:
         for turn in turns:
             record = turn["decode_attribution"]
             if record.get("speculative_draft_model") != "standalone_gemma3_tli" \
                     or record.get("speculative_sampling") != "lossless" \
-                    or record.get("learned_horizon") != (draft_horizon or 3) \
+                    or record.get("learned_horizon") != (draft_horizon or 1) \
                     or record.get("learned_verification_schedule") != (speculative_schedule or "full"):
                 raise RuntimeError("requested standalone TLI configuration does not match chat execution")
             effective = record.get("standalone_effective_sampler") or {}
@@ -461,6 +503,7 @@ def collect_environment(model, local_binary, kernel_binary, kernels, runner=subp
         "schema_version": ENVIRONMENT_SCHEMA_VERSION,
         "engine_build": kernels.get("engine_build"),
         "diagnostic_schema": kernels.get("schema_version"),
+        "kernel_diagnostics_skipped": bool(kernels.get("skipped_reason")),
         "model": {
             "path": model_path,
             "size_bytes": model_size,
@@ -496,9 +539,10 @@ def pathlib_parts(path):
 def validate_environment(environment):
     if not isinstance(environment, dict) or environment.get("schema_version") != ENVIRONMENT_SCHEMA_VERSION:
         raise RuntimeError("benchmark environment schema mismatch")
-    if not isinstance(environment.get("engine_build"), str) or not environment["engine_build"]:
+    skipped = environment.get("kernel_diagnostics_skipped", False)
+    if not skipped and (not isinstance(environment.get("engine_build"), str) or not environment["engine_build"]):
         raise RuntimeError("benchmark environment engine build is missing")
-    if environment.get("diagnostic_schema") != KERNEL_SCHEMA_VERSION:
+    if environment.get("diagnostic_schema") != (None if skipped else KERNEL_SCHEMA_VERSION):
         raise RuntimeError("benchmark environment diagnostic schema mismatch")
     model = environment.get("model")
     if not isinstance(model, dict) or not isinstance(model.get("path"), str):
@@ -540,6 +584,9 @@ def print_human(local, kernels, terminal_rendered):
             f" {record['compute_dispatches'] / tokens:>15.1f}"
             f" {record['attention_tokens']:>17}"
         )
+    if kernels.get("skipped_reason"):
+        print("\nKernel diagnostics skipped: " + kernels["skipped_reason"])
+        return
     print("\nKernel diagnostics (separate process, after headline chat)")
     print("sustained mode: 42 serial, buffer-barrier-separated dispatches per command")
     print(
@@ -563,6 +610,10 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--local", default="build/release/local-gguf-generate")
     parser.add_argument("--kernels", default="build/release/local-gguf-bench")
+    parser.add_argument("--context-size", type=int)
+    parser.add_argument("--kv-cache", choices=("auto", "f32", "f16"))
+    parser.add_argument("--skip-kernels", action="store_true",
+                        help="omit Gemma 2 diagnostic kernels when benchmarking another target")
     parser.add_argument("--cooldown", type=float, default=DEFAULT_COOLDOWN_SECONDS)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--no-speculative", action="store_true")
@@ -595,7 +646,8 @@ def main():
     local = run_local_chat(args.local, args.model, args.cooldown, not args.no_speculative,
                            retrieval=not args.no_retrieval, speculative_sampling=args.speculative_sampling,
                            speculative_schedule=args.speculative_schedule, draft_model=args.draft_model,
-                           draft_horizon=args.draft_horizon, draft_sampling=draft_sampling)
+                           draft_horizon=args.draft_horizon, draft_sampling=draft_sampling,
+                           context_size=args.context_size, kv_cache=args.kv_cache)
     draft_identity = "none"
     draft_head = "f16"
     if draft_digest:
@@ -604,11 +656,21 @@ def main():
             raise RuntimeError("standalone benchmark omitted or changed authenticated draft identity")
         draft_identity = identities.pop()
         draft_head = STANDALONE_DRAFT_HEADS[draft_identity]
-    if args.cooldown:
-        print(f"cooling down for {args.cooldown:g}s before kernel diagnostics...", file=sys.stderr)
-        time.sleep(args.cooldown)
-    kernels = run_kernel_diagnostics(args.kernels, args.model)
+    if args.skip_kernels:
+        builds = {turn["decode_attribution"].get("engine_build") for turn in local}
+        if len(builds) > 1:
+            raise RuntimeError("chat turns reported different engine builds")
+        kernels = {"kernels": [], "engine_build": next(iter(builds), None),
+                   "skipped_reason": "explicit --skip-kernels; real chat still measured"}
+    else:
+        if args.cooldown:
+            print(f"cooling down for {args.cooldown:g}s before kernel diagnostics...", file=sys.stderr)
+            time.sleep(args.cooldown)
+        kernels = run_kernel_diagnostics(args.kernels, args.model)
     environment = collect_environment(args.model, args.local, args.kernels, kernels)
+    if os.path.isfile(args.local):
+        with open(args.local, "rb") as binary:
+            environment["local_executable_sha256"] = hashlib.sha256(binary.read()).hexdigest()
     result = {
         "protocol": {
             "prompts": PROMPTS,
@@ -620,22 +682,27 @@ def main():
             "local_startup_warmup_decode_tokens": 1,
             "local_startup_warmup_verifier_tokens": 2,
             "speculative_decode": not args.no_speculative,
-            "retrieval_decode": not args.no_speculative and not args.no_retrieval,
+            "retrieval_decode": local[0]["decode_attribution"].get(
+                "retrieval_decode", not args.no_speculative and not args.no_retrieval),
             "standalone_draft_model_sha256": draft_digest,
-            "standalone_draft_horizon": (args.draft_horizon or 3) if draft_digest else None,
+            "standalone_draft_horizon": (args.draft_horizon or 1) if draft_digest else None,
             "speculative_draft_model": draft_identity,
-            "speculative_sampling": args.speculative_sampling or "exact-match",
+            "speculative_sampling": args.speculative_sampling or ("lossless" if draft_digest else "exact-match"),
             "learned_verification_schedule": args.speculative_schedule or "full",
             "learned_draft_head": draft_head,
-            "cross_mode_token_identity_required": args.speculative_sampling != "lossless",
+            "cross_mode_token_identity_required": not draft_digest,
             "primary_generation_clock": "generation_completion_ns",
             "cooldown_seconds": args.cooldown,
             "inter_turn_pause_seconds": INTER_TURN_PAUSE_SECONDS,
             "terminal_rendered": terminal_rendered,
             "chat_stream_mode": "terminal_alternate_screen" if terminal_rendered else "captured_pipes",
-            "decode_attribution_schema": 5,
+            "decode_attribution_schema": local[0]["decode_attribution"]["schema_version"],
             "standalone_draft_sampling_overrides": draft_sampling,
-            "kernel_diagnostic_schema": KERNEL_SCHEMA_VERSION,
+            "kernel_diagnostic_schema": None if args.skip_kernels else KERNEL_SCHEMA_VERSION,
+            "context_capacity_requested": args.context_size,
+            "kv_cache_precision_requested": args.kv_cache,
+            "kv_cache_precision_resolved": local[0]["decode_attribution"].get("kv_cache_dtype"),
+            "kernel_diagnostics_skipped": args.skip_kernels,
             "local_executable": os.path.realpath(args.local),
             "kernel_executable": os.path.realpath(args.kernels),
         },

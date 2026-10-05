@@ -9,6 +9,7 @@
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
+#include "local_gguf_engine/tensor/kquant_packing.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/matmul.hpp"
@@ -70,7 +71,11 @@ using local_gguf_engine::tensor::Shape;
 using local_gguf_engine::tensor::TensorError;
 using local_gguf_engine::tensor::TensorErrorCode;
 using local_gguf_engine::tensor::TensorDescriptor;
+using local_gguf_engine::tensor::TensorPacking;
 using local_gguf_engine::tensor::TensorStorage;
+using local_gguf_engine::tensor::TensorView;
+using local_gguf_engine::tensor::repack_kquant_weight_columns8;
+using local_gguf_engine::tensor::restore_native_kquant_weight;
 using local_gguf_engine::tensor::write_f16_from_f32;
 using local_gguf_engine::tensor::write_f32;
 using local_gguf_engine::tensor::ops::add_f32;
@@ -2763,7 +2768,203 @@ void test_rejects_f32_f16_matmul_right_dtype_mismatch() {
 }
 
 
+std::uint16_t packed_test_u16(std::span<const std::uint8_t> bytes, std::size_t offset) {
+    return static_cast<std::uint16_t>(bytes[offset]
+        | (static_cast<unsigned>(bytes[offset + 1U]) << 8U));
+}
+
+TensorStorage arbitrary_kquant_weight(DType dtype, std::uint64_t shared, std::uint64_t columns) {
+    auto native = TensorStorage::allocate(TensorDescriptor::from_quantized_gguf_weight_matrix(
+        Shape::from({shared, columns}), dtype));
+    std::uint32_t state = 0xC0FFEE01U;
+    for (auto& byte : native.mutable_bytes()) {
+        state ^= state << 13U;
+        state ^= state >> 17U;
+        state ^= state << 5U;
+        byte = static_cast<std::uint8_t>(state);
+    }
+    // Include signed zero, infinities, NaN payloads and subnormals. Packing must
+    // never convert a half to floating point, even for non-finite source bits.
+    constexpr std::array<std::uint16_t, 8> half_bits {
+        0x0000U, 0x8000U, 0x7C00U, 0xFC00U, 0x7E11U, 0x0001U, 0x7BFFU, 0x3555U,
+    };
+    const std::size_t native_block_bytes = dtype == DType::q4_k ? 144U : 210U;
+    const auto half_offset = dtype == DType::q4_k ? 0U : 208U;
+    for (std::size_t block = 0U; block < native.bytes().size() / native_block_bytes; ++block) {
+        const auto offset = block * native_block_bytes + half_offset;
+        const auto bits = half_bits[block % half_bits.size()];
+        native.mutable_bytes()[offset] = static_cast<std::uint8_t>(bits);
+        native.mutable_bytes()[offset + 1U] = static_cast<std::uint8_t>(bits >> 8U);
+        if (dtype == DType::q4_k) {
+            const auto minimum_bits = half_bits[(block + 3U) % half_bits.size()];
+            native.mutable_bytes()[offset + 2U] = static_cast<std::uint8_t>(minimum_bits);
+            native.mutable_bytes()[offset + 3U] = static_cast<std::uint8_t>(minimum_bits >> 8U);
+        }
+    }
+    return native;
+}
+
+template <typename Function>
+void expect_invalid_packing(Function&& function, std::string_view message) {
+    try {
+        function();
+    } catch (const std::invalid_argument&) {
+        return;
+    }
+    throw TestFailure(std::string(message));
+}
+
+void test_kquant_columns8_round_trips_all_native_bits() {
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        for (const std::uint64_t shared : {256U, 512U, 3840U}) {
+            for (const std::uint64_t columns : {1U, 7U, 8U, 9U, 17U}) {
+                const auto native = arbitrary_kquant_weight(dtype, shared, columns);
+                const auto packed = repack_kquant_weight_columns8(native.view());
+                const auto restored = restore_native_kquant_weight(packed.view());
+                const auto& descriptor = packed.descriptor();
+                expect(descriptor.packing == TensorPacking::kquant_columns8, "packed tensor lost packing tag");
+                expect(descriptor.shape == native.descriptor().shape, "packing changed logical shape");
+                expect(descriptor.dtype == dtype, "packing changed dtype");
+                expect(descriptor.element_count == shared * columns, "packing changed logical element count");
+                const auto tile_bytes = dtype == DType::q4_k ? 1184U : 1680U;
+                expect(descriptor.byte_count == ((columns + 7U) / 8U) * (shared / 256U) * tile_bytes,
+                    "packed tensor physical size mismatch");
+                expect(restored.descriptor() == native.descriptor(), "inverse packing changed native descriptor");
+                expect(std::equal(native.bytes().begin(), native.bytes().end(), restored.bytes().begin()),
+                    "K-quant packing did not preserve every native bit");
+            }
+        }
+    }
+}
+
+void test_kquant_columns8_matches_native_codes_and_zeroes_padding() {
+    constexpr std::size_t columns = 9U;
+    constexpr std::size_t blocks = 2U;
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        const auto native = arbitrary_kquant_weight(dtype, blocks * 256U, columns);
+        const auto packed = repack_kquant_weight_columns8(native.view());
+        const std::size_t tile_bytes = dtype == DType::q4_k ? 1184U : 1680U;
+        for (std::size_t column = 0U; column < 16U; ++column) {
+            for (std::size_t block = 0U; block < blocks; ++block) {
+                const auto tile = packed.bytes().subspan(((column / 8U) * blocks + block) * tile_bytes, tile_bytes);
+                const auto lane = column % 8U;
+                if (column >= columns) {
+                    for (std::size_t word = 0U; word < 64U; ++word) {
+                        expect(packed_test_u16(tile, (word * 8U + lane) * 2U) == 0U,
+                            "padded column contains low quant bits");
+                        if (dtype == DType::q6_k)
+                            expect(tile[1024U + word * 8U + lane] == 0U, "padded column contains high quant bits");
+                    }
+                    if (dtype == DType::q4_k) {
+                        for (std::size_t group = 0U; group < 8U; ++group)
+                            expect(packed_test_u16(tile, 1024U + (group * 8U + lane) * 2U) == 0U,
+                                "padded Q4 column contains scale metadata");
+                        expect(packed_test_u16(tile, 1152U + lane * 4U) == 0U
+                            && packed_test_u16(tile, 1154U + lane * 4U) == 0U, "padded Q4 column contains half bits");
+                    } else {
+                        for (std::size_t group = 0U; group < 16U; ++group)
+                            expect(tile[1536U + group * 8U + lane] == 0U, "padded Q6 column contains scale metadata");
+                        expect(packed_test_u16(tile, 1664U + lane * 2U) == 0U, "padded Q6 column contains half bits");
+                    }
+                } else if (dtype == DType::q4_k) {
+                    const auto reference = q4_k_block_view(native, column * blocks + block);
+                    for (std::size_t word = 0U; word < 64U; ++word)
+                        expect(packed_test_u16(tile, (word * 8U + lane) * 2U)
+                            == packed_test_u16(reference.quantized_bytes(), word * 2U), "Q4 quant word interleave mismatch");
+                    for (std::size_t group = 0U; group < 8U; ++group) {
+                        const auto metadata = packed_test_u16(tile, 1024U + (group * 8U + lane) * 2U);
+                        expect((metadata & 255U) == reference.scale_value(group), "Q4 decoded scale mismatch");
+                        expect((metadata >> 8U) == reference.min_value(group), "Q4 decoded minimum mismatch");
+                    }
+                    expect(packed_test_u16(tile, 1152U + lane * 4U) == reference.scale_bits(), "Q4 raw scale bits changed");
+                    expect(packed_test_u16(tile, 1154U + lane * 4U) == reference.min_scale_bits(), "Q4 raw minimum bits changed");
+                } else {
+                    const auto reference = q6_k_block_view(native, column * blocks + block);
+                    for (std::size_t element = 0U; element < 256U; ++element) {
+                        const auto word = element / 4U;
+                        const auto item = element % 4U;
+                        const auto low = packed_test_u16(tile, (word * 8U + lane) * 2U);
+                        const auto high = tile[1024U + word * 8U + lane];
+                        const auto code = ((low >> (item * 4U)) & 15U) | (((high >> (item * 2U)) & 3U) << 4U);
+                        expect(static_cast<int>(code) - 32 == reference.quantized_value(element), "Q6 quant code interleave mismatch");
+                    }
+                    for (std::size_t group = 0U; group < 16U; ++group)
+                        expect(tile[1536U + group * 8U + lane] == static_cast<std::uint8_t>(reference.scale_value(group)),
+                            "Q6 signed scale bits changed");
+                    expect(packed_test_u16(tile, 1664U + lane * 2U) == reference.scale_bits(), "Q6 raw scale bits changed");
+                }
+            }
+        }
+    }
+}
+
+void test_kquant_columns8_rejects_invalid_descriptors_and_overflow() {
+    for (const auto dtype : {DType::f32, DType::f16, DType::q8_0}) {
+        expect_invalid_packing([&] {
+            (void)TensorDescriptor::from_interleaved_kquant_weight_matrix(Shape::from({256U, 8U}), dtype);
+        }, "interleaved descriptor accepted unsupported dtype");
+    }
+    const auto expect_descriptor_error = [](const Shape& shape, TensorErrorCode expected) {
+        try {
+            (void)TensorDescriptor::from_interleaved_kquant_weight_matrix(shape, DType::q4_k);
+        } catch (const TensorError& error) {
+            expect(error.code() == expected, "interleaved descriptor reported wrong error");
+            return;
+        }
+        throw TestFailure("interleaved descriptor accepted invalid shape or overflow");
+    };
+    expect_descriptor_error(Shape::from({256U}), TensorErrorCode::invalid_shape_rank);
+    expect_descriptor_error(Shape::from({257U, 8U}), TensorErrorCode::invalid_quantized_element_count);
+    expect_descriptor_error(Shape::from({std::uint64_t {1U} << 62U, 1U}), TensorErrorCode::byte_size_overflow);
+    expect_descriptor_error(Shape::from({256U, std::numeric_limits<std::uint64_t>::max()}), TensorErrorCode::element_count_overflow);
+
+    const auto native = arbitrary_kquant_weight(DType::q4_k, 256U, 1U);
+    auto packed = repack_kquant_weight_columns8(native.view());
+    expect_invalid_packing([&] { (void)repack_kquant_weight_columns8(packed.view()); }, "repack accepted already packed input");
+    expect_invalid_packing([&] { (void)restore_native_kquant_weight(native.view()); }, "restore accepted native input");
+    auto forged = native.descriptor();
+    forged.packing = TensorPacking::kquant_columns8;
+    expect_invalid_packing([&] { (void)TensorStorage::allocate(forged); }, "allocation accepted packed tag with native size");
+    expect_invalid_packing([&] { (void)TensorStorage::from_bytes(forged, native.bytes()); }, "storage accepted packed tag with native size");
+    expect_invalid_packing([&] { (void)TensorView::from_bytes(forged, native.bytes()); }, "view accepted packed tag with native size");
+    forged = packed.descriptor();
+    ++forged.element_count;
+    expect_invalid_packing([&] { (void)TensorView::from_bytes(forged, packed.bytes()); }, "view accepted wrong packed element count");
+    forged = native.descriptor();
+    forged.packing = static_cast<TensorPacking>(255U);
+    expect_invalid_packing([&] { (void)TensorStorage::allocate(forged); }, "allocation accepted unknown packing");
+    packed.mutable_bytes()[1024U] = 64U;
+    expect_invalid_packing([&] { (void)restore_native_kquant_weight(packed.view()); }, "inverse accepted Q4 scale beyond six bits");
+}
+
+void test_native_cpu_quantized_operations_reject_interleaved_packing() {
+    const auto left = TensorStorage::allocate(TensorDescriptor::from(Shape::from({1U, 256U}), DType::f32));
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        const auto native = arbitrary_kquant_weight(dtype, 256U, 8U);
+        const auto packed = repack_kquant_weight_columns8(native.view());
+        expect_invalid_packing([&] {
+            if (dtype == DType::q4_k) (void)q4_k_block_count(packed.descriptor());
+            else (void)q6_k_block_count(packed.descriptor());
+        }, "native block count accepted interleaved packing");
+        expect_invalid_packing([&] {
+            if (dtype == DType::q4_k) (void)dequantize_q4_k_block(packed, 0U);
+            else (void)dequantize_q6_k_block(packed, 0U);
+        }, "native dequantization accepted interleaved packing");
+        expect_invalid_packing([&] {
+            (void)local_gguf_engine::tensor::ops::matmul_f32_quantized_gguf_weight(
+                left, packed, local_gguf_engine::runtime::BackendKind::cpu);
+        }, "native CPU matmul accepted interleaved packing");
+        if (dtype == DType::q6_k)
+            expect_invalid_packing([&] { (void)requantize_q6_k_gguf_weight_q4_k(packed.view()); },
+                "native requantization accepted interleaved packing");
+    }
+}
+
 const TestCase tensor_core_tests[] = {
+    {"K-quant columns8 round trips every native bit", test_kquant_columns8_round_trips_all_native_bits},
+    {"K-quant columns8 matches native codes and zeroes padding", test_kquant_columns8_matches_native_codes_and_zeroes_padding},
+    {"K-quant columns8 rejects invalid descriptors and overflow", test_kquant_columns8_rejects_invalid_descriptors_and_overflow},
+    {"native CPU quantized operations reject interleaved packing", test_native_cpu_quantized_operations_reject_interleaved_packing},
     {"default backend starts on CPU", test_default_backend_starts_on_cpu},
     {"tensor shape accepts valid shapes", test_tensor_shape_accepts_valid_shapes},
     {"rejects tensor shape rank over four", test_rejects_tensor_shape_rank_over_four},

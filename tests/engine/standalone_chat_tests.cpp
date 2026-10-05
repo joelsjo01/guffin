@@ -1,7 +1,9 @@
 #include "standalone_chat_tests.hpp"
+#include "gemma3_target_test_support.hpp"
 
 #include "local_gguf_engine/engine/standalone_chat.hpp"
 #include "local_gguf_engine/engine/gemma3_draft.hpp"
+#include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/gemma2_reference.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
@@ -47,6 +49,8 @@ tokenizer::Tokenizer draft_tokenizer() {
     tokens[5] = "Hello"; tokens[6] = "▁Hello";
     tokens[7] = "e"; tokens[8] = "l"; tokens[9] = "o";
     tokens[10] = "He"; tokens[11] = "Hel"; tokens[12] = "Hell";
+    tokens[13] = "<start_of_turn>"; types[13] = 3;
+    tokens[14] = "<end_of_turn>"; types[14] = 3;
     for (unsigned i = 3; i < 13; ++i) scores[i] = static_cast<float>(i);
     for (unsigned i = 0; i < 256; ++i) {
         std::array<char, 7> text {};
@@ -119,6 +123,37 @@ struct TargetFixture {
           model(load_verified_engine_model_from_gguf(view, bytes)),
           tokenizer(tokenizer::load_tokenizer_from_gguf_metadata(view.directory.metadata)),
           plan(create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::q8_0)) {}
+};
+
+struct DirectTargetFixture : Gemma3TargetFixture {
+    Gemma2MetalModelPlan plan;
+    explicit DirectTargetFixture(std::uint32_t context = 16,
+        GemmaKVPrecision precision = GemmaKVPrecision::automatic) : plan(prepare(context, precision)) {}
+private:
+    Gemma2MetalModelPlan prepare(std::uint32_t context, GemmaKVPrecision precision) {
+        // Full token-ID space and native six-layer Gemma3 target semantics;
+        // the independent scalar target law is a delta at Hello. The draft
+        // remains the complete 18-layer 270M fixture with nonzero private K/V.
+        tensors[0] = tensor::TensorStorage::allocate(tensor::TensorDescriptor::from_quantized_gguf_weight_matrix(
+            tensor::Shape::from({256U, draft_vocabulary}), tensor::DType::q6_k));
+        view.tensor_payloads[0].tensor.dimensions = {256U, draft_vocabulary};
+        view.tensor_payloads[0].bytes = tensors[0].bytes();
+        for (auto& value : tensors) {
+            auto bytes = value.mutable_bytes();
+            std::fill(bytes.begin(), bytes.end(), 0);
+            if (value.descriptor().dtype == tensor::DType::f32)
+                std::fill_n(reinterpret_cast<float*>(bytes.data()), value.descriptor().element_count, 1.0F);
+        }
+        auto embedding = tensors[0].mutable_bytes();
+        for (std::uint32_t token = 0; token < draft_vocabulary; ++token) {
+            const auto offset = std::size_t(token) * 210;
+            embedding[offset] = 1;
+            std::fill_n(embedding.begin() + static_cast<std::ptrdiff_t>(offset + 128), 64, 0xaaU);
+            std::fill_n(embedding.begin() + static_cast<std::ptrdiff_t>(offset + 192), 16, 1U);
+            embedding[offset + 209] = token == hello ? 0x40U : 0x3cU;
+        }
+        return create_gemma2_metal_model_plan(model(), Gemma2OutputHeadPolicy::automatic, context, precision);
+    }
 };
 
 void prefill(Gemma2MetalModelPlan& plan, TokenSampler& sampler, std::span<const std::uint32_t> prompt) {
@@ -231,6 +266,32 @@ void test_standalone_draft_sampling_resolution() {
         "draft override concealed invalid authoritative history capacity");
 }
 
+void test_shortened_chain_schedules_fit_every_prepared_arena() {
+    for (bool conditional : {false, true}) {
+        for (std::uint32_t maximum = 1; maximum <= external_speculation_max_horizon; ++maximum) {
+            const auto prepared = ChainChatVerifier::schedule_for_testing(maximum, maximum, conditional);
+            std::uint32_t row_capacity = 0;
+            for (std::uint32_t tile = 0; tile < prepared.tile_count; ++tile)
+                row_capacity = std::max(row_capacity, std::uint32_t(prepared.tiles[tile].input_row_count));
+            for (std::uint32_t active = 1; active <= maximum; ++active) {
+                const auto schedule = ChainChatVerifier::schedule_for_testing(maximum, active, conditional);
+                validate_chain_verifier_schedule(schedule, active);
+                std::uint32_t rows = 0;
+                for (std::uint32_t tile = 0; tile < schedule.tile_count; ++tile) {
+                    expect(schedule.tiles[tile].input_row_count <= row_capacity,
+                        "shortened chain requires storage beyond its prepared arena");
+                    rows += schedule.tiles[tile].input_row_count;
+                }
+                expect(rows == active + 1, "shortened schedule replays accepted rows or omits its bonus row");
+            }
+        }
+    }
+    refuses([] { static_cast<void>(ChainChatVerifier::schedule_for_testing(3, 0, true)); },
+        "zero active horizon was accepted as a verifier cycle");
+    refuses([] { static_cast<void>(ChainChatVerifier::schedule_for_testing(3, 4, true)); },
+        "active horizon exceeded its reusable preparation");
+}
+
 void test_standalone_draft_sampling_changes_only_proposal_law() {
     if (!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
     const auto& f = fixture();
@@ -334,10 +395,14 @@ void test_standalone_joint_callbacks_and_cache_prefixes() {
     const auto& f = fixture();
     for (bool conditional : {false, true}) {
         TargetFixture target;
-        StandaloneChatPlan draft(f.views, f.tokenizer, target.tokenizer, target.plan, {3, conditional});
-        for (bool throwing : {false, true}) for (std::uint32_t depth = 0; depth <= 3; ++depth) {
+        StandaloneExecutionOptions options {3, conditional};
+        // Keep the known all-accepted draft path while exercising both greedy
+        // and stochastic target RNG receipts at every callback boundary.
+        options.draft_sampling = {.temperature=0.0F, .top_k=0, .top_p=1.0F, .min_p=0.0F};
+        StandaloneChatPlan draft(f.views, f.tokenizer, target.tokenizer, target.plan, options);
+        for (float temperature : {0.0F, 0.8F}) for (bool throwing : {false, true}) for (std::uint32_t depth = 0; depth <= 3; ++depth) {
             draft.reset();
-            TokenSampler sampler({.temperature=0.0F, .top_k=1, .seed=42, .repetition_window=2});
+            TokenSampler sampler({.temperature=temperature, .top_k=1, .seed=42, .repetition_window=2});
             const std::array<std::uint32_t, 2> prompt {hello, spaced_hello};
             prefill(target.plan, sampler, prompt); draft.synchronize_context(prompt);
             sampler.observe_tokens(std::span<const std::uint32_t>(&hello, 1));
@@ -533,6 +598,348 @@ void test_standalone_complete_horizon_and_stop_endpoints() {
     }
 }
 
+void test_gemma3_direct_context_and_shortened_chain_tails() {
+    if (!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
+    const auto& f = fixture();
+    for (bool conditional : {false, true}) {
+        DirectTargetFixture target;
+        StandaloneChatPlan draft(f.views, f.tokenizer, f.tokenizer, target.plan, {3, conditional});
+        expect(draft.direct_ids() && draft.tokenizer_workspace_bytes_for_testing() == 0
+                && draft.draft_plan_for_testing().prepared_context_capacity() == 16,
+            "Gemma3 direct conditioning retained generic conversion or oversized native context storage");
+        const StandaloneTliMapping mapping(f.tokenizer, f.tokenizer);
+        expect(StandaloneChatPlan::estimate_owned_bytes(target.plan.config(), f.tokenizer, f.tokenizer,
+                mapping, {3, conditional}) >= draft.owned_bytes(),
+            "Gemma3 combined preparation underestimated standalone owned payload");
+        // Preserve exact byte fragments, unknown/control IDs and native
+        // boundaries, including tokens deliberately excluded from proposals.
+        const std::array<std::uint32_t, 6> prompt {hello, 1032, 1072, 0, 13, hello};
+        draft.synchronize_context(prompt);
+        compare_draft_cache(draft, prompt);
+        draft.synchronize_context(std::span(prompt).first(3));
+        compare_draft_cache(draft, std::span(prompt).first(3));
+        draft.synchronize_context(prompt);
+        for (const auto remaining : {2U, 3U, 4U}) {
+            draft.synchronize_context(prompt, true);
+            TokenSampler sampler({.temperature=0.0F, .top_k=1, .seed=17});
+            prefill(target.plan, sampler, prompt);
+            sampler.observe_tokens(std::span(&hello, 1));
+            const auto initial = sampler.checkpoint();
+            expect(draft.cycle_horizon(prompt.size(), remaining) == remaining - 1
+                    && sampler.checkpoint().same_state(initial),
+                "actual standalone horizon ignored output budget or advanced randomness");
+            std::uint32_t callbacks = 0;
+            const auto callback = [&](const ChainCommittedToken& token) {
+                expect(token.depth == callbacks++, "shortened chain callback order changed");
+                return Gemma2MetalTokenStreamDecision::continue_generation;
+            };
+            const auto result = draft.run(target.plan, sampler, hello, prompt.size(), remaining, {}, callback);
+            expect(result.proposal_count == remaining - 1 && result.accepted_edges == remaining - 1
+                    && result.retained_rows == remaining && callbacks == remaining
+                    && !result.rejected && !result.carry,
+                "shortened chain omitted, overshot or misclassified its durable budget prefix");
+            std::vector<std::uint32_t> committed(prompt.begin(), prompt.end());
+            committed.insert(committed.end(), remaining, hello);
+            compare_draft_cache(draft, committed);
+            DirectTargetFixture ordinary;
+            TokenSampler replay({.temperature=0.0F, .top_k=1, .seed=17});
+            prefill(ordinary.plan, replay, committed);
+            compare_target_cache(target.plan, ordinary.plan, static_cast<std::uint32_t>(committed.size()));
+        }
+        std::vector<std::uint32_t> context_tail(13, hello);
+        draft.synchronize_context(context_tail, true);
+        TokenSampler sampler({.temperature=0.0F, .top_k=1, .seed=31});
+        prefill(target.plan, sampler, context_tail);
+        sampler.observe_tokens(std::span(&hello, 1));
+        expect(draft.cycle_horizon(13, 20) == 2 && draft.cycle_horizon(13, 1) == 0,
+            "standalone horizon did not account for root and target context tail");
+        const auto callback = [](const ChainCommittedToken&) {
+            return Gemma2MetalTokenStreamDecision::continue_generation;
+        };
+        const auto result = draft.run(target.plan, sampler, hello, 13, 20, {}, callback);
+        expect(result.proposal_count == 2 && result.accepted_edges == 2 && result.retained_rows == 3
+                && draft.target_position() == 16 && draft.cycle_horizon(16, 20) == 0,
+            "short context tail did not use the reusable arena through its final legal row");
+        context_tail.resize(16, hello);
+        compare_draft_cache(draft, context_tail);
+        refuses([&] { draft.validate_committed_prefix(std::span(&hello, 1)); },
+            "full paired context accepted an additional authoritative token");
+        expect(!draft.poisoned(), "full-context preflight damaged the completed paired session");
+    }
+}
+
+void test_gemma3_half_target_h1_preserves_draft_precision_and_callback_prefixes() {
+    expect(StandaloneExecutionOptions{}.horizon == 1U && !StandaloneExecutionOptions{}.conditional_verification,
+        "standalone defaults must select H1 full verification");
+    if (!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
+    const auto& f = fixture();
+    DirectTargetFixture target(16U, GemmaKVPrecision::f16), ordinary(16U, GemmaKVPrecision::f16);
+    StandaloneChatPlan draft(f.views, f.tokenizer, f.tokenizer, target.plan, {});
+    expect(draft.horizon() == 1U && !draft.execution_options().conditional_verification,
+        "default standalone plan did not retain H1 full verification");
+    const StandaloneTliMapping mapping(f.tokenizer, f.tokenizer);
+    const auto half_estimate = StandaloneChatPlan::estimate_owned_bytes(target.plan.config(),
+        f.tokenizer, f.tokenizer, mapping, {1U, false});
+    auto full_config = target.plan.config();
+    full_config.kv_precision = GemmaKVPrecision::f32;
+    const auto full_estimate = StandaloneChatPlan::estimate_owned_bytes(full_config,
+        f.tokenizer, f.tokenizer, mapping, {1U, false});
+    // Only target verifier private/undo rows change. The 270M drafter keeps
+    // its F32 cache, full vocabulary law, sampler storage and host ledgers.
+    expect(half_estimate >= draft.owned_bytes()
+            && full_estimate - half_estimate == 6U * (2U + 2U) * 2U * 256U * 2U,
+        "paired F16 accounting changed draft storage or missed target private/undo precision");
+    const std::vector<std::uint32_t> prompt(10U, hello); // Wrap the target's eight-row local rings.
+    for (const bool stop_callback : {false, true}) {
+        draft.reset();
+        TokenSampler sampler({.temperature=0.0F, .top_k=1U, .seed=17U});
+        sampler.observe_tokens(prompt);
+        std::uint32_t callbacks = 0U;
+        const auto callback = [&](const Gemma2MetalGeneratedTokenEvent& event) {
+            expect(event.token_id == hello, "H1 half-cache target changed the independent delta law");
+            ++callbacks;
+            return stop_callback && callbacks == 3U ? Gemma2MetalTokenStreamDecision::stop_generation
+                : Gemma2MetalTokenStreamDecision::continue_generation;
+        };
+        const auto generated = generate_gemma2_metal_sampled_tokens_with_plan(target.plan,
+            prompt, 0U, 4U, {}, sampler, callback, {}, nullptr, nullptr, nullptr, &draft, prompt);
+        const auto count = stop_callback ? 3U : 4U;
+        expect(generated.selected_token_ids == std::vector<std::uint32_t>(count, hello)
+                && callbacks == count && generated.metrics.learned_cycle_count > 0U
+                && !target.plan.has_pending_verification() && !draft.poisoned(),
+            "H1 half-cache generation lost its verified callback prefix");
+        TokenSampler ordinary_sampler({.temperature=0.0F, .top_k=1U, .seed=17U});
+        ordinary_sampler.observe_tokens(prompt);
+        const auto scalar = generate_gemma2_metal_sampled_tokens_with_plan(ordinary.plan,
+            prompt, 0U, count, {}, ordinary_sampler);
+        expect(scalar.selected_token_ids == generated.selected_token_ids,
+            "H1 and ordinary half-cache target disagree on the independent delta law");
+        compare_target_cache(target.plan, ordinary.plan, 10U + count);
+        auto expected = prompt;
+        expected.insert(expected.end(), count, hello);
+        compare_draft_cache(draft, expected);
+        auto checkpoint = draft.checkpoint();
+        draft.reset();
+        draft.restore(checkpoint);
+        expect(!checkpoint.valid() && draft.target_position() == 10U + count,
+            "paired half-cache checkpoint did not preserve target/draft positions");
+        compare_draft_cache(draft, expected);
+    }
+}
+
+void test_gemma3_first_token_precedes_draft_work_and_recovers_every_exit() {
+    if (!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
+    const auto& f = fixture();
+    DirectTargetFixture target, ordinary;
+    StandaloneChatPlan draft(f.views, f.tokenizer, f.tokenizer, target.plan, {3, false});
+    const std::array<std::uint32_t, 2> prompt {hello, hello};
+    TokenSampler ordinary_sampler({.temperature=0.0F, .top_k=1, .seed=17});
+    ordinary_sampler.observe_tokens(prompt);
+    const auto ordinary_result = generate_gemma2_metal_sampled_tokens_with_plan(
+        ordinary.plan, prompt, 0, 1, {}, ordinary_sampler);
+    expect(ordinary_result.selected_token_ids == std::vector<std::uint32_t>{hello},
+        "deferred publication fixture lost its independent first-token target law");
+    enum class Exit {complete, stop_callback, throw_callback, eos, budget_one};
+    for (auto exit : {Exit::complete, Exit::stop_callback, Exit::throw_callback, Exit::eos, Exit::budget_one}) {
+        draft.reset();
+        const auto before = draft.execution_stats();
+        const std::array<std::uint32_t, 1> invalid {draft_vocabulary};
+        refuses([&] { draft.validate_direct_context(prompt, invalid); },
+            "deferred direct-ID validation admitted an invalid suffix");
+        expect(draft.target_position() == 0 && draft.draft_plan_for_testing().position() == 0
+                && draft.execution_stats().command_buffer_count == before.command_buffer_count,
+            "deferred direct-ID validation mutated draft state");
+        TokenSampler sampler({.temperature=0.0F, .top_k=1, .seed=17});
+        sampler.observe_tokens(prompt);
+        std::array<std::uint32_t, 5> committed {};
+        Gemma2GenerationCommitJournal journal {.token_storage=committed};
+        std::uint32_t calls = 0;
+        const auto callback = [&](const Gemma2MetalGeneratedTokenEvent& event) {
+            if (++calls == 1) {
+                expect(journal.count == 1 && journal.cached_token_count == prompt.size() + 1
+                        && journal.sampler.same_state(sampler.checkpoint())
+                        && !journal.completion.completion_unknown && !target.plan.has_pending_verification(),
+                    "first-token callback preceded its authoritative target cache/journal receipt");
+                expect(event.token_id == hello && draft.target_position() == 0
+                        && draft.draft_plan_for_testing().position() == 0
+                        && draft.execution_stats().command_buffer_count == before.command_buffer_count,
+                    "first-token publication waited for draft prompt synchronization or speculation");
+                compare_target_cache(target.plan, ordinary.plan, 3);
+                if (exit == Exit::throw_callback) throw std::runtime_error("first-token callback sentinel");
+                if (exit == Exit::stop_callback) return Gemma2MetalTokenStreamDecision::stop_generation;
+            }
+            return Gemma2MetalTokenStreamDecision::continue_generation;
+        };
+        std::uint64_t tick = 0;
+        const Gemma2MonotonicClock clock = [&] { return tick += 100; };
+        const auto maximum = exit == Exit::budget_one ? 1U : 5U;
+        const auto stops = exit == Exit::eos ? std::span<const std::uint32_t>(&hello, 1)
+            : std::span<const std::uint32_t>{};
+        std::optional<Gemma2MetalPlanGeneratedTokens> result;
+        bool threw = false;
+        try {
+            result = generate_gemma2_metal_sampled_tokens_with_plan(target.plan, prompt, 0, maximum,
+                stops, sampler, callback, clock, nullptr, nullptr, &journal, &draft, prompt);
+        } catch (const std::runtime_error& error) {
+            threw = std::string_view(error.what()) == "first-token callback sentinel";
+            if (!threw) throw;
+        }
+        const auto selected = exit == Exit::complete ? 5U : 1U;
+        expect(threw == (exit == Exit::throw_callback) && journal.count == selected
+                && draft.target_position() == prompt.size() + selected && !draft.poisoned(),
+            "deferred first-token exit lost its delivered prefix or swallowed the callback exception");
+        expect(calls == (exit == Exit::eos ? 0U : selected), "deferred first-token callback count changed");
+        std::vector<std::uint32_t> expected(prompt.begin(), prompt.end());
+        expected.insert(expected.end(), selected, hello);
+        compare_draft_cache(draft, expected);
+        if (result) {
+            expect(result->metrics.standalone_prefill_ns > 0
+                    && result->metrics.standalone_draft_wall_ns >= result->metrics.standalone_prefill_ns
+                    && result->metrics.decode_duration_ns >= result->metrics.standalone_prefill_ns
+                    && result->metrics.prompt_evaluation_duration_ns == 100,
+                "deferred draft synchronization was hidden outside generation or charged as target prefill");
+            const auto commands = draft.execution_stats().command_buffer_count - before.command_buffer_count;
+            expect(result->metrics.standalone_draft_command_buffer_count == commands
+                    && result->decode_execution.command_buffer_count >= commands + 1,
+                "deferred draft GPU work was omitted from the generation execution ledger");
+            expect(result->metrics.learned_cycle_count == (exit == Exit::complete ? 1U : 0U),
+                "first token unexpectedly ran a speculative cycle");
+        }
+        if (exit == Exit::budget_one) {
+            expect(draft.draft_plan_for_testing().materialized_position() == prompt.size(),
+                "first ordinary token was unnecessarily forwarded through the drafter");
+            auto checkpoint = draft.checkpoint();
+            draft.reset(); draft.restore(checkpoint);
+            expect(draft.draft_plan_for_testing().position() == 3
+                    && draft.draft_plan_for_testing().materialized_position() == 2,
+                "deferred native pending token was lost by checkpoint restoration");
+            const std::array<std::uint32_t, 4> context {hello, hello, hello, hello};
+            const auto suffix = std::span(context).last(1);
+            sampler.observe_tokens(suffix);
+            const auto follow_before = draft.execution_stats();
+            std::uint32_t follow_calls = 0;
+            const auto follow_callback = [&](const Gemma2MetalGeneratedTokenEvent&) {
+                ++follow_calls;
+                expect(draft.target_position() == 3 && draft.draft_plan_for_testing().materialized_position() == 2
+                        && draft.execution_stats().command_buffer_count == follow_before.command_buffer_count,
+                    "follow-up synchronized its draft before the first target publication");
+                return Gemma2MetalTokenStreamDecision::continue_generation;
+            };
+            const auto follow = generate_gemma2_metal_sampled_tokens_with_plan(target.plan, suffix, 3, 1,
+                {}, sampler, follow_callback, clock, nullptr, nullptr, nullptr, &draft, context);
+            expect(follow_calls == 1 && follow.cached_token_count == 5 && draft.target_position() == 5
+                    && draft.draft_plan_for_testing().materialized_position() == 4,
+                "follow-up failed to reconcile the previous pending token and new prompt");
+            compare_draft_cache(draft, std::array<std::uint32_t, 5>{hello, hello, hello, hello, hello});
+        }
+    }
+}
+
+void test_gemma3_deferred_draft_cached_continuation_preserves_pending_prefix() {
+    if (!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
+    const auto& f = fixture();
+    DirectTargetFixture target, ordinary;
+    StandaloneChatPlan draft(f.views, f.tokenizer, f.tokenizer, target.plan, {3, false});
+    const std::array<std::uint32_t, 2> prompt {hello, spaced_hello};
+    const std::array<std::uint32_t, 3> context {hello, spaced_hello, hello};
+    const std::array<std::uint32_t, 4> committed_context {hello, spaced_hello, hello, hello};
+    TokenSampler ordinary_sampler({.temperature=0.0F, .top_k=1, .seed=17});
+    ordinary_sampler.observe_tokens(prompt);
+    static_cast<void>(generate_gemma2_metal_sampled_tokens_with_plan(
+        ordinary.plan, prompt, 0, 2, {}, ordinary_sampler));
+    for (bool throwing_callback : {false, true}) {
+        draft.reset();
+        TokenSampler sampler({.temperature=0.0F, .top_k=1, .seed=17});
+        sampler.observe_tokens(prompt);
+        const auto first = generate_gemma2_metal_sampled_tokens_with_plan(target.plan, prompt, 0, 1,
+            {}, sampler, {}, {}, nullptr, nullptr, nullptr, &draft, prompt);
+        expect(first.selected_token_ids == std::vector<std::uint32_t>{hello}
+                && draft.target_position() == 3 && draft.draft_plan_for_testing().position() == 3
+                && draft.draft_plan_for_testing().materialized_position() == 2,
+            "cached continuation fixture did not retain the first selected token as pending");
+        const auto before = draft.execution_stats();
+        std::array<std::uint32_t, 1> committed {};
+        Gemma2GenerationCommitJournal journal {.token_storage=committed};
+        std::uint32_t calls = 0;
+        const auto callback = [&](const Gemma2MetalGeneratedTokenEvent& event) {
+            ++calls;
+            expect(event.token_id == hello && journal.count == 1 && journal.cached_token_count == 4
+                    && journal.sampler.same_state(sampler.checkpoint())
+                    && !journal.completion.completion_unknown && !target.plan.has_pending_verification(),
+                "cached continuation callback preceded authoritative target publication");
+            expect(draft.target_position() == 3 && draft.draft_plan_for_testing().materialized_position() == 2
+                    && draft.execution_stats().command_buffer_count == before.command_buffer_count,
+                "cached continuation materialized its pending draft prefix before publication");
+            compare_target_cache(target.plan, ordinary.plan, 4);
+            if (throwing_callback) throw std::runtime_error("cached continuation callback sentinel");
+            return Gemma2MetalTokenStreamDecision::continue_generation;
+        };
+        bool threw = false;
+        try {
+            // The caller already owns all three history tokens. Re-evaluating
+            // the final cached target row creates candidates without appending
+            // prompt history or changing the matching native draft ledger.
+            const auto result = generate_gemma2_metal_sampled_tokens_with_plan(target.plan,
+                std::span(context).last(1), 2, 1, {}, sampler, callback, {},
+                nullptr, nullptr, &journal, &draft, context);
+            expect(result.cached_token_count == 4 && result.metrics.standalone_draft_command_buffer_count > 0,
+                "cached continuation omitted its pending-prefix reconciliation work");
+        } catch (const std::runtime_error& error) {
+            threw = std::string_view(error.what()) == "cached continuation callback sentinel";
+            if (!threw) throw;
+        }
+        expect(threw == throwing_callback && calls == 1 && journal.count == 1
+                && draft.target_position() == 4 && draft.draft_plan_for_testing().position() == 4
+                && draft.draft_plan_for_testing().materialized_position() == 4 && !draft.poisoned(),
+            "cached continuation lost its committed prefix or the original callback exception");
+        compare_draft_cache(draft, committed_context);
+        // Both callback exits leave a usable authoritative prefix, including
+        // another exact-context continuation after the exceptional exit.
+        const auto next = generate_gemma2_metal_sampled_tokens_with_plan(target.plan,
+            std::span(committed_context).last(1), 3, 1, {}, sampler, {}, {},
+            nullptr, nullptr, nullptr, &draft, committed_context);
+        expect(next.cached_token_count == 5 && draft.target_position() == 5
+                && draft.draft_plan_for_testing().materialized_position() == 4 && !draft.poisoned(),
+            "reconciled cached continuation could not be reused after callback completion");
+        compare_draft_cache(draft, std::array<std::uint32_t, 5>{hello, spaced_hello, hello, hello, hello});
+    }
+}
+
+void test_gemma3_direct_draft_inherits_bounded_repetition_history() {
+    if (!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
+    const auto& f = fixture();
+    for (bool conditional : {false, true}) {
+        DirectTargetFixture target;
+        StandaloneChatPlan draft(f.views, f.tokenizer, f.tokenizer, target.plan, {3, conditional});
+        const std::array<std::uint32_t, 2> prompt {hello, spaced_hello};
+        for (const std::size_t window : {0U, 1U, 2U}) {
+            draft.synchronize_context(prompt, true);
+            TokenSampler sampler({.temperature=0.0F, .top_k=1, .repetition_penalty=1.1F,
+                .seed=23, .repetition_window=window});
+            prefill(target.plan, sampler, prompt);
+            sampler.observe_tokens(std::span(&hello, 1));
+            const auto callback = [](const ChainCommittedToken& token) {
+                expect(token.token_id == hello, "bounded draft repetition changed the target's delta law");
+                return Gemma2MetalTokenStreamDecision::continue_generation;
+            };
+            // The draft's two positive head rows are identical. Window one
+            // penalizes only the root Hello, so it proposes spaced-Hello and
+            // rejects against p. Window zero applies no penalty; window two
+            // penalizes both equal rows, preserving the Hello tie winner.
+            const auto result = draft.run(target.plan, sampler, hello, 2, 2, {}, callback);
+            expect(result.proposal_count == 1 && result.rejected == (window == 1)
+                    && result.accepted_edges == (window == 1 ? 0U : 1U)
+                    && result.retained_rows == 2 && !result.carry,
+                "direct-ID draft repetition ignored its inherited bounded window");
+            const std::array<std::uint32_t, 4> committed {hello, spaced_hello, hello, hello};
+            compare_draft_cache(draft, committed);
+        }
+    }
+    TargetFixture legacy_target;
+    StandaloneChatPlan legacy(f.views, f.tokenizer, legacy_target.tokenizer, legacy_target.plan, {3, false});
+    expect(!legacy.direct_ids(), "cross-generation TLI incorrectly opted into native window alignment");
+}
+
 void test_standalone_checkpoint_preserves_append_interpretation_and_lifetime() {
     if (!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
     const auto& f = fixture();
@@ -631,6 +1038,7 @@ void test_gemma3_checkpoint_restores_wrapped_context_after_conversion_failure() 
 
 std::span<const TestCase> standalone_chat_test_cases() {
     static constexpr TestCase cases[] {
+        {"shortened chain schedules fit every prepared full and conditional arena", test_shortened_chain_schedules_fit_every_prepared_arena},
         {"standalone draft sampling overrides resolve without changing target authority", test_standalone_draft_sampling_resolution},
         {"standalone draft scalar overrides preserve independent full-q equations and target law", test_standalone_draft_sampling_changes_only_proposal_law},
         {"standalone draft-only sampling changes proposals with default-equivalent target replay", test_standalone_draft_sampling_integration},
@@ -639,6 +1047,11 @@ std::span<const TestCase> standalone_chat_test_cases() {
         {"standalone native rejection honors budget correction and regeneration", test_standalone_rejection_budget_correction_and_regeneration},
         {"standalone ordinary synchronization context rebuild and unavailable device fail closed", test_standalone_ordinary_sync_rebuild_and_fail_closed},
         {"standalone complete horizons and accepted residual stop endpoints", test_standalone_complete_horizon_and_stop_endpoints},
+        {"Gemma3 direct context and shortened chain tails preserve native cache receipts", test_gemma3_direct_context_and_shortened_chain_tails},
+        {"Gemma3 F16 target H1 keeps F32 draft receipts and callback prefixes", test_gemma3_half_target_h1_preserves_draft_precision_and_callback_prefixes},
+        {"Gemma3 first target publication precedes draft work and preserves every exit", test_gemma3_first_token_precedes_draft_work_and_recovers_every_exit},
+        {"Gemma3 deferred draft cached continuation preserves pending prefix across callbacks", test_gemma3_deferred_draft_cached_continuation_preserves_pending_prefix},
+        {"Gemma3 direct draft inherits bounded repetition history without changing target authority", test_gemma3_direct_draft_inherits_bounded_repetition_history},
         {"standalone checkpoint preserves append interpretation and single-slot lifetime", test_standalone_checkpoint_preserves_append_interpretation_and_lifetime},
     };
     return cases;

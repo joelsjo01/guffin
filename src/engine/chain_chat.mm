@@ -64,7 +64,7 @@ std::uint64_t append_digest(std::uint64_t value,std::uint32_t token) {
     for(unsigned byte=0;byte<4;++byte) {value^=(token>>(8*byte))&255U;value*=1099511628211ULL;}
     return value;
 }
-ChainVerifierSchedule verification_schedule(std::uint32_t horizon,bool conditional) {
+ChainVerifierSchedule unbounded_verification_schedule(std::uint32_t horizon,bool conditional) {
     if(conditional) {
         switch(horizon) {
         case 3: case 4: case 7: case 8: case 15: case 16: case 23:
@@ -89,6 +89,38 @@ ChainVerifierSchedule verification_schedule(std::uint32_t horizon,bool condition
     schedule.tile_count=1;
     return schedule;
 }
+ChainVerifierSchedule verification_schedule(std::uint32_t horizon, bool conditional,
+    std::uint32_t row_capacity = external_speculation_max_horizon + 1) {
+    auto schedule = unbounded_verification_schedule(horizon, conditional);
+    bool fits = true;
+    for (std::uint32_t tile = 0; tile < schedule.tile_count; ++tile)
+        fits = fits && schedule.tiles[tile].input_row_count <= row_capacity;
+    if (fits) return schedule;
+    if (!conditional || row_capacity < 2)
+        throw std::invalid_argument("chain schedule exceeds its prepared row capacity");
+    // Registered widths are not monotonic in H: H=3 owns two rows whereas
+    // H=2 ordinarily asks for three; H=23 owns eight whereas H=16 asks for
+    // nine. Repartition shortened cycles within their existing arena. The
+    // last tile reserves one row for the post-full candidate.
+    schedule = {};
+    for (std::uint32_t remaining = horizon; remaining;) {
+        const auto count = remaining < row_capacity ? remaining : std::min(remaining - 1, row_capacity);
+        remaining -= count;
+        schedule.tiles[schedule.tile_count++] = {static_cast<std::uint16_t>(count),
+            static_cast<std::uint16_t>(count + (remaining == 0 ? 1U : 0U))};
+    }
+    validate_chain_verifier_schedule(schedule, horizon);
+    return schedule;
+}
+std::uint32_t prepared_rows(std::uint32_t horizon, bool conditional) {
+    if (horizon == 0 || horizon > external_speculation_max_horizon)
+        throw std::invalid_argument("invalid chain verifier horizon");
+    const auto schedule = verification_schedule(horizon, conditional);
+    std::uint32_t rows = 0;
+    for (std::uint32_t i = 0; i < schedule.tile_count; ++i)
+        rows = std::max(rows, std::uint32_t(schedule.tiles[i].input_row_count));
+    return rows;
+}
 } // namespace
 struct ChainChatVerifier::Impl {
     Gemma2MetalTargetVerifierPlan verifier;
@@ -105,15 +137,8 @@ struct ChainChatVerifier::Impl {
     const BackendBuffer* last_hidden = nullptr;
     Impl(const Gemma2MetalModelPlan& target, std::uint32_t h,
         SpeculativeSamplingMode mode, bool conditional_value)
-        : verifier(create_gemma2_metal_target_verifier_plan(target, [&] {
-            if (h == 0 || h > external_speculation_max_horizon)
-                throw std::invalid_argument("invalid chain verifier horizon");
-            const auto schedule = verification_schedule(h, conditional_value);
-            std::uint32_t rows = 0;
-            for (std::uint32_t i = 0; i < schedule.tile_count; ++i)
-                rows = std::max(rows, std::uint32_t(schedule.tiles[i].input_row_count));
-            return rows;
-          }())), horizon(h), sampling_mode(mode), conditional(conditional_value) {
+        : verifier(create_gemma2_metal_target_verifier_plan(target, prepared_rows(h, conditional_value))),
+          horizon(h), sampling_mode(mode), conditional(conditional_value) {
         if (mode != SpeculativeSamplingMode::exact_match && mode != SpeculativeSamplingMode::lossless)
             throw std::invalid_argument("invalid chain verifier sampling mode");
         verified_features.reserve(verifier.row_capacity());
@@ -129,8 +154,26 @@ ChainChatVerifier::~ChainChatVerifier() = default;
 ChainChatVerifier::ChainChatVerifier(ChainChatVerifier&&) noexcept = default;
 ChainChatVerifier& ChainChatVerifier::operator=(ChainChatVerifier&&) noexcept = default;
 std::size_t ChainChatVerifier::owned_bytes() const noexcept {
-    return sizeof(Impl) + impl_->verifier.allocated_byte_count();
+    return sizeof(Impl) + impl_->verifier.allocated_byte_count()
+        + impl_->verified_features.capacity() * sizeof(BackendBuffer);
 }
+std::size_t ChainChatVerifier::estimate_owned_bytes(const Gemma2ModelConfig& config,
+    std::uint32_t horizon, bool conditional) {
+    const auto rows = prepared_rows(horizon, conditional);
+    const auto arena = estimate_target_verifier_bytes(config, rows);
+    const auto host = sizeof(Impl) + std::size_t(rows) * sizeof(BackendBuffer);
+    if (arena > std::numeric_limits<std::size_t>::max() - host)
+        throw std::length_error("chain verifier storage estimate overflow");
+    return arena + host;
+}
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+ChainVerifierSchedule ChainChatVerifier::schedule_for_testing(std::uint32_t prepared_horizon,
+    std::uint32_t active_horizon, bool conditional) {
+    if (active_horizon == 0 || active_horizon > prepared_horizon)
+        throw std::invalid_argument("active chain horizon exceeds its preparation");
+    return verification_schedule(active_horizon, conditional, prepared_rows(prepared_horizon, conditional));
+}
+#endif
 const BackendBuffer& ChainChatVerifier::last_hidden() const {
     if (!impl_->last_hidden) throw std::logic_error("chain verifier has no post-full feature lease");
     return *impl_->last_hidden;
@@ -144,7 +187,7 @@ void ChainChatVerifier::warm_up_tiles(Gemma2MetalModelPlan& target) {
     if(!p.conditional) return;
     const auto& config=target.config();
     const auto request=validate_verifier_encode_request(p.request,config.vocab_size,
-        config.block_count,config.context_length,config.sliding_window);
+        config.block_count,config.context_length,config.sliding_window,config.attention_global_layer_period);
     std::array<std::uint32_t,external_speculation_max_horizon+1> path {};
     for(std::uint32_t row=0;row<path.size();++row) path[row]=row;
     // Setup rows are not a generated sequence. Publishing the complete setup
@@ -155,9 +198,9 @@ void ChainChatVerifier::warm_up_tiles(Gemma2MetalModelPlan& target) {
         p.tile_request.topology.input_row_count=0;
         p.tile_request.device_inputs.reset();
         make_chain_verifier_tile_request(p.tile_request,request,tile,
-            config.block_count,config.context_length,config.sliding_window);
+            config.block_count,config.context_length,config.sliding_window,config.attention_global_layer_period);
         auto validated=validate_verifier_encode_request(p.tile_request,config.vocab_size,
-            config.block_count,config.context_length,config.sliding_window);
+            config.block_count,config.context_length,config.sliding_window,config.attention_global_layer_period);
         auto ticket=encode_gemma2_metal_target_verifier(target,p.verifier,validated,
             gemma2_input_embedding_scale(config.embedding_length));
         submit_gemma2_metal_target_verifier(ticket);
@@ -173,15 +216,18 @@ ChainCycleResult ChainChatVerifier::run(
     std::uint32_t position, std::size_t remaining, std::span<const std::uint32_t> stops,
     const ChainProposalBatch& batch, const ChainSampleCallback& sample,
     const ChainCommitCallback& callback) {
-    auto& p = *impl_; const auto h = p.horizon; const auto& config = target.config();
-    if (remaining < 2 || position > config.context_length || h + 1 > config.context_length - position
-        || is_stop(root, stops) || batch.tokens.size() != h || batch.device.arena_epoch == 0
+    auto& p = *impl_; const auto& config = target.config();
+    const auto h = static_cast<std::uint32_t>(batch.tokens.size());
+    if (remaining < 2 || batch.tokens.empty() || batch.tokens.size() > p.horizon
+        || position > config.context_length || h + 1 > config.context_length - position
+        || is_stop(root, stops) || batch.device.arena_epoch == 0
         || batch.device.arena_epoch <= p.epoch
         || (!batch.confidence_logits.empty() && batch.confidence_logits.size() != h))
         throw std::invalid_argument("chain proposal has incompatible epoch, horizon or capacity");
     p.epoch = batch.device.arena_epoch;
     p.last_hidden = nullptr;
     ChainCycleResult result;
+    result.proposal_count = h;
     const bool lossless = p.sampling_mode == SpeculativeSamplingMode::lossless;
     auto& graph=p.graph;
     graph.header={.kind=ProposalGraphKind::chain,.horizon=h,.materialized_node_count=h+1,
@@ -227,15 +273,15 @@ ChainCycleResult ChainChatVerifier::run(
         .vocabulary_size=config.vocab_size,.context_length=config.context_length,
         .expected_root_token=root,.expected_root_position=position,
         .expected_root_history=root_history,.expected_device_arena_epoch=p.epoch}));
-    const auto schedule=verification_schedule(h,p.conditional);
+    const auto schedule=verification_schedule(h,p.conditional,p.verifier.row_capacity());
     p.request.topology=make_verifier_topology_descriptor(*p.validated_graph,schedule,
-        config.block_count,config.context_length,config.sliding_window);
+        config.block_count,config.context_length,config.sliding_window,config.attention_global_layer_period);
     p.request.selection_request_count=h+1;
     p.request.sampler_options=sampler.options();
     p.request.input_residency=VerifierInputResidency::device_resident;
     p.request.device_inputs=batch.device;
     auto request=validate_verifier_encode_request(p.request,config.vocab_size,
-        config.block_count,config.context_length,config.sliding_window);
+        config.block_count,config.context_length,config.sliding_window,config.attention_global_layer_period);
     // Previews stay on a fork. The pure controller, resumed after each live
     // callback, owns selection/adoption/stop/budget/carry decisions.
     auto& scenario=p.scenario;
@@ -301,9 +347,9 @@ ChainCycleResult ChainChatVerifier::run(
                     p.tile_request.topology.input_row_count=0;
                     p.tile_request.device_inputs.reset();
                     make_chain_verifier_tile_request(p.tile_request,request,tile,
-                        config.block_count,config.context_length,config.sliding_window);
+                        config.block_count,config.context_length,config.sliding_window,config.attention_global_layer_period);
                     auto validated=validate_verifier_encode_request(p.tile_request,
-                        config.vocab_size,config.block_count,config.context_length,config.sliding_window);
+                        config.vocab_size,config.block_count,config.context_length,config.sliding_window,config.attention_global_layer_period);
                     ticket.emplace(encode_gemma2_metal_target_verifier(target,p.verifier,validated,
                         gemma2_input_embedding_scale(config.embedding_length)));
                 } else {

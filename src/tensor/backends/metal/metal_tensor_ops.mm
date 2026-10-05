@@ -103,6 +103,9 @@ void require_matmul_inner_dimensions(const TensorDescriptor& left, const TensorD
 }
 
 void require_quantized_gguf_weight_descriptor(const TensorDescriptor& descriptor) {
+    if (descriptor.packing != TensorPacking::canonical) {
+        throw std::invalid_argument("Native GGUF Metal operations require canonical weight packing");
+    }
     if (descriptor.dtype == DType::q8_0 || descriptor.dtype == DType::q4_k || descriptor.dtype == DType::q6_k) {
         return;
     }

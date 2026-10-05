@@ -9,6 +9,7 @@
 #include "target_verifier_test_hooks.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <initializer_list>
 #include <limits>
@@ -28,8 +29,20 @@ using tensor::TensorDescriptor;
     return TensorDescriptor::from(Shape::from(dimensions), DType::f32);
 }
 
-[[nodiscard]] TensorDescriptor f16_descriptor(std::initializer_list<std::uint64_t> dimensions) {
-    return TensorDescriptor::from(Shape::from(dimensions), DType::f16);
+[[nodiscard]] std::optional<TensorDescriptor> q4_input_sums_descriptor(
+    const Gemma2ModelConfig& config, std::uint32_t row_capacity
+) {
+    if (config.architecture != ModelArchitecture::gemma3
+        && (config.embedding_length % 256U != 0U
+            || config.feed_forward_length % 256U != 0U
+            || config.attention_head_count * config.attention_value_length % 256U != 0U))
+        return std::nullopt;
+    const auto width = std::max({std::uint64_t(config.embedding_length),
+        std::uint64_t(config.feed_forward_length),
+        std::uint64_t(config.attention_head_count) * config.attention_value_length});
+    // Ordinary and larger verifier arenas also execute scalar/H1 rows. Bound
+    // the reusable sums independently of their maximum prefill row capacity.
+    return f32_descriptor({std::min(row_capacity, 2U), width / 8U});
 }
 
 [[nodiscard]] tensor::BackendBuffer allocate_metal(
@@ -50,13 +63,14 @@ using tensor::TensorDescriptor;
 void require_model_shape(
     std::uint32_t layer_count,
     std::uint32_t context_length,
-    std::uint32_t sliding_window
+    std::uint32_t sliding_window,
+    bool require_window_within_context = true
 ) {
     if (layer_count == 0U || layer_count > verifier_layer_max) {
         throw std::invalid_argument("target verifier layer count exceeds its fixed capacity");
     }
     if (!is_power_of_two(context_length) || !is_power_of_two(sliding_window)
-        || sliding_window > context_length) {
+        || (require_window_within_context && sliding_window > context_length)) {
         throw std::invalid_argument("target verifier requires power-of-two context windows");
     }
 }
@@ -135,14 +149,16 @@ void validate_device_binding(
 void populate_attention_schedule(
     VerifierTopologyDescriptor& topology,
     std::uint32_t layer_count,
-    std::uint32_t sliding_window
+    std::uint32_t sliding_window,
+    std::uint32_t global_layer_period
 ) {
+    if (global_layer_period == 0U) throw std::invalid_argument("target global layer period must be positive");
     topology.attention = VerifierAttentionSchedule {};
     auto& attention = topology.attention;
     attention.row_count = topology.input_row_count;
     attention.layer_count = layer_count;
     for (std::uint32_t layer = 0; layer < layer_count; ++layer) {
-        attention.layer_uses_sliding_window[layer] = gemma2_layer_uses_sliding_window(layer);
+        attention.layer_uses_sliding_window[layer] = ((layer + 1U) % global_layer_period) != 0U;
     }
     for (std::uint32_t row = 0; row < topology.input_row_count; ++row) {
         if (topology.depths[row] < topology.root_source_depth) {
@@ -196,7 +212,8 @@ void validate_topology_again(
     const VerifierTopologyDescriptor& topology,
     std::uint32_t vocabulary_size,
     std::uint32_t context_length,
-    std::uint32_t sliding_window
+    std::uint32_t sliding_window,
+    std::uint32_t global_layer_period
 ) {
     if (topology.input_row_count == 0U || topology.input_row_count > VerifierRowMax) {
         throw std::invalid_argument("target verifier input row count is outside fixed capacity");
@@ -358,6 +375,13 @@ void validate_topology_again(
         || topology.attention.ancestor_entry_count > verifier_ancestor_entry_max) {
         throw std::invalid_argument("target verifier attention schedule extent is invalid");
     }
+    if (global_layer_period == 0U) throw std::invalid_argument("target global layer period must be positive");
+    for (std::uint32_t layer = 0; layer < topology.attention.layer_count; ++layer) {
+        if (topology.attention.layer_uses_sliding_window[layer]
+            != (((layer + 1U) % global_layer_period) != 0U)) {
+            throw std::invalid_argument("target verifier attention pattern does not match target");
+        }
+    }
     auto expected_ancestor_offset = std::uint32_t {0U};
     for (std::uint32_t row = 0U; row < topology.input_row_count; ++row) {
         const auto local_depth = static_cast<std::uint32_t>(topology.depths[row])
@@ -443,7 +467,8 @@ VerifierTopologyDescriptor make_verifier_topology_descriptor(
     const ChainVerifierSchedule& chain_schedule,
     std::uint32_t layer_count,
     std::uint32_t context_length,
-    std::uint32_t sliding_window
+    std::uint32_t sliding_window,
+    std::uint32_t global_layer_period
 ) {
     require_model_shape(layer_count, context_length, sliding_window);
     const auto& source = graph.storage();
@@ -515,19 +540,27 @@ VerifierTopologyDescriptor make_verifier_topology_descriptor(
         };
     }
 
-    populate_attention_schedule(topology, layer_count, sliding_window);
+    populate_attention_schedule(topology, layer_count, sliding_window, global_layer_period);
     validate_topology_again(
-        topology, std::numeric_limits<std::uint32_t>::max(), context_length, sliding_window
+        topology, std::numeric_limits<std::uint32_t>::max(), context_length, sliding_window, global_layer_period
     );
     return topology;
 }
 
 ValidatedVerifierEncodeRequest::ValidatedVerifierEncodeRequest(
-    const VerifierEncodeRequest& request
-) : request_(&request) {}
+    const VerifierEncodeRequest& request,
+    std::array<std::uint32_t, 5> validation_shape
+) : request_(&request), validation_shape_(validation_shape) {}
 
 const VerifierEncodeRequest& ValidatedVerifierEncodeRequest::request() const noexcept {
     return *request_;
+}
+
+bool ValidatedVerifierEncodeRequest::validated_for(const Gemma2ModelConfig& target) const noexcept {
+    return validation_shape_ == std::array<std::uint32_t, 5> {
+        target.vocab_size, target.block_count, target.context_length,
+        target.sliding_window, target.attention_global_layer_period,
+    };
 }
 
 ValidatedVerifierEncodeRequest validate_verifier_encode_request(
@@ -535,10 +568,11 @@ ValidatedVerifierEncodeRequest validate_verifier_encode_request(
     std::uint32_t vocabulary_size,
     std::uint32_t layer_count,
     std::uint32_t context_length,
-    std::uint32_t sliding_window
+    std::uint32_t sliding_window,
+    std::uint32_t global_layer_period
 ) {
     require_model_shape(layer_count, context_length, sliding_window);
-    validate_topology_again(request.topology, vocabulary_size, context_length, sliding_window);
+    validate_topology_again(request.topology, vocabulary_size, context_length, sliding_window, global_layer_period);
     if (request.topology.attention.layer_count != layer_count) {
         throw std::invalid_argument("target verifier topology layer count does not match target plan");
     }
@@ -588,7 +622,9 @@ ValidatedVerifierEncodeRequest validate_verifier_encode_request(
             throw std::invalid_argument("target verifier selection suffix did not reach a root");
         }
     }
-    return ValidatedVerifierEncodeRequest(request);
+    return ValidatedVerifierEncodeRequest(request, {
+        vocabulary_size, layer_count, context_length, sliding_window, global_layer_period,
+    });
 }
 
 void make_chain_verifier_tile_request(
@@ -597,7 +633,8 @@ void make_chain_verifier_tile_request(
     std::uint32_t tile_index,
     std::uint32_t layer_count,
     std::uint32_t context_length,
-    std::uint32_t sliding_window
+    std::uint32_t sliding_window,
+    std::uint32_t global_layer_period
 ) {
     require_model_shape(layer_count, context_length, sliding_window);
     if (output.selection_request_count != 0U || output.topology.input_row_count != 0U
@@ -727,14 +764,14 @@ void make_chain_verifier_tile_request(
             throw std::invalid_argument("target verifier chain tile lost its output-frontier edge");
         }
     }
-    populate_attention_schedule(topology, layer_count, sliding_window);
+    populate_attention_schedule(topology, layer_count, sliding_window, global_layer_period);
     validate_topology_again(
-        topology, std::numeric_limits<std::uint32_t>::max(), context_length, sliding_window
+        topology, std::numeric_limits<std::uint32_t>::max(), context_length, sliding_window, global_layer_period
     );
 }
 
 // Defined with the Metal command implementation, allocated only during plan setup.
-std::shared_ptr<TargetVerifierRuntimeState> make_target_verifier_runtime_state();
+std::shared_ptr<TargetVerifierRuntimeState> make_target_verifier_runtime_state(bool precise_math);
 
 Gemma2MetalTargetVerifierPlan::Gemma2MetalTargetVerifierPlan(
     Gemma2MetalTargetVerifierScratch scratch,
@@ -742,8 +779,9 @@ Gemma2MetalTargetVerifierPlan::Gemma2MetalTargetVerifierPlan(
     std::uint32_t layer_count,
     std::uint32_t vocabulary_size,
     std::uintptr_t target_weight_identity,
-    std::size_t allocated_byte_count
-) : runtime_(make_target_verifier_runtime_state()), scratch_(std::move(scratch)),
+    std::size_t allocated_byte_count,
+    bool precise_math
+) : runtime_(make_target_verifier_runtime_state(precise_math)), scratch_(std::move(scratch)),
     row_capacity_(row_capacity),
     layer_count_(layer_count),
     vocabulary_size_(vocabulary_size),
@@ -771,6 +809,57 @@ Gemma2MetalTargetVerifierPlan::completion_candidates() noexcept {
     return completion_candidates_;
 }
 
+std::size_t estimate_target_verifier_bytes(const Gemma2ModelConfig& config, std::uint32_t row_capacity) {
+    // An ordinary workspace may have a runtime context shorter than the
+    // model's local window. It never creates ancestry; topology admission
+    // below the public verifier boundary retains its stricter window check.
+    require_model_shape(config.block_count, config.context_length, config.sliding_window, false);
+    if (row_capacity == 0U || row_capacity > VerifierRowMax)
+        throw std::invalid_argument("target verifier row capacity must be in [1, 1025]");
+    std::size_t bytes = 0;
+    const auto add = [&](std::initializer_list<std::uint64_t> shape, DType dtype = DType::f32) {
+        const auto count = TensorDescriptor::from(Shape::from(shape), dtype).byte_count;
+        if (count > std::numeric_limits<std::size_t>::max() - bytes)
+            throw std::overflow_error("target verifier allocation byte count overflow");
+        bytes += count;
+    };
+    const auto rows = std::uint64_t(row_capacity);
+    const auto accepted = std::uint64_t(std::bit_ceil(std::min(row_capacity,
+        std::uint32_t(external_speculation_max_horizon + 1U))));
+    const auto kv = gemma_kv_dtype(config);
+    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        add({rows, config.attention_head_count_kv, config.attention_key_length}, kv);
+        add({rows, config.attention_head_count_kv, config.attention_value_length}, kv);
+        add({accepted, config.attention_head_count_kv, config.attention_key_length}, kv);
+        add({accepted, config.attention_head_count_kv, config.attention_value_length}, kv);
+    }
+    constexpr auto batches = target_selection_batch_rows;
+    const auto tiles = (std::uint64_t(config.vocab_size) + gemma2_metal_selection_tile_size - 1U)
+        / gemma2_metal_selection_tile_size;
+    add({batches, config.vocab_size});
+    add({2U * batches, tiles, token_sampler_max_base_candidates, sizeof(TokenLogit) / sizeof(float)});
+    add({rows, 2U + token_sampler_max_candidates * sizeof(TokenLogit) / sizeof(float)});
+    add({rows, sizeof(VerifierDeviceSelectionRow) / sizeof(float)});
+    add({rows, 4U + token_sampler_max_repetition_window});
+    add({rows, token_sampler_max_repetition_window});
+    add({3U, rows}); // Token, expected-token and position staging.
+    add({config.block_count, rows, 4U});
+    add({verifier_ancestor_entry_max});
+    add({std::max(rows, accepted)});
+    add({1U});
+    add({6U, rows, config.embedding_length});
+    add({2U, rows, config.attention_head_count, config.attention_key_length});
+    add({rows, config.attention_head_count_kv, config.attention_key_length});
+    add({rows, config.attention_head_count_kv, config.attention_value_length});
+    add({rows, gemma2_decode_attention_max_partitions, config.attention_head_count,
+        std::uint64_t(config.attention_value_length) + 2U});
+    add({rows, config.attention_head_count, config.attention_value_length});
+    add({3U, rows, config.feed_forward_length});
+    if (const auto sums = q4_input_sums_descriptor(config, row_capacity))
+        add({sums->shape.dimension(0), sums->shape.dimension(1)});
+    return bytes;
+}
+
 Gemma2MetalTargetVerifierPlan create_gemma2_metal_target_verifier_plan(
     const Gemma2MetalModelPlan& target,
     std::uint32_t row_capacity
@@ -785,14 +874,18 @@ Gemma2MetalTargetVerifierPlan create_gemma2_metal_target_verifier_plan(
             "target verifier requires an available Metal device"
         );
     }
-    if (target.output_head_policy() != Gemma2OutputHeadPolicy::q8_0) {
-        throw std::invalid_argument("target verifier requires the production Q8 output head");
+    if (target.output_head_policy() != Gemma2OutputHeadPolicy::q8_0
+        && target.output_head_policy() != Gemma2OutputHeadPolicy::q6_k) {
+        throw std::invalid_argument("target verifier requires a native Q8 or Q6 output head");
     }
     if (row_capacity == 0U || row_capacity > VerifierRowMax) {
         throw std::invalid_argument("target verifier row capacity must be in [1, 1025]");
     }
     const auto& config = target.config();
-    require_model_shape(config.block_count, config.context_length, config.sliding_window);
+    // An ordinary workspace may have a runtime context shorter than the
+    // model's local window. It never creates ancestry; topology admission
+    // below the public verifier boundary retains its stricter window check.
+    require_model_shape(config.block_count, config.context_length, config.sliding_window, false);
     if (config.attention_head_count != 2U * config.attention_head_count_kv
         || config.attention_key_length != 256U
         || config.attention_value_length != config.attention_key_length) {
@@ -820,23 +913,29 @@ Gemma2MetalTargetVerifierPlan create_gemma2_metal_target_verifier_plan(
     const auto request_f32 = sizeof(VerifierDeviceSelectionRow) / sizeof(float);
     constexpr std::uint64_t resolved_request_f32 = 4U + token_sampler_max_repetition_window;
 
+    const auto kv_descriptor = [&](std::initializer_list<std::uint64_t> shape) {
+        return TensorDescriptor::from(Shape::from(shape), target.kv_cache().front().key.descriptor().dtype);
+    };
     std::size_t allocated = 0;
     std::vector<Gemma2MetalTargetVerifierKVLayer> kv_layers;
     kv_layers.reserve(config.block_count);
-    constexpr auto accepted_capacity = std::uint64_t {32U};
+    // A selected path cannot outgrow its arena or the controller's horizon.
+    // The ordinary 128-row workspace retains its existing 32-slot allocation.
+    const auto accepted_capacity = static_cast<std::uint64_t>(std::bit_ceil(std::min(
+        row_capacity, static_cast<std::uint32_t>(external_speculation_max_horizon + 1U))));
     for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
         kv_layers.push_back(Gemma2MetalTargetVerifierKVLayer {
-            .private_key = allocate_metal(f16_descriptor({rows, key_width}), allocated),
-            .private_value = allocate_metal(f16_descriptor({rows, value_width}), allocated),
+            .private_key = allocate_metal(kv_descriptor({rows, key_width}), allocated),
+            .private_value = allocate_metal(kv_descriptor({rows, value_width}), allocated),
             .accepted_backup_key = allocate_metal(
-                f16_descriptor({
+                kv_descriptor({
                     accepted_capacity, config.attention_head_count_kv,
                     config.attention_key_length,
                 }),
                 allocated
             ),
             .accepted_backup_value = allocate_metal(
-                f16_descriptor({
+                kv_descriptor({
                     accepted_capacity, config.attention_head_count_kv,
                     config.attention_value_length,
                 }),
@@ -869,6 +968,9 @@ Gemma2MetalTargetVerifierPlan create_gemma2_metal_target_verifier_plan(
         .batch_row_capacity = static_cast<std::uint32_t>(target_selection_batch_rows),
     };
 
+    std::optional<tensor::BackendBuffer> q4_input_sums;
+    if (const auto descriptor = q4_input_sums_descriptor(config, row_capacity))
+        q4_input_sums = allocate_metal(*descriptor, allocated);
     Gemma2MetalTargetVerifierScratch scratch {
         .token_id_staging = allocate_metal(f32_descriptor({rows}), allocated),
         .expected_token_id_staging = allocate_metal(f32_descriptor({rows}), allocated),
@@ -879,7 +981,7 @@ Gemma2MetalTargetVerifierPlan create_gemma2_metal_target_verifier_plan(
         .ancestor_index_staging = allocate_metal(f32_descriptor({
             verifier_ancestor_entry_max,
         }), allocated),
-        .selected_path_staging = allocate_metal(f32_descriptor({accepted_capacity}), allocated),
+        .selected_path_staging = allocate_metal(f32_descriptor({std::max(rows, accepted_capacity)}), allocated),
         .input_status = allocate_metal(f32_descriptor({1U}), allocated),
         .normalized_hidden = allocate_metal(f32_descriptor({rows, config.embedding_length}), allocated),
         .raw_query = allocate_metal(f32_descriptor({rows, query_width}), allocated),
@@ -920,12 +1022,13 @@ Gemma2MetalTargetVerifierPlan create_gemma2_metal_target_verifier_plan(
         .feed_forward_residual = allocate_metal(
             f32_descriptor({rows, config.embedding_length}), allocated
         ),
+        .q4_input_sums = std::move(q4_input_sums),
         .kv_layers = std::move(kv_layers),
         .selection = std::move(selection),
     };
     return Gemma2MetalTargetVerifierPlan(
         std::move(scratch), row_capacity, config.block_count, config.vocab_size,
-        target.allocation_identities()[0], allocated
+        target.allocation_identities()[0], allocated, config.architecture == ModelArchitecture::gemma3
     );
 }
 

@@ -103,6 +103,16 @@ std::uint32_t transaction_capacity(const StandaloneTliMapping& mapping, std::uin
         throw std::length_error("standalone transaction capacity overflow");
     return static_cast<std::uint32_t>(2 * per_token + horizon + 1);
 }
+std::uint32_t native_context_capacity(const StandaloneTliMapping& mapping, std::uint32_t target_context) {
+    if (mapping.direct_ids()) {
+        if (target_context > Gemma3DraftPlan::context_capacity)
+            throw std::length_error("paired Gemma3 context exceeds the drafter's 32768-token model limit");
+        return target_context;
+    }
+    // Cross-generation tokenization can expand the target history. Its native
+    // bound remains independent of the target's row count.
+    return Gemma3DraftPlan::context_capacity;
+}
 } // namespace
 
 struct StandaloneChatPlan::Impl {
@@ -117,7 +127,7 @@ struct StandaloneChatPlan::Impl {
     std::vector<std::uint32_t> target_history, draft_history, encoded;
     std::vector<std::size_t> ends, bases;
     std::vector<char> text;
-    tokenizer::TokenizerEncodeWorkspace workspace;
+    std::optional<tokenizer::TokenizerEncodeWorkspace> workspace;
     struct SavedContext {
         std::vector<std::uint32_t> target_history, draft_history;
         std::vector<std::size_t> ends, bases;
@@ -146,13 +156,17 @@ struct StandaloneChatPlan::Impl {
         : source(std::move(artifact)), target_tokenizer(tokenizer),
           draft_tokenizer(source->tokenizer()), mapping(target_tokenizer, draft_tokenizer),
           draft(*source, signed_mapping(mapping.draft_to_target()), target.config().vocab_size,
-              options.horizon, transaction_capacity(mapping, options.horizon)),
+              options.horizon, transaction_capacity(mapping, options.horizon),
+              native_context_capacity(mapping, target.config().context_length)),
           verifier(target, options.horizon, SpeculativeSamplingMode::lossless, options.conditional_verification),
           execution(options), target_history(target.config().context_length),
-          draft_history(source->context_limit()),
+          draft_history(draft.prepared_context_capacity()),
           encoded(draft_history.size()), ends(target_history.size() + 1, absent),
-          bases(target_history.size() + 1, absent), text(text_capacity(tokenizer, target.config().context_length)),
-          workspace(text.size()), saved(target_history.size(), draft_history.size()) { ends[0] = bases[0] = 0; }
+          bases(target_history.size() + 1, absent),
+          text(mapping.direct_ids() ? 0 : text_capacity(tokenizer, target.config().context_length)),
+          workspace(mapping.direct_ids() ? std::nullopt :
+              std::optional<tokenizer::TokenizerEncodeWorkspace>(std::in_place, text.size())),
+          saved(target_history.size(), draft_history.size()) { ends[0] = bases[0] = 0; }
 
 #if defined(LOCAL_GGUF_ENGINE_TESTING)
     Impl(std::span<const tensor::TensorView> tensors, const tokenizer::Tokenizer& draft_tokens,
@@ -160,22 +174,34 @@ struct StandaloneChatPlan::Impl {
         StandaloneExecutionOptions options)
         : target_tokenizer(target_tokens), draft_tokenizer(draft_tokens), mapping(target_tokenizer, draft_tokenizer),
           draft(tensors, signed_mapping(mapping.draft_to_target()), target.config().vocab_size, options.horizon,
-              transaction_capacity(mapping, options.horizon)),
+              transaction_capacity(mapping, options.horizon),
+              native_context_capacity(mapping, target.config().context_length)),
           verifier(target, options.horizon, SpeculativeSamplingMode::lossless, options.conditional_verification),
           execution(options), target_history(target.config().context_length),
-          draft_history(Gemma3DraftPlan::context_capacity),
+          draft_history(draft.prepared_context_capacity()),
           encoded(draft_history.size()), ends(target_history.size() + 1, absent),
-          bases(target_history.size() + 1, absent), text(text_capacity(target_tokens, target.config().context_length)),
-          workspace(text.size()), saved(target_history.size(), draft_history.size()) { ends[0] = bases[0] = 0; }
+          bases(target_history.size() + 1, absent),
+          text(mapping.direct_ids() ? 0 : text_capacity(target_tokens, target.config().context_length)),
+          workspace(mapping.direct_ids() ? std::nullopt :
+              std::optional<tokenizer::TokenizerEncodeWorkspace>(std::in_place, text.size())),
+          saved(target_history.size(), draft_history.size()) { ends[0] = bases[0] = 0; }
 #endif
     ~Impl() { checkpoint_state->active = false; }
 
     void ready() const {
         if (failed || draft.poisoned()) throw std::logic_error("standalone draft state is poisoned");
     }
+    std::size_t encode_context(std::span<const std::uint32_t> tokens) {
+        return mapping.direct_ids() ? mapping.encode_target_context(tokens, encoded)
+            : mapping.encode_target_context(tokens, encoded, text, *workspace);
+    }
+    std::size_t encode_token(std::uint32_t token) {
+        return mapping.direct_ids() ? mapping.append_target_token(token, encoded)
+            : mapping.append_target_token(token, encoded, text, *workspace);
+    }
     void restore(std::size_t restored_base, std::size_t restored_end) {
         if (restored_base > restored_end || restored_end > draft_history.size()
-            || restored_end - restored_base > Gemma3DraftPlan::context_capacity)
+            || restored_end - restored_base > draft.prepared_context_capacity())
             throw std::logic_error("invalid standalone draft window receipt");
         const auto started = now_ns();
         draft.reset();
@@ -188,7 +214,7 @@ struct StandaloneChatPlan::Impl {
     void append_emissions(std::span<const std::uint32_t> tokens) {
         if (tokens.size() > draft_history.size() - draft_count)
             throw std::length_error("standalone draft emission ledger overflow");
-        if (tokens.size() > Gemma3DraftPlan::context_capacity - (draft_count - base))
+        if (tokens.size() > draft.prepared_context_capacity() - (draft_count - base))
             throw std::length_error("Gemma3 draft context capacity exhausted; target context was not shortened");
         const auto previous = draft_count;
         std::copy(tokens.begin(), tokens.end(), draft_history.begin() + static_cast<std::ptrdiff_t>(draft_count));
@@ -207,8 +233,8 @@ struct StandaloneChatPlan::Impl {
     void observe(std::uint32_t token, std::uint32_t position) {
         if (position != target_count) throw std::logic_error("standalone commit target position mismatch");
         if (target_count == target_history.size()) throw std::length_error("standalone target ledger overflow");
-        const auto count = mapping.append_target_token(token, encoded, text, workspace);
-        if (count > Gemma3DraftPlan::context_capacity - (draft_count - base))
+        const auto count = encode_token(token);
+        if (count > draft.prepared_context_capacity() - (draft_count - base))
             throw std::length_error("standalone target token exceeds the draft's native context capacity");
         try {
             append_emissions(std::span<const std::uint32_t>(encoded).first(count));
@@ -244,10 +270,57 @@ const Gemma3DraftPlan& StandaloneChatPlan::draft_plan_for_testing() const noexce
 const Gemma3DraftPlan* StandaloneChatPlan::gemma3_draft_plan_for_testing() const noexcept {
     return &impl_->draft;
 }
+std::size_t StandaloneChatPlan::tokenizer_workspace_bytes_for_testing() const noexcept {
+    return impl_->text.capacity() + (impl_->workspace ? impl_->workspace->owned_bytes() : 0);
+}
 #endif
 StandaloneChatPlan::StandaloneChatPlan(StandaloneChatPlan&&) noexcept = default;
 StandaloneChatPlan& StandaloneChatPlan::operator=(StandaloneChatPlan&&) noexcept = default;
+std::size_t StandaloneChatPlan::estimate_owned_bytes(const Gemma2ModelConfig& target,
+    const tokenizer::Tokenizer& target_tokenizer, const tokenizer::Tokenizer& draft_tokenizer,
+    const StandaloneTliMapping& mapping, StandaloneExecutionOptions execution) {
+    if (execution.horizon == 0 || execution.horizon > external_speculation_max_horizon
+        || target_tokenizer.vocabulary().size() != target.vocab_size
+        || draft_tokenizer.vocabulary().size() != Gemma3DraftPlan::vocabulary_size)
+        throw std::invalid_argument("standalone storage estimate has incompatible vocabulary or horizon");
+    static_cast<void>(resolve_standalone_draft_sampler_options(TokenSamplerOptions{}, execution.draft_sampling,
+        Gemma3DraftPlan::vocabulary_size));
+    const auto native_rows = native_context_capacity(mapping, target.context_length);
+    std::size_t result = sizeof(Impl) + sizeof(StandaloneChatCheckpointState);
+    const auto add = [&](std::size_t count, std::size_t width = 1) {
+        if (count > (std::numeric_limits<std::size_t>::max() - result) / width)
+            throw std::length_error("standalone storage estimate overflow");
+        result += count * width;
+    };
+    add(Gemma3DraftPlan::estimate_owned_bytes(target.vocab_size, execution.horizon,
+        transaction_capacity(mapping, execution.horizon), native_rows));
+    add(ChainChatVerifier::estimate_owned_bytes(target, execution.horizon, execution.conditional_verification));
+    add(target.context_length, 2 * sizeof(std::uint32_t));
+    add(native_rows, 3 * sizeof(std::uint32_t));
+    add(std::size_t(target.context_length) + 1, 4 * sizeof(std::size_t));
+    if (!mapping.direct_ids()) {
+        const auto text_bytes = text_capacity(target_tokenizer, target.context_length);
+        add(text_bytes);
+        add(tokenizer::TokenizerEncodeWorkspace::estimate_owned_bytes(text_bytes));
+    }
+    add(target_tokenizer.owned_bytes()); add(draft_tokenizer.owned_bytes()); add(mapping.owned_bytes());
+    return result;
+}
 std::uint32_t StandaloneChatPlan::horizon() const noexcept { return impl_->execution.horizon; }
+bool StandaloneChatPlan::direct_ids() const noexcept { return impl_->mapping.direct_ids(); }
+std::uint32_t StandaloneChatPlan::cycle_horizon(std::uint32_t position, std::size_t remaining) const noexcept {
+    const auto& p = *impl_;
+    if (remaining < 2 || position != p.target_count || position >= p.target_history.size()) return 0;
+    const auto target_available = p.target_history.size() - position;
+    const auto draft_available = p.draft.prepared_context_capacity() - (p.draft_count - p.base);
+    const auto append_bound = p.mapping.max_append_tokens();
+    // Reserve a root conversion and the longest possible correction at the
+    // last rejected edge. The direct-ID case is exactly H+1 native rows.
+    const auto reserved = 2 * std::size_t(append_bound) - 1;
+    if (target_available < 2 || draft_available <= reserved) return 0;
+    return static_cast<std::uint32_t>(std::min({std::size_t(p.execution.horizon),
+        remaining - 1, target_available - 1, draft_available - reserved}));
+}
 StandaloneDraftKind StandaloneChatPlan::kind() const noexcept {
     return StandaloneDraftKind::gemma3_270m_q8;
 }
@@ -266,7 +339,8 @@ std::size_t StandaloneChatPlan::owned_bytes() const noexcept {
         + sizeof(StandaloneChatCheckpointState)
         + 4 * (p.target_history.capacity() + p.draft_history.capacity() + p.encoded.capacity())
         + sizeof(std::size_t) * (p.ends.capacity() + p.bases.capacity()) + p.text.capacity()
-        + p.workspace.owned_bytes() + p.target_tokenizer.owned_bytes() + p.draft_tokenizer.owned_bytes()
+        + (p.workspace ? p.workspace->owned_bytes() : 0)
+        + p.target_tokenizer.owned_bytes() + p.draft_tokenizer.owned_bytes()
         + p.mapping.owned_bytes();
 }
 StandaloneChatCheckpoint StandaloneChatPlan::checkpoint() {
@@ -347,9 +421,9 @@ void StandaloneChatPlan::synchronize_context(std::span<const std::uint32_t> toke
     const auto restored_base = common == p.target_count ? p.base : p.bases[common];
     // Complete potentially failing input conversion before rewinding either
     // the emission ledger or a sliding cache. The encoded scratch is private.
-    const auto count = p.mapping.encode_target_context(tokens.subspan(common), p.encoded, p.text, p.workspace);
+    const auto count = p.encode_context(tokens.subspan(common));
     if (count > p.draft_history.size() - restored_end
-        || (count > Gemma3DraftPlan::context_capacity - (restored_end - restored_base)))
+        || (count > p.draft.prepared_context_capacity() - (restored_end - restored_base)))
         throw std::length_error("standalone converted prompt exceeds its prepared native context capacity");
     try {
         if (replace_context) reset();
@@ -367,19 +441,60 @@ void StandaloneChatPlan::synchronize_context(std::span<const std::uint32_t> toke
         if (common == tokens.size()) return;
         p.append_emissions(std::span<const std::uint32_t>(p.encoded).first(count));
         for (std::size_t i = common; i < tokens.size(); ++i) {
-            p.target_history[i] = tokens[i]; p.ends[i + 1] = p.bases[i + 1] = absent;
+            p.target_history[i] = tokens[i];
+            // Direct token conditioning has a receipt for every prefix,
+            // including byte fragments which text conversion could merge.
+            p.ends[i + 1] = p.mapping.direct_ids() ? restored_end + i - common + 1 : absent;
+            p.bases[i + 1] = p.mapping.direct_ids() ? p.base : absent;
         }
         p.target_count = static_cast<std::uint32_t>(tokens.size());
         p.ends[p.target_count] = p.draft_count; p.bases[p.target_count] = p.base;
+    } catch (...) { p.failed = true; throw; }
+}
+void StandaloneChatPlan::validate_direct_context(std::span<const std::uint32_t> tokens,
+    std::span<const std::uint32_t> suffix) const {
+    const auto& p = *impl_; p.ready();
+    if (!p.mapping.direct_ids() || p.cycle_active)
+        throw std::logic_error("deferred context validation requires an idle direct-ID draft");
+    const auto capacity = std::min(p.target_history.size(), std::size_t(p.draft.prepared_context_capacity()));
+    if (tokens.size() > capacity || suffix.size() > capacity - tokens.size())
+        throw std::length_error("deferred direct-ID context exceeds its prepared capacity");
+    for (auto sequence : {tokens, suffix}) for (auto token : sequence)
+        if (token >= p.target_tokenizer.vocabulary().size())
+            throw std::invalid_argument("deferred direct-ID token is outside the vocabulary");
+}
+void StandaloneChatPlan::observe_committed_pending(std::uint32_t token, std::uint32_t position) {
+    auto& p = *impl_; p.ready();
+    if (!p.mapping.direct_ids() || p.cycle_active || position != p.target_count)
+        throw std::logic_error("pending target observation requires a synchronized direct-ID prefix");
+    if (token >= p.target_tokenizer.vocabulary().size())
+        throw std::invalid_argument("pending target observation is outside the vocabulary");
+    if (p.target_count == p.target_history.size() || p.draft_count == p.draft_history.size()
+        || p.draft_count - p.base == p.draft.prepared_context_capacity())
+        throw std::length_error("pending target observation exceeds its prepared capacity");
+    try {
+        if (p.draft.position() != p.draft_count - p.base)
+            throw std::logic_error("pending target observation requires a synchronized native frontier");
+        if (p.draft.materialized_position() != p.draft.position()) {
+            // A cached continuation may re-evaluate the final target token
+            // without extending the synchronized draft prefix. That prefix
+            // can already own a pending token, so append both known rows
+            // before recording this next committed token exactly once.
+            p.observe(token, position);
+            return;
+        }
+        add_stats(p.stats, p.draft.restore_pending_token(token));
+        p.draft_history[p.draft_count++] = token;
+        p.record(token);
     } catch (...) { p.failed = true; throw; }
 }
 void StandaloneChatPlan::validate_committed_prefix(std::span<const std::uint32_t> tokens) {
     auto& p = *impl_; p.ready();
     if (tokens.size() > p.target_history.size() - p.target_count)
         throw std::length_error("standalone target commit ledger capacity exhausted");
-    auto available = Gemma3DraftPlan::context_capacity - (p.draft_count - p.base);
+    auto available = p.draft.prepared_context_capacity() - (p.draft_count - p.base);
     for (const auto token : tokens) {
-        const auto count = p.mapping.append_target_token(token, p.encoded, p.text, p.workspace);
+        const auto count = p.encode_token(token);
         if (count > available)
             throw std::length_error("standalone target commit exceeds the draft's native context capacity");
         available -= count;
@@ -397,6 +512,9 @@ StandaloneCycleResult StandaloneChatPlan::run(Gemma2MetalModelPlan& target, Toke
     auto& p = *impl_; p.ready();
     if (p.cycle_active) throw std::logic_error("standalone cycles are not reentrant");
     if (position != p.target_count) throw std::logic_error("standalone cycle target frontier mismatch");
+    const auto active_horizon = cycle_horizon(position, remaining);
+    if (active_horizon == 0)
+        throw std::length_error("standalone cycle has no proposal capacity; ordinary continuation is required");
     const auto draft_options = effective_draft_sampler_options(sampler.options());
     struct CycleGuard {
         bool& active;
@@ -409,30 +527,35 @@ StandaloneCycleResult StandaloneChatPlan::run(Gemma2MetalModelPlan& target, Toke
     bool delivered = false;
     bool transaction_started = false;
     try {
-        const auto root_count = p.mapping.append_target_token(root, p.encoded, p.text, p.workspace);
+        const auto root_count = p.encode_token(root);
         {
-            const auto available = Gemma3DraftPlan::context_capacity - (p.draft_count - p.base);
+            const auto available = p.draft.prepared_context_capacity() - (p.draft_count - p.base);
             // The final target correction is not known until verification.
             // Prove room for its complete native encoding before a callback
             // can make any part of this cycle irreversible.
-            const auto required = root_count + std::max<std::size_t>(horizon(),
-                horizon() - 1U + p.mapping.max_append_tokens());
+            const auto required = root_count + std::max<std::size_t>(active_horizon,
+                active_horizon - 1U + p.mapping.max_append_tokens());
             if (required > available)
                 throw std::length_error("Gemma3 draft lacks context capacity for the requested chain and target correction");
         }
         const auto transaction_stats = p.draft.begin_transaction();
         transaction_started = true;
         add_stats(p.stats, transaction_stats);
-        p.append_emissions(std::span<const std::uint32_t>(p.encoded).first(root_count));
-        if (p.draft.position() == 0) throw std::invalid_argument("standalone draft has no tokenized context");
+        if (root_count > p.draft_history.size() - p.draft_count)
+            throw std::length_error("standalone root exceeds its native emission ledger");
+        const auto root_tokens = std::span<const std::uint32_t>(p.encoded).first(root_count);
+        std::copy(root_tokens.begin(), root_tokens.end(),
+            p.draft_history.begin() + static_cast<std::ptrdiff_t>(p.draft_count));
+        p.draft_count += root_count;
         const auto after_root = p.draft_count;
-        const auto words = sampler.preview_proposal_words(horizon());
+        const auto words = sampler.preview_proposal_words(active_horizon);
         const auto proposal = p.draft.propose(root,
-            std::span<const std::uint32_t>(words.words).first(horizon()),
-            draft_options, sampler.history_snapshot());
+            std::span<const std::uint32_t>(words.words).first(active_horizon),
+            draft_options, sampler.history_snapshot(), root_tokens, p.mapping.direct_ids());
         add_stats(p.stats, proposal.execution);
         auto draft_elapsed = now_ns() - started;
-        if (proposal.target_tokens.size() != horizon() || proposal.draft_tokens.size() != horizon())
+        if (proposal.target_tokens.size() != active_horizon || proposal.draft_tokens.size() != active_horizon
+            || proposal.start_position != after_root - p.base)
             throw std::logic_error("standalone draft omitted a requested proposal");
         const auto sample = [&](TokenSamplerFork& fork, std::uint32_t depth,
             std::span<const TokenLogit> candidates) {
@@ -450,7 +573,7 @@ StandaloneCycleResult StandaloneChatPlan::run(Gemma2MetalModelPlan& target, Toke
             else {
                 // A stop or budget correction is cached by the target endpoint
                 // but is not a draft proposal. Conversion follows finalization.
-                if (token.depth > horizon() || token.token_id != proposal.target_tokens[token.depth - 1]) {
+                if (token.depth > active_horizon || token.token_id != proposal.target_tokens[token.depth - 1]) {
                     if (!token.stop_token && token.depth + 1 != remaining)
                         throw std::logic_error("non-endpoint correction committed inside standalone chain");
                     const auto correction_started = now_ns();
@@ -507,7 +630,7 @@ void StandaloneChatPlan::warm_up(Gemma2MetalModelPlan& target, const TokenSample
         gemma2_input_embedding_scale(target.config().embedding_length), warm_sampler.selection_request()));
     warm_sampler.observe_tokens(prompt);
     const auto stop = [](const ChainCommittedToken&) { return Gemma2MetalTokenStreamDecision::stop_generation; };
-    static_cast<void>(run(target, warm_sampler, prompt[0], 1, 2, {}, stop));
+    static_cast<void>(run(target, warm_sampler, prompt[0], 1, horizon() + 1, {}, stop));
     p.verifier.warm_up_tiles(target);
     reset();
 }

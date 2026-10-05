@@ -12,6 +12,7 @@
 #include <limits>
 #include <mutex>
 #include <numeric>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -20,6 +21,9 @@ namespace local_gguf_engine::tensor {
 namespace {
 
 void require_quantized_descriptor(const TensorDescriptor& descriptor, DType expected_dtype) {
+    if (descriptor.packing != TensorPacking::canonical) {
+        throw std::invalid_argument("native quantized block access requires canonical tensor packing");
+    }
     if (descriptor.dtype != expected_dtype) {
         throw TensorError(
             TensorErrorCode::unsupported_quantized_dtype,

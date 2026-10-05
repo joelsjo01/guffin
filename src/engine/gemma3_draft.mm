@@ -98,7 +98,8 @@ kernel void gd_attention(device const float4* q [[buffer(0)]],
  device const float4* resident_k [[buffer(1)]],device const float4* resident_v [[buffer(2)]],
  device const float4* private_k [[buffer(3)]],device const float4* private_v [[buffer(4)]],
  device float4* partial [[buffer(5)]],device float2* scales [[buffer(6)]],
- constant GDAttention& p [[buffer(7)]],uint3 group [[threadgroup_position_in_grid]],
+ constant GDAttention& p [[buffer(7)]],device float4* output [[buffer(8)]],
+ device atomic_uint* status [[buffer(9)]],uint3 group [[threadgroup_position_in_grid]],
  uint lane [[thread_index_in_simdgroup]],uint sg [[simdgroup_index_in_threadgroup]]) {
  uint row=group.y,head=group.x,position=p.position+row;
  uint first=p.local&&position>=511?position-511:0,count=position-first+1;
@@ -129,6 +130,15 @@ kernel void gd_attention(device const float4* q [[buffer(0)]],
    float next=max(maximum,a.x),old=denom==0?0.0f:exp(maximum-next),add=exp(a.x-next);
    acc0=acc0*old+accum[i*64+lane*2]*add;acc1=acc1*old+accum[i*64+lane*2+1]*add;
    denom=denom*old+a.y*add;maximum=next;
+ }
+ if(p.max_parts==1){
+   // Preserve the one-partition reducer's F32 arithmetic without round-tripping
+   // its entire partial output through another kernel and command dependency.
+   float add=exp(maximum-maximum);acc0=(float4(0)*0.0f+acc0*add)/(0.0f+denom*add);
+   acc1=(float4(0)*0.0f+acc1*add)/(0.0f+denom*add);
+   output[(row*4+head)*64+lane*2]=acc0;output[(row*4+head)*64+lane*2+1]=acc1;
+   if(!all(isfinite(acc0))||!all(isfinite(acc1)))atomic_store_explicit(status,5u,memory_order_relaxed);
+   return;
  }
  uint index=(row*4+head)*32+partition;
  partial[index*64+lane*2]=acc0;partial[index*64+lane*2+1]=acc1;
@@ -169,8 +179,8 @@ kernel void gd_history_clear(device uint* bits [[buffer(0)]],uint i [[thread_pos
  if(i<8192)bits[i]=0;
 }
 kernel void gd_history_mark(device const uint* history [[buffer(0)]],device atomic_uint* bits [[buffer(1)]],
- constant uint& count [[buffer(2)]],uint i [[thread_position_in_grid]]) {
- if(i<count){uint token=history[i];atomic_fetch_or_explicit(bits+token/32,1u<<(token%32),memory_order_relaxed);}
+ constant uint2& range [[buffer(2)]],uint i [[thread_position_in_grid]]) {
+ if(i<range.y){uint token=history[range.x+i];atomic_fetch_or_explicit(bits+token/32,1u<<(token%32),memory_order_relaxed);}
 }
 kernel void gd_process(device const float* logits [[buffer(0)]],device const int* map [[buffer(1)]],
  device const uint* history_bits [[buffer(2)]],device float* scores [[buffer(3)]],
@@ -204,10 +214,95 @@ kernel void gd_sort_tile(device const float* scores [[buffer(0)]],device GDPair*
  }
  if(token<262144)output[token]=tile[t];
 }
+// Merge only the best 64 entries from each run. The initial 512-token
+// tiles remain intact for the rare large-support fallback.
+kernel void gd_bounded_merge(device const GDPair* input [[buffer(0)]],device GDPair* output [[buffer(1)]],
+ constant uint2& p [[buffer(2)]],uint i [[thread_position_in_grid]]) {
+ if(i>=p.x*64)return;uint group=i/64,rank=i%64;
+ device const GDPair* a=input+group*2*p.y;device const GDPair* b=a+p.y;
+ int low=0,high=int(rank);
+ while(low<=high){int probe=(low+high)/2;uint ai=uint(probe),bi=rank-ai;
+   if(ai>0&&bi<64&&gd_better(b[bi],a[ai-1]))high=probe-1;
+   else if(bi>0&&ai<64&&gd_better(a[ai],b[bi-1]))low=probe+1;
+   else{low=probe;break;}}
+ uint ai=uint(low),bi=rank-ai;
+ output[i]=ai>=64?b[bi]:bi>=64?a[ai]:gd_better(b[bi],a[ai])?b[bi]:a[ai];
+}
+kernel void gd_compact_collect(device const float* scores [[buffer(0)]],device const int* map [[buffer(1)]],
+ device const GDPair* best [[buffer(2)]],device GDPair* support [[buffer(3)]],
+ device atomic_uint* count [[buffer(4)]],constant uint& top_k [[buffer(5)]],uint i [[thread_position_in_grid]]) {
+ if(i>=262144||map[i]<0||scores[i]<best[top_k-1].score)return;
+ uint index=atomic_fetch_add_explicit(count,1u,memory_order_relaxed);
+ if(index<256)support[index]=GDPair{i,scores[i]};
+}
+// The compact law uses fixed token-ID order and F32 positive accumulation.
+// Its uint64 bin widths are the probability law, not an idealized softmax.
+// Support overflow is decided from logits before inspecting any random word.
+kernel void gd_compact_sample(device const GDPair* support [[buffer(0)]],device const uint* count [[buffer(1)]],
+ device uint* ids [[buffer(2)]],device ulong* cdf [[buffer(3)]],device const int* map [[buffer(4)]],
+ device const uint* words [[buffer(5)]],device uint* draft [[buffer(6)]],device uint* target [[buffer(7)]],
+ device atomic_uint* status [[buffer(8)]],constant uint& depth [[buffer(9)]],
+ constant float2& filters [[buffer(10)]],uint t [[thread_index_in_threadgroup]]) {
+ uint n=*count;if(n>256)return;
+ if(n==0){if(t==0)atomic_store_explicit(status,12u,memory_order_relaxed);return;}
+ threadgroup GDPair values[256];threadgroup float weights[256];
+ values[t]=t<n?support[t]:GDPair{uint(-1),-INFINITY};threadgroup_barrier(mem_flags::mem_threadgroup);
+ for(uint width=2;width<=256;width<<=1)for(uint stride=width>>1;stride;stride>>=1){uint other=t^stride;
+   if(other>t){bool ascending=(t&width)!=0;
+     if((!ascending&&gd_better(values[other],values[t]))||(ascending&&gd_better(values[t],values[other])))
+       {GDPair swap=values[t];values[t]=values[other];values[other]=swap;}}
+   threadgroup_barrier(mem_flags::mem_threadgroup);}
+ weights[t]=t<n?exp(values[t].score-values[0].score):0.0f;
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ if(t==0){float total=0,tail=0;for(uint j=n;j>0;--j)total+=weights[j-1];
+   for(uint j=n;j>0;--j){uint i=j-1;tail+=weights[i];
+     bool keep=i==0||((filters.x>=1.0f||tail/total>1.0f-filters.x)
+       &&(filters.y<=0.0f||weights[i]>=filters.y));
+     if(!keep)values[i].score=-INFINITY;}}
+ threadgroup_barrier(mem_flags::mem_threadgroup);
+ // Sorting IDs after filtering makes receipt lookup deterministic even though
+ // support compaction itself is parallel and may arrive in any order.
+ for(uint width=2;width<=256;width<<=1)for(uint stride=width>>1;stride;stride>>=1){uint other=t^stride;
+   if(other>t){bool ascending=(t&width)==0;
+     if((ascending&&values[other].token<values[t].token)||(!ascending&&values[t].token<values[other].token))
+       {GDPair swap=values[t];values[t]=values[other];values[other]=swap;}}
+   threadgroup_barrier(mem_flags::mem_threadgroup);}
+ // Recompute using the original maximum to avoid a reduction dependent on
+ // support compaction or filtering. The best candidate always survives.
+ if(t==0){float maximum=-INFINITY;for(uint i=0;i<n;++i)maximum=max(maximum,values[i].score);
+   float total=0;for(uint i=0;i<n;++i){weights[i]=exp(values[i].score-maximum);total+=weights[i];}
+   if(!(total>0)||!isfinite(total)){atomic_store_explicit(status,13u,memory_order_relaxed);return;}
+   float prefix=0;ulong last=0;cdf[0]=0;
+   for(uint i=0;i<n;++i){ids[i]=values[i].token;prefix+=weights[i];
+     ulong next=ulong(clamp((prefix/total)*4294967296.0f,0.0f,4294967296.0f));
+     // Last positive prefix equals total; zero-weight tails inherit its exact
+     // endpoint without acquiring a forced probability mass.
+     cdf[i+1]=next;
+     if(next<last||next>4294967296ul||(next>last&&!isfinite(values[i].score)))
+       atomic_store_explicit(status,14u,memory_order_relaxed);
+     if(ulong(words[depth])>=last&&ulong(words[depth])<next){draft[depth]=ids[i];target[depth+1]=uint(map[ids[i]]);}
+     last=next;
+   }
+   if(last!=4294967296ul)atomic_store_explicit(status,15u,memory_order_relaxed);
+ }
+}
+kernel void gd_full_merge(device const GDPair* input [[buffer(0)]],device GDPair* output [[buffer(1)]],
+ constant uint& width [[buffer(2)]],device const uint* compact_count [[buffer(3)]],uint i [[thread_position_in_grid]]) {
+ if(*compact_count<=256||i>=262144)return;
+ uint group=i/(width*2),rank=i%(width*2);device const GDPair* a=input+group*width*2;
+ device const GDPair* b=a+width;int low=int(rank>width?rank-width:0),high=int(min(rank,width));
+ while(low<=high){int probe=(low+high)/2;uint ai=uint(probe),bi=rank-ai;
+   if(ai>0&&bi<width&&gd_better(b[bi],a[ai-1]))high=probe-1;
+   else if(bi>0&&ai<width&&gd_better(a[ai],b[bi-1]))low=probe+1;
+   else{low=probe;break;}}
+ uint ai=uint(low),bi=rank-ai;
+ output[i]=ai>=width?b[bi]:bi>=width?a[ai]:gd_better(b[bi],a[ai])?b[bi]:a[ai];
+}
 // Ascending tail prefix for HF top-p; all cutoff ties survive top-k.
 kernel void gd_filter_prefix(device const GDPair* sorted [[buffer(0)]],device const int* map [[buffer(1)]],
  device float* prefix [[buffer(2)]],device float* totals [[buffer(3)]],constant uint& top_k [[buffer(4)]],
- uint group [[threadgroup_position_in_grid]],uint t [[thread_index_in_threadgroup]]) {
+ uint group [[threadgroup_position_in_grid]],uint t [[thread_index_in_threadgroup]],device const uint* compact_count [[buffer(5)]]) {
+ if(*compact_count<=256)return;
  threadgroup float weights[256];uint i=group*256+t;GDPair item=sorted[262143-i];
  float cutoff=top_k?sorted[top_k-1].score:-INFINITY;
  weights[t]=(map[item.token]>=0 && item.score>=cutoff)?exp(item.score-sorted[0].score):0.0f;
@@ -218,7 +313,8 @@ kernel void gd_filter_apply(device const GDPair* sorted [[buffer(0)]],device con
  device const float* prefix [[buffer(2)]],device const float* offsets [[buffer(3)]],
  device float* scores [[buffer(4)]],constant uint& top_k [[buffer(5)]],constant float2& filters [[buffer(6)]],
  device uint* eligible [[buffer(7)]],
- uint i [[thread_position_in_grid]]) {
+ uint i [[thread_position_in_grid]],device const uint* compact_count [[buffer(8)]]) {
+ if(*compact_count<=256)return;
  if(i>=262144)return;GDPair item=sorted[262143-i];
  float cutoff=top_k?sorted[top_k-1].score:-INFINITY;
  bool keep=map[item.token]>=0&&item.score>=cutoff;
@@ -230,7 +326,8 @@ kernel void gd_filter_apply(device const GDPair* sorted [[buffer(0)]],device con
 kernel void gd_max(device const float* logits [[buffer(0)]],device const uint* eligible [[buffer(1)]],
  device float* maxima [[buffer(2)]],device uint* argmax [[buffer(3)]],
  device atomic_uint* status [[buffer(4)]],uint group [[threadgroup_position_in_grid]],
- uint t [[thread_index_in_threadgroup]]) {
+ uint t [[thread_index_in_threadgroup]],device const uint* compact_count [[buffer(5)]]) {
+ if(*compact_count<=256)return;
  threadgroup float m[256];threadgroup uint ids[256];uint i=group*256+t;
  float v=logits[i];if(eligible[i]&&!isfinite(v))atomic_store_explicit(status,5u,memory_order_relaxed);
  m[t]=eligible[i]?v:-INFINITY;ids[t]=i;threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -239,7 +336,8 @@ kernel void gd_max(device const float* logits [[buffer(0)]],device const uint* e
  if(t==0){maxima[group]=m[0];argmax[group]=ids[0];}
 }
 kernel void gd_max_finish(device float* maxima [[buffer(0)]],device uint* argmax [[buffer(1)]],
- device atomic_uint* status [[buffer(2)]]) {
+ device atomic_uint* status [[buffer(2)]],device const uint* compact_count [[buffer(3)]]) {
+ if(*compact_count<=256)return;
  float m=-INFINITY;uint id=0;
  for(uint i=0;i<1024;++i) if(maxima[i]>m||(maxima[i]==m&&argmax[i]<id)){m=maxima[i];id=argmax[i];}
  maxima[1024]=m;argmax[1024]=id;
@@ -251,20 +349,23 @@ kernel void gd_max_finish(device float* maxima [[buffer(0)]],device uint* argmax
 kernel void gd_prefix(device const float* logits [[buffer(0)]],device const uint* eligible [[buffer(1)]],
  device const float* maxima [[buffer(2)]],device float* prefix [[buffer(3)]],
  device float* totals [[buffer(4)]],constant float& temperature [[buffer(5)]],
- uint group [[threadgroup_position_in_grid]],uint t [[thread_index_in_threadgroup]]) {
+ uint group [[threadgroup_position_in_grid]],uint t [[thread_index_in_threadgroup]],device const uint* compact_count [[buffer(6)]]) {
+ if(*compact_count<=256)return;
  threadgroup float w[256];uint i=group*256+t;
  w[t]=(eligible[i] && temperature>0)?exp((logits[i]-maxima[1024])/temperature):0.0f;
  threadgroup_barrier(mem_flags::mem_threadgroup);
  if(t==0){float s=0;for(uint j=0;j<256;++j){s+=w[j];prefix[group*256+j]=s;}totals[group]=s;}
 }
 kernel void gd_offsets(device const float* totals [[buffer(0)]],device float* offsets [[buffer(1)]],
- device atomic_uint* status [[buffer(2)]],constant float& temperature [[buffer(3)]]) {
+ device atomic_uint* status [[buffer(2)]],constant float& temperature [[buffer(3)]],device const uint* compact_count [[buffer(4)]]) {
+ if(*compact_count<=256)return;
  float s=0;offsets[0]=0;for(uint i=0;i<1024;++i){s+=totals[i];offsets[i+1]=s;}
  if(temperature>0 && (!(s>0)||!isfinite(s)))atomic_store_explicit(status,7u,memory_order_relaxed);
 }
 kernel void gd_cdf(device const float* prefix [[buffer(0)]],device const float* offsets [[buffer(1)]],
  device const uint* argmax [[buffer(2)]],device ulong* cdf [[buffer(3)]],
- constant float& temperature [[buffer(4)]],device atomic_uint* status [[buffer(5)]],uint i [[thread_position_in_grid]]) {
+ constant float& temperature [[buffer(4)]],device atomic_uint* status [[buffer(5)]],uint i [[thread_position_in_grid]],device const uint* compact_count [[buffer(6)]]) {
+ if(*compact_count<=256)return;
  if(i>262144)return;
  if(atomic_load_explicit(status,memory_order_relaxed)!=0){cdf[i]=0;return;}
  if(temperature==0){cdf[i]=i<=argmax[1024]?0ul:4294967296ul;return;}
@@ -275,7 +376,8 @@ kernel void gd_cdf(device const float* prefix [[buffer(0)]],device const float* 
 kernel void gd_select(device const ulong* cdf [[buffer(0)]],device const int* map [[buffer(1)]],
  device const uint* words [[buffer(2)]],device uint* draft [[buffer(3)]],
  device uint* target [[buffer(4)]],device atomic_uint* status [[buffer(5)]],
- constant uint& depth [[buffer(6)]],device const uint* eligible [[buffer(7)]],uint i [[thread_position_in_grid]]) {
+ constant uint& depth [[buffer(6)]],device const uint* eligible [[buffer(7)]],uint i [[thread_position_in_grid]],device const uint* compact_count [[buffer(8)]]) {
+ if(*compact_count<=256)return;
  if(i>=262144)return;
  if(atomic_load_explicit(status,memory_order_relaxed)!=0)return;
  if(cdf[i]>cdf[i+1]||cdf[i+1]>4294967296ul)
@@ -293,11 +395,11 @@ kernel void gd_requests(device const uint* base [[buffer(0)]],device const uint*
 )metal";
 enum Pipeline : std::size_t {q8,embed,pending,norm,rope,attention,attention_reduce,gelu,add,publish,copy,
     maxima,max_finish,prefix,offsets,cdf,select,requests,history_clear,history_mark,process,
-    sort_tile,filter_prefix,filter_apply,pipeline_count};
+    sort_tile,filter_prefix,filter_apply,bounded_merge,compact_collect,compact_sample,full_merge,pipeline_count};
 constexpr std::array<const char*,pipeline_count> names={"gd_q8","gd_embed","gd_pending","gd_norm","gd_rope_store",
     "gd_attention","gd_attention_reduce","gd_gelu","gd_add","gd_publish","gd_copy",
     "gd_max","gd_max_finish","gd_prefix","gd_offsets","gd_cdf","gd_select","gd_requests",
-    "gd_history_clear","gd_history_mark","gd_process","gd_sort_tile","gd_filter_prefix","gd_filter_apply"};
+    "gd_history_clear","gd_history_mark","gd_process","gd_sort_tile","gd_filter_prefix","gd_filter_apply","gd_bounded_merge","gd_compact_collect","gd_compact_sample","gd_full_merge"};
 std::uint64_t now_ns(){return static_cast<std::uint64_t>(std::chrono::duration_cast<
     std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
 const MetalBackendBufferStorage& storage(const BackendBuffer& b){
@@ -335,28 +437,80 @@ struct Gemma3DraftPlan::Impl {
         Buffer key,value,private_key,private_value;
     };
     std::array<Layer,layer_count> layers;
-    Buffer embedding,final_norm,ids,pending_input,x,normed,q,k,v,norm_q,norm_k,rotated_q,attended,projected,branch,gate,up;
+    Buffer embedding,final_norm,ids,proposal_input,pending_input,x,normed,q,k,v,norm_q,norm_k,rotated_q,attended,projected,branch,gate,up;
     Buffer partial,scales,durable_norm,private_norm,logits,status,mapping,words,draft_tokens,target_tokens;
     Buffer tile_max,tile_argmax,local_prefix,tile_totals,tile_offsets,cdfs,base_history,device_requests;
     Buffer native_history,history_bits,processed_logits,active,sort_a,sort_b;
+    Buffer bounded_a,bounded_b,compact_support,compact_counts,compact_ids,compact_cdfs;
     std::array<id<MTLComputePipelineState>,pipeline_count> pipelines {};
     MatmulPipelineState* shared=nullptr;
     id<MTLCommandBuffer> command=nil;
     id<MTLComputeCommandEncoder> encoder=nil;
     std::vector<std::int32_t> reverse_map;
     DraftProbabilityLeaseOwner probability_owner;
-    std::uint32_t frontier=0,materialized=0,horizon=0,target_vocab=0,transaction_capacity=0,active_horizon=0;
+    std::uint32_t frontier=0,materialized=0,horizon=0,target_vocab=0,transaction_capacity=0,context=0,active_horizon=0;
     std::uint32_t transaction_begin=0,saved_frontier=0,saved_materialized=0,saved_pending_token=0,pending_token=0;
     std::uint64_t epoch=0,published_epoch=0,probability_bytes=0,wall_start=0;
     std::size_t bytes=0;
     bool poison=false,in_transaction=false,has_pending=false,saved_pending=false;
     StandaloneDraftExecutionStats running;
 
+    template<class Visit>static void scratch_layout(std::uint32_t horizon,std::uint32_t transaction_rows,
+        std::uint32_t context,Visit&& visit){
+        const auto add=[&](Buffer Impl::* member,std::initializer_list<std::uint64_t> shape){visit(member,shape);};
+        add(&Impl::ids,{chunk});
+        add(&Impl::proposal_input,{transaction_rows});
+        add(&Impl::pending_input,{1});
+        add(&Impl::x,{chunk,hidden});
+        add(&Impl::normed,{chunk,hidden});
+        add(&Impl::q,{chunk,1024});
+        add(&Impl::k,{chunk,256});
+        add(&Impl::v,{chunk,256});
+        add(&Impl::norm_q,{chunk,1024});
+        add(&Impl::norm_k,{chunk,256});
+        add(&Impl::rotated_q,{chunk,1024});
+        add(&Impl::attended,{chunk,1024});
+        add(&Impl::projected,{chunk,hidden});
+        add(&Impl::branch,{chunk,hidden});
+        add(&Impl::gate,{chunk,intermediate});
+        add(&Impl::up,{chunk,intermediate});
+        add(&Impl::partial,{chunk,4,32,256});
+        add(&Impl::scales,{chunk,4,32,2});
+        add(&Impl::durable_norm,{1,hidden});
+        add(&Impl::private_norm,{std::max(chunk,transaction_rows),hidden});
+        add(&Impl::logits,{vocabulary});
+        add(&Impl::status,{1});
+        add(&Impl::mapping,{vocabulary});
+        add(&Impl::words,{horizon});
+        add(&Impl::draft_tokens,{horizon});
+        add(&Impl::target_tokens,{horizon+1});
+        add(&Impl::tile_max,{tiles+1});
+        add(&Impl::tile_argmax,{tiles+1});
+        add(&Impl::local_prefix,{vocabulary});
+        add(&Impl::tile_totals,{tiles});
+        add(&Impl::tile_offsets,{tiles+1});
+        add(&Impl::cdfs,{horizon,vocabulary+1,2});
+        add(&Impl::base_history,{91});
+        add(&Impl::device_requests,{horizon+1,91});
+        add(&Impl::native_history,{context});
+        add(&Impl::history_bits,{vocabulary/32});
+        add(&Impl::processed_logits,{vocabulary});
+        add(&Impl::active,{vocabulary});
+        add(&Impl::sort_a,{vocabulary,2});
+        add(&Impl::sort_b,{vocabulary,2});
+        add(&Impl::bounded_a,{vocabulary/512/2,64,2});
+        add(&Impl::bounded_b,{vocabulary/512/2,64,2});
+        add(&Impl::compact_support,{256,2});
+        add(&Impl::compact_counts,{horizon});
+        add(&Impl::compact_ids,{horizon,256});
+        add(&Impl::compact_cdfs,{horizon,257,2});
+    }
+
     Impl(TensorSource source_tensors,std::span<const std::int32_t> map,std::uint32_t target_vocabulary,
-        std::uint32_t max_horizon,std::uint32_t transaction_rows)
-        :horizon(max_horizon),target_vocab(target_vocabulary),transaction_capacity(transaction_rows){
+        std::uint32_t max_horizon,std::uint32_t transaction_rows,std::uint32_t context_rows)
+        :horizon(max_horizon),target_vocab(target_vocabulary),transaction_capacity(transaction_rows),context(context_rows){
         if(map.size()!=vocabulary||target_vocab==0||horizon==0||horizon>external_speculation_max_horizon
-            ||transaction_rows<horizon+2||transaction_rows>capacity)
+            ||transaction_rows<horizon+2||transaction_rows>capacity||context==0||context>capacity)
             throw std::invalid_argument("Gemma3 draft geometry, transaction capacity or horizon is invalid");
         reverse_map.assign(target_vocab,-1);std::size_t mapped=0;
         for(std::uint32_t i=0;i<vocabulary;++i){
@@ -398,24 +552,14 @@ struct Gemma3DraftPlan::Impl {
         for(std::uint32_t i=0;i<layer_count;++i){auto& layer=layers[i];const auto prefix="blk."+std::to_string(i)+".";
             for(std::uint32_t w=0;w<13;++w)layer.weights[w]=load(prefix+suffixes[w],
                 w<7?inputs[w]:(w>=11?256:hidden),w<7?outputs[w]:0,w<7?DType::q8_0:DType::f32);
-            const auto rows=local_layer(i)?512:capacity;
+            const auto rows=local_layer(i)?512:context;
             layer.key=alloc({rows,256});layer.value=alloc({rows,256});
             layer.private_key=alloc({std::max(chunk,transaction_rows),256});
             layer.private_value=alloc({std::max(chunk,transaction_rows),256});
         }
-        ids=alloc({chunk});pending_input=alloc({1});x=alloc({chunk,hidden});normed=alloc({chunk,hidden});q=alloc({chunk,1024});
-        k=alloc({chunk,256});v=alloc({chunk,256});norm_q=alloc({chunk,1024});norm_k=alloc({chunk,256});
-        rotated_q=alloc({chunk,1024});attended=alloc({chunk,1024});projected=alloc({chunk,hidden});
-        branch=alloc({chunk,hidden});gate=alloc({chunk,intermediate});up=alloc({chunk,intermediate});
-        partial=alloc({chunk,4,32,256});scales=alloc({chunk,4,32,2});
-        durable_norm=alloc({1,hidden});private_norm=alloc({std::max(chunk,transaction_rows),hidden});
-        logits=alloc({vocabulary});status=alloc({1});mapping=alloc({vocabulary});words=alloc({horizon});
-        draft_tokens=alloc({horizon});target_tokens=alloc({horizon+1});tile_max=alloc({tiles+1});
-        tile_argmax=alloc({tiles+1});local_prefix=alloc({vocabulary});tile_totals=alloc({tiles});
-        tile_offsets=alloc({tiles+1});cdfs=alloc({horizon,vocabulary+1,2});base_history=alloc({91});
-        device_requests=alloc({horizon+1,91});native_history=alloc({capacity});
-        history_bits=alloc({vocabulary/32});processed_logits=alloc({vocabulary});active=alloc({vocabulary});
-        sort_a=alloc({vocabulary,2});sort_b=alloc({vocabulary,2});
+        scratch_layout(horizon,transaction_rows,context,[&](Buffer Impl::* member,std::initializer_list<std::uint64_t> shape){
+            this->*member=alloc(shape);
+        });
         std::memcpy(contents(mapping),map.data(),map.size_bytes());bytes+=reverse_map.capacity()*sizeof(std::int32_t);
     }
     void require_live()const{if(poison)throw std::logic_error("Gemma3 draft plan is poisoned");}
@@ -428,6 +572,7 @@ struct Gemma3DraftPlan::Impl {
         if(!encoder)throw std::runtime_error("Gemma3 encoder allocation failed");
     }
     StandaloneDraftExecutionStats finish(){
+        keep_metal_buffers_resident();
         [encoder endEncoding];encoder=nil;[command commit];[command waitUntilCompleted];
         if(command.status!=MTLCommandBufferStatusCompleted){
             poison=true;invalidate();throw std::runtime_error("Gemma3 Metal execution: "+ns_error_message(command.error,"command failed"));
@@ -442,22 +587,22 @@ struct Gemma3DraftPlan::Impl {
     void pipeline(Pipeline p){[encoder setComputePipelineState:pipelines[p]];}
     template<class T>void constant(const T& value,NSUInteger index){[encoder setBytes:&value length:sizeof(value) atIndex:index];}
     void barrier(){[encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];++running.memory_barrier_count;}
-    void dispatch(std::uint32_t groups,std::uint32_t threads=256,std::uint32_t rows=1,std::uint32_t partitions=1){
+    void dispatch(std::uint32_t groups,std::uint32_t threads=256,std::uint32_t rows=1,std::uint32_t partitions=1,bool synchronize=true){
         [encoder dispatchThreadgroups:MTLSizeMake(groups,rows,partitions)
-                  threadsPerThreadgroup:MTLSizeMake(threads,1,1)];++running.compute_dispatch_count;barrier();
+                  threadsPerThreadgroup:MTLSizeMake(threads,1,1)];++running.compute_dispatch_count;if(synchronize)barrier();
     }
     void linear(const BackendBuffer& input,const BackendBuffer& weight,const BackendBuffer& output,
-        std::uint32_t rows,std::uint32_t in,std::uint32_t out,std::size_t input_offset=0){
+        std::uint32_t rows,std::uint32_t in,std::uint32_t out,std::size_t input_offset=0,bool synchronize=true){
         // Same row-parallel reduction for scalar decode and every prefill row.
         // A Q8 row is 20 blocks at width640; no Q4/width-two surrogate is used.
         pipeline(q8);
         bind(encoder,input,0,input_offset);bind(encoder,weight,1);bind(encoder,output,2);
-        constant(std::array<std::uint32_t,3>{rows,in,out},3);dispatch((out+3)/4,64,rows);
+        constant(std::array<std::uint32_t,3>{rows,in,out},3);dispatch((out+3)/4,64,rows,1,synchronize);
     }
     void normalize(const BackendBuffer& input,const BackendBuffer& weight,const BackendBuffer& output,
-        std::uint32_t rows,std::uint32_t width,std::size_t input_offset=0,std::size_t output_offset=0){
+        std::uint32_t rows,std::uint32_t width,std::size_t input_offset=0,std::size_t output_offset=0,bool synchronize=true){
         pipeline(norm);bind(encoder,input,0,input_offset);bind(encoder,weight,1);bind(encoder,output,2,output_offset);
-        bind(encoder,status,3);constant(std::array<std::uint32_t,2>{rows,width},4);dispatch(rows,32);
+        bind(encoder,status,3);constant(std::array<std::uint32_t,2>{rows,width},4);dispatch(rows,32,1,1,synchronize);
     }
     void residual(std::uint32_t rows){
         pipeline(add);bind(encoder,x,0);bind(encoder,branch,1);bind(encoder,status,2);
@@ -469,8 +614,8 @@ struct Gemma3DraftPlan::Impl {
             const auto first=local_layer(i)&&end-begin>512?end-512:begin;
             pipeline(publish);bind(encoder,l.private_key,0);bind(encoder,l.private_value,1);
             bind(encoder,l.key,2);bind(encoder,l.value,3);
-            constant(std::array<std::uint32_t,4>{first,end-first,private_begin,local_layer(i)?511U:capacity-1},4);
-            dispatch(1,256,end-first);
+            constant(std::array<std::uint32_t,4>{first,end-first,private_begin,local_layer(i)?511U:std::numeric_limits<std::uint32_t>::max()},4);
+            dispatch(1,256,end-first,1,false);
         }
         pipeline(copy);bind(encoder,private_norm,0,std::size_t(end-1-private_begin)*hidden*sizeof(float));
         bind(encoder,durable_norm,1);dispatch(3);
@@ -482,9 +627,11 @@ struct Gemma3DraftPlan::Impl {
         dispatch(3,256,rows);
         for(std::uint32_t i=0;i<layer_count;++i){auto& l=layers[i];auto& w=l.weights;
             normalize(x,w[7],normed,rows,hidden);
-            linear(normed,w[0],q,rows,hidden,1024);linear(normed,w[1],k,rows,hidden,256);
+            // Q/K/V share a read-only input and have disjoint outputs. Q/K
+            // norms likewise join before RoPE; status writes are atomic.
+            linear(normed,w[0],q,rows,hidden,1024,0,false);linear(normed,w[1],k,rows,hidden,256,0,false);
             linear(normed,w[2],v,rows,hidden,256);
-            normalize(q,w[11],norm_q,rows*4,256);normalize(k,w[12],norm_k,rows,256);
+            normalize(q,w[11],norm_q,rows*4,256,0,0,false);normalize(k,w[12],norm_k,rows,256);
             pipeline(rope);bind(encoder,norm_q,0);bind(encoder,norm_k,1);bind(encoder,v,2);
             bind(encoder,rotated_q,3);bind(encoder,l.private_key,4);bind(encoder,l.private_value,5);bind(encoder,status,6);
             constant(std::array<std::uint32_t,4>{rows,position,private_begin,0},7);
@@ -493,13 +640,15 @@ struct Gemma3DraftPlan::Impl {
             const std::array<std::uint32_t,5> params{rows,position,private_begin,local_layer(i)?1U:0U,max_parts};
             pipeline(attention);bind(encoder,rotated_q,0);bind(encoder,l.key,1);bind(encoder,l.value,2);
             bind(encoder,l.private_key,3);bind(encoder,l.private_value,4);bind(encoder,partial,5);bind(encoder,scales,6);
-            constant(params,7);dispatch(4,128,rows,max_parts);
-            pipeline(attention_reduce);bind(encoder,partial,0);bind(encoder,scales,1);
-            bind(encoder,attended,2);bind(encoder,status,3);constant(params,4);dispatch(4,32,rows);
+            constant(params,7);bind(encoder,attended,8);bind(encoder,status,9);dispatch(4,128,rows,max_parts);
+            if(max_parts>1){
+                pipeline(attention_reduce);bind(encoder,partial,0);bind(encoder,scales,1);
+                bind(encoder,attended,2);bind(encoder,status,3);constant(params,4);dispatch(4,32,rows);
+            }
             linear(attended,w[3],projected,rows,1024,hidden);
             normalize(projected,w[8],branch,rows,hidden);residual(rows);
             normalize(x,w[9],normed,rows,hidden);
-            linear(normed,w[4],gate,rows,hidden,intermediate);linear(normed,w[5],up,rows,hidden,intermediate);
+            linear(normed,w[4],gate,rows,hidden,intermediate,0,false);linear(normed,w[5],up,rows,hidden,intermediate);
             pipeline(gelu);bind(encoder,gate,0);bind(encoder,up,1);constant(rows*intermediate,2);
             dispatch((rows*intermediate+255)/256);
             linear(gate,w[6],projected,rows,intermediate,hidden);
@@ -521,63 +670,125 @@ struct Gemma3DraftPlan::Impl {
                 std::size_t(materialized-1-transaction_begin)*hidden*sizeof(float));
         else linear(durable_norm,embedding,logits,1,hidden,vocabulary);
     }
-    void sample(std::uint32_t depth,const TokenSamplerOptions& options,std::uint32_t history_count){
+    void sample(std::uint32_t depth,const TokenSamplerOptions& options,std::uint32_t history_count,
+        bool bounded_repetition_history){
         if(options.repetition_penalty!=1.0F){
             pipeline(history_clear);bind(encoder,history_bits,0);dispatch((vocabulary/32+255)/256);
             pipeline(history_mark);bind(encoder,native_history,0);bind(encoder,history_bits,1);
-            constant(history_count,2);if(history_count)dispatch((history_count+255)/256);
+            const auto count=bounded_repetition_history
+                ?static_cast<std::uint32_t>(std::min<std::size_t>(history_count,options.repetition_window)):history_count;
+            constant(std::array<std::uint32_t,2>{history_count-count,count},2);
+            if(count)dispatch((count+255)/256);
         }
         pipeline(process);bind(encoder,logits,0);bind(encoder,mapping,1);bind(encoder,history_bits,2);
         bind(encoder,processed_logits,3);bind(encoder,status,4);
         constant(std::array<float,2>{options.temperature,options.repetition_penalty},5);
         bind(encoder,active,6);dispatch(tiles);
         const float temperature=options.temperature==0?0.0F:1.0F;
+        const bool compact=temperature>0&&options.top_k>0&&options.top_k<=64;
+        static_cast<std::uint32_t*>(contents(compact_counts))[depth]=compact?0U:std::numeric_limits<std::uint32_t>::max();
+        running.uploaded_bytes+=sizeof(std::uint32_t);
+        const auto bind_count=[&](NSUInteger index){bind(encoder,compact_counts,index,std::size_t(depth)*sizeof(std::uint32_t));};
         if(temperature>0&&(options.top_k!=0||options.top_p<1||options.min_p>0)){
             pipeline(sort_tile);bind(encoder,processed_logits,0);bind(encoder,sort_a,1);dispatch(vocabulary/512,512);
+            if(compact){
+                const BackendBuffer* input=&static_cast<const BackendBuffer&>(sort_a);
+                bool into_a=true;std::uint32_t stride=512;
+                for(std::uint32_t groups=vocabulary/512/2;groups;groups/=2){
+                    auto& output=into_a?bounded_a:bounded_b;pipeline(bounded_merge);
+                    bind(encoder,*input,0);bind(encoder,output,1);
+                    constant(std::array<std::uint32_t,2>{groups,stride},2);dispatch((groups*64+255)/256);
+                    input=&static_cast<const BackendBuffer&>(output);stride=64;into_a=!into_a;
+                }
+                pipeline(compact_collect);bind(encoder,processed_logits,0);bind(encoder,mapping,1);
+                bind(encoder,*input,2);bind(encoder,compact_support,3);bind_count(4);
+                constant(static_cast<std::uint32_t>(options.top_k),5);dispatch(tiles);
+                pipeline(compact_sample);bind(encoder,compact_support,0);bind_count(1);
+                bind(encoder,compact_ids,2,std::size_t(depth)*256*sizeof(std::uint32_t));
+                bind(encoder,compact_cdfs,3,std::size_t(depth)*257*sizeof(std::uint64_t));
+                bind(encoder,mapping,4);bind(encoder,words,5);bind(encoder,draft_tokens,6);bind(encoder,target_tokens,7);
+                bind(encoder,status,8);constant(depth,9);constant(std::array<float,2>{options.top_p,options.min_p},10);
+                dispatch(1);
+            }
             bool in_a=true;
             for(std::uint32_t width=512;width<vocabulary;width*=2){
-                [encoder setComputePipelineState:shared->draft_topk_merge_pipeline];
-                bind(encoder,in_a?sort_a:sort_b,0);bind(encoder,in_a?sort_b:sort_a,1);
-                constant(std::array<std::uint32_t,4>{1,vocabulary,vocabulary,width},2);
-                dispatch(tiles);in_a=!in_a;
+                pipeline(full_merge);bind(encoder,in_a?sort_a:sort_b,0);bind(encoder,in_a?sort_b:sort_a,1);
+                constant(width,2);bind_count(3);dispatch(tiles);in_a=!in_a;
             }
             const auto& sorted=in_a?sort_a:sort_b;const auto top_k=static_cast<std::uint32_t>(options.top_k);
             pipeline(filter_prefix);bind(encoder,sorted,0);bind(encoder,mapping,1);bind(encoder,local_prefix,2);
-            bind(encoder,tile_totals,3);constant(top_k,4);dispatch(tiles);
+            bind(encoder,tile_totals,3);constant(top_k,4);bind_count(5);dispatch(tiles);
             pipeline(offsets);bind(encoder,tile_totals,0);bind(encoder,tile_offsets,1);bind(encoder,status,2);
-            constant(temperature,3);dispatch(1,1);
+            constant(temperature,3);bind_count(4);dispatch(1,1);
             pipeline(filter_apply);bind(encoder,sorted,0);bind(encoder,mapping,1);bind(encoder,local_prefix,2);
             bind(encoder,tile_offsets,3);bind(encoder,processed_logits,4);constant(top_k,5);
-            constant(std::array<float,2>{options.top_p,options.min_p},6);bind(encoder,active,7);dispatch(tiles);
+            constant(std::array<float,2>{options.top_p,options.min_p},6);bind(encoder,active,7);bind_count(8);dispatch(tiles);
         }
         pipeline(maxima);bind(encoder,processed_logits,0);bind(encoder,active,1);
-        bind(encoder,tile_max,2);bind(encoder,tile_argmax,3);bind(encoder,status,4);dispatch(tiles);
-        pipeline(max_finish);bind(encoder,tile_max,0);bind(encoder,tile_argmax,1);bind(encoder,status,2);dispatch(1,1);
+        bind(encoder,tile_max,2);bind(encoder,tile_argmax,3);bind(encoder,status,4);bind_count(5);dispatch(tiles);
+        pipeline(max_finish);bind(encoder,tile_max,0);bind(encoder,tile_argmax,1);bind(encoder,status,2);bind_count(3);dispatch(1,1);
         pipeline(prefix);bind(encoder,processed_logits,0);bind(encoder,active,1);bind(encoder,tile_max,2);
-        bind(encoder,local_prefix,3);bind(encoder,tile_totals,4);constant(temperature,5);dispatch(tiles);
+        bind(encoder,local_prefix,3);bind(encoder,tile_totals,4);constant(temperature,5);bind_count(6);dispatch(tiles);
         pipeline(offsets);bind(encoder,tile_totals,0);bind(encoder,tile_offsets,1);bind(encoder,status,2);
-        constant(temperature,3);dispatch(1,1);
+        constant(temperature,3);bind_count(4);dispatch(1,1);
         const auto offset=std::size_t(depth)*(vocabulary+1)*sizeof(std::uint64_t);
         pipeline(cdf);bind(encoder,local_prefix,0);bind(encoder,tile_offsets,1);bind(encoder,tile_argmax,2);
-        bind(encoder,cdfs,3,offset);constant(temperature,4);bind(encoder,status,5);dispatch((vocabulary+256)/256);
+        bind(encoder,cdfs,3,offset);constant(temperature,4);bind(encoder,status,5);bind_count(6);dispatch((vocabulary+256)/256);
         pipeline(select);bind(encoder,cdfs,0,offset);bind(encoder,mapping,1);bind(encoder,words,2);
         bind(encoder,draft_tokens,3);bind(encoder,target_tokens,4);bind(encoder,status,5);
-        constant(depth,6);bind(encoder,active,7);dispatch(tiles);
+        constant(depth,6);bind(encoder,active,7);bind_count(8);dispatch(tiles);
     }
 };
 
 Gemma3DraftPlan::Gemma3DraftPlan(const StandaloneDraftArtifact& artifact,
     std::span<const std::int32_t> map,std::uint32_t target_vocabulary,
-    std::uint32_t max_horizon,std::uint32_t transaction_rows):impl_(nullptr){
+    std::uint32_t max_horizon,std::uint32_t transaction_rows,std::uint32_t context_rows):impl_(nullptr){
     if(artifact.kind()!=StandaloneDraftKind::gemma3_270m_q8)
         throw std::invalid_argument("Gemma3 draft requires its authenticated Q8 artifact");
     impl_=std::make_unique<Impl>(TensorSource{&artifact,
         [](const void* context,std::string_view name){return static_cast<const StandaloneDraftArtifact*>(context)->tensor(name);}},
-        map,target_vocabulary,max_horizon,transaction_rows);
+        map,target_vocabulary,max_horizon,transaction_rows,context_rows);
+}
+std::size_t Gemma3DraftPlan::estimate_owned_bytes(std::uint32_t target_vocabulary,std::uint32_t horizon,
+    std::uint32_t transaction_rows,std::uint32_t context){
+    if(target_vocabulary==0||horizon==0||horizon>external_speculation_max_horizon
+        ||transaction_rows<horizon+2||transaction_rows>capacity||context==0||context>capacity)
+        throw std::invalid_argument("Gemma3 draft estimate has incompatible geometry");
+    std::size_t bytes=sizeof(Impl);
+    const auto add=[&](std::size_t amount){
+        if(amount>std::numeric_limits<std::size_t>::max()-bytes)
+            throw std::overflow_error("Gemma3 draft resident estimate overflow");
+        bytes+=amount;
+    };
+    const auto shape_bytes=[](std::initializer_list<std::uint64_t> shape){
+        std::size_t result=sizeof(float);
+        for(auto count:shape){
+            if(count>std::numeric_limits<std::size_t>::max()/result)
+                throw std::overflow_error("Gemma3 draft buffer estimate overflow");
+            result*=count;
+        }
+        return result;
+    };
+    // GGUF Q8 rows contain a half scale plus 32 int8 values per block. Tied
+    // output embeddings are counted once, exactly as resident preparation.
+    add(std::size_t(hidden/32)*34*vocabulary);add(hidden*sizeof(float));
+    constexpr std::array<std::uint32_t,7> inputs={hidden,hidden,hidden,1024,hidden,hidden,intermediate};
+    constexpr std::array<std::uint32_t,7> outputs={1024,256,256,hidden,intermediate,intermediate,hidden};
+    for(std::uint32_t i=0;i<layer_count;++i){
+        for(std::uint32_t w=0;w<7;++w)add(std::size_t(inputs[w]/32)*34*outputs[w]);
+        add((4*hidden+2*256)*sizeof(float));
+        add(shape_bytes({2,local_layer(i)?512U:context,256}));
+        add(shape_bytes({2,std::max(chunk,transaction_rows),256}));
+    }
+    Impl::scratch_layout(horizon,transaction_rows,context,[&](Buffer Impl::*,std::initializer_list<std::uint64_t> shape){
+        add(shape_bytes(shape));
+    });
+    add(shape_bytes({target_vocabulary}));return bytes;
 }
 Gemma3DraftPlan::~Gemma3DraftPlan()=default;
 Gemma3DraftPlan::Gemma3DraftPlan(Gemma3DraftPlan&&)noexcept=default;
 Gemma3DraftPlan& Gemma3DraftPlan::operator=(Gemma3DraftPlan&&)noexcept=default;
+std::uint32_t Gemma3DraftPlan::prepared_context_capacity()const noexcept{return impl_->context;}
 std::uint32_t Gemma3DraftPlan::position()const noexcept{return impl_->frontier;}
 std::uint32_t Gemma3DraftPlan::materialized_position()const noexcept{return impl_->materialized;}
 std::uint32_t Gemma3DraftPlan::horizon_capacity()const noexcept{return impl_->horizon;}
@@ -621,7 +832,7 @@ StandaloneDraftExecutionStats Gemma3DraftPlan::commit_prefix(std::uint32_t posit
 }
 StandaloneDraftExecutionStats Gemma3DraftPlan::append(std::span<const std::uint32_t> tokens){
     auto& p=*impl_;p.require_live();
-    if(tokens.size()>capacity-p.frontier
+    if(tokens.size()>p.context-p.frontier
         ||(p.in_transaction&&tokens.size()>p.transaction_capacity-(p.frontier-p.transaction_begin)))
         throw std::length_error("Gemma3 draft append exceeds its prepared capacity");
     for(auto token:tokens)if(token>=vocabulary)throw std::invalid_argument("Gemma3 draft token is outside vocabulary");
@@ -639,19 +850,24 @@ StandaloneDraftExecutionStats Gemma3DraftPlan::append(std::span<const std::uint3
     result.wall_duration_ns=now_ns()-started;return result;
 }
 Gemma3DraftProposal Gemma3DraftPlan::propose(std::uint32_t root,std::span<const std::uint32_t> words,
-    const TokenSamplerOptions& options,const SamplerHistorySnapshot& history){
+    const TokenSamplerOptions& options,const SamplerHistorySnapshot& history,std::span<const std::uint32_t> appended_tokens,
+    bool bounded_repetition_history){
     auto& p=*impl_;p.require_live();validate_options(options);
-    if(!p.in_transaction||words.empty()||words.size()>p.horizon||p.frontier==0
-        ||words.size()>capacity-p.frontier
-        ||words.size()>p.transaction_capacity-(p.frontier-p.transaction_begin)||root>=p.target_vocab)
+    if(!p.in_transaction||words.empty()||words.size()>p.horizon||(p.frontier==0&&appended_tokens.empty())
+        ||appended_tokens.size()>p.context-p.frontier
+        ||words.size()>p.context-p.frontier-appended_tokens.size()
+        ||appended_tokens.size()>p.transaction_capacity-(p.frontier-p.transaction_begin)
+        ||words.size()>p.transaction_capacity-(p.frontier-p.transaction_begin)-appended_tokens.size()||root>=p.target_vocab)
         throw std::invalid_argument("Gemma3 proposal has incompatible transaction, horizon or capacity");
+    for(auto token:appended_tokens)if(token>=vocabulary)
+        throw std::invalid_argument("Gemma3 proposal root token is outside vocabulary");
     if(history.head>=token_sampler_max_repetition_window||history.length>history.window_limit
         ||history.window_limit>token_sampler_max_repetition_window
         ||(history.length&&history.head>=history.window_limit)||(!history.length&&history.head))
         throw std::invalid_argument("Gemma3 proposal sampler history is malformed");
     if(p.epoch==std::numeric_limits<std::uint64_t>::max())throw std::overflow_error("Gemma3 proposal epoch overflow");
     p.invalidate();p.probability_owner.begin_epoch();
-    const auto count=static_cast<std::uint32_t>(words.size()),start_position=p.frontier;
+    const auto count=static_cast<std::uint32_t>(words.size()),start_position=p.frontier+static_cast<std::uint32_t>(appended_tokens.size());
     @autoreleasepool {
         p.start();std::memcpy(contents(p.words),words.data(),words.size_bytes());
         auto* target=static_cast<std::uint32_t*>(contents(p.target_tokens));target[0]=root;
@@ -661,9 +877,25 @@ Gemma3DraftProposal Gemma3DraftPlan::propose(std::uint32_t root,std::span<const 
         row.history_length=history.length;row.history_window_limit=history.window_limit;
         static_assert(sizeof(row)==91*sizeof(std::uint32_t));std::memcpy(contents(p.base_history),&row,sizeof(row));
         p.running.uploaded_bytes+=words.size_bytes()+sizeof(root)+sizeof(row)+2*count*sizeof(std::uint32_t);
-        p.materialize_pending();
+        if(appended_tokens.empty())p.materialize_pending();
+        else{
+            // Both a saved pending emission and the root are already known.
+            // Their causal rows can share ingestion kernels; future sampled
+            // draft tokens still execute sequentially below.
+            auto* input=static_cast<std::uint32_t*>(contents(p.proposal_input));
+            const std::uint32_t pending_rows=p.has_pending?1U:0U;
+            if(pending_rows)input[0]=p.pending_token;
+            std::memcpy(input+pending_rows,appended_tokens.data(),appended_tokens.size_bytes());
+            const auto input_rows=static_cast<std::uint32_t>(appended_tokens.size())+pending_rows;
+            p.running.uploaded_bytes+=std::size_t(input_rows)*sizeof(std::uint32_t);
+            for(std::uint32_t offset=0;offset<input_rows;offset+=chunk){
+                const auto rows=std::min(chunk,input_rows-offset);
+                p.forward(p.proposal_input,offset,rows,p.materialized);p.materialized+=rows;
+            }
+            p.frontier+=static_cast<std::uint32_t>(appended_tokens.size());p.has_pending=false;
+        }
         for(std::uint32_t i=0;i<count;++i){
-            p.project();p.sample(i,options,p.frontier);
+            p.project();p.sample(i,options,p.frontier,bounded_repetition_history);
             if(i+1<count){p.forward(p.draft_tokens,i,1,p.frontier);++p.materialized;}
             else {
                 p.pipeline(pending);bind(p.encoder,p.draft_tokens,0);bind(p.encoder,p.native_history,1);
@@ -687,7 +919,7 @@ Gemma3DraftProposal Gemma3DraftPlan::propose(std::uint32_t root,std::span<const 
 }
 StandaloneDraftExecutionStats Gemma3DraftPlan::restore_pending_token(std::uint32_t token){
     auto& p=*impl_;p.require_live();const auto started=now_ns();
-    if(p.in_transaction||p.has_pending||p.frontier!=p.materialized||p.frontier==capacity||token>=vocabulary)
+    if(p.in_transaction||p.has_pending||p.frontier!=p.materialized||p.frontier==p.context||token>=vocabulary)
         throw std::invalid_argument("Gemma3 saved pending token is incompatible with its restored prefix");
     p.invalidate();static_cast<std::uint32_t*>(contents(p.native_history))[p.frontier]=token;
     p.pending_token=token;p.has_pending=true;++p.frontier;
@@ -703,16 +935,30 @@ GatheredDraftTokenDistribution Gemma3DraftPlan::gather(std::uint32_t depth,const
     if(!p.published_epoch||depth>=p.active_horizon||!target.count||target.count>token_sampler_max_top_k)
         throw std::invalid_argument("Gemma3 proposal probability lease is stale or malformed");
     GatheredDraftTokenDistribution result;result.lease=p.probability_owner.lease(depth);result.count=target.count;
-    const auto* c=static_cast<const std::uint64_t*>(contents(p.cdfs))+std::size_t(depth)*(vocabulary+1);
+    const auto compact_count=static_cast<const std::uint32_t*>(contents(p.compact_counts))[depth];
+    const bool compact=compact_count<=256;
+    const auto* c=static_cast<const std::uint64_t*>(contents(compact?p.compact_cdfs:p.cdfs))
+        +std::size_t(depth)*(compact?257:vocabulary+1);
+    const auto* ids=compact?static_cast<const std::uint32_t*>(contents(p.compact_ids))+std::size_t(depth)*256:nullptr;
+    const auto interval=[&](std::uint32_t token){
+        if(!compact)return std::pair{c[token],c[token+1]};
+        const auto* found=std::lower_bound(ids,ids+compact_count,token);
+        if(found==ids+compact_count||*found!=token)return std::pair<std::uint64_t,std::uint64_t>{0,0};
+        const auto index=static_cast<std::size_t>(found-ids);return std::pair{c[index],c[index+1]};
+    };
     const auto selected=static_cast<const std::uint32_t*>(contents(p.draft_tokens))[depth];
     result.proposal.token=static_cast<const std::uint32_t*>(contents(p.target_tokens))[depth+1];
-    result.proposal.probability_mass=c[selected+1]-c[selected];result.proposal_cdf_begin=c[selected];
-    p.probability_bytes+=2*sizeof(std::uint32_t)+2*sizeof(std::uint64_t);
+    const auto selected_interval=interval(selected);
+    result.proposal.probability_mass=selected_interval.second-selected_interval.first;
+    result.proposal_cdf_begin=selected_interval.first;
+    p.probability_bytes+=2*sizeof(std::uint32_t)+2*sizeof(std::uint64_t)+sizeof(std::uint32_t);
+    if(compact)p.probability_bytes+=compact_count*sizeof(std::uint32_t);
     for(std::uint32_t i=0;i<target.count;++i){
         const auto token=target.values[i].token;if(token>=p.target_vocab)
             throw std::invalid_argument("Gemma3 probability gather target token is out of bounds");
         result.target_values[i]={token,0};const auto id=p.reverse_map[token];
-        if(id>=0){result.target_values[i].probability_mass=c[std::uint32_t(id)+1]-c[std::uint32_t(id)];
+        if(id>=0){const auto bounds=interval(static_cast<std::uint32_t>(id));
+            result.target_values[i].probability_mass=bounds.second-bounds.first;
             p.probability_bytes+=2*sizeof(std::uint64_t);}
     }
     return result;
@@ -746,12 +992,19 @@ void Gemma3DraftPlan::warm_up(){
     auto& p=*impl_;p.require_live();
     if(p.frontier||p.in_transaction)throw std::logic_error("Gemma3 warmup requires an empty prepared plan");
     std::array<std::uint32_t,chunk> tokens{};tokens.fill(2);
-    (void)append(tokens);(void)begin_transaction();(void)append(std::span(tokens).first(1));
+    if(p.context<3){
+        (void)append(std::span(tokens).first(1));
+        @autoreleasepool {p.start();p.project();(void)p.finish();}
+        reset();return;
+    }
+    const auto active_horizon=std::min(p.horizon,p.context-2);
+    (void)append(std::span(tokens).first(std::min(chunk,p.context-active_horizon-2)));
+    (void)begin_transaction();
     std::array<std::uint32_t,external_speculation_max_horizon> words{};
     TokenSamplerOptions options;options.temperature=0.8F;options.repetition_penalty=1.1F;
     SamplerHistorySnapshot history;history.window_limit=64;
-    const auto batch=propose(0,std::span(words).first(p.horizon),options,history);
-    for(std::uint32_t row=0;row<p.horizon;++row){
+    const auto batch=propose(0,std::span(words).first(active_horizon),options,history,std::span(tokens).first(1));
+    for(std::uint32_t row=0;row<active_horizon;++row){
         PreparedTokenDistribution target;target.count=1;target.values[0]={batch.target_tokens[row],1,1};
         (void)gather(row,target);
     }
@@ -760,7 +1013,7 @@ void Gemma3DraftPlan::warm_up(){
 
 #if defined(LOCAL_GGUF_ENGINE_TESTING)
 Gemma3DraftPlan::Gemma3DraftPlan(std::span<const tensor::TensorView> tensors,std::span<const std::int32_t> map,
-    std::uint32_t target_vocabulary,std::uint32_t max_horizon,std::uint32_t transaction_rows):impl_(nullptr){
+    std::uint32_t target_vocabulary,std::uint32_t max_horizon,std::uint32_t transaction_rows,std::uint32_t context_rows):impl_(nullptr){
     if(tensors.size()!=2+13*layer_count)throw std::invalid_argument("Gemma3 fixture must contain the entire production model");
     impl_=std::make_unique<Impl>(TensorSource{&tensors,[](const void* context,std::string_view name){
         const auto views=*static_cast<const std::span<const tensor::TensorView>*>(context);
@@ -768,26 +1021,26 @@ Gemma3DraftPlan::Gemma3DraftPlan(std::span<const tensor::TensorView> tensors,std
         for(std::uint32_t layer=0;layer<layer_count;++layer)for(std::uint32_t w=0;w<13;++w)
             if(name=="blk."+std::to_string(layer)+"."+suffixes[w])return views[2+13*layer+w];
         throw std::invalid_argument("Gemma3 fixture tensor name is invalid");
-    }},map,target_vocabulary,max_horizon,transaction_rows);
+    }},map,target_vocabulary,max_horizon,transaction_rows,context_rows);
 }
 void Gemma3DraftPlan::sample_logits_for_testing(std::span<const float> logits,std::uint32_t word,
-    const TokenSamplerOptions& options){
+    const TokenSamplerOptions& options,bool bounded_repetition_history){
     auto& p=*impl_;p.require_live();validate_options(options);
     if(logits.size()!=vocabulary)throw std::invalid_argument("Gemma3 diagnostic logits are not full vocabulary");
     p.invalidate();p.probability_owner.begin_epoch();
     @autoreleasepool {p.start();std::memcpy(contents(p.logits),logits.data(),logits.size_bytes());
         *static_cast<std::uint32_t*>(contents(p.words))=word;
-        p.sample(0,options,p.frontier);(void)p.finish();}
+        p.sample(0,options,p.frontier,bounded_repetition_history);(void)p.finish();}
     p.published_epoch=++p.epoch;p.active_horizon=1;p.probability_bytes=0;
 }
 void Gemma3DraftPlan::seed_zero_cache_prefix_for_testing(std::uint32_t position){
     auto& p=*impl_;p.require_live();
-    if(position>capacity||p.frontier||p.in_transaction)
+    if(position>p.context||p.frontier||p.in_transaction)
         throw std::invalid_argument("Gemma3 zero-cache fixture requires empty bounded state");
     for(auto& layer:p.layers)for(const Buffer* buffer:{&layer.key,&layer.value})
         std::memset(contents(*buffer),0,buffer->value->descriptor().byte_count);
     std::memset(contents(p.durable_norm),0,hidden*sizeof(float));
-    std::memset(contents(p.native_history),0,capacity*sizeof(std::uint32_t));
+    std::memset(contents(p.native_history),0,p.context*sizeof(std::uint32_t));
     p.invalidate();p.materialized=p.frontier=position;
 }
 #endif

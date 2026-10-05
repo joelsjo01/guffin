@@ -9,6 +9,7 @@
 #include <array>
 #include <bit>
 #include <cstring>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <string>
@@ -73,6 +74,16 @@ void hash_string(runtime::Sha256& hash, std::string_view value) {
     hash_u32(hash, std::bit_cast<std::uint32_t>(config.attention_logit_softcap));
     hash_u32(hash, std::bit_cast<std::uint32_t>(config.final_logit_softcap));
     hash_u32(hash, config.uses_tied_output_weight ? 1U : 0U);
+    // Preserve authenticated Gemma 2 receipts. Gemma 3 consumes additional
+    // policy that must be bound independently of the tensor payload identity.
+    if (architecture == ModelArchitecture::gemma3) {
+        hash_u32(hash, config.model_context_length);
+        hash_u32(hash, config.attention_global_layer_period);
+        hash_u32(hash, std::bit_cast<std::uint32_t>(config.rope_freq_base));
+        hash_u32(hash, std::bit_cast<std::uint32_t>(config.local_rope_freq_base));
+        hash_u32(hash, std::bit_cast<std::uint32_t>(config.rope_freq_scale));
+        hash_u32(hash, config.uses_qk_norm ? 1U : 0U);
+    }
     return hash.finalize();
 }
 
@@ -110,6 +121,9 @@ void hash_string(runtime::Sha256& hash, std::string_view value) {
             break;
         case EngineModelErrorCode::invalid_metadata_type:
             message = "invalid model metadata type";
+            break;
+        case EngineModelErrorCode::invalid_metadata_value:
+            message = "invalid model metadata value";
             break;
         case EngineModelErrorCode::unsupported_architecture:
             message = "unsupported model architecture";
@@ -225,6 +239,9 @@ void hash_string(runtime::Sha256& hash, std::string_view value) {
     if (architecture == "gemma2") {
         return ModelArchitecture::gemma2;
     }
+    if (architecture == "gemma3") {
+        return ModelArchitecture::gemma3;
+    }
 
     throw EngineModelError(EngineModelErrorCode::unsupported_architecture, architecture);
 }
@@ -308,6 +325,89 @@ void hash_string(runtime::Sha256& hash, std::string_view value) {
         .final_logit_softcap = require_metadata_f32(metadata, "gemma2.final_logit_softcapping"),
         .uses_tied_output_weight = find_tensor_payload(model, "output.weight") == nullptr,
     };
+}
+
+[[nodiscard]] Gemma2ModelConfig load_gemma3_config(const model_format::GGUFModelView& model) {
+    const auto& metadata = model.directory.metadata;
+    const auto model_context = require_metadata_u32(metadata, "gemma3.context_length");
+    const auto embedding_length = require_metadata_u32(metadata, "gemma3.embedding_length");
+    float rope_scale = 1.0F;
+    const auto scaling_type = optional_metadata_string(metadata, "gemma3.rope.scaling.type");
+    if (scaling_type.has_value() && *scaling_type != "none") {
+        if (*scaling_type != "linear") {
+            throw EngineModelError(EngineModelErrorCode::invalid_metadata_value,
+                "gemma3.rope.scaling.type: only none or linear is supported");
+        }
+        const auto factor = require_metadata_f32(metadata, "gemma3.rope.scaling.factor");
+        if (!std::isfinite(factor) || factor < 1.0F) {
+            throw EngineModelError(EngineModelErrorCode::invalid_metadata_value,
+                "gemma3.rope.scaling.factor");
+        }
+        rope_scale = 1.0F / factor;
+    } else if (find_metadata_entry(metadata, "gemma3.rope.scaling.factor") != nullptr) {
+        throw EngineModelError(EngineModelErrorCode::invalid_metadata_value,
+            "gemma3.rope.scaling.factor requires linear scaling type");
+    }
+    auto config = Gemma2ModelConfig {
+        .context_length = std::min(model_context, 16384U),
+        .embedding_length = embedding_length,
+        .block_count = require_metadata_u32(metadata, "gemma3.block_count"),
+        .feed_forward_length = require_metadata_u32(metadata, "gemma3.feed_forward_length"),
+        .attention_head_count = require_metadata_u32(metadata, "gemma3.attention.head_count"),
+        .attention_head_count_kv = require_metadata_u32(metadata, "gemma3.attention.head_count_kv"),
+        .attention_key_length = require_metadata_u32(metadata, "gemma3.attention.key_length"),
+        .attention_value_length = require_metadata_u32(metadata, "gemma3.attention.value_length"),
+        .sliding_window = require_metadata_u32(metadata, "gemma3.attention.sliding_window"),
+        .vocab_size = infer_vocab_size_from_token_embedding(model, embedding_length),
+        .rms_norm_epsilon = require_metadata_f32(metadata, "gemma3.attention.layer_norm_rms_epsilon"),
+        .uses_tied_output_weight = find_tensor_payload(model, "output.weight") == nullptr,
+        .architecture = ModelArchitecture::gemma3,
+        .model_context_length = model_context,
+        // These are Gemma 3 architectural defaults when GGUF omits them:
+        // five local layers then one global; local RoPE is never scaled.
+        .attention_global_layer_period = 6U,
+        .rope_freq_base = require_metadata_f32(metadata, "gemma3.rope.freq_base"),
+        .local_rope_freq_base = 10000.0F,
+        .rope_freq_scale = rope_scale,
+        .uses_qk_norm = true,
+    };
+    if (find_metadata_entry(metadata, "gemma3.attention.sliding_window_pattern") != nullptr) {
+        config.attention_global_layer_period = require_metadata_u32(metadata, "gemma3.attention.sliding_window_pattern");
+        if (config.attention_global_layer_period != 6U) {
+            throw EngineModelError(EngineModelErrorCode::invalid_metadata_value,
+                "gemma3.attention.sliding_window_pattern: target requires five local layers then one global");
+        }
+    }
+    if (find_metadata_entry(metadata, "gemma3.rope.freq_base_swa") != nullptr) {
+        config.local_rope_freq_base = require_metadata_f32(metadata, "gemma3.rope.freq_base_swa");
+        if (!std::isfinite(config.local_rope_freq_base) || config.local_rope_freq_base <= 0.0F) {
+            throw EngineModelError(EngineModelErrorCode::invalid_metadata_value, "gemma3.rope.freq_base_swa");
+        }
+    }
+    if (find_metadata_entry(metadata, "gemma3.rope.dimension_count") != nullptr
+        && require_metadata_u32(metadata, "gemma3.rope.dimension_count") != config.attention_key_length) {
+        throw EngineModelError(EngineModelErrorCode::invalid_metadata_value,
+            "gemma3.rope.dimension_count: target rotates the entire head");
+    }
+    for (const auto key : {"gemma3.attn_logit_softcapping", "gemma3.final_logit_softcapping"}) {
+        if (find_metadata_entry(metadata, key) != nullptr && require_metadata_f32(metadata, key) != 0.0F) {
+            throw EngineModelError(EngineModelErrorCode::invalid_metadata_value,
+                std::string(key) + ": Gemma 3 target requires uncapped logits");
+        }
+    }
+    if (config.context_length == 0U || config.embedding_length == 0U || config.block_count == 0U
+        || config.feed_forward_length == 0U || config.attention_head_count == 0U
+        || config.attention_head_count_kv == 0U || config.attention_key_length == 0U
+        || config.attention_key_length != config.attention_value_length
+        || config.attention_key_length % 2U != 0U || config.sliding_window == 0U
+        || config.vocab_size == 0U
+        || config.attention_head_count % config.attention_head_count_kv != 0U
+        || !std::isfinite(config.rms_norm_epsilon) || config.rms_norm_epsilon <= 0.0F
+        || !std::isfinite(config.rope_freq_base) || config.rope_freq_base <= 0.0F) {
+        throw EngineModelError(EngineModelErrorCode::invalid_metadata_value,
+            "Gemma 3 dimensions, attention grouping, RMS epsilon or RoPE base");
+    }
+    return config;
 }
 
 [[nodiscard]] std::vector<EngineTensorView> load_unique_tensor_views(const model_format::GGUFModelView& model) {
@@ -406,6 +506,8 @@ std::string_view model_architecture_name(ModelArchitecture architecture) noexcep
     switch (architecture) {
         case ModelArchitecture::gemma2:
             return "gemma2";
+        case ModelArchitecture::gemma3:
+            return "gemma3";
     }
 
     return "unknown";
@@ -414,7 +516,8 @@ std::string_view model_architecture_name(ModelArchitecture architecture) noexcep
 EngineModel load_engine_model_from_gguf(const model_format::GGUFModelView& model) {
     const auto architecture = parse_architecture(model.directory.metadata);
     const auto name = optional_metadata_string(model.directory.metadata, "general.name");
-    const auto gemma2_config = load_gemma2_config(model);
+    const auto gemma2_config = architecture == ModelArchitecture::gemma3
+        ? load_gemma3_config(model) : load_gemma2_config(model);
     auto tensor_views = load_unique_tensor_views(model);
     return EngineModel(
         architecture,
@@ -433,7 +536,8 @@ EngineModel load_verified_engine_model_from_gguf(
     }
     const auto architecture = parse_architecture(model.directory.metadata);
     const auto name = optional_metadata_string(model.directory.metadata, "general.name");
-    const auto gemma2_config = load_gemma2_config(model);
+    const auto gemma2_config = architecture == ModelArchitecture::gemma3
+        ? load_gemma3_config(model) : load_gemma2_config(model);
     auto tensor_views = load_unique_tensor_views(model);
     if (tensor_views.size() > std::numeric_limits<std::uint32_t>::max()) {
         throw EngineModelError(EngineModelErrorCode::invalid_tensor, "source tensor receipt count");
@@ -458,6 +562,49 @@ EngineModel load_verified_engine_model_from_gguf(
         tokenizer_identity = tokenizer::tokenizer_identity_from_gguf_metadata(authenticated_metadata);
     }
     return EngineModel(architecture, name, gemma2_config, std::move(tensor_views), receipt, tokenizer_identity);
+}
+
+bool gemma_layer_uses_sliding_window(const Gemma2ModelConfig& config, std::uint32_t layer_index) noexcept {
+    return config.attention_global_layer_period > 1U
+        && layer_index % config.attention_global_layer_period != config.attention_global_layer_period - 1U;
+}
+
+float gemma_layer_rope_freq_base(const Gemma2ModelConfig& config, std::uint32_t layer_index) noexcept {
+    return gemma_layer_uses_sliding_window(config, layer_index)
+        ? config.local_rope_freq_base : config.rope_freq_base;
+}
+
+float gemma_layer_rope_freq_scale(const Gemma2ModelConfig& config, std::uint32_t layer_index) noexcept {
+    return gemma_layer_uses_sliding_window(config, layer_index) ? 1.0F : config.rope_freq_scale;
+}
+
+GemmaKVPrecision resolve_gemma_kv_precision(ModelArchitecture architecture, GemmaKVPrecision requested) {
+    if (architecture != ModelArchitecture::gemma2 && architecture != ModelArchitecture::gemma3)
+        throw std::invalid_argument("KV precision requires a supported Gemma architecture");
+    switch (requested) {
+        case GemmaKVPrecision::automatic:
+            return GemmaKVPrecision::f16;
+        case GemmaKVPrecision::f16:
+            return requested;
+        case GemmaKVPrecision::f32:
+            if (architecture == ModelArchitecture::gemma3) return requested;
+            throw std::invalid_argument("Gemma 2 supports only F16 KV precision");
+    }
+    throw std::invalid_argument("invalid Gemma KV precision policy");
+}
+
+std::string_view gemma_kv_precision_name(GemmaKVPrecision precision) noexcept {
+    switch (precision) {
+        case GemmaKVPrecision::automatic: return "automatic";
+        case GemmaKVPrecision::f32: return "f32";
+        case GemmaKVPrecision::f16: return "f16";
+    }
+    return "unknown";
+}
+
+tensor::DType gemma_kv_dtype(const Gemma2ModelConfig& config) {
+    return resolve_gemma_kv_precision(config.architecture, config.kv_precision) == GemmaKVPrecision::f32
+        ? tensor::DType::f32 : tensor::DType::f16;
 }
 
 }  // namespace local_gguf_engine::engine

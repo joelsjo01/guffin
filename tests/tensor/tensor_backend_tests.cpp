@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -1055,6 +1056,99 @@ void test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_
                     }
                 }
             }
+        }
+    }
+}
+
+void test_gemma3_parallel_projection_preserves_scalar_bits_for_native_shapes() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    struct Case { std::uint32_t rows, blocks, columns, head_offset; };
+    // Actual 12B K dimensions are 15 (Q/K/V, gate/up, head), 16 (O), and
+    // 60 (down). Every width covers one-row execution and two-row tile tails;
+    // odd columns and head offsets catch masked lanes and later selection tiles.
+    constexpr std::array<Case, 17> cases {{
+        {2, 1, 1, 1},
+        {1, 15, 3, 0}, {2, 15, 5, 1}, {3, 15, 7, 3},
+        {4, 15, 33, 4}, {5, 15, 65, 5},
+        {1, 16, 5, 1}, {2, 16, 67, 3}, {3, 16, 3, 4},
+        {4, 16, 4, 5}, {5, 16, 7, 1},
+        {1, 60, 3, 3}, {2, 60, 4, 4}, {3, 60, 5, 5},
+        {4, 60, 5, 1}, {5, 60, 7, 3}, {8, 60, 3, 1},
+    }};
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) for (const auto shape : cases) {
+        const auto shared = std::uint64_t(shape.blocks) * 256;
+        const auto input_rows = shape.rows + shape.head_offset;
+        auto values = tensor_f32_projection_values(input_rows, shared);
+        for (std::size_t i = 0; i < values.size(); ++i)
+            values[i] = values[i] * (i % 17 == 0 ? 16.0F : i % 13 == 0 ? 0.03125F : 1.0F)
+                + 0.00037F * static_cast<float>(i % 11);
+        const auto input = tensor_f32_matrix(input_rows, shared, values);
+        const auto weight = dtype == DType::q4_k
+            ? tensor_q4_k_stress_gguf_weight_matrix(shared, shape.columns, shape.rows)
+            : tensor_q6_k_stress_gguf_weight_matrix(shared, shape.columns, shape.rows);
+        const auto expected = reference_f32_quantized_gguf_weight_matmul(input, weight);
+        const auto device_input = copy_tensor_to_backend(input, BackendKind::metal);
+        const auto device_weight = copy_tensor_to_backend(weight, BackendKind::metal);
+        const auto descriptor = TensorDescriptor::from(Shape::from({shape.rows + 1, shape.columns}), DType::f32);
+        const auto batch = allocate_backend_buffer(descriptor, BackendKind::metal);
+        const auto head = allocate_backend_buffer(descriptor, BackendKind::metal);
+        fill_shared_metal_buffer_u32(batch, 0x7fc00000U);
+        fill_shared_metal_buffer_u32(head, 0x7fc00000U);
+        const auto ordinary_first = allocate_backend_buffer(
+            TensorDescriptor::from(Shape::from({1, shape.columns}), DType::f32), BackendKind::metal);
+        std::vector<local_gguf_engine::tensor::BackendBuffer> scalar;
+        scalar.reserve(input_rows);
+        for (std::uint32_t row = 0; row < input_rows; ++row)
+            scalar.push_back(allocate_backend_buffer(
+                TensorDescriptor::from(Shape::from({1, shape.columns}), DType::f32), BackendKind::metal));
+        MetalCommandContext command("Gemma3 parallel rows retain canonical scalar arithmetic", false, true);
+        command.encode_verifier_matmul(device_input, device_weight, batch, shape.rows);
+        command.encode_verifier_matmul(device_input, device_weight, ordinary_first, 1U);
+        command.encode_target_head_rows(device_input, shape.head_offset, device_weight, head, shape.rows);
+        for (std::uint32_t row = 0; row < input_rows; ++row)
+            command.encode_target_head_rows(device_input, row, device_weight, scalar[row], 1);
+        const auto stats = command.commit_and_wait();
+        expect(stats.transient_buffer_allocation_count == 0,
+            "parallel row projection allocated transient device storage");
+        const auto actual = copy_tensor_from_backend(batch);
+        const auto actual_head = copy_tensor_from_backend(head);
+        const auto actual_ordinary_first = copy_tensor_from_backend(ordinary_first);
+        std::vector<TensorStorage> ordinary;
+        ordinary.reserve(scalar.size());
+        for (const auto& row : scalar) ordinary.push_back(copy_tensor_from_backend(row));
+        for (std::uint32_t row = 0; row < shape.rows; ++row) {
+            for (std::uint32_t column = 0; column < shape.columns; ++column) {
+                const std::array<std::uint64_t, 2> index {row, column}, scalar_index {0, column};
+                const auto value = read_f32(actual, index);
+                const auto head_value = read_f32(actual_head, index);
+                expect(std::isfinite(value) && std::isfinite(head_value),
+                    "Gemma3 native projection must produce finite values for finite inputs");
+                expect(std::bit_cast<std::uint32_t>(value)
+                        == std::bit_cast<std::uint32_t>(read_f32(ordinary[row], scalar_index)),
+                    "Gemma3 parallel projection changed canonical target arithmetic");
+                expect(std::bit_cast<std::uint32_t>(head_value)
+                        == std::bit_cast<std::uint32_t>(read_f32(ordinary[row + shape.head_offset], scalar_index)),
+                    "Gemma3 parallel head changed canonical arithmetic or input-row offset");
+                if (row == 0U) {
+                    expect(std::bit_cast<std::uint32_t>(value)
+                            == std::bit_cast<std::uint32_t>(read_f32(actual_ordinary_first, scalar_index)),
+                        "Gemma3 ordinary transformer and batched/head projection arithmetic disagree");
+                }
+                const auto oracle = read_f32(expected, index);
+                expect_close(value, oracle, (dtype == DType::q4_k ? 0.05F : 0.1F) + 1.e-5F * std::fabs(oracle),
+                    "Gemma3 parallel projection differs from independent dequantized reference");
+                const std::array<std::uint64_t, 2> head_index {row + shape.head_offset, column};
+                const auto head_oracle = read_f32(expected, head_index);
+                expect_close(head_value, head_oracle,
+                    (dtype == DType::q4_k ? 0.05F : 0.1F) + 1.e-5F * std::fabs(head_oracle),
+                    "Gemma3 offset head differs from independent dequantized reference");
+            }
+        }
+        for (std::uint32_t column = 0; column < shape.columns; ++column) {
+            const std::array<std::uint64_t, 2> guard {shape.rows, column};
+            expect(std::bit_cast<std::uint32_t>(read_f32(actual, guard)) == 0x7fc00000U
+                    && std::bit_cast<std::uint32_t>(read_f32(actual_head, guard)) == 0x7fc00000U,
+                "Gemma3 parallel projection overwrote its explicit row boundary");
         }
     }
 }
@@ -2178,6 +2272,10 @@ const TestCase tensor_backend_tests[] {
     {
         "matches independent Q4_K and Q6_K small-batch and tiled projection on Metal",
         test_matches_independent_q4_k_and_q6_k_small_batch_and_tiled_projection_on_metal,
+    },
+    {
+        "Gemma3 parallel projections preserve scalar bits for native shapes and tails",
+        test_gemma3_parallel_projection_preserves_scalar_bits_for_native_shapes,
     },
     {
         "rejects explicit Metal matmul rows beyond input before encoding",

@@ -27,6 +27,7 @@ src/engine/gemma2_chat_session.*
   -> src/engine/sampling.*
   -> src/engine/retrieval_proposer.*
   -> src/engine/gemma2_runtime.*
+      -> src/engine/gemma_target_runtime.*
       -> src/engine/gemma2_metal_plan.*
       -> src/tensor
           -> src/tensor/ops
@@ -85,6 +86,7 @@ Benchmark output lives under ignored `benchmarks/results`.
 | `scripts/capture_decode_gpu_trace.py` | one-shot production decode `.gputrace` driver |
 | `scripts/llama_reference_benchmark.py` | infrequent pinned llama-cli reference driver |
 | `scripts/gemma3_reference_golden.py` | independent full-checkpoint GGUF/Q8 Gemma 3 CPU logits and logical K/V goldens |
+| `scripts/gemma3_target_reference.py` | bounded independent Q4_K/Q6_K Gemma 3 target CPU logits and all-layer K/V goldens |
 | `scripts/reference_gguf.py` | independent GGUF reader shared by offline checkpoint equations |
 | `scripts/reference_requirements.txt` | pinned NumPy/PyTorch dependencies for offline CPU reference goldens |
 | `docs/LLAMA_CPP_REFERENCE_BASELINE.md` | stored pinned reference identity, protocol, and result |
@@ -105,6 +107,7 @@ Benchmark output lives under ignored `benchmarks/results`.
 | `include/local_gguf_engine/engine/model.hpp` | source-model and resident-target payload receipt types | training artifacts, file serialization |
 | `src/engine/gemma2_model.*` | Gemma 2 config parsing and weight binding | backend upload/execution |
 | `src/engine/gemma2_metal_plan.*` | Metal resident weight upload, KV cache buffers, prefill/decode/verifier schedules and transaction state | tokenization, CLI formatting |
+| `src/engine/gemma_target_runtime.*` | shared Gemma block encoding, producer-fused Q4 sum routing, Gemma 2/3 width-two retrieval, Gemma 3 resident prefill/decode and private-row publication | chat history, tokenization, speculative acceptance |
 | `src/engine/gemma2_runtime.*` | Gemma Metal prefill/decode/verifier execution, resident decode, metrics, argmax and selector-driven token loops | chat history, CLI parsing |
 | `src/engine/gemma2_chat_session.*` | persistent chat state, prompt rendering, KV-prefix reuse, context trimming, stops, streaming, regeneration, sampler integration | CLI commands and formatting |
 | `src/engine/gemma2_reference.*` | tiny CPU/reference Gemma numerics for parity tests | product CPU runtime |
@@ -123,13 +126,31 @@ Benchmark output lives under ignored `benchmarks/results`.
 | `src/tensor/ops` | CPU/reference tensor ops and backend-dispatched op front doors | device setup |
 | `src/tensor/backends/cpu_backend.*` | CPU backend buffers and CPU backend execution helpers | product-speed Gemma path |
 | `src/tensor/backends/metal_backend.*` | public Metal backend bridge, availability, buffer copy/allocation | CLI behavior |
-| `src/tensor/backends/metal/metal_command_context.*` | resident prefill/decode command encoding, submission statistics, selected-token readback | model scheduling, chat state |
+| `src/tensor/backends/metal/metal_command_context.*` | resident prefill/decode command encoding, fused Q4 sum validation and binding, submission statistics, selected-token readback | model scheduling, chat state |
 | `src/tensor/backends/metal/*` | Metal device context, buffers, kernels, command encoding, Metal op implementations | benchmark reporting |
 | `src/frontends/cli` | command arguments, file IO, stdout/stderr formatting, error reporting | inference math |
 | `scripts/gemma3_reference_golden.py`, `scripts/reference_gguf.py` | independent CPU checkpoint equations and authenticated GGUF reads | production inference |
 | `tests` | deterministic coverage and fixtures | real model weights, generated benchmark artifacts |
 
 ## Task Routes
+
+Gemma 3 target integration:
+
+- `include/local_gguf_engine/engine/model.hpp`
+- `src/engine/model.cpp`
+- `src/engine/gemma2_model.cpp`
+- `src/engine/gemma2_metal_plan.cpp`
+- `src/engine/gemma_target_runtime.*`
+- `src/engine/target_verifier*.*`
+- `src/engine/gemma2_chat_session.cpp`
+- `tests/support/gemma3_target_test_support.hpp`
+- `tests/engine/gemma3_model_plan_tests.cpp`
+- `tests/engine/gemma3_target_runtime_tests.cpp`
+- `tests/engine/gemma3_target_golden_hashes.hpp`
+- `tests/tensor/gemma3_metal_tests.cpp`
+- `tests/frontends/cli/generate_cli_tests.cpp`
+- `scripts/gemma3_target_reference.py`
+- `tests/scripts/gemma3_target_reference_tests.py`
 
 Gemma 2 model binding:
 
@@ -207,9 +228,11 @@ GGUF tensor bridge and Q4_K/Q6_K layout:
 - `include/local_gguf_engine/tensor/dtype.hpp`
 - `include/local_gguf_engine/tensor/layout.hpp`
 - `include/local_gguf_engine/tensor/quantization.hpp`
+- `include/local_gguf_engine/tensor/kquant_packing.hpp`
 - `src/tensor/dtype.cpp`
 - `src/tensor/layout.cpp`
 - `src/tensor/quantization.cpp`
+- `src/tensor/kquant_packing.cpp`
 - `tests/model_format/gguf_tensor_bridge_tests.cpp`
 - `tests/tensor/tensor_tests.cpp`
 
@@ -397,8 +420,10 @@ Project docs:
 | GGUF tensor bridge | `tests/model_format/gguf_tensor_bridge_tests.cpp` |
 | Tensor layout/dtypes/quantization/accessors | `tests/tensor/tensor_tests.cpp` |
 | Tensor ops/backends/Metal parity | `tests/tensor/tensor_backend_tests.cpp` |
+| Gemma 3 F32 prompt matrices, Gemma 2/3 compact projections and producer-fused Q4 sums, attention and Metal numerical parity | `tests/tensor/gemma3_metal_tests.cpp` |
 | Engine model binding | `tests/engine/engine_model_tests.cpp` |
 | Gemma Metal plan/runtime/resident command context | `tests/engine/gemma2_metal_plan_tests.cpp` |
+| Gemma 3 target runtime, causal prompt prefixes, F32/F16 cache lifecycle and authenticated target goldens | `tests/engine/gemma3_target_runtime_tests.cpp`, `tests/engine/gemma3_target_golden_hashes.hpp` |
 | Gemma chat session, KV reuse, stops, streaming, context, regeneration | `tests/frontends/cli/generate_cli_tests.cpp` |
 | Gemma reference numerics | `tests/engine/gemma2_reference_tests.cpp` |
 | Token sampling and top-logit helpers | `tests/engine/sampling_tests.cpp`, `tests/tensor/tensor_backend_tests.cpp`, `tests/frontends/cli/generate_cli_tests.cpp` |

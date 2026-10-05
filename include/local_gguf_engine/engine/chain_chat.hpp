@@ -54,6 +54,7 @@ struct ChainProposalBatch {
 struct ChainCycleResult {
     TargetVerifierExecutionStats target;
     Gemma2MetalDecodeExecutionStats endpoint;
+    std::uint32_t proposal_count = 0;
     std::uint32_t retained_rows = 0;
     std::uint32_t accepted_edges = 0;
     // Only an authoritative correction selected by the controller counts as
@@ -77,6 +78,8 @@ public:
     ChainChatVerifier& operator=(ChainChatVerifier&&) noexcept;
     ChainChatVerifier(const ChainChatVerifier&) = delete;
     ChainChatVerifier& operator=(const ChainChatVerifier&) = delete;
+    [[nodiscard]] static std::size_t estimate_owned_bytes(const Gemma2ModelConfig& config,
+        std::uint32_t horizon, bool conditional);
     [[nodiscard]] std::size_t owned_bytes() const noexcept;
     [[nodiscard]] const tensor::BackendBuffer& last_hidden() const;
     void warm_up_tiles(Gemma2MetalModelPlan& target);
@@ -84,6 +87,10 @@ public:
         std::uint32_t root, std::uint32_t position, std::size_t remaining,
         std::span<const std::uint32_t> stops, const ChainProposalBatch& batch,
         const ChainSampleCallback& sample, const ChainCommitCallback& callback);
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+    [[nodiscard]] static ChainVerifierSchedule schedule_for_testing(std::uint32_t prepared_horizon,
+        std::uint32_t active_horizon, bool conditional);
+#endif
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

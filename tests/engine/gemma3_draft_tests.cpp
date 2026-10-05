@@ -300,6 +300,28 @@ void probability_law(){
     logits[37]=2;logits[38]=1.5F;o.temperature=0;o.top_p=1;o.repetition_penalty=2;
     plan.sample_logits_for_testing(logits,0,o);
     expect(plan.gather(0,target_tokens(37,2)).proposal.token==38,"Gemma3 draft repetition discarded older native history");
+    // The explicit direct-ID law penalizes only the selected native window.
+    // Keep an old token, a recent token and an unseen token distinguishable,
+    // then compare the actual q masses against independent softmax equations.
+    plan.reset();native.back()=38;(void)plan.append(native);
+    std::fill(logits.begin(),logits.end(),-100);logits[37]=3;logits[38]=2.5F;logits[39]=2;
+    o.temperature=1;o.top_k=3;o.top_p=1;o.min_p=0;o.repetition_window=64;
+    const auto check_repetition=[&](bool bounded,const std::array<double,3>& scores){
+        plan.sample_logits_for_testing(logits,0,o,bounded);const auto q=plan.gather(0,target_tokens(37,3));
+        const auto maximum=*std::max_element(scores.begin(),scores.end());double total=0;
+        for(auto score:scores)total+=std::exp(score-maximum);
+        std::uint64_t mass=0;
+        for(std::uint32_t i=0;i<3;++i){const auto expected=std::exp(scores[i]-maximum)/total;
+            const auto actual=double(q.target_values[i].probability_mass)/double(draft_probability_mass_total);
+            expect(std::abs(actual-expected)<0.000001,"Gemma3 repetition policy changed its declared q law");
+            mass+=q.target_values[i].probability_mass;
+        }
+        expect(mass==draft_probability_mass_total,"Gemma3 repetition policy q does not sum to its integer grid");
+    };
+    check_repetition(false,{1.5,1.25,2});check_repetition(true,{3,1.25,2});
+    o.repetition_window=0;check_repetition(true,{3,2.5,2});
+    // A prior zero-window call must not suppress legacy full-history marking.
+    check_repetition(false,{1.5,1.25,2});
     plan.reset();logits[0]=std::numeric_limits<float>::infinity();
     refuses([&]{plan.sample_logits_for_testing(logits,0,o);},"Gemma3 accepted nonfinite raw logits");
     expect(plan.poisoned(),"Gemma3 numerical failure did not poison the plan");
@@ -316,6 +338,139 @@ void probability_law(){
         &&endpoint.target_values[1].probability_mass==0,"Gemma3 CDF resurrected a zero-mass tail");
     o.temperature=std::numeric_limits<float>::min();logits[0]=std::numeric_limits<float>::max();
     refuses([&]{masked_plan.sample_logits_for_testing(logits,0,o);},"Gemma3 ignored finite temperature overflow");
+}
+void compact_probability_law(){
+    if(!have_metal())return;const auto& f=fixture();Gemma3DraftPlan plan(f.views,f.map,vocab,3,6,769);
+    std::vector<float> logits(vocab,-100);TokenSamplerOptions o;o.temperature=1;o.top_k=40;
+    o.top_p=0.87F;o.min_p=0.05F;o.repetition_penalty=1;
+    struct Candidate {std::uint32_t token;float score;};std::vector<Candidate> sorted;
+    // Each candidate is in a different original sort tile. Cutoff ties extend
+    // the retained support beyond k and compaction arrival order is irrelevant.
+    for(std::uint32_t i=0;i<48;++i){const auto token=37+i*4099;
+        logits[token]=i<38?4.0F-float(i)*0.07F:1.34F;sorted.push_back({token,logits[token]});}
+    std::sort(sorted.begin(),sorted.end(),[](const auto& a,const auto& b){
+        return a.score>b.score||(a.score==b.score&&a.token<b.token);});
+    const auto cutoff=sorted[o.top_k-1].score;
+    sorted.erase(std::remove_if(sorted.begin(),sorted.end(),[&](const auto& v){return v.score<cutoff;}),sorted.end());
+    std::vector<double> weights(sorted.size());double total=0;
+    for(std::size_t i=0;i<sorted.size();++i){weights[i]=std::exp(double(sorted[i].score)-sorted[0].score);total+=weights[i];}
+    double tail=0;std::vector<std::pair<std::uint32_t,double>> expected;
+    for(std::size_t j=sorted.size();j>0;--j){const auto i=j-1;tail+=weights[i];
+        if(i==0||(tail/total>1.0-double(o.top_p)&&weights[i]>=o.min_p))expected.push_back({sorted[i].token,weights[i]});}
+    std::sort(expected.begin(),expected.end());total=0;for(const auto& value:expected)total+=value.second;
+    plan.sample_logits_for_testing(logits,0,o);PreparedTokenDistribution support;support.count=48;
+    for(std::uint32_t i=0;i<48;++i)support.values[i]={37+i*4099,1,1};
+    const auto q=plan.gather(0,support);std::uint64_t mass=0;
+    for(std::uint32_t i=0;i<support.count;++i){const auto token=support.values[i].token;
+        const auto found=std::find_if(expected.begin(),expected.end(),[&](const auto& value){return value.first==token;});
+        const double probability=found==expected.end()?0:found->second/total;
+        const double actual=double(q.target_values[i].probability_mass)/double(draft_probability_mass_total);
+        expect(std::abs(probability-actual)<0.000001,"Gemma3 compact receipt differs from independent filtered softmax");
+        if(found==expected.end())expect(q.target_values[i].probability_mass==0,"Gemma3 compact filter resurrected a token");
+        mass+=q.target_values[i].probability_mass;
+    }
+    expect(mass==draft_probability_mass_total,"Gemma3 compact integer law is not normalized");
+    // Selected interval boundaries must be the very same rounded masses used
+    // for correction lookup, including both endpoints of nontrivial bins.
+    std::uint64_t begin=0;std::uint32_t checked=0;
+    for(std::uint32_t i=0;i<support.count;++i){const auto interval_mass=q.target_values[i].probability_mass;
+        if(interval_mass&&checked++<4){for(auto word:{begin,begin+interval_mass-1}){
+            plan.sample_logits_for_testing(logits,static_cast<std::uint32_t>(word),o);
+            const auto selected=plan.gather(0,support);
+            expect(selected.proposal.token==support.values[i].token&&selected.proposal_cdf_begin==begin
+                &&selected.proposal.probability_mass==interval_mass,"Gemma3 compact sampler and q receipt disagree");
+        }}begin+=interval_mass;
+    }
+    // Exercise both sides of the bounded-support fallback with cutoff ties;
+    // the general path must replace any compact receipt from the previous call.
+    for(auto count:{256U,257U,64U}){
+        std::fill(logits.begin(),logits.end(),-100);std::fill_n(logits.begin(),count,0);
+        o.top_k=1;o.top_p=1;o.min_p=0;
+        plan.sample_logits_for_testing(logits,std::numeric_limits<std::uint32_t>::max(),o);
+        const auto selected=plan.gather(0,target_tokens(count-1,2));
+        expect(selected.proposal.token==count-1&&selected.target_values[1].probability_mass==0,
+            "Gemma3 cutoff tie fallback lost support or reused stale compact data");
+        expect(std::abs(double(selected.proposal.probability_mass)/double(draft_probability_mass_total)-1.0/count)<0.000001,
+            "Gemma3 cutoff tie fallback changed the uniform law");
+    }
+    // A compact receipt lives in native draft-ID order. Probability lookup
+    // must map target support back by ID, without assuming numeric identity or
+    // renormalizing away the excluded target control token.
+    auto mapped=f.map;std::swap(mapped[12],mapped[50000]);mapped[0]=-1;
+    {
+        Gemma3DraftPlan mapped_plan(f.views,mapped,vocab,3,6,769);
+        std::fill(logits.begin(),logits.end(),-100);logits[0]=100;logits[12]=0;logits[511]=0;
+        o.temperature=1;o.top_k=1;o.top_p=1;o.min_p=0;
+        PreparedTokenDistribution target;target.count=4;
+        target.values[0]={0,1,1};target.values[1]={50000,1,1};target.values[2]={511,1,1};target.values[3]={12,1,1};
+        mapped_plan.sample_logits_for_testing(logits,0,o);const auto left=mapped_plan.gather(0,target);
+        expect(left.proposal.token==50000&&left.proposal_cdf_begin==0
+            &&left.proposal.probability_mass==draft_probability_mass_total/2
+            &&left.target_values[0].probability_mass==0&&left.target_values[3].probability_mass==0
+            &&left.target_values[1].probability_mass==draft_probability_mass_total/2
+            &&left.target_values[2].probability_mass==draft_probability_mass_total/2,
+            "Gemma3 compact receipt assumed identity mapping or included excluded controls");
+        mapped_plan.sample_logits_for_testing(logits,std::numeric_limits<std::uint32_t>::max(),o);
+        const auto right=mapped_plan.gather(0,target);
+        expect(right.proposal.token==511&&right.proposal_cdf_begin==draft_probability_mass_total/2,
+            "Gemma3 compact mapped selection changed its native-ID CDF interval");
+        logits[0]=std::numeric_limits<float>::quiet_NaN();
+        refuses([&]{mapped_plan.sample_logits_for_testing(logits,0,o);},
+            "Gemma3 compact path ignored a NaN in an excluded raw logit");
+        expect(mapped_plan.poisoned(),"Gemma3 compact NaN refusal did not poison the plan");
+    }
+    {
+        Gemma3DraftPlan overflow_plan(f.views,f.map,vocab,3,6,769);
+        std::fill(logits.begin(),logits.end(),0);logits[12]=std::numeric_limits<float>::max();
+        o.temperature=std::numeric_limits<float>::min();
+        refuses([&]{overflow_plan.sample_logits_for_testing(logits,0,o);},
+            "Gemma3 compact path accepted finite temperature-transform overflow");
+        expect(overflow_plan.poisoned(),"Gemma3 compact transform refusal did not poison the plan");
+    }
+}
+void bounded_resources_and_batched_ingestion(){
+    const auto full=Gemma3DraftPlan::estimate_owned_bytes(vocab,3,6,32768);
+    const auto half=Gemma3DraftPlan::estimate_owned_bytes(vocab,3,6,16384);
+    expect(full-half==std::size_t(32768-16384)*(3*256*2+1)*sizeof(float),
+        "Gemma3 context estimate does not account for exactly global KV and native history");
+    refuses([&]{(void)Gemma3DraftPlan::estimate_owned_bytes(vocab,3,6,0);},"Gemma3 estimated zero context");
+    refuses([&]{(void)Gemma3DraftPlan::estimate_owned_bytes(vocab,3,6,32769);},"Gemma3 estimated beyond model context");
+    if(!have_metal())return;const auto& f=fixture();Gemma3DraftPlan plan(f.views,f.map,vocab,3,6,769);
+    expect(plan.prepared_context_capacity()==769&&plan.owned_bytes()==Gemma3DraftPlan::estimate_owned_bytes(vocab,3,6,769),
+        "Gemma3 aggregate admission estimate differs from allocated ownership");
+    const std::array<std::uint32_t,2> prefix={2,71};const std::uint32_t root=111,next_root=739;
+    TokenSamplerOptions options;options.temperature=0;SamplerHistorySnapshot history;history.window_limit=64;
+    std::array<std::uint32_t,3> words{};(void)plan.append(prefix);
+    (void)plan.begin_transaction();(void)plan.append(std::span(&root,1));
+    const auto original=plan.propose(root,words,options,history);
+    const std::vector<std::uint32_t> expected(original.draft_tokens.begin(),original.draft_tokens.end());
+    plan.abort_transaction();(void)plan.begin_transaction();
+    const auto combined=plan.propose(root,words,options,history,std::span(&root,1));
+    expect(combined.execution.command_buffer_count==1&&combined.execution.token_count==3
+        &&combined.start_position==3&&std::equal(expected.begin(),expected.end(),combined.draft_tokens.begin()),
+        "Gemma3 batched root ingestion changed proposals or added a submission");
+    (void)plan.commit_prefix(plan.position());
+    (void)plan.begin_transaction();const auto pending=plan.propose(next_root,std::span(words).first(1),options,history,std::span(&next_root,1));
+    expect(pending.execution.command_buffer_count==1&&pending.execution.token_count==2,
+        "Gemma3 pending/root ingestion submitted separately or forwarded final proposal");
+    plan.abort_transaction();expect(plan.position()==6&&plan.materialized_position()==5,
+        "Gemma3 combined transaction abort lost the durable pending token");
+    (void)plan.append(std::span(&next_root,1));std::vector<float> actual(vocab),replayed(vocab);(void)plan.read_logits(actual);
+    std::vector<std::uint32_t> replay(prefix.begin(),prefix.end());replay.push_back(root);
+    replay.insert(replay.end(),expected.begin(),expected.end());replay.push_back(next_root);
+    plan.reset();(void)plan.append(replay);(void)plan.read_logits(replayed);
+    expect(bit_equal(actual,replayed),"Gemma3 combined root/pending path changed exact replay");
+    // Non-power-of-two global capacity must use logical positions, never a
+    // capacity-minus-one bit mask when publishing the final global cache row.
+    plan.reset();plan.seed_zero_cache_prefix_for_testing(768);Reference reference;reference.position=768;
+    (void)plan.append(std::span(&root,1));reference.step(root,true);(void)plan.read_logits(actual);
+    close_logits(actual,reference.logits(),"session-sized non-power-of-two context boundary");
+    for(unsigned layer=0;layer<layers;++layer){std::vector<float> k(256),v(256);plan.read_cache(layer,768,k,v);
+        cache_close(k,reference.keys[layer],"session-sized endpoint K");cache_close(v,reference.values[layer],"session-sized endpoint V");}
+    const auto frontier=plan.position();(void)plan.begin_transaction();
+    refuses([&]{(void)plan.propose(root,std::span(words).first(1),options,history,std::span(&root,1));},
+        "Gemma3 combined root/proposal accepted a context overflow");
+    expect(plan.position()==frontier,"Gemma3 combined capacity refusal mutated the timeline");plan.abort_transaction();
 }
 void context_endpoint(){
     if(!have_metal())return;const auto& f=fixture();Gemma3DraftPlan plan(f.views,f.map,vocab,3);
@@ -406,10 +561,12 @@ void checkpoint_goldens(){
 }
 } // namespace
 std::span<const TestCase> gemma3_draft_test_cases(){
-    static const std::array<TestCase,6> cases={{
+    static const std::array<TestCase,8> cases={{
         {"Gemma3 complete Q8 transformer matches independent CPU equations and exact replay",synthetic_forward},
         {"Gemma3 private K/V transactions preserve wrap, rejection, correction and pending-token replay",transaction_lifecycle},
         {"Gemma3 full262k probability law preserves ties, nucleus and native-history semantics",probability_law},
+        {"Gemma3 compact top-k receipts match independent sampling and preserve cutoff tie fallback",compact_probability_law},
+        {"Gemma3 session resources and batched pending/root ingestion preserve exact replay",bounded_resources_and_batched_ingestion},
         {"Gemma3 full32768 context endpoint matches independent attention equations and refuses overflow",context_endpoint},
         {"Gemma3 requires Metal, complete geometry and bounded injective mappings",unavailable_and_malformed},
         {"Gemma3 actual checkpoint matches pinned CPU goldens and exact wrapped replay when available",checkpoint_goldens},

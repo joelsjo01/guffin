@@ -148,6 +148,45 @@ def standalone_attribution_v5():
 
 
 class QuickBenchmarkScriptTests(unittest.TestCase):
+    def test_schema6_actual_horizons_and_authoritative_exposure(self):
+        record = standalone_attribution_v5()
+        # One H=1 cycle accepts fully; two H=3 cycles reject at depths0/1,
+        # and one H=2 cycle accepts fully. Shorter full cycles are not censored.
+        record.update(schema_version=6, standalone_draft_sampler="explicit_or_target_scalars_native_history_v2",
+                      learned_proposed_edges=9, learned_horizon_histogram=[0, 1, 1, 2] + [0] * 20,
+                      learned_reached_depth_histogram=[4, 1] + [0] * 21,
+                      learned_accepted_edges=4, learned_accepted_prefix_histogram=[1, 2, 1] + [0] * 21,
+                      learned_full_accept_count=2, learned_censored_cycle_count=0)
+        # Three accepted first edges and one first-edge rejection; the second
+        # depth has one accepted edge and one rejection.
+        record["learned_reached_depth_histogram"][1] = 2
+        turn = dict(evaluated=12, cached=0, decoded=10, decode_attribution=record)
+        QUICK.validate_decode_attribution(turn, "Variable")
+        bounded = copy.deepcopy(record)
+        bounded.update(model_architecture="gemma3", kv_cache_dtype="f32",
+                       standalone_draft_sampler="explicit_or_target_scalars_target_window_v2",
+                       standalone_repetition_window=64)
+        turn["decode_attribution"] = bounded
+        QUICK.validate_decode_attribution(turn, "Bounded")
+        for window in (None, -1, 65, True, "64"):
+            bounded["standalone_repetition_window"] = window
+            with self.subTest(window=window), self.assertRaises(RuntimeError):
+                QUICK.validate_decode_attribution(turn, "Bounded")
+        bounded["standalone_repetition_window"] = 0
+        QUICK.validate_decode_attribution(turn, "No penalty history")
+        bounded["model_architecture"] = "gemma2"
+        with self.assertRaises(RuntimeError):
+            QUICK.validate_decode_attribution(turn, "Wrong bridge")
+        turn["decode_attribution"] = record
+        for field, value in (("learned_proposed_edges", 12),
+                             ("learned_horizon_histogram", [0, 0, 1, 2] + [0] * 20),
+                             ("learned_reached_depth_histogram", [4, 3] + [0] * 21),
+                             ("learned_reached_depth_histogram", [True] + [0] * 22)):
+            malformed = copy.deepcopy(record)
+            malformed[field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(RuntimeError):
+                QUICK.validate_acceptance_accounting(malformed, "Variable")
+
     def test_schema5_acceptance_accounting_distinguishes_rejection_stop_and_capacity(self):
         record = standalone_attribution_v5()
         turn = dict(evaluated=12, cached=0, decoded=10, decode_attribution=record)
@@ -296,7 +335,7 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
                 run.assert_not_called()
                 sleep.assert_not_called()
 
-    def test_lossless_chat_mode_is_explicit_and_validated(self):
+    def test_explicit_lossless_chat_mode_is_validated(self):
         with mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
                 mock.patch.object(QUICK, "parse_local", return_value=[]):
             QUICK.run_local_chat("engine", "model", 0, draft_model="draft",
@@ -310,6 +349,24 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     QUICK.run_local_chat("engine", "model", 0, **options)
                 run.assert_not_called()
+
+    def test_standalone_defaults_use_engine_h1_lossless_full(self):
+        record = {"speculative_draft_model": "standalone_gemma3_tli",
+                  "speculative_sampling": "lossless", "learned_horizon": 1,
+                  "learned_verification_schedule": "full", "kv_cache_dtype": "f16"}
+        for horizon in (1, 3):
+            turns = [{"decode_attribution": dict(record, learned_horizon=horizon)}]
+            with self.subTest(horizon=horizon), \
+                    mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
+                    mock.patch.object(QUICK, "parse_local", return_value=turns):
+                if horizon == 1:
+                    self.assertEqual(QUICK.run_local_chat("engine", "model", 0, draft_model="draft"), turns)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "does not match chat execution"):
+                        QUICK.run_local_chat("engine", "model", 0, draft_model="draft")
+                command = run.call_args.args[0]
+                for flag in ("--draft-horizon", "--speculative-sampling", "--speculative-schedule", "--kv-cache"):
+                    self.assertNotIn(flag, command)
 
     def test_standalone_tli_flags_reach_executable_for_full_capacity(self):
         for horizon in (1, 3, 23):
@@ -392,6 +449,7 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
         effective = {field: value if field == "top_k" else struct.unpack("<f", struct.pack("<f", value))[0]
                      for field, value in requested.items()}
         record = standalone_attribution_v5()
+        record["learned_horizon"] = 1
         record["standalone_effective_sampler"] = effective
         for field in requested:
             bad = copy.deepcopy(record)
@@ -420,7 +478,6 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
 
     def test_standalone_tli_conflicts_fail_before_process_or_cooldown(self):
         invalid = [
-            {"draft_model": "draft"},
             {"draft_model": "draft", "speculative_sampling": "exact-match"},
             {"draft_model": "draft", "speculative_sampling": "lossless", "speculative": False},
             {"draft_model": "", "speculative_sampling": "lossless"},
@@ -438,8 +495,8 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
 
     def test_standalone_tli_benchmark_rejects_execution_fallback(self):
         record = {"speculative_draft_model": "standalone_gemma3_tli", "speculative_sampling": "lossless",
-                  "learned_horizon": 3, "learned_verification_schedule": "conditional"}
-        for field, replacement in (("speculative_draft_model", "recurrent"), ("learned_horizon", 1),
+                  "learned_horizon": 1, "learned_verification_schedule": "conditional"}
+        for field, replacement in (("speculative_draft_model", "recurrent"), ("learned_horizon", 3),
                                    ("speculative_sampling", "exact-match"),
                                    ("learned_verification_schedule", "full")):
             bad = dict(record, **{field: replacement})
@@ -460,7 +517,7 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             output = io.StringIO()
             with mock.patch.object(sys, "argv", argv), \
                     mock.patch.object(QUICK, "run_local_chat", return_value=[{
-                        "decode_attribution": {"speculative_draft_model": "standalone_gemma3_tli"}
+                        "decode_attribution": {"schema_version": 6, "speculative_draft_model": "standalone_gemma3_tli"}
                     }]) as chat, \
                     mock.patch.object(QUICK, "run_kernel_diagnostics", return_value={}), \
                     mock.patch.object(QUICK, "collect_environment", return_value={}), \
@@ -476,7 +533,31 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             self.assertEqual(chat.call_args.kwargs, {
                 "retrieval": True, "speculative_sampling": "lossless",
                 "speculative_schedule": "conditional", "draft_model": str(draft),
-                "draft_horizon": 23, "draft_sampling": None})
+                "draft_horizon": 23, "draft_sampling": None, "context_size": None, "kv_cache": None})
+
+    def test_main_records_omitted_drafter_controls_as_h1_lossless_full(self):
+        with tempfile.TemporaryDirectory() as directory:
+            draft = pathlib.Path(directory) / "draft.gguf"
+            draft.write_bytes(b"test draft artifact")
+            argv = ["quick_benchmark.py", "--model", "target.gguf", "--draft-model", str(draft),
+                    "--skip-kernels", "--cooldown", "0", "--json"]
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(QUICK, "run_local_chat", return_value=[{
+                        "decode_attribution": {"schema_version": 6, "speculative_draft_model": "standalone_gemma3_tli",
+                                               "kv_cache_dtype": "f16"}
+                    }]) as chat, \
+                    mock.patch.object(QUICK, "collect_environment", return_value={}), \
+                    contextlib.redirect_stdout(output):
+                QUICK.main()
+            protocol = json.loads(output.getvalue())["protocol"]
+            self.assertEqual(protocol["standalone_draft_horizon"], 1)
+            self.assertEqual(protocol["speculative_sampling"], "lossless")
+            self.assertEqual(protocol["learned_verification_schedule"], "full")
+            self.assertEqual(protocol["kv_cache_precision_resolved"], "f16")
+            self.assertFalse(protocol["cross_mode_token_identity_required"])
+            for field in ("draft_horizon", "speculative_sampling", "speculative_schedule", "kv_cache"):
+                self.assertIsNone(chat.call_args.kwargs[field])
 
     def test_main_records_and_passes_draft_sampling_overrides_as_keyword(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -489,7 +570,7 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             output = io.StringIO()
             with mock.patch.object(sys, "argv", argv), \
                     mock.patch.object(QUICK, "run_local_chat", return_value=[{
-                        "decode_attribution": {"speculative_draft_model": "standalone_gemma3_tli"}
+                        "decode_attribution": {"schema_version": 6, "speculative_draft_model": "standalone_gemma3_tli"}
                     }]) as chat, \
                     mock.patch.object(QUICK, "run_kernel_diagnostics", return_value={}), \
                     mock.patch.object(QUICK, "collect_environment", return_value={}), \
@@ -498,12 +579,57 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
             expected = dict(temperature=0.5, top_k=0, top_p=1.0, min_p=0.0, repetition_penalty=1.25)
             protocol = json.loads(output.getvalue())["protocol"]
             self.assertEqual(protocol["standalone_draft_sampling_overrides"], expected)
-            self.assertEqual(protocol["decode_attribution_schema"], 5)
+            self.assertEqual(protocol["decode_attribution_schema"], 6)
             self.assertEqual(protocol["seed"], QUICK.SEED)
             self.assertEqual(chat.call_args.kwargs, {
                 "retrieval": True, "speculative_sampling": "lossless",
                 "speculative_schedule": None, "draft_model": str(draft),
-                "draft_horizon": 23, "draft_sampling": expected})
+                "draft_horizon": 23, "draft_sampling": expected, "context_size": None, "kv_cache": None})
+
+    def test_kv_precision_reaches_engine_and_receipt_must_match(self):
+        for precision in ("auto", "f32", "f16"):
+            turns = [{"decode_attribution": {"kv_cache_dtype": "f32" if precision == "f32" else "f16"}}]
+            with self.subTest(precision=precision), \
+                    mock.patch.object(QUICK, "run_process", return_value=("out", "err")) as run, \
+                    mock.patch.object(QUICK, "parse_local", return_value=turns):
+                QUICK.run_local_chat("engine", "model", 0, kv_cache=precision)
+                command = run.call_args.args[0]
+                self.assertEqual(command[command.index("--kv-cache") + 1], precision)
+        with mock.patch.object(QUICK, "run_process", return_value=("out", "err")), \
+                mock.patch.object(QUICK, "parse_local", return_value=[{"decode_attribution": {"kv_cache_dtype": "f32"}}]):
+            with self.assertRaisesRegex(RuntimeError, "KV cache precision does not match"):
+                QUICK.run_local_chat("engine", "model", 0, kv_cache="f16")
+        with mock.patch.object(QUICK, "run_process") as run, mock.patch.object(QUICK.time, "sleep") as sleep:
+            with self.assertRaises(ValueError):
+                QUICK.run_local_chat("engine", "model", 240, kv_cache="bf16")
+            run.assert_not_called()
+            sleep.assert_not_called()
+
+    def test_gemma3_context_and_chat_only_benchmark(self):
+        argv = ["quick_benchmark.py", "--model", "gemma3.gguf", "--context-size", "32768",
+                "--kv-cache", "f16", "--skip-kernels", "--no-speculative", "--cooldown", "0", "--json"]
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(QUICK, "run_local_chat", return_value=[{
+                    "decode_attribution": {"schema_version": 5, "engine_build": "test", "retrieval_decode": False,
+                                           "kv_cache_dtype": "f16"}
+                }]) as chat, \
+                mock.patch.object(QUICK, "run_kernel_diagnostics") as kernels, \
+                mock.patch.object(QUICK, "collect_environment", return_value={}), \
+                contextlib.redirect_stdout(output):
+            QUICK.main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(chat.call_args.kwargs["context_size"], 32768)
+        self.assertEqual(chat.call_args.kwargs["kv_cache"], "f16")
+        self.assertEqual(result["protocol"]["kv_cache_precision_requested"], "f16")
+        self.assertEqual(result["protocol"]["kv_cache_precision_resolved"], "f16")
+        self.assertFalse(chat.call_args.args[3])
+        kernels.assert_not_called()
+        self.assertTrue(result["protocol"]["kernel_diagnostics_skipped"])
+        self.assertEqual(result["protocol"]["context_capacity_requested"], 32768)
+        self.assertEqual(result["protocol"]["decode_attribution_schema"], 5)
+        self.assertFalse(result["protocol"]["retrieval_decode"])
+        self.assertIn("real chat still measured", result["kernels"]["skipped_reason"])
 
     def test_main_invalid_draft_scalars_fail_before_artifact_process_or_cooldown(self):
         for extra in (["--draft-temperature", "nan"], ["--draft-top-k", "-1"],
@@ -585,7 +711,7 @@ class QuickBenchmarkScriptTests(unittest.TestCase):
                 for other, (_, other_flag) in choices.items():
                     if other != field:
                         self.assertNotIn(other_flag, command)
-            for mode, option in ((None, value), ("exact-match", value), ("lossless", "invalid")):
+            for mode, option in ((None, "invalid"), ("exact-match", value), ("lossless", "invalid")):
                 with self.subTest(field=field, mode=mode, option=option), \
                         mock.patch.object(QUICK, "run_process") as run:
                     with self.assertRaises(ValueError):
