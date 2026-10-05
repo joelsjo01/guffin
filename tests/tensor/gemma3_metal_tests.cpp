@@ -1463,6 +1463,27 @@ void shared_buffer_access_preserves_owner_lifetime() {
         "CPU contents access must not retain destroyed Metal buffers in a caller autorelease pool");
 }
 
+void residency_skips_unsupported_devices() {
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+    // This exercises construction, buffer registration and destruction even
+    // when no system Metal device exists. The fake throws if creation is tried.
+    static_cast<void>(tensor::backends::metal::exercise_metal_buffer_residency_for_testing(false));
+#endif
+}
+
+void residency_preserves_supported_device_errors() {
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+    bool failed = false;
+    try {
+        if (!tensor::backends::metal::exercise_metal_buffer_residency_for_testing(true)) return;
+    } catch (const runtime::BackendError& error) {
+        failed = error.code() == runtime::BackendErrorCode::metal_execution_failed
+            && error.backend() == BackendKind::metal;
+    }
+    expect(failed, "supported devices must report residency allocation failures");
+#endif
+}
+
 void precise_context_unavailable_device() {
 #if defined(LOCAL_GGUF_ENGINE_TESTING)
     using tensor::backends::metal::set_metal_device_unavailable_for_testing;
@@ -1504,6 +1525,8 @@ std::span<const TestCase> gemma3_metal_test_cases() {
         TestCase{"Gemma3 columns8 storage boundaries", columns8_storage_boundaries},
         TestCase{"Metal discarded commands release queue slots", discarded_commands_release_queue_slots},
         TestCase{"Metal shared buffer access preserves owner lifetime", shared_buffer_access_preserves_owner_lifetime},
+        TestCase{"Metal residency skips unsupported devices", residency_skips_unsupported_devices},
+        TestCase{"Metal residency preserves supported device errors", residency_preserves_supported_device_errors},
         TestCase{"Gemma3 precise Metal context unavailable device", precise_context_unavailable_device},
     };
     return cases;

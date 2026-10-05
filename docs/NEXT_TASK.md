@@ -1,5 +1,29 @@
 # Next Task
 
+## Hosted CI residency compatibility fix (2026-10-05)
+
+The hosted `f69364e` run finishes with 158 C++ failures: 147 report
+`Metal residency set creation failed: unknown error`, and the remaining CLI
+failures follow from that initialization error. Unlike the September hang,
+this is an optional Metal feature being requested without checking GPU support.
+[Apple's Metal feature table](https://developer.apple.com/metal/capabilities/)
+lists residency sets as requiring Apple6 or later;
+macOS 15 API availability alone does not establish hardware support.
+
+`MetalBufferResidency` now checks the device family before creating a set.
+Unsupported GPUs keep ordinary Metal buffers without starting the residency
+worker or tracking allocations. Supported GPUs, including the M4, retain the
+500 ms refresh and three-minute idle window, and actual creation failures still
+propagate. Two isolated fake-device tests cover unsupported-device lifecycle
+and supported-device error propagation without requiring GPU hardware.
+
+Native `bash scripts/ci.sh` passes **503 C++ tests** and the **64-test Python
+suite** (15 skips), including the new regressions and existing numerical,
+cache, speculative and CLI coverage. No compiler warnings were reported.
+This is a compatibility fix; no performance benchmark was run. Changes are
+local, and a hosted rerun of this fix is still pending. The fix is complete;
+stop without further inference optimization.
+
 ## September CI hang resolved locally (2026-10-05)
 
 The `dff16f0` snapshot reproduces a native Metal hang. A process stack shows
@@ -13,8 +37,9 @@ command-context fix to the isolated September snapshot makes all **423 C++
 tests pass**. Current native `bash scripts/ci.sh` also passes **501 C++ and 64
 Python tests** (15 Python skips), including the abandoned-command regression.
 No production change was needed. CI now has a 20-minute job limit, and existing
-test output flushes immediately without extra lines. Changes are local;
-a GitHub-hosted rerun has not been performed.
+test output flushes immediately without extra lines. The subsequent hosted
+`f69364e` run reaches completion and exposes the separate residency compatibility
+failure described above.
 
 ## Gemma 2 recurrent H1 trial and retained target improvements (2026-10-04)
 

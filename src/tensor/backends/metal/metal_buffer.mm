@@ -16,6 +16,32 @@
 #include <unordered_map>
 #include <utility>
 
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+#include "metal_test_hooks.hpp"
+
+// Exercise the real residency lifecycle without requiring a particular GPU.
+@interface LocalGGUFResidencyTestDevice : NSObject
+@property(nonatomic) BOOL residencySupported;
+- (BOOL)supportsFamily:(MTLGPUFamily)family;
+- (id<MTLResidencySet>)newResidencySetWithDescriptor:(MTLResidencySetDescriptor*)descriptor
+    error:(NSError**)error API_AVAILABLE(macos(15.0));
+@end
+
+@implementation LocalGGUFResidencyTestDevice
+- (BOOL)supportsFamily:(MTLGPUFamily)family {
+    return self.residencySupported && family == MTLGPUFamilyApple6;
+}
+- (id<MTLResidencySet>)newResidencySetWithDescriptor:(MTLResidencySetDescriptor*)descriptor
+    error:(NSError**)error {
+    if (!self.residencySupported) {
+        throw std::logic_error("unsupported device must not attempt residency set creation");
+    }
+    if (error != nullptr) *error = nil;
+    return nil;
+}
+@end
+#endif
+
 namespace local_gguf_engine::tensor::backends::metal {
 
 namespace {
@@ -25,14 +51,17 @@ namespace {
 // One set covers both numerical targets and the drafter without extra GPU work.
 class MetalBufferResidency final {
 public:
-    MetalBufferResidency() {
+    explicit MetalBufferResidency(id<MTLDevice> device) {
         if (@available(macOS 15.0, *)) {
             @autoreleasepool {
+                // OS availability alone is insufficient: residency sets require
+                // Apple6 or later. Other Metal GPUs still use ordinary buffers.
+                if (![device supportsFamily:MTLGPUFamilyApple6]) return;
                 auto* descriptor = [MTLResidencySetDescriptor new];
                 descriptor.label = @"local-gguf-engine model buffers";
                 descriptor.initialCapacity = 256;
                 NSError* error = nil;
-                set_ = [metal_device_or_throw() newResidencySetWithDescriptor:descriptor error:&error];
+                set_ = [device newResidencySetWithDescriptor:descriptor error:&error];
                 if (set_ == nil) {
                     throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
                         "Metal residency set creation failed: " + ns_error_message(error, "unknown error"));
@@ -51,6 +80,7 @@ public:
     }
 
     ~MetalBufferResidency() {
+        if (set_ == nil) return;
         {
             std::lock_guard lock(mutex_);
             stopping_ = true;
@@ -68,6 +98,7 @@ public:
     }
 
     void add(id<MTLBuffer> buffer) {
+        if (set_ == nil) return;
         if (@available(macOS 15.0, *)) {
             std::lock_guard lock(mutex_);
             // Packed projections and cache views share a parent allocation.
@@ -85,6 +116,7 @@ public:
     }
 
     void remove(id<MTLBuffer> buffer) noexcept {
+        if (set_ == nil) return;
         if (@available(macOS 15.0, *)) {
             std::lock_guard lock(mutex_);
             const auto entry = owners_.find(identity(buffer));
@@ -99,6 +131,7 @@ public:
     }
 
     void keep_alive() noexcept {
+        if (set_ == nil) return;
         active_until_ns_.store(now_ns() + 180'000'000'000LL, std::memory_order_relaxed);
     }
 
@@ -121,11 +154,28 @@ private:
 };
 
 MetalBufferResidency& buffer_residency() {
-    static MetalBufferResidency residency;
+    static MetalBufferResidency residency(metal_device_or_throw());
     return residency;
 }
 
 } // namespace
+
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+bool exercise_metal_buffer_residency_for_testing(bool supported) {
+    if (@available(macOS 15.0, *)) {
+        @autoreleasepool {
+            auto* device = [LocalGGUFResidencyTestDevice new];
+            device.residencySupported = supported;
+            MetalBufferResidency residency((id<MTLDevice>)device);
+            residency.add(nil);
+            residency.keep_alive();
+            residency.remove(nil);
+        }
+        return true;
+    }
+    return false;
+}
+#endif
 
 void keep_metal_buffers_resident() {
     buffer_residency().keep_alive();

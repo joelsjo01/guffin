@@ -133,9 +133,9 @@ preserves the distribution of that selected target policy.
 128K is the model's advertised limit, not the default allocation on a 16 GiB Mac.
 This is text-only inference; no vision encoder or projector is loaded.
 
-On macOS 15 and later, the engine requests that model buffers stay resident
-for three minutes after inference, helping avoid memory restoration delays
-between messages. This is automatic for ordinary and speculative decoding;
+On macOS 15 and later with supported Apple GPUs, the engine requests that model
+buffers stay resident for three minutes after inference, helping avoid memory
+restoration delays between messages. This is automatic for ordinary and speculative decoding;
 after that idle window, residency refreshes stop.
 
 Gemma 3 starts with ordinary target decoding. `--retrieval` explicitly enables
