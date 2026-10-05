@@ -1,6 +1,6 @@
 #include "gemma2_reference_test_support.hpp"
 
-#include "local_gguf_engine/engine/gemma2_reference.hpp"
+#include "gemma2_reference.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
@@ -83,8 +83,8 @@ std::vector<engine::TokenLogit> sorted_candidates(const TensorStorage& logits) {
 }  // namespace
 
 ReferenceDecodeResult reference_decode(
-    const engine::Gemma2ModelConfig& config,
-    const engine::Gemma2ModelWeights& weights,
+    const engine::GemmaModelConfig& config,
+    const engine::GemmaModelWeights& weights,
     std::uint32_t token_id,
     std::uint32_t cache_position,
     std::vector<TensorStorage> key_cache,
@@ -169,8 +169,8 @@ ReferenceDecodeResult reference_decode(
 }
 
 ReferenceDecodeTrace reference_decode_trace(
-    const engine::Gemma2ModelConfig& config,
-    const engine::Gemma2ModelWeights& weights,
+    const engine::GemmaModelConfig& config,
+    const engine::GemmaModelWeights& weights,
     std::span<const std::uint32_t> token_ids,
     std::uint32_t initial_cache_position,
     std::vector<TensorStorage> key_cache,

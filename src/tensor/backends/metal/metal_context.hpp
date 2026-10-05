@@ -102,12 +102,6 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> target_candidate_batch_merge_pipeline = nil;
     id<MTLComputePipelineState> target_candidate_batch_finalize_pipeline = nil;
     id<MTLComputePipelineState> target_candidate_batch_top1_pipeline = nil;
-    id<MTLComputePipelineState> feature_tap_copy_pipeline = nil;
-    id<MTLComputePipelineState> feature_tap_store_f16_pipeline = nil;
-    id<MTLComputePipelineState> feature_scatter_f32_pipeline = nil;
-    id<MTLComputePipelineState> feature_scatter_f16_pipeline = nil;
-    id<MTLComputePipelineState> f16_row_scatter_pipeline = nil;
-    id<MTLComputePipelineState> draft_topk_merge_pipeline = nil;
     id<MTLCommandQueue> queue = nil;
 
     explicit MatmulPipelineState(bool precise_math = false);
@@ -125,7 +119,6 @@ struct F16MatmulDispatch {
     MTLSize threads_per_threadgroup = MTLSizeMake(0, 0, 0);
 };
 
-[[nodiscard]] const char* metal_kernel_source() noexcept;
 [[nodiscard]] std::string ns_error_message(NSError* error, const char* fallback);
 [[nodiscard]] runtime::BackendError metal_error(
     runtime::BackendErrorCode code,

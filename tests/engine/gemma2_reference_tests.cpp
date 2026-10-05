@@ -2,7 +2,8 @@
 
 #include "tensor_test_support.hpp"
 
-#include "local_gguf_engine/engine/gemma2_reference.hpp"
+#include "gemma2_reference.hpp"
+#include "local_gguf_engine/engine/model.hpp"
 
 #include <array>
 #include <span>
@@ -11,7 +12,7 @@
 
 namespace {
 
-using local_gguf_engine::engine::gemma2_input_embedding_scale;
+using local_gguf_engine::engine::gemma_input_embedding_scale;
 using local_gguf_engine::engine::gemma2_layer_uses_sliding_window;
 using local_gguf_engine::engine::gemma2_post_norm_residual_f32;
 using local_gguf_engine::engine::gemma2_rms_norm_f32;
@@ -23,8 +24,8 @@ using local_gguf_engine::tests::expect;
 using local_gguf_engine::tests::expect_close;
 
 void test_computes_gemma2_embedding_scale() {
-    expect_close(gemma2_input_embedding_scale(3584), 59.86652F, 0.0001F, "Gemma2 embedding scale mismatch");
-    expect_close(gemma2_input_embedding_scale(9), 3.0F, 0.0F, "Gemma2 tiny embedding scale mismatch");
+    expect_close(gemma_input_embedding_scale(3584), 59.86652F, 0.0001F, "Gemma2 embedding scale mismatch");
+    expect_close(gemma_input_embedding_scale(9), 3.0F, 0.0F, "Gemma2 tiny embedding scale mismatch");
 }
 
 void test_marks_even_layers_as_sliding_window() {

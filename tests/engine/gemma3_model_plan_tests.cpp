@@ -2,12 +2,12 @@
 #include "gemma3_target_test_support.hpp"
 
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
-#include "local_gguf_engine/engine/prepared_gemma2_plan.hpp"
+#include "local_gguf_engine/engine/prepared_gemma_plan.hpp"
 #include "local_gguf_engine/engine/target_verifier.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/kquant_packing.hpp"
-#include "../../src/tensor/backends/metal/metal_test_hooks.hpp"
+#include "metal_test_hooks.hpp"
 
 #include <algorithm>
 #include <array>
@@ -41,7 +41,7 @@ void rejects_model(Function function, EngineModelErrorCode code, std::string_vie
 void test_gemma3_metadata_policy_and_native_binding() {
     Gemma3Fixture fixture;
     const auto model = fixture.model();
-    const auto& config = model.gemma2_config();
+    const auto& config = model.gemma_config();
     expect(model.architecture() == ModelArchitecture::gemma3 && model_architecture_name(model.architecture()) == "gemma3",
         "Gemma 3 architecture was not preserved");
     expect(config.model_context_length == 131072U && config.context_length == 16384U,
@@ -57,18 +57,18 @@ void test_gemma3_metadata_policy_and_native_binding() {
         expect(gemma_layer_rope_freq_scale(config, layer) == (local ? 1.0F : 0.125F),
             "Gemma 3 linear scaling must apply only on global layers");
     }
-    const auto weights = bind_gemma2_model_weights(model);
+    const auto weights = bind_gemma_model_weights(model);
     expect(weights.output_weight.bytes().data() == weights.token_embedding_weight.bytes().data(),
         "Gemma 3 tied head lost source alias");
     expect(weights.blocks[0].attention.query_norm_weight && weights.blocks[0].attention.key_norm_weight,
         "Gemma 3 Q/K norms were not bound");
-    expect(resolve_gemma2_output_head_policy(config, weights, Gemma2OutputHeadPolicy::automatic) == Gemma2OutputHeadPolicy::q6_k,
+    expect(resolve_gemma_output_head_policy(config, weights, GemmaOutputHeadPolicy::automatic) == GemmaOutputHeadPolicy::q6_k,
         "Gemma 3 automatic head must preserve Q6_K");
-    expect(std::string(gemma2_output_head_policy_name(Gemma2OutputHeadPolicy::q6_k)) == "q6_k",
+    expect(std::string(gemma_output_head_policy_name(GemmaOutputHeadPolicy::q6_k)) == "q6_k",
         "Gemma 3 head policy name mismatch");
-    for (const auto policy : {Gemma2OutputHeadPolicy::f16, Gemma2OutputHeadPolicy::q8_0}) {
+    for (const auto policy : {GemmaOutputHeadPolicy::f16, GemmaOutputHeadPolicy::q8_0}) {
         try {
-            (void)resolve_gemma2_output_head_policy(config, weights, policy);
+            (void)resolve_gemma_output_head_policy(config, weights, policy);
             throw TestFailure("Gemma 3 accepted implicit head conversion");
         } catch (const std::invalid_argument&) {}
     }
@@ -91,27 +91,27 @@ void test_gemma3_rejects_bad_metadata_and_shapes() {
     fixture.metadata(tests::metadata_f32("gemma3.rope.freq_base_swa", -1.0F));
     rejects_model([&] { (void)fixture.model(); }, EngineModelErrorCode::invalid_metadata_value, "freq_base_swa");
     fixture.metadata(tests::metadata_f32("gemma3.rope.freq_base_swa", 20000.0F));
-    expect(fixture.model().gemma2_config().local_rope_freq_base == 20000.0F,
+    expect(fixture.model().gemma_config().local_rope_freq_base == 20000.0F,
         "explicit local RoPE base must be consumed");
-    auto unsupported = fixture.model().gemma2_config();
+    auto unsupported = fixture.model().gemma_config();
     unsupported.attention_head_count = 4U;
-    auto valid_weights = bind_gemma2_model_weights(fixture.model());
+    auto valid_weights = bind_gemma_model_weights(fixture.model());
     rejects_model([&] { validate_gemma3_model_weights(unsupported, valid_weights); },
         EngineModelErrorCode::invalid_tensor, "paired GQA");
-    unsupported = fixture.model().gemma2_config();
+    unsupported = fixture.model().gemma_config();
     unsupported.context_length = 4U;
     rejects_model([&] { validate_gemma3_model_weights(unsupported, valid_weights); },
         EngineModelErrorCode::invalid_tensor, "local attention window");
-    auto malformed = bind_gemma2_model_weights(fixture.model());
+    auto malformed = bind_gemma_model_weights(fixture.model());
     malformed.blocks[0].attention.query_norm_weight.reset();
-    rejects_model([&] { validate_gemma3_model_weights(fixture.model().gemma2_config(), malformed); },
+    rejects_model([&] { validate_gemma3_model_weights(fixture.model().gemma_config(), malformed); },
         EngineModelErrorCode::invalid_tensor, "Q/K norm");
-    malformed = bind_gemma2_model_weights(fixture.model());
+    malformed = bind_gemma_model_weights(fixture.model());
     malformed.blocks[0].attention.query_weight = malformed.blocks[0].attention.key_weight;
-    rejects_model([&] { validate_gemma3_model_weights(fixture.model().gemma2_config(), malformed); },
+    rejects_model([&] { validate_gemma3_model_weights(fixture.model().gemma_config(), malformed); },
         EngineModelErrorCode::invalid_tensor, "attn_q.weight");
     std::erase_if(fixture.view.tensor_payloads, [](const auto& payload) { return payload.tensor.name == "blk.0.attn_k_norm.weight"; });
-    rejects_model([&] { (void)bind_gemma2_model_weights(fixture.model()); }, EngineModelErrorCode::missing_tensor, "attn_k_norm.weight");
+    rejects_model([&] { (void)bind_gemma_model_weights(fixture.model()); }, EngineModelErrorCode::missing_tensor, "attn_k_norm.weight");
 }
 
 void test_gemma3_policy_receipt_binds_global_rope_scaling() {
@@ -129,8 +129,8 @@ void test_gemma3_policy_receipt_binds_global_rope_scaling() {
 void test_gemma3_rejects_execution_packing_at_source_boundary() {
     Gemma3Fixture fixture;
     const auto model = fixture.model();
-    const auto& config = model.gemma2_config();
-    const auto native = bind_gemma2_model_weights(model);
+    const auto& config = model.gemma_config();
+    const auto native = bind_gemma_model_weights(model);
     for (const auto kind : {0U, 1U, 2U}) {
         const auto source = kind == 0U ? native.token_embedding_weight
             : kind == 1U ? native.blocks[0].attention.query_weight
@@ -178,9 +178,9 @@ std::size_t expected_resident_weight_bytes(const EngineModel& model) {
 void test_gemma3_memory_estimate_counts_execution_packing_without_a_device() {
     Gemma3Fixture fixture;
     const auto model = fixture.model();
-    auto config = model.gemma2_config();
+    auto config = model.gemma_config();
     config.context_length = 16U;
-    const auto weights = bind_gemma2_model_weights(model);
+    const auto weights = bind_gemma_model_weights(model);
     const auto estimate = estimate_gemma3_metal_memory(config, weights);
     expect(estimate.weights == expected_resident_weight_bytes(model),
         "Gemma 3 admission must count packed projection bytes before device upload");
@@ -213,9 +213,9 @@ void test_gemma_kv_precision_policy_and_estimates() {
 
     Gemma3Fixture fixture;
     const auto model = fixture.model();
-    auto config = model.gemma2_config();
+    auto config = model.gemma_config();
     config.context_length = 16U;
-    const auto weights = bind_gemma2_model_weights(model);
+    const auto weights = bind_gemma_model_weights(model);
     const auto original = estimate_gemma3_metal_memory(config, weights);
     config.kv_precision = GemmaKVPrecision::f32;
     const auto f32 = estimate_gemma3_metal_memory(config, weights);
@@ -243,7 +243,7 @@ void test_gemma_kv_precision_policy_and_estimates() {
         expect(full_bytes - half_bytes == 6U * (rows + backups) * 2U * 256U * 2U,
             "verifier half-cache estimate changed storage outside private K/V and accepted backups");
     }
-    expect(model.gemma2_config().kv_precision == GemmaKVPrecision::automatic,
+    expect(model.gemma_config().kv_precision == GemmaKVPrecision::automatic,
         "memory estimation mutated loaded model metadata");
     config.kv_precision = static_cast<GemmaKVPrecision>(99);
     try {
@@ -259,18 +259,18 @@ void test_gemma3_precision_owns_all_cache_storage_and_preserves_receipts() {
     const auto model = load_verified_engine_model_from_gguf(fixture.view, provenance);
     const auto source_receipt = model.payload_receipt();
     ResidentTargetPayloadReceipt f32_receipt, f16_receipt, automatic_receipt;
-    auto full = create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::automatic,
+    auto full = create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::automatic,
         f32_receipt, 16U, GemmaKVPrecision::f32);
-    auto half = create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::automatic,
+    auto half = create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::automatic,
         f16_receipt, 16U, GemmaKVPrecision::f16);
-    auto automatic = create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::automatic,
+    auto automatic = create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::automatic,
         automatic_receipt, 16U);
     expect(full.config().kv_precision == GemmaKVPrecision::f32
             && half.config().kv_precision == GemmaKVPrecision::f16
             && gemma_kv_dtype(half.config()) == DType::f16,
         "resident configuration did not retain its resolved KV policy");
     expect(f16_receipt == f32_receipt && model.payload_receipt() == source_receipt
-            && model.gemma2_config().kv_precision == GemmaKVPrecision::automatic,
+            && model.gemma_config().kv_precision == GemmaKVPrecision::automatic,
         "cache precision changed authenticated source or resident weight identity");
     expect(automatic.config() == half.config() && automatic_receipt == f16_receipt
             && automatic.kv_cache_byte_count() == half.kv_cache_byte_count()
@@ -288,7 +288,7 @@ void test_gemma3_precision_owns_all_cache_storage_and_preserves_receipts() {
         expect(layer.backup_key.descriptor().dtype == DType::f16
                 && layer.backup_value.descriptor().dtype == DType::f16,
             "width-two rollback storage ignored resolved KV precision");
-    const auto estimate = estimate_gemma3_metal_memory(half.config(), bind_gemma2_model_weights(model));
+    const auto estimate = estimate_gemma3_metal_memory(half.config(), bind_gemma_model_weights(model));
     for (const auto rows : {1U, 2U, 3U, 4U, 24U, gemma2_metal_prefill_chunk_size}) {
         const auto arena = create_gemma2_metal_target_verifier_plan(half, rows);
         const auto automatic_arena = create_gemma2_metal_target_verifier_plan(automatic, rows);
@@ -309,24 +309,24 @@ void test_gemma3_precision_owns_all_cache_storage_and_preserves_receipts() {
             expect(estimate.scratch == half.scratch_byte_count() + arena.allocated_byte_count(),
                 "half-cache admission omitted ordinary lazy workspace");
     }
-    auto configured = create_gemma2_metal_model_plan(half.config(), bind_gemma2_model_weights(model));
+    auto configured = create_gemma2_metal_model_plan(half.config(), bind_gemma_model_weights(model));
     expect(configured.config().kv_precision == GemmaKVPrecision::f16
             && configured.kv_cache_byte_count() == half.kv_cache_byte_count(),
         "low-level plan factory discarded configuration precision");
     auto automatic_config = half.config();
     automatic_config.kv_precision = GemmaKVPrecision::automatic;
-    auto configured_automatic = create_gemma2_metal_model_plan(automatic_config, bind_gemma2_model_weights(model));
+    auto configured_automatic = create_gemma2_metal_model_plan(automatic_config, bind_gemma_model_weights(model));
     expect(configured_automatic.config() == configured.config()
             && configured_automatic.kv_cache_byte_count() == configured.kv_cache_byte_count()
             && configured_automatic.scratch_byte_count() == configured.scratch_byte_count(),
         "low-level automatic plan factory must resolve to explicit F16 allocation");
-    auto prepared = prepare_gemma2_target_only_plan(model, Gemma2OutputHeadPolicy::automatic,
+    auto prepared = prepare_gemma_target_only_plan(model, GemmaOutputHeadPolicy::automatic,
         16U, GemmaKVPrecision::f16);
     expect(prepared.target().config().kv_precision == GemmaKVPrecision::f16
             && prepared.resident_receipt() == f16_receipt
             && prepared.model_receipt() == source_receipt,
         "prepared target factory lost precision or changed weight identity");
-    auto prepared_automatic = prepare_gemma2_target_only_plan(model, Gemma2OutputHeadPolicy::automatic, 16U);
+    auto prepared_automatic = prepare_gemma_target_only_plan(model, GemmaOutputHeadPolicy::automatic, 16U);
     expect(prepared_automatic.target().config() == prepared.target().config()
             && prepared_automatic.resident_receipt() == prepared.resident_receipt()
             && prepared_automatic.model_receipt() == prepared.model_receipt(),
@@ -340,8 +340,8 @@ void test_gemma3_resident_plan_native_weights_context_and_bounded_scratch() {
     const auto source_receipt = model.payload_receipt();
     if (!tensor::tensor_backend_is_available(runtime::BackendKind::metal)) return;
     ResidentTargetPayloadReceipt resident, larger_resident;
-    auto plan = create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::automatic, resident, 16U);
-    auto larger = create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::automatic, larger_resident, 32U);
+    auto plan = create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::automatic, resident, 16U);
+    auto larger = create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::automatic, larger_resident, 32U);
     expect(plan.config().context_length == 16U && plan.config().model_context_length == 131072U,
         "runtime context override must preserve model maximum");
     expect(&tensor::backend_buffer_storage(plan.weights().token_embedding_weight)
@@ -364,7 +364,7 @@ void test_gemma3_resident_plan_native_weights_context_and_bounded_scratch() {
         && plan.weights().output_weight.descriptor().packing == tensor::TensorPacking::canonical
         && plan.weights().output_norm_weight.descriptor().packing == tensor::TensorPacking::canonical,
         "Gemma 3 tied embedding/head and output norm must retain native storage");
-    const auto source_weights = bind_gemma2_model_weights(model);
+    const auto source_weights = bind_gemma_model_weights(model);
     for (std::size_t layer = 0U; layer < plan.weights().blocks.size(); ++layer) {
         const auto& block = plan.weights().blocks[layer];
         const auto& source = source_weights.blocks[layer];
@@ -402,7 +402,7 @@ void test_gemma3_resident_plan_native_weights_context_and_bounded_scratch() {
         expect(plan.kv_cache()[layer].row_capacity == (layer == 5U ? 16U : 8U), "Gemma 3 local/global cache capacity mismatch");
     }
     expect(plan.kv_cache_byte_count() == 2U * 256U * sizeof(std::uint16_t) * (5U * 8U + 16U), "Gemma 3 KV allocation ledger mismatch");
-    const auto estimate = estimate_gemma3_metal_memory(plan.config(), bind_gemma2_model_weights(model));
+    const auto estimate = estimate_gemma3_metal_memory(plan.config(), bind_gemma_model_weights(model));
     expect(estimate.weights == plan.uploaded_weight_byte_count()
         && estimate.kv_cache == plan.kv_cache_byte_count(), "Gemma 3 admission estimate must match actual resident ownership");
     for (const auto rows : {1U, 2U, 3U, 4U, 24U, gemma2_metal_prefill_chunk_size}) {
@@ -420,7 +420,7 @@ void test_gemma3_resident_plan_native_weights_context_and_bounded_scratch() {
         "Gemma 3 schedule must attend populated local/global prefixes");
     for (const auto context : {0x40000U, 24U}) {
         try {
-            (void)create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::automatic, context);
+            (void)create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::automatic, context);
             throw TestFailure("Gemma 3 accepted invalid runtime context");
         } catch (const std::invalid_argument&) {}
     }
@@ -435,7 +435,7 @@ void test_gemma3_plan_unavailable_device() {
     tensor::backends::metal::set_metal_device_unavailable_for_testing(true);
     for (const auto precision : {GemmaKVPrecision::automatic, GemmaKVPrecision::f32, GemmaKVPrecision::f16}) {
         try {
-            (void)create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 16U, precision);
+            (void)create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 16U, precision);
             throw TestFailure("Gemma 3 plan should reject unavailable Metal");
         } catch (const runtime::BackendError& error) {
             expect(error.code() == runtime::BackendErrorCode::unavailable_metal_device,
@@ -443,7 +443,7 @@ void test_gemma3_plan_unavailable_device() {
         }
     }
     try {
-        (void)create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic,
+        (void)create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic,
             16U, static_cast<GemmaKVPrecision>(99));
         throw TestFailure("invalid precision was accepted before device preparation");
     } catch (const std::invalid_argument&) {

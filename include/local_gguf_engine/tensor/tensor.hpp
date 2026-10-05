@@ -35,6 +35,9 @@ private:
         TensorPacking packing = TensorPacking::canonical);
 };
 
+// Validate mutable descriptor fields before admitting external storage or views.
+void validate_tensor_descriptor(const TensorDescriptor& descriptor);
+
 class TensorView;
 
 class TensorStorage final {
@@ -48,7 +51,7 @@ public:
     [[nodiscard]] const TensorDescriptor& descriptor() const noexcept;
     [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept;
     [[nodiscard]] std::span<std::uint8_t> mutable_bytes() noexcept;
-    [[nodiscard]] TensorView view() const noexcept;
+    [[nodiscard]] TensorView view() const;
 
 private:
     TensorStorage(TensorDescriptor descriptor, std::vector<std::uint8_t> bytes);
@@ -70,6 +73,8 @@ public:
 
 private:
     TensorView(TensorDescriptor descriptor, std::span<const std::uint8_t> bytes);
+
+    friend class TensorStorage;
 
     TensorDescriptor descriptor_;
     std::span<const std::uint8_t> bytes_;

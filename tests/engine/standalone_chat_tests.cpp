@@ -4,11 +4,11 @@
 #include "local_gguf_engine/engine/standalone_chat.hpp"
 #include "local_gguf_engine/engine/gemma3_draft.hpp"
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
-#include "local_gguf_engine/engine/gemma2_reference.hpp"
+#include "gemma2_reference.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
-#include "../../src/tensor/backends/metal/metal_test_hooks.hpp"
+#include "metal_test_hooks.hpp"
 
 #include <algorithm>
 #include <array>
@@ -122,7 +122,7 @@ struct TargetFixture {
         : bytes(standalone_chat_target_fixture_bytes(context)), view(model_format::read_gguf_model_view(bytes)),
           model(load_verified_engine_model_from_gguf(view, bytes)),
           tokenizer(tokenizer::load_tokenizer_from_gguf_metadata(view.directory.metadata)),
-          plan(create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::q8_0)) {}
+          plan(create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::q8_0)) {}
 };
 
 struct DirectTargetFixture : Gemma3TargetFixture {
@@ -152,14 +152,14 @@ private:
             std::fill_n(embedding.begin() + static_cast<std::ptrdiff_t>(offset + 192), 16, 1U);
             embedding[offset + 209] = token == hello ? 0x40U : 0x3cU;
         }
-        return create_gemma2_metal_model_plan(model(), Gemma2OutputHeadPolicy::automatic, context, precision);
+        return create_gemma2_metal_model_plan(model(), GemmaOutputHeadPolicy::automatic, context, precision);
     }
 };
 
 void prefill(Gemma2MetalModelPlan& plan, TokenSampler& sampler, std::span<const std::uint32_t> prompt) {
     sampler.observe_tokens(prompt);
     static_cast<void>(run_gemma2_metal_resident_prefill(plan, prompt, 0,
-        gemma2_input_embedding_scale(plan.config().embedding_length), sampler.selection_request()));
+        gemma_input_embedding_scale(plan.config().embedding_length), sampler.selection_request()));
 }
 
 void compare_target_cache(const Gemma2MetalModelPlan& actual, const Gemma2MetalModelPlan& expected,
@@ -702,7 +702,7 @@ void test_gemma3_half_target_h1_preserves_draft_precision_and_callback_prefixes(
                 : Gemma2MetalTokenStreamDecision::continue_generation;
         };
         const auto generated = generate_gemma2_metal_sampled_tokens_with_plan(target.plan,
-            prompt, 0U, 4U, {}, sampler, callback, {}, nullptr, nullptr, nullptr, &draft, prompt);
+            prompt, 0U, 4U, {}, sampler, callback, {}, nullptr, nullptr, &draft, prompt);
         const auto count = stop_callback ? 3U : 4U;
         expect(generated.selected_token_ids == std::vector<std::uint32_t>(count, hello)
                 && callbacks == count && generated.metrics.learned_cycle_count > 0U
@@ -779,7 +779,7 @@ void test_gemma3_first_token_precedes_draft_work_and_recovers_every_exit() {
         bool threw = false;
         try {
             result = generate_gemma2_metal_sampled_tokens_with_plan(target.plan, prompt, 0, maximum,
-                stops, sampler, callback, clock, nullptr, nullptr, &journal, &draft, prompt);
+                stops, sampler, callback, clock, nullptr, &journal, &draft, prompt);
         } catch (const std::runtime_error& error) {
             threw = std::string_view(error.what()) == "first-token callback sentinel";
             if (!threw) throw;
@@ -826,7 +826,7 @@ void test_gemma3_first_token_precedes_draft_work_and_recovers_every_exit() {
                 return Gemma2MetalTokenStreamDecision::continue_generation;
             };
             const auto follow = generate_gemma2_metal_sampled_tokens_with_plan(target.plan, suffix, 3, 1,
-                {}, sampler, follow_callback, clock, nullptr, nullptr, nullptr, &draft, context);
+                {}, sampler, follow_callback, clock, nullptr, nullptr, &draft, context);
             expect(follow_calls == 1 && follow.cached_token_count == 5 && draft.target_position() == 5
                     && draft.draft_plan_for_testing().materialized_position() == 4,
                 "follow-up failed to reconcile the previous pending token and new prompt");
@@ -852,7 +852,7 @@ void test_gemma3_deferred_draft_cached_continuation_preserves_pending_prefix() {
         TokenSampler sampler({.temperature=0.0F, .top_k=1, .seed=17});
         sampler.observe_tokens(prompt);
         const auto first = generate_gemma2_metal_sampled_tokens_with_plan(target.plan, prompt, 0, 1,
-            {}, sampler, {}, {}, nullptr, nullptr, nullptr, &draft, prompt);
+            {}, sampler, {}, {}, nullptr, nullptr, &draft, prompt);
         expect(first.selected_token_ids == std::vector<std::uint32_t>{hello}
                 && draft.target_position() == 3 && draft.draft_plan_for_testing().position() == 3
                 && draft.draft_plan_for_testing().materialized_position() == 2,
@@ -881,7 +881,7 @@ void test_gemma3_deferred_draft_cached_continuation_preserves_pending_prefix() {
             // prompt history or changing the matching native draft ledger.
             const auto result = generate_gemma2_metal_sampled_tokens_with_plan(target.plan,
                 std::span(context).last(1), 2, 1, {}, sampler, callback, {},
-                nullptr, nullptr, &journal, &draft, context);
+                nullptr, &journal, &draft, context);
             expect(result.cached_token_count == 4 && result.metrics.standalone_draft_command_buffer_count > 0,
                 "cached continuation omitted its pending-prefix reconciliation work");
         } catch (const std::runtime_error& error) {
@@ -897,7 +897,7 @@ void test_gemma3_deferred_draft_cached_continuation_preserves_pending_prefix() {
         // another exact-context continuation after the exceptional exit.
         const auto next = generate_gemma2_metal_sampled_tokens_with_plan(target.plan,
             std::span(committed_context).last(1), 3, 1, {}, sampler, {}, {},
-            nullptr, nullptr, nullptr, &draft, committed_context);
+            nullptr, nullptr, &draft, committed_context);
         expect(next.cached_token_count == 5 && draft.target_position() == 5
                 && draft.draft_plan_for_testing().materialized_position() == 4 && !draft.poisoned(),
             "reconciled cached continuation could not be reused after callback completion");

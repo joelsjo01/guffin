@@ -1,8 +1,9 @@
-#include "generate_cli_tests.hpp"
+#include "cli_tests.hpp"
 
-#include "local_gguf_engine/engine/gemma2_chat_session.hpp"
-#include "local_gguf_engine/engine/gemma2_reference.hpp"
-#include "local_gguf_engine/frontends/cli/generate.hpp"
+#include "local_gguf_engine/engine/gemma_chat_session.hpp"
+#include "gemma2_reference.hpp"
+#include "local_gguf_engine/frontends/cli/cli.hpp"
+#include "local_gguf_engine/frontends/cli/metrics.hpp"
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
@@ -14,9 +15,8 @@
 #include "tensor_test_support.hpp"
 #include "gemma3_target_test_support.hpp"
 #include "../../tokenizer/gemma3_chat_template.hpp"
-#include "../../../src/engine/target_verifier_test_hooks.hpp"
-#include "../../../src/engine/prepared_plan_test_hooks.hpp"
-#include "../../../src/tensor/backends/metal/metal_test_hooks.hpp"
+#include "target_verifier_test_hooks.hpp"
+#include "metal_test_hooks.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -36,16 +36,16 @@
 
 namespace {
 
-using local_gguf_engine::frontends::cli::run_generate;
+using local_gguf_engine::frontends::cli::run_cli;
 using local_gguf_engine::frontends::cli::format_chat_timing_line;
 using local_gguf_engine::frontends::cli::format_chat_timing_detail_line;
 using local_gguf_engine::frontends::cli::format_chat_decode_attribution_line;
-using local_gguf_engine::engine::Gemma2ChatSession;
-using local_gguf_engine::engine::Gemma2ChatContextError;
-using local_gguf_engine::engine::Gemma2ChatSessionOptions;
-using local_gguf_engine::engine::Gemma2ChatTurnOptions;
+using local_gguf_engine::engine::GemmaChatSession;
+using local_gguf_engine::engine::GemmaChatContextError;
+using local_gguf_engine::engine::GemmaChatSessionOptions;
+using local_gguf_engine::engine::GemmaChatTurnOptions;
 using local_gguf_engine::engine::Gemma2GenerationStopReason;
-using local_gguf_engine::engine::Gemma2TokenSelectionMode;
+using local_gguf_engine::engine::GemmaTokenSelectionMode;
 using local_gguf_engine::engine::TokenSamplerOptions;
 using local_gguf_engine::model_format::read_file_backed_gguf_model;
 using local_gguf_engine::model_format::GGUFMetadataArray;
@@ -122,7 +122,7 @@ private:
 }
 
 void test_formats_chat_timing_line_from_runtime_metrics() {
-    local_gguf_engine::engine::Gemma2ChatTurnMetrics metrics;
+    local_gguf_engine::engine::GemmaChatTurnMetrics metrics;
     metrics.generation.newly_evaluated_prompt_token_count = 19U;
     metrics.generation.prompt_evaluation_duration_ns = 1'000'000'000U;
     metrics.prompt_processing_duration_ns = 1'250'000'000U;
@@ -171,7 +171,7 @@ void test_formats_chat_timing_line_from_runtime_metrics() {
 }
 
 void test_formats_and_validates_chat_decode_attribution() {
-    local_gguf_engine::engine::Gemma2ChatTurnMetrics metrics;
+    local_gguf_engine::engine::GemmaChatTurnMetrics metrics;
     metrics.initial_cache_position = 10U;
     metrics.reused_cached_token_count = 10U;
     metrics.generation.newly_evaluated_prompt_token_count = 3U;
@@ -348,17 +348,17 @@ int run_generate_for_path(
     std::ostringstream& output,
     std::ostringstream& error
 ) {
-    const std::string program = "local-gguf-generate";
+    const std::string program = "guffin";
     const std::string path_string = path.string();
     const std::string prompt_string(prompt);
     const std::string max_new_tokens_string(max_new_tokens);
     const char* argv[] = {
         program.c_str(),
         path_string.c_str(),
-        prompt_string.c_str(),
-        max_new_tokens_string.c_str(),
+        "--prompt", prompt_string.c_str(),
+        "--max-new-tokens", max_new_tokens_string.c_str(),
     };
-    return run_generate(4, argv, output, error);
+    return run_cli(static_cast<int>(std::size(argv)), argv, output, error);
 }
 
 int run_generate_for_path_with_greedy(
@@ -368,18 +368,18 @@ int run_generate_for_path_with_greedy(
     std::ostringstream& output,
     std::ostringstream& error
 ) {
-    const std::string program = "local-gguf-generate";
+    const std::string program = "guffin";
     const std::string path_string = path.string();
     const std::string prompt_string(prompt);
     const std::string max_new_tokens_string(max_new_tokens);
     const char* argv[] = {
         program.c_str(),
         path_string.c_str(),
-        prompt_string.c_str(),
-        max_new_tokens_string.c_str(),
+        "--prompt", prompt_string.c_str(),
+        "--max-new-tokens", max_new_tokens_string.c_str(),
         "--greedy",
     };
-    return run_generate(5, argv, output, error);
+    return run_cli(static_cast<int>(std::size(argv)), argv, output, error);
 }
 
 int run_generate_chat_for_path(
@@ -389,18 +389,18 @@ int run_generate_chat_for_path(
     std::ostringstream& output,
     std::ostringstream& error
 ) {
-    const std::string program = "local-gguf-generate";
+    const std::string program = "guffin";
     const std::string path_string = path.string();
     const std::string max_new_tokens_string(max_new_tokens);
     const char* argv[] = {
         program.c_str(),
         path_string.c_str(),
-        "--chat",
+        "--stats",
         "--max-new-tokens",
         max_new_tokens_string.c_str(),
         "--greedy",
     };
-    return run_generate(6, argv, input, output, error);
+    return run_cli(6, argv, input, output, error);
 }
 
 int run_generate_chat_for_path_with_reverse_stop(
@@ -411,21 +411,21 @@ int run_generate_chat_for_path_with_reverse_stop(
     std::ostringstream& output,
     std::ostringstream& error
 ) {
-    const std::string program = "local-gguf-generate";
+    const std::string program = "guffin";
     const std::string path_string = path.string();
     const std::string max_new_tokens_string(max_new_tokens);
     const std::string reverse_stop_string(reverse_stop);
     const char* argv[] = {
         program.c_str(),
         path_string.c_str(),
-        "--chat",
+        "--stats",
         "--max-new-tokens",
         max_new_tokens_string.c_str(),
         "--reverse-prompt",
         reverse_stop_string.c_str(),
         "--greedy",
     };
-    return run_generate(8, argv, input, output, error);
+    return run_cli(8, argv, input, output, error);
 }
 
 int run_generate_chat_for_path_with_sampling(
@@ -434,14 +434,14 @@ int run_generate_chat_for_path_with_sampling(
     std::ostringstream& output,
     std::ostringstream& error
 ) {
-    const std::string program = "local-gguf-generate";
+    const std::string program = "guffin";
     const std::string path_string = path.string();
     const char* argv[] = {
-        program.c_str(), path_string.c_str(), "--chat", "--max-new-tokens", "3",
+        program.c_str(), path_string.c_str(), "--stats", "--max-new-tokens", "3",
         "--temperature", "1", "--top-k", "2", "--top-p", "1",
         "--repeat-penalty", "1.1", "--seed", "42",
     };
-    return run_generate(15, argv, input, output, error);
+    return run_cli(15, argv, input, output, error);
 }
 
 int run_generate_chat_for_path_with_context_shift(
@@ -451,14 +451,14 @@ int run_generate_chat_for_path_with_context_shift(
     std::ostringstream& output,
     std::ostringstream& error
 ) {
-    const std::string program = "local-gguf-generate";
+    const std::string program = "guffin";
     const std::string path_string = path.string();
     const std::string max_new_tokens_string(max_new_tokens);
     const char* argv[] = {
-        program.c_str(), path_string.c_str(), "--chat", "--max-new-tokens",
+        program.c_str(), path_string.c_str(), "--stats", "--max-new-tokens",
         max_new_tokens_string.c_str(), "--context-shift", "--greedy",
     };
-    return run_generate(7, argv, input, output, error);
+    return run_cli(7, argv, input, output, error);
 }
 
 int run_generate_chat_with_default_options(
@@ -467,10 +467,10 @@ int run_generate_chat_with_default_options(
     std::ostringstream& output,
     std::ostringstream& error
 ) {
-    const std::string program = "local-gguf-generate";
+    const std::string program = "guffin";
     const std::string path_string = path.string();
-    const char* argv[] = {program.c_str(), path_string.c_str(), "--chat"};
-    return run_generate(3, argv, input, output, error);
+    const char* argv[] = {program.c_str(), path_string.c_str(), "--stats"};
+    return run_cli(3, argv, input, output, error);
 }
 
 int run_generate_chat_with_extra_arguments(
@@ -480,7 +480,7 @@ int run_generate_chat_with_extra_arguments(
     std::ostringstream& error
 ) {
     std::vector<std::string> arguments {
-        "local-gguf-generate", path.string(), "--chat", "--max-new-tokens", "1",
+        "guffin", path.string(), "--stats", "--max-new-tokens", "1",
     };
     arguments.insert(arguments.end(), extra_arguments.begin(), extra_arguments.end());
     std::vector<const char*> argv;
@@ -489,7 +489,7 @@ int run_generate_chat_with_extra_arguments(
         argv.push_back(argument.c_str());
     }
     std::istringstream input("/exit\n");
-    return run_generate(static_cast<int>(argv.size()), argv.data(), input, output, error);
+    return run_cli(static_cast<int>(argv.size()), argv.data(), input, output, error);
 }
 
 void append_u8(std::vector<std::uint8_t>& bytes, std::uint8_t value) {
@@ -744,7 +744,7 @@ std::vector<std::int32_t> tiny_gemma2_generate_cli_token_types() {
     return token_types;
 }
 
-std::vector<GGUFMetadataEntry> tiny_gemma2_generate_cli_metadata(std::uint32_t context_length = 16) {
+std::vector<GGUFMetadataEntry> tiny_gemma2_generate_cli_metadata(std::uint32_t context_length = 32) {
     return {
         metadata_string("general.architecture", "gemma2"),
         metadata_string("general.name", "Tiny Gemma 2 Generate Fixture"),
@@ -935,7 +935,7 @@ std::vector<std::uint8_t> tiny_gemma3_chat_fixture_bytes(std::uint32_t forced_to
 void test_gemma3_chat_native_target_multiturn_regeneration_and_reset_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) return;
     const TempBinaryFile file("gemma3-chat-lifecycle", tiny_gemma3_chat_fixture_bytes());
-    auto session = Gemma2ChatSession(read_file_backed_gguf_model(file.path()), {
+    auto session = GemmaChatSession(read_file_backed_gguf_model(file.path()), {
         .max_new_tokens = 2, .context_length = 128, .speculative_decode = false, .retrieval_decode = false,
     });
     expect(session.context_length() == 128, "Gemma3 runtime capacity must honor explicit context length");
@@ -951,7 +951,7 @@ void test_gemma3_chat_native_target_multiturn_regeneration_and_reset_when_availa
             && !first.metrics.standalone_draft && !first.metrics.retrieval_decode,
         "Gemma3 target-only defaults must use F16 without inventing a drafter or enabling retrieval");
     expect(first.metrics.context_capacity == 128, "Gemma3 chat metrics must report runtime capacity");
-    expect(first.metrics.output_head_policy == local_gguf_engine::engine::Gemma2OutputHeadPolicy::q6_k,
+    expect(first.metrics.output_head_policy == local_gguf_engine::engine::GemmaOutputHeadPolicy::q6_k,
         "Gemma3 default head must retain the native Q6_K checkpoint");
     expect(std::count(first.rendered_prompt_token_ids.begin(), first.rendered_prompt_token_ids.end(), 2U) == 1,
         "Gemma3 chat must render one BOS");
@@ -974,7 +974,7 @@ void test_gemma3_chat_context_shift_and_failed_turn_preserve_state_when_availabl
     const TempBinaryFile file("gemma3-chat-context", tiny_gemma3_chat_fixture_bytes());
     for (const auto precision : {local_gguf_engine::engine::GemmaKVPrecision::f32,
                                  local_gguf_engine::engine::GemmaKVPrecision::f16}) {
-        auto session = Gemma2ChatSession(read_file_backed_gguf_model(file.path()), {
+        auto session = GemmaChatSession(read_file_backed_gguf_model(file.path()), {
             .max_new_tokens = 1, .context_length = 32, .kv_precision = precision, .context_shift = true,
             .speculative_decode = false, .retrieval_decode = false,
         });
@@ -997,7 +997,7 @@ void test_gemma3_chat_context_shift_and_failed_turn_preserve_state_when_availabl
         try {
             (void)session.generate_user_turn(std::string(256, 'x'));
             throw TestFailure("Gemma3 oversized turn should fail");
-        } catch (const Gemma2ChatContextError&) {}
+        } catch (const GemmaChatContextError&) {}
         expect(session.cached_token_count() == cached && session.message_count() == messages && !session.poisoned(),
             "Gemma3 rejected oversized turn mutated valid retained state");
         const auto recovery = session.generate_user_turn("Hello");
@@ -1009,10 +1009,10 @@ void test_gemma3_chat_context_shift_and_failed_turn_preserve_state_when_availabl
 void test_gemma3_chat_callback_failure_cancellation_and_stops_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) return;
     const TempBinaryFile file("gemma3-chat-callback", tiny_gemma3_chat_fixture_bytes());
-    const auto options = Gemma2ChatSessionOptions {
+    const auto options = GemmaChatSessionOptions {
         .max_new_tokens = 3, .context_length = 128, .speculative_decode = false, .retrieval_decode = false,
     };
-    auto session = Gemma2ChatSession(read_file_backed_gguf_model(file.path()), options);
+    auto session = GemmaChatSession(read_file_backed_gguf_model(file.path()), options);
     std::size_t deliveries = 0;
     try {
         (void)session.generate_user_turn("Hello", [&](std::string_view value) {
@@ -1028,21 +1028,21 @@ void test_gemma3_chat_callback_failure_cancellation_and_stops_when_available() {
         "Gemma3 callback failure must preserve its committed turn prefix");
     expect(session.regenerate_last_turn().text == "HelloHelloHello", "Gemma3 regeneration after callback error failed");
     bool stopped = false;
-    const auto cancelled = session.generate_user_turn("Hello", Gemma2ChatTurnOptions {
+    const auto cancelled = session.generate_user_turn("Hello", GemmaChatTurnOptions {
         .on_text_delta = [&](std::string_view) { stopped = true; }, .should_stop = [&] { return stopped; },
     });
     expect(cancelled.interrupted && cancelled.text == "Hello" && cancelled.selected_token_ids.size() == 1,
         "Gemma3 cancellation must retain exactly the delivered token prefix");
     for (const auto token : {1U, 107U}) {
         const TempBinaryFile stop_file("gemma3-chat-stop-" + std::to_string(token), tiny_gemma3_chat_fixture_bytes(token));
-        auto stop_session = Gemma2ChatSession(read_file_backed_gguf_model(stop_file.path()), options);
+        auto stop_session = GemmaChatSession(read_file_backed_gguf_model(stop_file.path()), options);
         const auto result = stop_session.generate_user_turn("Hello");
         expect(result.text.empty() && result.stop_token_id == token && result.generated_token_ids.empty(),
             "Gemma3 target EOS/end-of-turn must stop without visible control text");
     }
     auto reverse_options = options;
     reverse_options.reverse_stop_strings = {"HelloHello"};
-    auto reverse_session = Gemma2ChatSession(read_file_backed_gguf_model(file.path()), reverse_options);
+    auto reverse_session = GemmaChatSession(read_file_backed_gguf_model(file.path()), reverse_options);
     std::string reverse_stream;
     const auto reversed = reverse_session.generate_user_turn("Hello", [&](std::string_view text) { reverse_stream += text; });
     expect(reversed.reverse_stop_string == "HelloHello" && reversed.text.empty() && reverse_stream.empty()
@@ -1055,7 +1055,7 @@ void test_gemma3_chat_without_retrieval_exceeds_8192_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) return;
     const TempBinaryFile file("gemma3-long-chat", tiny_gemma3_chat_fixture_bytes());
     // Gemma3's default disables retrieval, independently of native speculation.
-    Gemma2ChatSession session(read_file_backed_gguf_model(file.path()), {
+    GemmaChatSession session(read_file_backed_gguf_model(file.path()), {
         .max_new_tokens = 1U, .context_length = 16384U,
     });
     std::string prompt;
@@ -1071,7 +1071,7 @@ void test_gemma3_chat_without_retrieval_exceeds_8192_when_available() {
     const auto messages = session.message_count();
     bool rejected = false;
     try { (void)session.generate_user_turn(prompt + prompt); }
-    catch (const Gemma2ChatContextError&) { rejected = true; }
+    catch (const GemmaChatContextError&) { rejected = true; }
     expect(rejected && session.cached_token_count() == cached && session.message_count() == messages,
         "model context admission must still reject oversize turns without mutating long history");
 }
@@ -1082,12 +1082,12 @@ void test_gemma3_chat_cli_context_option_and_unavailable_device() {
     for (const std::string precision : {"", "auto", "f32", "f16"}) {
         std::istringstream input("/tokens\nHello\nHello\n/regen\n/clear\nHello\n/reset\nHello\n/exit\n");
         std::ostringstream output, error;
-        std::vector<std::string> arguments {"local-gguf-generate", path, "--chat", "--max-new-tokens", "1",
+        std::vector<std::string> arguments {"guffin", path, "--stats", "--max-new-tokens", "1",
             "--greedy", "--context-size", "64", "--no-speculative", "--decode-diagnostics"};
         if (!precision.empty()) arguments.insert(arguments.end(), {"--kv-cache", precision});
         std::vector<const char*> args;
         for (const auto& argument : arguments) args.push_back(argument.c_str());
-        const auto result = run_generate(static_cast<int>(args.size()), args.data(), input, output, error);
+        const auto result = run_cli(static_cast<int>(args.size()), args.data(), input, output, error);
         if (!tensor_backend_is_available(BackendKind::metal)) {
             expect(result == EXIT_FAILURE && error.str().find("Metal backend unavailable") != std::string::npos,
                 "Gemma3 unavailable Metal must report failure without a CPU fallback");
@@ -1129,21 +1129,21 @@ void test_gemma3_chat_cli_context_option_and_unavailable_device() {
         using local_gguf_engine::engine::GemmaKVPrecision;
         for (const auto prepared_precision : {GemmaKVPrecision::f16, GemmaKVPrecision::f32})
         for (const auto requested : {GemmaKVPrecision::automatic, GemmaKVPrecision::f16, GemmaKVPrecision::f32}) {
-            Gemma2ChatSessionOptions options {.max_new_tokens = 1, .context_length = 64,
+            GemmaChatSessionOptions options {.max_new_tokens = 1, .context_length = 64,
                 .kv_precision = prepared_precision,
                 .speculative_decode = false};
-            auto prepared = local_gguf_engine::engine::Gemma2ChatSessionState::prepare(
+            auto prepared = local_gguf_engine::engine::GemmaChatSessionState::prepare(
                 read_file_backed_gguf_model(file.path()), options);
             options.kv_precision = requested;
             const auto resolved = requested == GemmaKVPrecision::f32 ? GemmaKVPrecision::f32 : GemmaKVPrecision::f16;
             if (prepared_precision == resolved) {
-                Gemma2ChatSession compatible(std::move(prepared), options);
+                GemmaChatSession compatible(std::move(prepared), options);
                 expect(compatible.generate_user_turn("Hello").metrics.kv_precision == resolved,
                     "prepared session rejected or changed a compatible automatic/explicit precision");
                 continue;
             }
             try {
-                Gemma2ChatSession mismatched(std::move(prepared), options);
+                GemmaChatSession mismatched(std::move(prepared), options);
                 throw TestFailure("prepared target accepted a different requested numerical policy");
             } catch (const std::invalid_argument& exception) {
                 expect(std::string(exception.what()).find("KV precision differ") != std::string::npos,
@@ -1167,7 +1167,7 @@ void test_gemma3_paired_chat_public_path_and_capacity_when_available() {
     for (const auto precision : {local_gguf_engine::engine::GemmaKVPrecision::f32,
                                  local_gguf_engine::engine::GemmaKVPrecision::f16})
     for (const bool conditional : {false, true}) {
-        Gemma2ChatSession session(read_file_backed_gguf_model(target.path()), {
+        GemmaChatSession session(read_file_backed_gguf_model(target.path()), {
             .max_new_tokens = 3, .context_length = 64, .kv_precision = precision, .retrieval_decode = false,
             .standalone_draft_model = draft_path,
             .standalone_execution = {.horizon = 3, .conditional_verification = conditional},
@@ -1190,7 +1190,7 @@ void test_gemma3_paired_chat_public_path_and_capacity_when_available() {
             "Gemma3 paired follow-up lost its retained target/draft history");
     }
     try {
-        Gemma2ChatSession oversized(read_file_backed_gguf_model(target.path()), {
+        GemmaChatSession oversized(read_file_backed_gguf_model(target.path()), {
             .context_length = 65536,
             .standalone_draft_model = draft_path,
             .speculative_sampling = local_gguf_engine::engine::SpeculativeSamplingMode::lossless,
@@ -1213,7 +1213,7 @@ void test_gemma3_paired_defaults_match_explicit_f16_h1_lossless_when_available()
     std::vector<std::uint32_t> default_tokens;
     std::vector<std::string> default_hashes;
     for (const bool explicit_options : {false, true}) {
-        Gemma2ChatSessionOptions options {.max_new_tokens = 3, .context_length = 64,
+        GemmaChatSessionOptions options {.max_new_tokens = 3, .context_length = 64,
             .standalone_draft_model = draft_path,
             .sampler = {.temperature = 0.8F, .top_k = 1U, .seed = 42U}};
         if (explicit_options) {
@@ -1222,7 +1222,7 @@ void test_gemma3_paired_defaults_match_explicit_f16_h1_lossless_when_available()
             options.speculative_sampling = engine::SpeculativeSamplingMode::lossless;
         }
         {
-            Gemma2ChatSession session(read_file_backed_gguf_model(target.path()), options);
+            GemmaChatSession session(read_file_backed_gguf_model(target.path()), options);
             for (unsigned turn = 0; turn < 3; ++turn) {
                 if (turn == 2) session.reset();
                 const auto result = turn == 1 ? session.regenerate_last_turn() : session.generate_user_turn("Hello");
@@ -1244,7 +1244,7 @@ void test_gemma3_paired_defaults_match_explicit_f16_h1_lossless_when_available()
                 }
             }
         }
-        std::vector<std::string> arguments {"local-gguf-generate", target.path().string(), "--chat",
+        std::vector<std::string> arguments {"guffin", target.path().string(), "--stats",
             "--draft-model", draft_path.string(), "--max-new-tokens", "3", "--context-size", "64",
             "--temperature", "0.8", "--top-k", "1", "--seed", "42", "--decode-diagnostics"};
         if (explicit_options) arguments.insert(arguments.end(), {"--kv-cache", "f16", "--draft-horizon", "1",
@@ -1253,7 +1253,7 @@ void test_gemma3_paired_defaults_match_explicit_f16_h1_lossless_when_available()
         for (const auto& argument : arguments) argv.push_back(argument.c_str());
         std::istringstream input("Hello\n/regen\n/reset\nHello\n/exit\n");
         std::ostringstream output, error;
-        expect(run_generate(static_cast<int>(argv.size()), argv.data(), input, output, error) == EXIT_SUCCESS
+        expect(run_cli(static_cast<int>(argv.size()), argv.data(), input, output, error) == EXIT_SUCCESS
                 && error.str().empty(), "minimal/explicit paired CLI failed: " + error.str());
         std::istringstream lines(output.str());
         std::vector<std::string> hashes;
@@ -1276,21 +1276,22 @@ void test_gemma3_paired_defaults_match_explicit_f16_h1_lossless_when_available()
     }
 }
 
-void test_runs_generate_gemma2_default_greedy_when_available() {
-    if (!tensor_backend_is_available(BackendKind::metal)) {
-        return;
-    }
-
-    const auto bytes = tiny_gemma2_generate_cli_gguf_bytes();
-    const TempBinaryFile model("tiny-gemma2-generate-default-greedy", std::span<const std::uint8_t>(bytes));
-    std::ostringstream output;
-    std::ostringstream error;
-
-    const auto exit_code = run_generate_for_path(model.path(), "Hello", "1", output, error);
-
-    expect(exit_code == EXIT_SUCCESS, "generate Gemma2 default greedy exit code mismatch");
-    expect(output.str() == "\n", "generate Gemma2 default greedy output mismatch");
-    expect(error.str().empty(), "generate Gemma2 default greedy should not write stderr");
+void test_guffin_one_shot_uses_chat_sampling_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const TempBinaryFile model("guffin-sampled-one-shot", tiny_gemma2_generate_cli_gguf_bytes());
+    const auto path = model.path().string();
+    const char* argv[] = {"guffin", path.c_str(), "--prompt", "Hello",
+        "--max-new-tokens", "1", "--seed", "42"};
+    std::ostringstream output, error;
+    const auto result = run_cli(static_cast<int>(std::size(argv)), argv, output, error);
+    GemmaChatSession reference(read_file_backed_gguf_model(model.path()), {
+        .max_new_tokens = 1,
+        .sampler = {.temperature = 0.8F, .top_k = 40U, .top_p = 0.95F,
+            .min_p = 0.05F, .repetition_penalty = 1.0F, .seed = 42U, .repetition_window = 64U},
+    });
+    const auto expected = reference.generate_user_turn("Hello").text;
+    expect(result == EXIT_SUCCESS && error.str().empty(), "one-shot sampled chat must succeed");
+    expect(output.str() == expected + "\n", "one-shot must use the same target and sampling as chat");
 }
 
 void test_runs_generate_gemma2_greedy_when_available() {
@@ -1321,9 +1322,9 @@ void test_gemma2_chat_session_appends_second_turn_at_nonzero_cache_when_availabl
     );
     const TempBinaryFile model("tiny-gemma2-chat-session", std::span<const std::uint8_t>(bytes));
     auto file_model = read_file_backed_gguf_model(model.path());
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         std::move(file_model),
-        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+        GemmaChatSessionOptions {.max_new_tokens = 1}
     );
 
     expect(session.warmup_stats().has_value(), "Gemma2 default constructor warm-up stats missing");
@@ -1348,9 +1349,9 @@ void test_gemma2_chat_session_appends_after_truncated_output_retokenizes_differe
         tiny_gemma2_generate_cli_tensors_for_forced_token(6)
     );
     const TempBinaryFile model("tiny-gemma2-truncated-retokenize", std::span<const std::uint8_t>(bytes));
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         read_file_backed_gguf_model(model.path()),
-        Gemma2ChatSessionOptions {.max_new_tokens = 1U}
+        GemmaChatSessionOptions {.max_new_tokens = 1U}
     );
     const auto first = session.generate_user_turn("Hello");
     const auto second = session.generate_user_turn("Hello");
@@ -1375,9 +1376,9 @@ void test_gemma2_chat_session_tracks_nonvisible_generated_tokens_in_cache_when_a
         tiny_gemma2_generate_cli_tensors_for_forced_token(106)
     );
     const TempBinaryFile model("tiny-gemma2-hidden-cache-token", std::span<const std::uint8_t>(bytes));
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         read_file_backed_gguf_model(model.path()),
-        Gemma2ChatSessionOptions {.max_new_tokens = 1U}
+        GemmaChatSessionOptions {.max_new_tokens = 1U}
     );
 
     const auto first = session.generate_user_turn("Hello");
@@ -1401,9 +1402,9 @@ void test_gemma2_chat_session_records_deterministic_turn_metrics_when_available(
     );
     const TempBinaryFile model("tiny-gemma2-chat-metrics", std::span<const std::uint8_t>(bytes));
     std::uint64_t now_ns = 100U;
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         read_file_backed_gguf_model(model.path()),
-        Gemma2ChatSessionOptions {
+        GemmaChatSessionOptions {
             .max_new_tokens = 1,
             .clock = [&now_ns]() {
                 const auto current = now_ns;
@@ -1456,7 +1457,7 @@ void test_gemma2_chat_session_records_deterministic_turn_metrics_when_available(
     expect(first.metrics.generation.decode_token_count == 1U, "Gemma2 measured decode count mismatch");
     expect(first.metrics.generation.stop_reason == Gemma2GenerationStopReason::token_limit,
         "Gemma2 measured token-limit reason mismatch");
-    expect(first.metrics.selection_mode == Gemma2TokenSelectionMode::greedy,
+    expect(first.metrics.selection_mode == GemmaTokenSelectionMode::greedy,
         "Gemma2 measured greedy mode mismatch");
     expect(first.metrics.initial_cache_position == 0U && first.metrics.reused_cached_token_count == 0U,
         "Gemma2 measured first-turn cache facts mismatch");
@@ -1482,9 +1483,9 @@ void test_gemma2_chat_session_streams_visible_text_before_return_when_available(
     );
     const TempBinaryFile model("tiny-gemma2-chat-stream-session", std::span<const std::uint8_t>(bytes));
     auto file_model = read_file_backed_gguf_model(model.path());
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         std::move(file_model),
-        Gemma2ChatSessionOptions {.max_new_tokens = 2}
+        GemmaChatSessionOptions {.max_new_tokens = 2}
     );
 
     bool returned = false;
@@ -1515,16 +1516,16 @@ void test_gemma2_chat_session_can_cancel_generation_when_available() {
     );
     const TempBinaryFile model("tiny-gemma2-chat-cancel-session", std::span<const std::uint8_t>(bytes));
     auto file_model = read_file_backed_gguf_model(model.path());
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         std::move(file_model),
-        Gemma2ChatSessionOptions {.max_new_tokens = 3}
+        GemmaChatSessionOptions {.max_new_tokens = 3}
     );
 
     bool should_stop = false;
     std::string streamed;
     const auto turn = session.generate_user_turn(
         "Hello",
-        Gemma2ChatTurnOptions {
+        GemmaChatTurnOptions {
             .on_text_delta = [&](std::string_view text_delta) {
                 streamed += text_delta;
                 should_stop = true;
@@ -1556,9 +1557,9 @@ void test_gemma2_chat_session_stops_on_eos_when_available() {
     );
     const TempBinaryFile model("tiny-gemma2-chat-eos-stop", std::span<const std::uint8_t>(bytes));
     auto file_model = read_file_backed_gguf_model(model.path());
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         std::move(file_model),
-        Gemma2ChatSessionOptions {.max_new_tokens = 3}
+        GemmaChatSessionOptions {.max_new_tokens = 3}
     );
 
     std::string streamed;
@@ -1587,9 +1588,9 @@ void test_gemma2_chat_session_stops_on_end_of_turn_when_available() {
     );
     const TempBinaryFile model("tiny-gemma2-chat-eot-stop", std::span<const std::uint8_t>(bytes));
     auto file_model = read_file_backed_gguf_model(model.path());
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         std::move(file_model),
-        Gemma2ChatSessionOptions {.max_new_tokens = 3}
+        GemmaChatSessionOptions {.max_new_tokens = 3}
     );
 
     std::string streamed;
@@ -1614,9 +1615,9 @@ void test_gemma2_chat_session_applies_reverse_stop_and_cleans_history_when_avail
     );
     const TempBinaryFile model("tiny-gemma2-chat-reverse-stop", std::span<const std::uint8_t>(bytes));
     auto file_model = read_file_backed_gguf_model(model.path());
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         std::move(file_model),
-        Gemma2ChatSessionOptions {
+        GemmaChatSessionOptions {
             .max_new_tokens = 3,
             .reverse_stop_strings = {"HelloHello"},
         }
@@ -1653,9 +1654,9 @@ void test_gemma2_chat_session_clear_and_reset_restore_empty_context_when_availab
         tiny_gemma2_generate_cli_tensors_for_forced_token(5)
     );
     const TempBinaryFile model("tiny-gemma2-chat-clear-reset", std::span<const std::uint8_t>(bytes));
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         read_file_backed_gguf_model(model.path()),
-        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+        GemmaChatSessionOptions {.max_new_tokens = 1}
     );
 
     const auto first_turn = session.generate_user_turn("Hello");
@@ -1685,9 +1686,9 @@ void test_gemma2_chat_session_regenerates_last_turn_without_full_replay_when_ava
         tiny_gemma2_generate_cli_tensors_for_forced_token(5)
     );
     const TempBinaryFile model("tiny-gemma2-chat-regen", std::span<const std::uint8_t>(bytes));
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         read_file_backed_gguf_model(model.path()),
-        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+        GemmaChatSessionOptions {.max_new_tokens = 1}
     );
 
     const auto first_turn = session.generate_user_turn("Hello");
@@ -1710,9 +1711,9 @@ void test_gemma2_chat_session_reports_real_token_budget_when_available() {
         tiny_gemma2_generate_cli_tensors()
     );
     const TempBinaryFile model("tiny-gemma2-chat-token-budget", std::span<const std::uint8_t>(bytes));
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         read_file_backed_gguf_model(model.path()),
-        Gemma2ChatSessionOptions {.max_new_tokens = 3}
+        GemmaChatSessionOptions {.max_new_tokens = 3}
     );
 
     expect(session.context_length() == 64U, "Gemma2 chat context length mismatch");
@@ -1735,9 +1736,9 @@ void test_gemma2_chat_session_trims_oldest_turns_and_rebuilds_retained_context_w
         tiny_gemma2_generate_cli_tensors_for_forced_token(5)
     );
     const TempBinaryFile model("tiny-gemma2-chat-context-trim", std::span<const std::uint8_t>(bytes));
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         read_file_backed_gguf_model(model.path()),
-        Gemma2ChatSessionOptions {.max_new_tokens = 1, .context_shift = true}
+        GemmaChatSessionOptions {.max_new_tokens = 1, .context_shift = true}
     );
 
     bool rebuilt = false;
@@ -1773,9 +1774,9 @@ void test_gemma2_chat_session_does_not_shift_context_by_default_when_available()
         tiny_gemma2_generate_cli_tensors_for_forced_token(5)
     );
     const TempBinaryFile model("tiny-gemma2-chat-no-context-shift", std::span<const std::uint8_t>(bytes));
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         read_file_backed_gguf_model(model.path()),
-        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+        GemmaChatSessionOptions {.max_new_tokens = 1}
     );
 
     std::size_t completed_turns = 0;
@@ -1784,7 +1785,7 @@ void test_gemma2_chat_session_does_not_shift_context_by_default_when_available()
         try {
             const auto turn = session.generate_user_turn("Hello");
             expect(!turn.rebuilt_context, "default chat should not rebuild context");
-        } catch (const Gemma2ChatContextError&) {
+        } catch (const GemmaChatContextError&) {
             rejected = true;
             break;
         }
@@ -1805,16 +1806,16 @@ void test_gemma2_chat_session_rejects_impossible_turn_without_mutating_context_w
         tiny_gemma2_generate_cli_tensors_for_forced_token(5)
     );
     const TempBinaryFile model("tiny-gemma2-chat-context-reject", std::span<const std::uint8_t>(bytes));
-    auto session = Gemma2ChatSession(
+    auto session = GemmaChatSession(
         read_file_backed_gguf_model(model.path()),
-        Gemma2ChatSessionOptions {.max_new_tokens = 1}
+        GemmaChatSessionOptions {.max_new_tokens = 1}
     );
     const auto first_turn = session.generate_user_turn("Hello");
 
     bool rejected = false;
     try {
         static_cast<void>(session.generate_user_turn(std::string(128U, 'x')));
-    } catch (const Gemma2ChatContextError& error) {
+    } catch (const GemmaChatContextError& error) {
         rejected = std::string_view(error.what()).find("use a shorter prompt or lower --max-new-tokens")
             != std::string_view::npos;
     }
@@ -1838,7 +1839,7 @@ void test_gemma2_chat_session_seeded_sampling_and_regen_are_reproducible_when_av
     const TempBinaryFile first_model("tiny-gemma2-chat-sampled-a", std::span<const std::uint8_t>(bytes));
     const TempBinaryFile second_model("tiny-gemma2-chat-sampled-b", std::span<const std::uint8_t>(bytes));
     std::uint64_t now_ns = 1000U;
-    const auto options = Gemma2ChatSessionOptions {
+    const auto options = GemmaChatSessionOptions {
         .max_new_tokens = 3,
         .sampler = TokenSamplerOptions {
             .temperature = 1.0F,
@@ -1853,8 +1854,8 @@ void test_gemma2_chat_session_seeded_sampling_and_regen_are_reproducible_when_av
             return current;
         },
     };
-    auto first_session = Gemma2ChatSession(read_file_backed_gguf_model(first_model.path()), options);
-    auto second_session = Gemma2ChatSession(read_file_backed_gguf_model(second_model.path()), options);
+    auto first_session = GemmaChatSession(read_file_backed_gguf_model(first_model.path()), options);
+    auto second_session = GemmaChatSession(read_file_backed_gguf_model(second_model.path()), options);
 
     const auto first = first_session.generate_user_turn("Hello");
     const auto same_seed = second_session.generate_user_turn("Hello");
@@ -1862,7 +1863,7 @@ void test_gemma2_chat_session_seeded_sampling_and_regen_are_reproducible_when_av
 
     expect(first.generated_token_ids == same_seed.generated_token_ids, "seeded sampled sessions mismatch");
     expect(first.generated_token_ids == regenerated.generated_token_ids, "sampled /regen should replay sampler state");
-    expect(first.metrics.selection_mode == Gemma2TokenSelectionMode::sampled,
+    expect(first.metrics.selection_mode == GemmaTokenSelectionMode::sampled,
         "sampled turn measurement mode mismatch");
     expect(first.metrics.generation.prompt_evaluation_duration_ns == 10U,
         "sampled turn deterministic prompt-evaluation timing mismatch");
@@ -1901,7 +1902,7 @@ void test_runs_generate_gemma2_chat_loop_until_exit_when_available() {
 
     expect(exit_code == EXIT_SUCCESS, "generate Gemma2 chat CLI exit code mismatch");
     expect(
-        without_chat_timing_lines(output.str()) == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> \n> \n> ",
+        without_chat_timing_lines(output.str()) == "Guffin\n/help for commands, /exit to quit.\n\n> \n> \n> ",
         "generate Gemma2 chat CLI output mismatch"
     );
     expect(chat_timing_line_count(output.str()) == 2U, "generate Gemma2 chat timing line count mismatch");
@@ -1915,7 +1916,7 @@ void test_runs_generate_chat_decode_diagnostics_only_when_requested_when_availab
     );
     const TempBinaryFile model("tiny-gemma2-chat-diagnostics", std::span<const std::uint8_t>(bytes));
     const std::vector<std::string> arguments {
-        "local-gguf-generate", model.path().string(), "--chat", "--max-new-tokens", "1",
+        "guffin", model.path().string(), "--stats", "--max-new-tokens", "1",
         "--greedy", "--decode-diagnostics",
     };
     std::vector<const char*> argv;
@@ -1923,7 +1924,7 @@ void test_runs_generate_chat_decode_diagnostics_only_when_requested_when_availab
     std::istringstream input("Hello\n/exit\n");
     std::ostringstream output;
     std::ostringstream error;
-    const auto exit_code = run_generate(
+    const auto exit_code = run_cli(
         static_cast<int>(argv.size()), argv.data(), input, output, error
     );
     expect(exit_code == EXIT_SUCCESS && error.str().empty(),
@@ -1936,10 +1937,10 @@ void test_rejects_metal_capture_without_diagnostics() {
     std::ostringstream output;
     std::ostringstream error;
     const char* argv[] = {
-        "local-gguf-generate", "missing.gguf", "--chat", "--metal-capture", "/tmp/test.gputrace",
+        "guffin", "missing.gguf", "--stats", "--metal-capture", "/tmp/test.gputrace",
     };
     std::istringstream input("/exit\n");
-    const auto exit_code = run_generate(5, argv, input, output, error);
+    const auto exit_code = run_cli(5, argv, input, output, error);
     expect(exit_code == EXIT_FAILURE, "Metal capture without diagnostics must fail");
     expect(error.str().find("requires --decode-diagnostics and --backend metal") != std::string::npos,
         "Metal capture validation error mismatch");
@@ -1963,7 +1964,7 @@ void test_runs_generate_gemma2_chat_streams_visible_tokens_when_available() {
 
     expect(exit_code == EXIT_SUCCESS, "generate Gemma2 chat stream CLI exit code mismatch");
     expect(
-        without_chat_timing_lines(output.str()) == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> HelloHello\n> ",
+        without_chat_timing_lines(output.str()) == "Guffin\n/help for commands, /exit to quit.\n\n> HelloHello\n> ",
         "generate Gemma2 chat stream CLI output mismatch"
     );
     expect(chat_timing_line_count(output.str()) == 1U, "streamed chat timing line count mismatch");
@@ -1995,7 +1996,7 @@ void test_runs_generate_gemma2_chat_reverse_stop_when_available() {
 
     expect(exit_code == EXIT_SUCCESS, "generate Gemma2 chat reverse-stop CLI exit code mismatch");
     expect(
-        without_chat_timing_lines(output.str()) == "local-gguf-engine chat\ncommands: /exit /quit /clear /reset /regen /tokens /read <path>\nmultiline: end a line with \\\n> \n> ",
+        without_chat_timing_lines(output.str()) == "Guffin\n/help for commands, /exit to quit.\n\n> \n> ",
         "generate Gemma2 chat reverse-stop CLI output mismatch"
     );
     expect(chat_timing_line_count(output.str()) == 1U, "reverse-stop chat timing line count mismatch");
@@ -2066,7 +2067,7 @@ void test_runs_generate_gemma2_chat_context_trim_and_recovers_from_impossible_tu
 
     expect(exit_code == EXIT_SUCCESS, "generate Gemma2 context CLI should survive turn rejection");
     expect(text.find("context: dropped ") != std::string::npos, "context trim notice missing");
-    expect(text.find("oldest turn(s) and rebuilt retained KV") != std::string::npos, "context rebuild notice missing");
+    expect(text.find("oldest turn(s)") != std::string::npos, "context rebuild notice missing");
     expect(text.find("error: context: turn requires ") != std::string::npos, "context rejection prefix missing");
     expect(text.find("use a shorter prompt or lower --max-new-tokens") != std::string::npos, "context recovery guidance missing");
     expect(text.find("tokens: cached=") != std::string::npos, "REPL should continue after context rejection");
@@ -2206,13 +2207,13 @@ void test_reports_generate_gemma2_metal_runtime_shell_unavailable_when_missing()
 void test_rejects_generate_gemma2_cpu_backend() {
     const auto bytes = tiny_gemma2_generate_cli_gguf_bytes();
     const TempBinaryFile model("tiny-gemma2-generate-cpu", std::span<const std::uint8_t>(bytes));
-    const std::string program = "local-gguf-generate";
+    const std::string program = "guffin";
     const std::string path_string = model.path().string();
     const char* argv[] = {
         program.c_str(),
         path_string.c_str(),
-        "Hello",
-        "1",
+        "--prompt", "Hello",
+        "--max-new-tokens", "1",
         "--greedy",
         "--backend",
         "cpu",
@@ -2220,35 +2221,35 @@ void test_rejects_generate_gemma2_cpu_backend() {
     std::ostringstream output;
     std::ostringstream error;
 
-    const auto exit_code = run_generate(7, argv, output, error);
+    const auto exit_code = run_cli(static_cast<int>(std::size(argv)), argv, output, error);
 
     expect(exit_code == EXIT_FAILURE, "generate Gemma2 CPU backend exit code mismatch");
     expect(output.str().empty(), "generate Gemma2 CPU backend should not write stdout");
     expect(
-        error.str().find("Gemma 2 generation requires Metal backend") != std::string::npos,
+        error.str().find("Gemma 2 chat session requires Metal backend") != std::string::npos,
         "generate Gemma2 CPU backend error missing"
     );
 }
 
-void test_rejects_generate_gemma2_after_decode_schedule_context_full_when_available() {
+void test_guffin_rejects_one_shot_reply_exceeding_context_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) {
         return;
     }
 
     const auto bytes = write_tiny_gguf_bytes(
-        tiny_gemma2_generate_cli_metadata(8),
+        tiny_gemma2_generate_cli_metadata(32),
         tiny_gemma2_generate_cli_tensors()
     );
     const TempBinaryFile model("tiny-gemma2-decode-context-full", std::span<const std::uint8_t>(bytes));
     std::ostringstream output;
     std::ostringstream error;
 
-    const auto exit_code = run_generate_for_path_with_greedy(model.path(), "Hello", "1", output, error);
+    const auto exit_code = run_generate_for_path_with_greedy(model.path(), "Hello", "33", output, error);
 
     expect(exit_code == EXIT_FAILURE, "generate Gemma2 decode schedule context-full exit code mismatch");
     expect(output.str().empty(), "generate Gemma2 decode schedule context-full should not write stdout");
     expect(
-        error.str().find("Gemma2 Metal generation token count exceeds context length") != std::string::npos,
+        error.str().find("turn requires") != std::string::npos,
         "generate Gemma2 decode schedule context-full error missing"
     );
 }
@@ -2278,19 +2279,19 @@ void test_rejects_generate_gemma2_unsupported_chat_template_before_runtime() {
 }
 
 void test_rejects_generate_missing_arguments() {
-    const char* argv[] = {"local-gguf-generate"};
+    const char* argv[] = {"guffin", "--stats"};
     std::ostringstream output;
     std::ostringstream error;
 
-    const auto exit_code = run_generate(1, argv, output, error);
+    const auto exit_code = run_cli(2, argv, output, error);
 
     expect(exit_code == EXIT_FAILURE, "generate missing-args exit code mismatch");
     expect(output.str().empty(), "generate missing-args should not write stdout");
     expect(
-        error.str().find("usage: local-gguf-generate <model.gguf> <prompt> <max-new-tokens>") != std::string::npos,
+        error.str().find("usage: guffin -m MODEL [options]") != std::string::npos,
         "generate missing-args usage missing"
     );
-    expect(error.str().find("missing required argument") != std::string::npos, "generate missing-args error missing");
+    expect(error.str().find("missing model GGUF file") != std::string::npos, "generate missing-args error missing");
 }
 
 void test_rejects_generate_invalid_max_new_tokens() {
@@ -2310,20 +2311,20 @@ void test_rejects_generate_invalid_max_new_tokens() {
 
 void test_rejects_generate_invalid_backend_option() {
     const auto path = std::filesystem::temp_directory_path() / "local-gguf-engine-unused-generate.gguf";
-    const std::string program = "local-gguf-generate";
+    const std::string program = "guffin";
     const std::string path_string = path.string();
     const char* argv[] = {
         program.c_str(),
         path_string.c_str(),
-        "",
-        "1",
+        "--prompt", "",
+        "--max-new-tokens", "1",
         "--backend",
         "gpu",
     };
     std::ostringstream output;
     std::ostringstream error;
 
-    const auto exit_code = run_generate(6, argv, output, error);
+    const auto exit_code = run_cli(static_cast<int>(std::size(argv)), argv, output, error);
 
     expect(exit_code == EXIT_FAILURE, "generate invalid-backend exit code mismatch");
     expect(output.str().empty(), "generate invalid-backend should not write stdout");
@@ -2377,8 +2378,8 @@ void test_archived_draft_controls_fail_closed() {
         std::ostringstream output, error;
         expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) != 0,
             "archived draft controls silently selected a runtime route");
-        expect(output.str().find("local-gguf-engine chat") == std::string::npos
-            && error.str().find("unknown chat option") != std::string::npos,
+        expect(output.str().find("Guffin\n") == std::string::npos
+            && error.str().find("unknown option") != std::string::npos,
             "archived draft option was not rejected before session creation");
     }
 }
@@ -2388,7 +2389,7 @@ void test_standalone_engine_configuration_fails_before_model_or_device_work() {
     const auto bytes = write_tiny_gguf_bytes(tiny_gemma2_generate_cli_metadata(), tiny_gemma2_generate_cli_tensors());
     TempBinaryFile model("standalone-engine-options", bytes);
     for (unsigned case_index = 0; case_index < 6; ++case_index) {
-        Gemma2ChatSessionOptions options;
+        GemmaChatSessionOptions options;
         switch (case_index) {
         case 0: options.speculative_sampling = static_cast<engine::SpeculativeSamplingMode>(255); break;
         case 1: options.speculative_sampling = engine::SpeculativeSamplingMode::lossless; break;
@@ -2405,7 +2406,7 @@ void test_standalone_engine_configuration_fails_before_model_or_device_work() {
         }
         bool refused = false;
         try {
-            static_cast<void>(engine::Gemma2ChatSessionState::prepare(read_file_backed_gguf_model(model.path()), options));
+            static_cast<void>(engine::GemmaChatSessionState::prepare(read_file_backed_gguf_model(model.path()), options));
         } catch (const std::invalid_argument&) { refused = true; }
         expect(refused, "invalid engine draft configuration reached artifact/device work or selected a fallback");
     }
@@ -2438,9 +2439,9 @@ void test_standalone_tli_cli_rejects_missing_and_conflicting_configuration() {
         std::ostringstream output, error;
         expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) != 0
                 && !error.str().empty(), "invalid standalone TLI configuration silently selected another route");
-        expect(output.str().find("local-gguf-engine chat") == std::string::npos,
+        expect(output.str().find("Guffin\n") == std::string::npos,
             "invalid standalone TLI configuration started chat using a fallback route");
-        expect(error.str().find("unknown chat option") == std::string::npos,
+        expect(error.str().find("unknown option") == std::string::npos,
             "standalone TLI flags were not recognized by the real CLI parser");
     }
 }
@@ -2468,7 +2469,7 @@ void test_standalone_draft_sampling_cli_rejects_invalid_and_conflicting_flags() 
         expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) != 0,
             "invalid draft sampler flag was accepted");
         expect(error.str().find("error: --draft-") != std::string::npos
-            && error.str().find("unknown chat option") == std::string::npos,
+            && error.str().find("unknown option") == std::string::npos,
             "invalid draft sampler must fail in explicit CLI validation before artifact loading");
     }
     for (const auto* flag : {"--draft-temperature", "--draft-top-k", "--draft-top-p", "--draft-min-p", "--draft-repeat-penalty"}) {
@@ -2482,7 +2483,7 @@ void test_standalone_draft_sampling_cli_rejects_invalid_and_conflicting_flags() 
             args.insert(args.end(), {flag, "1"});
             std::ostringstream output, error;
             expect(run_generate_chat_with_extra_arguments(model.path(), args, output, error) != 0
-                && output.str().find("local-gguf-engine chat") == std::string::npos,
+                && output.str().find("Guffin\n") == std::string::npos,
                 "draft scalar overrides leaked into target-only/non-lossless mode");
             expect(error.str().find("requires") != std::string::npos || error.str().find("require") != std::string::npos,
                 "conflicting draft sampler configuration omitted its dependency error");
@@ -2496,7 +2497,7 @@ void test_standalone_draft_sampling_cli_propagates_effective_values_when_availab
     TempBinaryFile model("standalone-draft-sampling-cli-effective", chat_speculative_target_fixture_bytes());
     std::string inherited_hash;
     for (const bool override : {false, true}) {
-        std::vector<std::string> arguments {"local-gguf-generate", model.path().string(), "--chat", "--max-new-tokens", "1",
+        std::vector<std::string> arguments {"guffin", model.path().string(), "--stats", "--max-new-tokens", "1",
             "--draft-model", draft.string(),
             "--output-head", "q8_0",
             "--temperature", "0.5", "--top-k", "2", "--top-p", "0.75", "--min-p", "0.125",
@@ -2507,7 +2508,7 @@ void test_standalone_draft_sampling_cli_propagates_effective_values_when_availab
         for (const auto& argument : arguments) argv.push_back(argument.c_str());
         std::istringstream input("Hello\n/exit\n");
         std::ostringstream output, error;
-        expect(run_generate(static_cast<int>(argv.size()), argv.data(), input, output, error) == 0,
+        expect(run_cli(static_cast<int>(argv.size()), argv.data(), input, output, error) == 0,
             "valid explicit standalone draft sampler CLI failed: " + error.str());
         const auto expected = override
             ? "\"standalone_effective_sampler\":{\"temperature\":0.25,\"top_k\":0,\"top_p\":1,\"min_p\":0,\"repetition_penalty\":1}"
@@ -2526,13 +2527,13 @@ void check_standalone_real_artifact_failed_regeneration(const std::filesystem::p
     namespace engine = local_gguf_engine::engine;
     if (!tensor_backend_is_available(BackendKind::metal) || !std::filesystem::exists(draft_path)) return;
     TempBinaryFile model("standalone-real-regeneration", chat_speculative_target_fixture_bytes(false, false, false, 64));
-    Gemma2ChatSessionOptions options {.max_new_tokens = 8,
-        .output_head_policy = engine::Gemma2OutputHeadPolicy::q8_0,
+    GemmaChatSessionOptions options {.max_new_tokens = 8,
+        .output_head_policy = engine::GemmaOutputHeadPolicy::q8_0,
         .context_shift = true, .retrieval_decode = false, .standalone_draft_model = draft_path,
         .standalone_execution = {.horizon = 3, .conditional_verification = true},
         .speculative_sampling = engine::SpeculativeSamplingMode::lossless,
         .sampler = {.temperature = 0.8F, .top_k = 1, .seed = 92, .repetition_window = 2}};
-    Gemma2ChatSession session(read_file_backed_gguf_model(model.path()), options);
+    GemmaChatSession session(read_file_backed_gguf_model(model.path()), options);
     const auto original = session.generate_user_turn("Hello");
     expect(original.metrics.generation.learned_cycle_count > 0,
         "real standalone regeneration test did not execute its native draft");
@@ -2584,7 +2585,126 @@ void test_gemma3_real_artifact_failed_regeneration_when_available() {
     check_standalone_real_artifact_failed_regeneration("models/gemma-3-270m-it-Q8_0.gguf");
 }
 
+void test_guffin_help_and_version_without_model() {
+    for (const char* flag : {"--help", "-h", "--help-all", "--version"}) {
+        const char* argv[] = {"guffin", flag};
+        std::istringstream input;
+        std::ostringstream output, error;
+        expect(run_cli(2, argv, input, output, error, false) == EXIT_SUCCESS,
+            "help and version must work without a model or Metal device");
+        expect(error.str().empty(), "help and version must not report errors");
+        expect(output.str().find(flag == std::string_view("--version") ? "guffin " : "Usage: guffin -m MODEL")
+            != std::string::npos, "help/version output must identify Guffin");
+        if (flag == std::string_view("--help")) {
+            expect(output.str().find("--chat") == std::string::npos
+                && output.str().find("--draft-temperature") == std::string::npos,
+                "basic help must stay focused on ordinary usage");
+        }
+        if (flag == std::string_view("--help-all")) {
+            expect(output.str().find("--draft-temperature") != std::string::npos,
+                "advanced help must document retained tuning controls");
+        }
+    }
+    const char* argv[] = {"guffin"};
+    std::ostringstream output, error;
+    expect(run_cli(1, argv, output, error) == EXIT_SUCCESS
+        && output.str().find("Usage: guffin -m MODEL") != std::string::npos,
+        "invoking Guffin without arguments must show help");
+}
+
+void test_guffin_argument_validation() {
+    const std::vector<std::vector<std::string>> cases {
+        {"-m"}, {"-m", "--stats"}, {"missing.gguf", "-m", "another.gguf"},
+        {"missing.gguf", "--prompt"}, {"missing.gguf", "--chat"},
+        {"missing.gguf", "-p", "Hello", "--interactive"},
+        {"missing.gguf", "-n", "0"}, {"missing.gguf", "-c", "bad"},
+        {"missing.gguf", "unexpected.gguf"},
+    };
+    for (auto arguments : cases) {
+        arguments.insert(arguments.begin(), "guffin");
+        std::vector<const char*> argv;
+        for (const auto& arg : arguments) argv.push_back(arg.c_str());
+        std::istringstream input;
+        std::ostringstream output, error;
+        expect(run_cli(static_cast<int>(argv.size()), argv.data(), input, output, error, false)
+            == EXIT_FAILURE, "invalid new CLI arguments must fail");
+        expect(output.str().empty() && error.str().find("error:") != std::string::npos
+            && error.str().find("invalid GGUF") == std::string::npos,
+            "argument errors must fail before model loading");
+    }
+    const char* argv[] = {"guffin", "missing.gguf", "-p", "--help"};
+    std::istringstream input;
+    std::ostringstream output, error;
+    expect(run_cli(4, argv, input, output, error, false) == EXIT_FAILURE
+        && output.str().empty() && error.str().find("could not read") != std::string::npos,
+        "a prompt containing --help must remain prompt data");
+}
+
+void test_guffin_inspection_subcommand() {
+    const TempBinaryFile model("guffin-inspect", tiny_gemma2_generate_cli_gguf_bytes());
+    const auto path = model.path().string();
+    const char* argv[] = {"guffin", "inspect", path.c_str()};
+    std::istringstream input;
+    std::ostringstream output, error;
+    expect(run_cli(3, argv, input, output, error, false) == EXIT_SUCCESS
+        && error.str().empty() && output.str().starts_with("GGUF summary\n"),
+        "inspection must reuse the GGUF inspector without initializing inference");
+    const char* help[] = {"guffin", "inspect", "--help"};
+    output.str("");
+    expect(run_cli(3, help, input, output, error, false) == EXIT_SUCCESS
+        && output.str().find("guffin inspect MODEL") != std::string::npos,
+        "inspection needs its own help");
+    const char* missing[] = {"guffin", "inspect"};
+    output.str("");
+    expect(run_cli(2, missing, input, output, error, false) == EXIT_FAILURE
+        && output.str().empty() && error.str().find("missing GGUF path") != std::string::npos,
+        "inspection must reject a missing model");
+}
+
+void test_guffin_default_chat_and_clean_output_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const auto bytes = write_tiny_gguf_bytes(tiny_gemma2_generate_cli_metadata(64),
+        tiny_gemma2_generate_cli_tensors_for_forced_token(5));
+    const TempBinaryFile model("guffin-default-chat", bytes);
+    const auto path = model.path().string();
+    const char* chat[] = {"guffin", "-m", path.c_str(), "-n", "1", "--greedy"};
+    std::istringstream terminal_input("Hello\n/exit\n");
+    std::ostringstream terminal_output, terminal_error;
+    expect(run_cli(6, chat, terminal_input, terminal_output, terminal_error, true) == EXIT_SUCCESS,
+        "-m must select the model and start chat without a mode flag");
+    expect(terminal_error.str().empty() && terminal_output.str().starts_with("Guffin\n")
+        && terminal_output.str().find("> Hello\n") != std::string::npos
+        && chat_timing_line_count(terminal_output.str()) == 1U
+        && terminal_output.str().find("| Generation:") != std::string::npos
+        && terminal_output.str().find("| TTFT:") != std::string::npos
+        && terminal_output.str().find("[ Detail:") == std::string::npos
+        && terminal_output.str().find("[ Decode:") == std::string::npos,
+        "default chat must stream a reply and show compact timing without raw diagnostics");
+    std::istringstream pipe_input("Hello\n/exit\n");
+    std::ostringstream pipe_output, pipe_error;
+    expect(run_cli(6, chat, pipe_input, pipe_output, pipe_error, false) == EXIT_SUCCESS
+        && pipe_output.str() == "Hello\n" && pipe_error.str().empty(),
+        "redirected chat must contain only answers");
+    std::istringstream invalid_input("/unknown-command\n");
+    std::ostringstream invalid_output, invalid_error;
+    expect(run_cli(6, chat, invalid_input, invalid_output, invalid_error, false) == EXIT_FAILURE
+        && invalid_output.str().empty() && invalid_error.str().find("unknown command") != std::string::npos,
+        "invalid piped commands must fail on stderr");
+    const char* one_shot[] = {"guffin", "-n", "1", "-m", path.c_str(),
+        "-p", "Hello", "--greedy", "--stats"};
+    std::istringstream unused_input("/help\n");
+    std::ostringstream answer, stats;
+    expect(run_cli(9, one_shot, unused_input, answer, stats, true) == EXIT_SUCCESS
+        && answer.str() == "Hello\n" && stats.str().find("[ Prompt:") != std::string::npos
+        && stats.str().find("[ Detail:") == std::string::npos,
+        "one-shot aliases must share chat execution and keep timing off stdout");
+}
+
 const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
+    {"Guffin help and version work without a model", test_guffin_help_and_version_without_model},
+    {"Guffin arguments fail before model loading", test_guffin_argument_validation},
+    {"Guffin inspection subcommand", test_guffin_inspection_subcommand},
+    {"Guffin default chat and redirected answers stay clean", test_guffin_default_chat_and_clean_output_when_available},
     {"Gemma3 native target chat preserves multi-turn regeneration and reset", test_gemma3_chat_native_target_multiturn_regeneration_and_reset_when_available},
     {"Gemma3 chat context shift and failed turn preserve state", test_gemma3_chat_context_shift_and_failed_turn_preserve_state_when_available},
     {"Gemma3 chat callback failure cancellation and stops preserve committed prefix", test_gemma3_chat_callback_failure_cancellation_and_stops_when_available},
@@ -2608,8 +2728,8 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
     },
     {"Metal trace capture arm validation", test_metal_trace_capture_arm_validation},
     {
-        "runs generate Gemma2 default greedy when available",
-        test_runs_generate_gemma2_default_greedy_when_available,
+        "Guffin one-shot uses the chat target and sampling when available",
+        test_guffin_one_shot_uses_chat_sampling_when_available,
     },
     {
         "runs generate Gemma2 greedy when available",
@@ -2729,8 +2849,8 @@ const local_gguf_engine::tests::TestCase kGenerateCliTests[] = {
         test_rejects_generate_gemma2_cpu_backend,
     },
     {
-        "rejects generate Gemma2 after decode schedule context full when available",
-        test_rejects_generate_gemma2_after_decode_schedule_context_full_when_available,
+        "Guffin rejects a one-shot reply exceeding context when available",
+        test_guffin_rejects_one_shot_reply_exceeding_context_when_available,
     },
     {
         "rejects generate Gemma2 unsupported chat template before runtime",
@@ -2749,7 +2869,7 @@ std::vector<std::uint8_t> standalone_chat_target_fixture_bytes(std::uint32_t con
     return chat_speculative_target_fixture_bytes(false, false, false, context);
 }
 
-std::span<const TestCase> generate_cli_test_cases() {
+std::span<const TestCase> cli_test_cases() {
     return kGenerateCliTests;
 }
 

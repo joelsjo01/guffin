@@ -1,8 +1,7 @@
 #include "engine_model_tests.hpp"
-#include "feature_bank_tests.hpp"
 #include "quick_benchmark_tests.hpp"
 #include "gemma2_metal_plan_tests.hpp"
-#include "generate_cli_tests.hpp"
+#include "cli_tests.hpp"
 #include "gemma2_reference_tests.hpp"
 #include "gguf_inspect_tests.hpp"
 #include "gguf_reader_tests.hpp"
@@ -75,7 +74,7 @@ int main() {
     for (const auto& test : local_gguf_engine::tests::quick_benchmark_test_cases()) {
         run_test(test);
     }
-    for (const auto& test : local_gguf_engine::tests::generate_cli_test_cases()) {
+    for (const auto& test : local_gguf_engine::tests::cli_test_cases()) {
         run_test(test);
     }
     for (const auto& test : local_gguf_engine::tests::gguf_tensor_bridge_test_cases()) {
@@ -88,9 +87,6 @@ int main() {
         run_test(test);
     }
     for (const auto& test : local_gguf_engine::tests::engine_model_test_cases()) {
-        run_test(test);
-    }
-    for (const auto& test : local_gguf_engine::tests::feature_bank_test_cases()) {
         run_test(test);
     }
     for (const auto& test : local_gguf_engine::tests::gemma2_metal_plan_test_cases()) {

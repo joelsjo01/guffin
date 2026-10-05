@@ -11,6 +11,7 @@
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -231,8 +232,12 @@ void write_gguf_inspection_summary(
 }
 
 int run_gguf_inspect(int argc, const char* const* argv, std::ostream& output, std::ostream& error) {
+    if (argc == 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
+        output << "usage: guffin inspect MODEL\nInspect GGUF metadata without running inference.\n";
+        return 0;
+    }
     if (argc != 2) {
-        error << "usage: gguf-inspect <model.gguf>\n";
+        error << "usage: guffin inspect MODEL\n";
         if (argc < 2) {
             error << "error: missing GGUF path\n";
         } else {

@@ -15,16 +15,4 @@ if git ls-files | grep -E '\.(gguf|ggml|safetensors|pt|pth|onnx|bin|ckpt|npy|npz
   exit 1
 fi
 
-if [[ -f Makefile ]]; then
-  make test
-elif [[ -f Cargo.toml ]]; then
-  cargo test
-elif [[ -f CMakeLists.txt ]]; then
-  cmake -S . -B build
-  cmake --build build
-  ctest --test-dir build --output-on-failure
-elif [[ -f package.json ]]; then
-  npm test
-else
-  echo "No engine toolchain detected yet. Repo hygiene checks passed."
-fi
+make MODE=debug test

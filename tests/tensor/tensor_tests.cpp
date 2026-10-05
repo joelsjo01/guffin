@@ -8,6 +8,7 @@
 #include "local_gguf_engine/model_format/gguf_tensor_bridge.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
+#include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/kquant_packing.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
@@ -33,6 +34,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -326,6 +328,144 @@ void test_rejects_tensor_descriptor_with_invalid_shape_dtype_combination() {
         expect(error.expected_value() == 32, "expected Q8_0 descriptor block size mismatch");
         expect(error.actual_value() == 15, "actual Q8_0 descriptor row element count mismatch");
     }
+}
+
+template <typename Function>
+void expect_invalid_tensor_descriptor(Function&& function, std::string_view message) {
+    try {
+        function();
+    } catch (const TensorError&) {
+        return;
+    } catch (const std::invalid_argument&) {
+        return;
+    }
+    throw TestFailure(std::string(message));
+}
+
+void expect_tensor_construction_rejects_descriptor(
+    const TensorDescriptor& descriptor,
+    std::span<const std::uint8_t> bytes
+) {
+    expect_invalid_tensor_descriptor([&] {
+        (void)TensorStorage::allocate(descriptor);
+    }, "host allocation accepted an invalid descriptor");
+    expect_invalid_tensor_descriptor([&] {
+        (void)TensorStorage::from_bytes(descriptor, bytes);
+    }, "host storage accepted an invalid descriptor");
+    expect_invalid_tensor_descriptor([&] {
+        (void)TensorView::from_bytes(descriptor, bytes);
+    }, "borrowed view accepted an invalid descriptor");
+    for (const auto backend : {local_gguf_engine::runtime::BackendKind::cpu,
+                              local_gguf_engine::runtime::BackendKind::metal}) {
+        expect_invalid_tensor_descriptor([&] {
+            (void)local_gguf_engine::tensor::allocate_backend_buffer(descriptor, backend);
+        }, "backend allocation accepted an invalid descriptor or requested a device first");
+    }
+}
+
+void test_tensor_construction_rejects_mutated_descriptors() {
+    const std::array descriptors {
+        TensorDescriptor::from(Shape::from({2, 3}), DType::f32),
+        TensorDescriptor::from(Shape::from({2, 3}), DType::f16),
+        TensorDescriptor::from(Shape::from({2, 32}), DType::q8_0),
+        TensorDescriptor::from(Shape::from({2, 256}), DType::q4_k),
+        TensorDescriptor::from(Shape::from({2, 256}), DType::q6_k),
+        TensorDescriptor::from_quantized_gguf_weight_matrix(Shape::from({512, 5}), DType::q8_0),
+        TensorDescriptor::from_quantized_gguf_weight_matrix(Shape::from({512, 5}), DType::q4_k),
+        TensorDescriptor::from_quantized_gguf_weight_matrix(Shape::from({512, 5}), DType::q6_k),
+        TensorDescriptor::from_interleaved_kquant_weight_matrix(Shape::from({512, 5}), DType::q4_k),
+        TensorDescriptor::from_interleaved_kquant_weight_matrix(Shape::from({512, 5}), DType::q6_k),
+    };
+    for (const auto& descriptor : descriptors) {
+        const std::vector<std::uint8_t> bytes(descriptor.byte_count);
+        auto forged = descriptor;
+        forged.shape = Shape::from({1});
+        expect_tensor_construction_rejects_descriptor(forged, bytes);
+        forged = descriptor;
+        forged.dtype = descriptor.dtype == DType::f32 ? DType::f16 : DType::f32;
+        expect_tensor_construction_rejects_descriptor(forged, bytes);
+        forged = descriptor;
+        ++forged.element_count;
+        expect_tensor_construction_rejects_descriptor(forged, bytes);
+        forged = descriptor;
+        --forged.byte_count;
+        // Matching the forged size ensures descriptor validation, rather than
+        // merely checking the supplied span length, rejects undersized storage.
+        expect_tensor_construction_rejects_descriptor(
+            forged, std::span<const std::uint8_t>(bytes).first(forged.byte_count));
+        forged = descriptor;
+        forged.packing = static_cast<TensorPacking>(255U);
+        expect_tensor_construction_rejects_descriptor(forged, bytes);
+    }
+}
+
+void test_tensor_construction_rejects_invalid_layouts_and_overflow() {
+    auto descriptor = TensorDescriptor::from(Shape::from({32}), DType::q8_0);
+    const std::array<std::uint8_t, 34> quantized_bytes {};
+    // The total is one block, but neither matrix dimension holds whole blocks.
+    descriptor.shape = Shape::from({8, 4});
+    expect_tensor_construction_rejects_descriptor(descriptor, quantized_bytes);
+    descriptor.shape = Shape::from({2, 4, 4});
+    expect_tensor_construction_rejects_descriptor(descriptor, quantized_bytes);
+
+    descriptor = TensorDescriptor::from(Shape::from({1}), DType::f32);
+    const std::array<std::uint8_t, 4> scalar_bytes {};
+    descriptor.dtype = static_cast<DType>(255U);
+    expect_tensor_construction_rejects_descriptor(descriptor, scalar_bytes);
+    descriptor.dtype = DType::f32;
+    descriptor.shape = Shape::from({std::numeric_limits<std::uint64_t>::max(), 2});
+    expect_tensor_construction_rejects_descriptor(descriptor, scalar_bytes);
+    descriptor.shape = Shape::from({std::numeric_limits<std::uint64_t>::max() / 4U + 1U});
+    expect_tensor_construction_rejects_descriptor(descriptor, scalar_bytes);
+
+    descriptor = TensorDescriptor::from_interleaved_kquant_weight_matrix(
+        Shape::from({256, 1}), DType::q4_k);
+    const std::vector<std::uint8_t> packed_bytes(descriptor.byte_count);
+    descriptor.shape = Shape::from({std::uint64_t {1U} << 62U, 1});
+    expect_tensor_construction_rejects_descriptor(descriptor, packed_bytes);
+}
+
+void test_tensor_construction_accepts_native_and_packed_output_tails() {
+    for (const auto dtype : {DType::q8_0, DType::q4_k, DType::q6_k}) {
+        for (const auto columns : {1U, 5U, 8U, 9U}) {
+            const auto native = TensorDescriptor::from_quantized_gguf_weight_matrix(
+                Shape::from({512, columns}), dtype);
+            const auto verify_construction = [](const TensorDescriptor& descriptor) {
+                const auto storage = TensorStorage::allocate(descriptor);
+                const auto copied = TensorStorage::from_bytes(descriptor, storage.bytes());
+                const auto view = TensorView::from_bytes(descriptor, copied.bytes());
+                expect(view.descriptor() == descriptor, "valid output tail view descriptor mismatch");
+                expect(storage.view().bytes().size() == descriptor.byte_count,
+                    "valid output tail storage view size mismatch");
+                const auto buffer = local_gguf_engine::tensor::allocate_backend_buffer(
+                    descriptor, local_gguf_engine::runtime::BackendKind::cpu);
+                expect(buffer.descriptor() == descriptor, "valid output tail backend descriptor mismatch");
+            };
+            verify_construction(native);
+            if (dtype != DType::q8_0) {
+                verify_construction(TensorDescriptor::from_interleaved_kquant_weight_matrix(
+                    native.shape, dtype));
+            }
+        }
+    }
+}
+
+void test_moved_tensor_storage_rejects_unbacked_view() {
+    const auto descriptor = TensorDescriptor::from(Shape::from({2}), DType::f32);
+    auto source = TensorStorage::allocate(descriptor);
+    auto destination = std::move(source);
+    expect(destination.view().bytes().size() == descriptor.byte_count, "moved tensor lost its backing bytes");
+    try {
+        (void)source.view();
+    } catch (const TensorError& error) {
+        expect(error.code() == TensorErrorCode::invalid_storage_byte_count,
+            "unbacked tensor view reported the wrong error");
+        source = std::move(destination);
+        expect(source.view().bytes().size() == descriptor.byte_count,
+            "reassigned tensor storage should expose its backing bytes");
+        return;
+    }
+    throw TestFailure("moved-from tensor storage exposed an unbacked view");
 }
 
 void test_decodes_q8_0_block_values() {
@@ -2961,6 +3101,10 @@ void test_native_cpu_quantized_operations_reject_interleaved_packing() {
 }
 
 const TestCase tensor_core_tests[] = {
+    {"tensor construction rejects mutated descriptors", test_tensor_construction_rejects_mutated_descriptors},
+    {"tensor construction rejects invalid layouts and overflow", test_tensor_construction_rejects_invalid_layouts_and_overflow},
+    {"tensor construction accepts native and packed output tails", test_tensor_construction_accepts_native_and_packed_output_tails},
+    {"moved tensor storage rejects unbacked view", test_moved_tensor_storage_rejects_unbacked_view},
     {"K-quant columns8 round trips every native bit", test_kquant_columns8_round_trips_all_native_bits},
     {"K-quant columns8 matches native codes and zeroes padding", test_kquant_columns8_matches_native_codes_and_zeroes_padding},
     {"K-quant columns8 rejects invalid descriptors and overflow", test_kquant_columns8_rejects_invalid_descriptors_and_overflow},

@@ -4,7 +4,7 @@
 
 #include "backends/cpu_backend.hpp"
 #include "backends/metal/metal_buffer.hpp"
-#include "backends/metal/metal_context.hpp"
+#include "backends/metal/metal_kernels.hpp"
 
 #include "local_gguf_engine/runtime/backend_error.hpp"
 

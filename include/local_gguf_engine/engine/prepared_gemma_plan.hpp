@@ -9,24 +9,24 @@
 
 namespace local_gguf_engine::engine {
 
-enum class PreparedGemma2Mode : std::uint8_t {
+enum class PreparedGemmaMode : std::uint8_t {
     target_only,
     standalone_gemma3_tli,
 };
 
-enum class PreparedGemma2Lifecycle : std::uint8_t { ready, poisoned };
+enum class PreparedGemmaLifecycle : std::uint8_t { ready, poisoned };
 
 // Session-owned aggregate. Factories publish only after every requested
 // component has been authenticated, validated and allocated.
-class PreparedGemma2Plan final {
+class PreparedGemmaPlan final {
 public:
-    PreparedGemma2Plan(const PreparedGemma2Plan&) = delete;
-    PreparedGemma2Plan& operator=(const PreparedGemma2Plan&) = delete;
-    PreparedGemma2Plan(PreparedGemma2Plan&&) noexcept = default;
-    PreparedGemma2Plan& operator=(PreparedGemma2Plan&&) noexcept = default;
+    PreparedGemmaPlan(const PreparedGemmaPlan&) = delete;
+    PreparedGemmaPlan& operator=(const PreparedGemmaPlan&) = delete;
+    PreparedGemmaPlan(PreparedGemmaPlan&&) noexcept = default;
+    PreparedGemmaPlan& operator=(PreparedGemmaPlan&&) noexcept = default;
 
-    [[nodiscard]] PreparedGemma2Mode mode() const noexcept;
-    [[nodiscard]] PreparedGemma2Lifecycle lifecycle() const noexcept;
+    [[nodiscard]] PreparedGemmaMode mode() const noexcept;
+    [[nodiscard]] PreparedGemmaLifecycle lifecycle() const noexcept;
     [[nodiscard]] bool ready() const noexcept;
     [[nodiscard]] Gemma2MetalModelPlan& target();
     [[nodiscard]] const Gemma2MetalModelPlan& target() const;
@@ -39,19 +39,19 @@ public:
     [[nodiscard]] const StandaloneChatPlan* standalone() const noexcept;
 
 private:
-    friend PreparedGemma2Plan prepare_gemma2_standalone_plan(
+    friend PreparedGemmaPlan prepare_gemma_standalone_plan(
         const EngineModel&, const tokenizer::Tokenizer&, std::shared_ptr<StandaloneDraftArtifact>,
-        StandaloneExecutionOptions, Gemma2OutputHeadPolicy, std::uint32_t, GemmaKVPrecision
+        StandaloneExecutionOptions, GemmaOutputHeadPolicy, std::uint32_t, GemmaKVPrecision
     );
-    friend PreparedGemma2Plan prepare_gemma2_target_only_plan(
-        const EngineModel&, Gemma2OutputHeadPolicy, std::uint32_t, GemmaKVPrecision
+    friend PreparedGemmaPlan prepare_gemma_target_only_plan(
+        const EngineModel&, GemmaOutputHeadPolicy, std::uint32_t, GemmaKVPrecision
     );
-    PreparedGemma2Plan(PreparedGemma2Mode, Gemma2MetalModelPlan,
+    PreparedGemmaPlan(PreparedGemmaMode, Gemma2MetalModelPlan,
         std::optional<EngineModelPayloadReceipt>, std::optional<ResidentTargetPayloadReceipt>,
         std::optional<runtime::Sha256Digest>);
 
-    PreparedGemma2Mode mode_ = PreparedGemma2Mode::target_only;
-    PreparedGemma2Lifecycle lifecycle_ = PreparedGemma2Lifecycle::ready;
+    PreparedGemmaMode mode_ = PreparedGemmaMode::target_only;
+    PreparedGemmaLifecycle lifecycle_ = PreparedGemmaLifecycle::ready;
     Gemma2MetalModelPlan target_;
     std::optional<EngineModelPayloadReceipt> model_receipt_;
     std::optional<ResidentTargetPayloadReceipt> resident_receipt_;
@@ -59,16 +59,16 @@ private:
     std::optional<StandaloneChatPlan> standalone_;
 };
 
-[[nodiscard]] PreparedGemma2Plan prepare_gemma2_standalone_plan(
+[[nodiscard]] PreparedGemmaPlan prepare_gemma_standalone_plan(
     const EngineModel& verified_model, const tokenizer::Tokenizer& target_tokenizer,
     std::shared_ptr<StandaloneDraftArtifact> source, StandaloneExecutionOptions execution,
-    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic,
+    GemmaOutputHeadPolicy policy = GemmaOutputHeadPolicy::automatic,
     std::uint32_t context_length = 0U,
     GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic
 );
-[[nodiscard]] PreparedGemma2Plan prepare_gemma2_target_only_plan(
+[[nodiscard]] PreparedGemmaPlan prepare_gemma_target_only_plan(
     const EngineModel& model,
-    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic,
+    GemmaOutputHeadPolicy policy = GemmaOutputHeadPolicy::automatic,
     std::uint32_t context_length = 0U,
     GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic
 );

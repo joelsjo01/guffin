@@ -195,12 +195,7 @@ MetalBackendBufferStorage::MetalBackendBufferStorage(
     : descriptor_(std::move(descriptor)),
       buffer_(buffer),
       base_byte_offset_(base_byte_offset) {
-    if (descriptor_.packing != TensorPacking::canonical
-        && (descriptor_.packing != TensorPacking::kquant_columns8
-            || descriptor_ != TensorDescriptor::from_interleaved_kquant_weight_matrix(
-                descriptor_.shape, descriptor_.dtype))) {
-        throw std::invalid_argument("Metal buffer has an inconsistent execution-packing descriptor");
-    }
+    validate_tensor_descriptor(descriptor_);
     if (buffer_ == nil) throw std::invalid_argument("Metal backend buffer must not be nil");
     if (base_byte_offset_ % alignof(std::uint32_t) != 0U) {
         throw std::invalid_argument("Metal backend buffer base offset must be four-byte aligned");
@@ -331,6 +326,7 @@ BackendBuffer copy_tensor_view_to_metal_backend(const TensorView& view) {
 }
 
 BackendBuffer allocate_metal_backend_buffer(const TensorDescriptor& descriptor) {
+    validate_tensor_descriptor(descriptor);
     @autoreleasepool {
         id<MTLDevice> device = metal_device_or_throw();
         if (descriptor.byte_count > device.maxBufferLength) {

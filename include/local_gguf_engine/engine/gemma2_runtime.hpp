@@ -1,6 +1,5 @@
 #pragma once
 
-#include "local_gguf_engine/engine/feature_bank.hpp"
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
@@ -250,27 +249,6 @@ struct Gemma2MetalGeneratedTokenEvent {
 using Gemma2MetalGeneratedTokenCallback =
     std::function<Gemma2MetalTokenStreamDecision(const Gemma2MetalGeneratedTokenEvent&)>;
 
-struct Gemma2TargetSelectionTraceEvent {
-    std::uint32_t target_position = 0U;
-    std::uint32_t input_token_id = 0U;
-    std::uint32_t selected_token_id = 0U;
-    std::uint32_t remaining_token_budget = 0U;
-    bool terminal = false;
-    TokenSamplerOptions sampler_options;
-    TokenSelectionRequest request;
-    SamplerCheckpoint sampler_pre;
-    SamplerTicket draw_ticket;
-    SamplerCheckpoint sampler_post;
-    std::span<const TokenLogit> compact_candidates;
-};
-
-using Gemma2TargetSelectionTraceCallback =
-    std::function<void(const Gemma2TargetSelectionTraceEvent&)>;
-
-struct Gemma2GenerationTraceBinding {
-    FeatureSinkBinding feature_sink;
-    Gemma2TargetSelectionTraceCallback on_target_selection;
-};
 struct Gemma2ExecutionReceipt {
     bool completion_unknown = false;
 };
@@ -281,7 +259,6 @@ struct Gemma2ExecutionReceipt {
     float embedding_scale,
     std::optional<TokenSelectionRequest> selection_request = std::nullopt,
     Gemma2MetalDecodeOutputMode output_mode = Gemma2MetalDecodeOutputMode::logits,
-    FeatureSinkBinding feature_sink = {},
     Gemma2ExecutionReceipt* completion = nullptr
 );
 
@@ -317,7 +294,6 @@ void discard_gemma2_metal_width_two_verification(Gemma2MetalModelPlan& plan);
     std::uint32_t cache_position,
     float embedding_scale,
     std::optional<TokenSelectionRequest> selection_request = std::nullopt,
-    FeatureSinkBinding feature_sink = {},
     Gemma2ExecutionReceipt* completion = nullptr
 );
 
@@ -365,7 +341,6 @@ struct Gemma2GenerationCommitJournal {
     const Gemma2MetalGeneratedTokenCallback& on_token = {},
     const Gemma2MonotonicClock& clock = {},
     RetrievalProposer* proposer = nullptr,
-    const Gemma2GenerationTraceBinding* trace = nullptr,
     Gemma2GenerationCommitJournal* journal = nullptr,
     StandaloneChatPlan* standalone = nullptr,
     std::span<const std::uint32_t> standalone_context = {}

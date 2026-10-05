@@ -95,7 +95,7 @@ def measure(
     ps_runner=subprocess.run, timeout=900,
 ):
     started = time.monotonic_ns()
-    command = [binary, model, "--chat", "--max-new-tokens", "1", "--greedy", "--decode-diagnostics"]
+    command = [binary, model, "--interactive", "--max-new-tokens", "1", "--greedy", "--decode-diagnostics"]
     if output_head_policy is not None:
         command.extend(("--output-head", output_head_policy))
     process = subprocess.Popen(
@@ -154,7 +154,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--baseline", required=True)
-    parser.add_argument("--candidate", default="build/release/local-gguf-generate")
+    parser.add_argument("--candidate", default="build/release/guffin")
     parser.add_argument("--baseline-output-head", choices=("f16", "q8_0"))
     parser.add_argument("--candidate-output-head", choices=("f16", "q8_0"))
     parser.add_argument("--repetitions", type=int, default=3)

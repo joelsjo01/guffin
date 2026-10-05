@@ -1,5 +1,4 @@
 #include "local_gguf_engine/benchmarks/quick_benchmark.hpp"
-#include "local_gguf_engine/benchmarks/feature_capture_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/immutable_weight_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/output_head_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/target_verifier_benchmark.hpp"
@@ -255,8 +254,6 @@ int main(int argc, const char* const* argv) {
             || std::string_view(argv[2]) == "--target-verifier-conditional"
             || std::string_view(argv[2]) == "--target-verifier-forest"
             || std::string_view(argv[2]) == "--target-verifier-repeated-root");
-    const bool feature_capture_mode = argc == 4
-        && std::string_view(argv[2]) == "--feature-capture";
     const bool output_quality_mode = argc >= 3 && std::string_view(argv[2]) == "--output-head-quality";
     const bool storage_mode = argc >= 4 && std::string_view(argv[2]) == "--storage-policy";
     const bool no_copy_mode = argc >= 3 && std::string_view(argv[2]) == "--no-copy-feasibility";
@@ -264,60 +261,24 @@ int main(int argc, const char* const* argv) {
         || (argc == 4 && no_copy_mode && std::string_view(argv[3]) == "--json")
         || (argc == 5 && storage_mode && std::string_view(argv[4]) == "--json");
     if (argc < 2 || (!storage_mode && !no_copy_mode && !output_quality_mode
-            && !width_two_mode && !target_verifier_mode && !feature_capture_mode && argc > 3)
+            && !width_two_mode && !target_verifier_mode && argc > 3)
         || (storage_mode && argc > 5) || (no_copy_mode && argc > 4)
         || (target_verifier_mode && argc != 4)
-        || (feature_capture_mode && argc != 4)
         || (argc == 3 && !json && !no_copy_mode && !output_quality_mode && !width_two_mode)
         || (output_quality_mode && argc != 4)
         || (storage_mode && argc == 5 && !json) || (no_copy_mode && argc == 4 && !json)) {
-        std::cerr << "usage: local-gguf-bench <model.gguf> [--json]\n"
-                     "       local-gguf-bench <model.gguf> --width-two\n"
-                     "       local-gguf-bench <model.gguf> --target-verifier <rows>\n"
-                     "       local-gguf-bench <model.gguf> --target-verifier-conditional <horizon>\n"
-                     "       local-gguf-bench <model.gguf> --target-verifier-forest <rows>\n"
-                     "       local-gguf-bench <model.gguf> --target-verifier-repeated-root <beam-width>\n"
-                     "       local-gguf-bench <model.gguf> --feature-capture <off|on>\n"
-                     "       local-gguf-bench <model.gguf> --output-head-quality --json\n"
-                     "       local-gguf-bench <model.gguf> --storage-policy <policy> [--json]\n"
-                     "       local-gguf-bench <model.gguf> --no-copy-feasibility [--json]\n";
+        std::cerr << "usage: guffin-bench <model.gguf> [--json]\n"
+                     "       guffin-bench <model.gguf> --width-two\n"
+                     "       guffin-bench <model.gguf> --target-verifier <rows>\n"
+                     "       guffin-bench <model.gguf> --target-verifier-conditional <horizon>\n"
+                     "       guffin-bench <model.gguf> --target-verifier-forest <rows>\n"
+                     "       guffin-bench <model.gguf> --target-verifier-repeated-root <beam-width>\n"
+                     "       guffin-bench <model.gguf> --output-head-quality --json\n"
+                     "       guffin-bench <model.gguf> --storage-policy <policy> [--json]\n"
+                     "       guffin-bench <model.gguf> --no-copy-feasibility [--json]\n";
         return EXIT_FAILURE;
     }
     try {
-        if (feature_capture_mode) {
-            const auto mode = std::string_view(argv[3]);
-            if (mode != "off" && mode != "on") {
-                throw std::invalid_argument("feature capture mode must be off or on");
-            }
-            const auto result = local_gguf_engine::benchmarks::run_feature_capture_benchmark(
-                argv[1], mode == "on"
-            );
-            std::cout << std::fixed << std::setprecision(3)
-                << "feature capture: " << (result.capture_enabled ? "on" : "off") << "\n"
-                << "verified model load: "
-                << static_cast<double>(result.verified_model_load_wall_ns) / 1.0e6 << " ms\n"
-                << "target upload: "
-                << static_cast<double>(result.target_upload_wall_ns) / 1.0e6 << " ms\n"
-                << "feature setup: "
-                << static_cast<double>(result.feature_setup_wall_ns) / 1.0e6 << " ms\n"
-                << "prompt/TTFT wall/GPU: "
-                << static_cast<double>(result.prompt_wall_ns) / 1.0e6 << " / "
-                << static_cast<double>(result.prompt_gpu_ns) / 1.0e6 << " ms\n"
-                << "prompt throughput: "
-                << static_cast<double>(result.prompt_token_count) * 1.0e9
-                    / static_cast<double>(result.prompt_wall_ns) << " tokens/s\n"
-                << "commands/waits: " << result.prompt_command_buffer_count << "/"
-                << result.prompt_synchronous_wait_count << "\n"
-                << "resident target/feature bytes: " << result.target_resident_bytes << "/"
-                << result.features.allocated_bytes << "\n"
-                << "captured/projected rows: " << result.features.captured_row_count << "/"
-                << result.features.eager_projection_row_count << "\n"
-                << "logical capture/projection bytes: "
-                << result.features.logical_capture_bytes << "/"
-                << result.features.logical_projection_weight_bytes << "\n"
-                << "logits sha256: " << result.logits_digest.hex() << "\n";
-            return EXIT_SUCCESS;
-        }
         if (target_verifier_mode) {
             char* end = nullptr;
             const auto rows = std::strtoul(argv[3], &end, 10);

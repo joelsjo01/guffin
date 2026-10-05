@@ -1,6 +1,6 @@
 #pragma once
 
-#include "local_gguf_engine/engine/gemma2_model.hpp"
+#include "local_gguf_engine/engine/gemma_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
@@ -33,8 +33,8 @@ struct ReferenceDecodeTrace {
 };
 
 [[nodiscard]] ReferenceDecodeResult reference_decode(
-    const engine::Gemma2ModelConfig& config,
-    const engine::Gemma2ModelWeights& weights,
+    const engine::GemmaModelConfig& config,
+    const engine::GemmaModelWeights& weights,
     std::uint32_t token_id,
     std::uint32_t cache_position,
     std::vector<tensor::TensorStorage> key_cache,
@@ -42,8 +42,8 @@ struct ReferenceDecodeTrace {
 );
 
 [[nodiscard]] ReferenceDecodeTrace reference_decode_trace(
-    const engine::Gemma2ModelConfig& config,
-    const engine::Gemma2ModelWeights& weights,
+    const engine::GemmaModelConfig& config,
+    const engine::GemmaModelWeights& weights,
     std::span<const std::uint32_t> token_ids,
     std::uint32_t initial_cache_position,
     std::vector<tensor::TensorStorage> key_cache,

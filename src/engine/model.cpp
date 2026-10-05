@@ -55,7 +55,7 @@ void hash_string(runtime::Sha256& hash, std::string_view value) {
 [[nodiscard]] runtime::Sha256Digest hash_consumed_metadata(
     ModelArchitecture architecture,
     const std::optional<std::string>& name,
-    const Gemma2ModelConfig& config
+    const GemmaModelConfig& config
 ) {
     runtime::Sha256 hash;
     hash_string(hash, "local-gguf-engine/consumed-model-metadata/v1");
@@ -305,11 +305,11 @@ void hash_string(runtime::Sha256& hash, std::string_view value) {
     return checked_tensor_dimension_u32(token_embedding, 1);
 }
 
-[[nodiscard]] Gemma2ModelConfig load_gemma2_config(const model_format::GGUFModelView& model) {
+[[nodiscard]] GemmaModelConfig load_gemma2_config(const model_format::GGUFModelView& model) {
     const auto& metadata = model.directory.metadata;
     const auto embedding_length = require_metadata_u32(metadata, "gemma2.embedding_length");
 
-    return Gemma2ModelConfig {
+    return GemmaModelConfig {
         .context_length = require_metadata_u32(metadata, "gemma2.context_length"),
         .embedding_length = embedding_length,
         .block_count = require_metadata_u32(metadata, "gemma2.block_count"),
@@ -327,7 +327,7 @@ void hash_string(runtime::Sha256& hash, std::string_view value) {
     };
 }
 
-[[nodiscard]] Gemma2ModelConfig load_gemma3_config(const model_format::GGUFModelView& model) {
+[[nodiscard]] GemmaModelConfig load_gemma3_config(const model_format::GGUFModelView& model) {
     const auto& metadata = model.directory.metadata;
     const auto model_context = require_metadata_u32(metadata, "gemma3.context_length");
     const auto embedding_length = require_metadata_u32(metadata, "gemma3.embedding_length");
@@ -348,7 +348,7 @@ void hash_string(runtime::Sha256& hash, std::string_view value) {
         throw EngineModelError(EngineModelErrorCode::invalid_metadata_value,
             "gemma3.rope.scaling.factor requires linear scaling type");
     }
-    auto config = Gemma2ModelConfig {
+    auto config = GemmaModelConfig {
         .context_length = std::min(model_context, 16384U),
         .embedding_length = embedding_length,
         .block_count = require_metadata_u32(metadata, "gemma3.block_count"),
@@ -450,14 +450,14 @@ const std::string& EngineModelError::detail() const noexcept {
 EngineModel::EngineModel(
     ModelArchitecture architecture,
     std::optional<std::string> name,
-    Gemma2ModelConfig gemma2_config,
+    GemmaModelConfig gemma_config,
     std::vector<EngineTensorView> tensor_views,
     std::optional<EngineModelPayloadReceipt> payload_receipt,
     std::optional<runtime::Sha256Digest> tokenizer_identity
 )
     : architecture_(architecture),
       name_(std::move(name)),
-      gemma2_config_(gemma2_config),
+      gemma_config_(gemma_config),
       tensor_views_(std::move(tensor_views)),
       payload_receipt_(std::move(payload_receipt)),
       tokenizer_identity_(std::move(tokenizer_identity)) {}
@@ -470,8 +470,8 @@ const std::optional<std::string>& EngineModel::name() const noexcept {
     return name_;
 }
 
-const Gemma2ModelConfig& EngineModel::gemma2_config() const noexcept {
-    return gemma2_config_;
+const GemmaModelConfig& EngineModel::gemma_config() const noexcept {
+    return gemma_config_;
 }
 
 const std::vector<EngineTensorView>& EngineModel::tensor_views() const noexcept {
@@ -516,13 +516,13 @@ std::string_view model_architecture_name(ModelArchitecture architecture) noexcep
 EngineModel load_engine_model_from_gguf(const model_format::GGUFModelView& model) {
     const auto architecture = parse_architecture(model.directory.metadata);
     const auto name = optional_metadata_string(model.directory.metadata, "general.name");
-    const auto gemma2_config = architecture == ModelArchitecture::gemma3
+    const auto gemma_config = architecture == ModelArchitecture::gemma3
         ? load_gemma3_config(model) : load_gemma2_config(model);
     auto tensor_views = load_unique_tensor_views(model);
     return EngineModel(
         architecture,
         name,
-        gemma2_config,
+        gemma_config,
         std::move(tensor_views)
     );
 }
@@ -536,7 +536,7 @@ EngineModel load_verified_engine_model_from_gguf(
     }
     const auto architecture = parse_architecture(model.directory.metadata);
     const auto name = optional_metadata_string(model.directory.metadata, "general.name");
-    const auto gemma2_config = architecture == ModelArchitecture::gemma3
+    const auto gemma_config = architecture == ModelArchitecture::gemma3
         ? load_gemma3_config(model) : load_gemma2_config(model);
     auto tensor_views = load_unique_tensor_views(model);
     if (tensor_views.size() > std::numeric_limits<std::uint32_t>::max()) {
@@ -547,7 +547,7 @@ EngineModel load_verified_engine_model_from_gguf(
         .source_tensor_count = static_cast<std::uint32_t>(tensor_views.size()),
         .whole_gguf = runtime::sha256(whole_gguf_bytes),
         .canonical_consumed_metadata = hash_consumed_metadata(
-            architecture, name, gemma2_config
+            architecture, name, gemma_config
         ),
         .source_tensors = hash_source_tensors(tensor_views),
     };
@@ -561,20 +561,28 @@ EngineModel load_verified_engine_model_from_gguf(
         const auto authenticated_metadata = model_format::read_gguf_metadata_section(whole_gguf_bytes);
         tokenizer_identity = tokenizer::tokenizer_identity_from_gguf_metadata(authenticated_metadata);
     }
-    return EngineModel(architecture, name, gemma2_config, std::move(tensor_views), receipt, tokenizer_identity);
+    return EngineModel(architecture, name, gemma_config, std::move(tensor_views), receipt, tokenizer_identity);
 }
 
-bool gemma_layer_uses_sliding_window(const Gemma2ModelConfig& config, std::uint32_t layer_index) noexcept {
+float gemma_input_embedding_scale(std::uint32_t embedding_length) {
+    if (embedding_length == 0) {
+        throw std::invalid_argument("embedding_length");
+    }
+
+    return std::sqrt(static_cast<float>(embedding_length));
+}
+
+bool gemma_layer_uses_sliding_window(const GemmaModelConfig& config, std::uint32_t layer_index) noexcept {
     return config.attention_global_layer_period > 1U
         && layer_index % config.attention_global_layer_period != config.attention_global_layer_period - 1U;
 }
 
-float gemma_layer_rope_freq_base(const Gemma2ModelConfig& config, std::uint32_t layer_index) noexcept {
+float gemma_layer_rope_freq_base(const GemmaModelConfig& config, std::uint32_t layer_index) noexcept {
     return gemma_layer_uses_sliding_window(config, layer_index)
         ? config.local_rope_freq_base : config.rope_freq_base;
 }
 
-float gemma_layer_rope_freq_scale(const Gemma2ModelConfig& config, std::uint32_t layer_index) noexcept {
+float gemma_layer_rope_freq_scale(const GemmaModelConfig& config, std::uint32_t layer_index) noexcept {
     return gemma_layer_uses_sliding_window(config, layer_index) ? 1.0F : config.rope_freq_scale;
 }
 
@@ -602,7 +610,7 @@ std::string_view gemma_kv_precision_name(GemmaKVPrecision precision) noexcept {
     return "unknown";
 }
 
-tensor::DType gemma_kv_dtype(const Gemma2ModelConfig& config) {
+tensor::DType gemma_kv_dtype(const GemmaModelConfig& config) {
     return resolve_gemma_kv_precision(config.architecture, config.kv_precision) == GemmaKVPrecision::f32
         ? tensor::DType::f32 : tensor::DType::f16;
 }

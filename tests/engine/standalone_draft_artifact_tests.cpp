@@ -1,7 +1,7 @@
 #include "test_support.hpp"
 
 #include "local_gguf_engine/engine/standalone_draft_artifact.hpp"
-#include "local_gguf_engine/engine/prepared_gemma2_plan.hpp"
+#include "local_gguf_engine/engine/prepared_gemma_plan.hpp"
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
 
 #include <algorithm>
@@ -653,14 +653,14 @@ void test_prepared_standalone_authenticates_target_tokenizer() {
     expect(altered_model.tokenizer_identity() == correct.identity(),
         "caller-mutated parsed view must not change authenticated tokenizer identity");
     bool altered_failed = false;
-    try { (void)engine::prepare_gemma2_standalone_plan(altered_model, wrong, nullptr, {}); }
+    try { (void)engine::prepare_gemma_standalone_plan(altered_model, wrong, nullptr, {}); }
     catch (const std::invalid_argument& error) {
         altered_failed = std::string_view(error.what()).find("target tokenizer does not match") != std::string_view::npos;
     }
     expect(altered_failed, "mutated view and matching counterfeit tokenizer must fail before device preparation");
     for (const bool mismatch : {false, true}) {
         bool failed = false;
-        try { (void)engine::prepare_gemma2_standalone_plan(model, mismatch ? wrong : correct, nullptr, {}); }
+        try { (void)engine::prepare_gemma_standalone_plan(model, mismatch ? wrong : correct, nullptr, {}); }
         catch (const std::invalid_argument& error) {
             failed = std::string_view(error.what()).find(mismatch ? "target tokenizer does not match" : "authenticated model sources")
                 != std::string_view::npos;

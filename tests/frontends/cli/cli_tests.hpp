@@ -6,6 +6,6 @@
 
 namespace local_gguf_engine::tests {
 
-[[nodiscard]] std::span<const TestCase> feature_bank_test_cases();
+std::span<const TestCase> cli_test_cases();
 
 }  // namespace local_gguf_engine::tests

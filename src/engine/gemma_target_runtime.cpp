@@ -1,5 +1,4 @@
 #include "gemma_target_runtime.hpp"
-#include "feature_bank_runtime.hpp"
 #include "gemma2_verification_state_access.hpp"
 
 #include <algorithm>
@@ -16,7 +15,7 @@ void encode_gemma_target_blocks(
     const Gemma2MetalTargetVerifierScratch& scratch,
     std::uint32_t row_capacity, std::uint32_t row_count,
     const tensor::BackendBuffer& token_source, std::uint32_t token_offset,
-    float embedding_scale, FeatureSinkBinding feature_sink, bool produce_final_hidden,
+    float embedding_scale, bool produce_final_hidden,
     bool prefill_projection
 ) {
     auto* command = &encoder;
@@ -29,12 +28,6 @@ void encode_gemma_target_blocks(
         row_count
     );
     command->encode_memory_barrier();
-    if (feature_sink_bound(feature_sink)) {
-        FeatureSinkRuntimeAccess::encode_tap(
-            feature_sink, *command, FeatureTapStage::embedding_residual, 0U,
-            scratch.feed_forward_residual, 0U, row_count
-        );
-    }
 
     const auto& config = target.config();
     const auto* kv_numerical_status = config.architecture == ModelArchitecture::gemma3
@@ -173,13 +166,6 @@ void encode_gemma_target_blocks(
             row_count
         );
         command->encode_memory_barrier();
-        if (feature_sink_bound(feature_sink)) {
-            FeatureSinkRuntimeAccess::encode_tap(
-                feature_sink, *command, FeatureTapStage::layer_residual,
-                static_cast<std::uint16_t>(layer), scratch.feed_forward_residual,
-                0U, row_count
-            );
-        }
     }
 
     if (!produce_final_hidden) return;
@@ -189,12 +175,6 @@ void encode_gemma_target_blocks(
         row_count
     );
     command->encode_memory_barrier();
-    if (feature_sink_bound(feature_sink)) {
-        FeatureSinkRuntimeAccess::encode_tap(
-            feature_sink, *command, FeatureTapStage::final_normalized, 0U,
-            scratch.normalized_hidden, 0U, row_count
-        );
-    }
 }
 
 namespace {
@@ -261,7 +241,7 @@ void publish_contiguous_rows(metal::MetalCommandContext& command,
 }
 
 template <class Stats>
-void account_contiguous_attention(Stats& stats, const Gemma2ModelConfig& config,
+void account_contiguous_attention(Stats& stats, const GemmaModelConfig& config,
     std::uint32_t position, std::uint32_t count) {
     // Matches the verifier's per-query counters; these are logical work counts,
     // independent of partition launches and the optional reduction dispatch.
@@ -314,7 +294,7 @@ metal::MetalCommandStats execute_contiguous_chunk(
     Gemma2MetalModelPlan& target, Gemma2MetalTargetVerifierPlan& workspace,
     std::span<const std::uint32_t> tokens, std::uint32_t position, float embedding_scale,
     const tensor::BackendBuffer& logits, bool produce_logits,
-    const std::optional<TokenSelectionRequest>& request, FeatureSinkBinding feature_sink,
+    const std::optional<TokenSelectionRequest>& request,
     Gemma2ExecutionReceipt* completion, std::uint32_t& selector_dispatches,
     bool prompt_prefill = false) {
     if (!std::isfinite(embedding_scale) || embedding_scale <= 0.0F)
@@ -325,19 +305,11 @@ metal::MetalCommandStats execute_contiguous_chunk(
     auto& command = target_workspace_command(workspace);
     const auto& scratch = workspace.scratch();
     const auto count = static_cast<std::uint32_t>(tokens.size());
-    std::array<std::uint32_t, gemma2_metal_prefill_chunk_size> positions {};
-    for (std::uint32_t row = 0; row < count; ++row) positions[row] = position + row;
-    const auto position_span = std::span<const std::uint32_t>(positions).first(count);
     bool submitted = false;
-    const auto capture = feature_sink_bound(feature_sink);
     try {
         stage_contiguous_rows(command, target, workspace, tokens, position);
-        if (capture) FeatureSinkRuntimeAccess::begin_capture(
-            feature_sink, command, position_span, tokens, count);
-        const auto final_hidden = produce_logits || (capture && FeatureSinkRuntimeAccess::needs_tap(
-            feature_sink, FeatureTapStage::final_normalized, 0U));
         encode_gemma_target_blocks(command, target, scratch, workspace.row_capacity(),
-            count, scratch.token_id_staging, 0U, embedding_scale, feature_sink, final_hidden,
+            count, scratch.token_id_staging, 0U, embedding_scale, produce_logits,
             prompt_prefill);
         if (produce_logits) {
             command.encode_target_head_rows(scratch.normalized_hidden, count - 1U,
@@ -360,14 +332,8 @@ metal::MetalCommandStats execute_contiguous_chunk(
             Gemma2MetalVerificationStateAccess::poison(target);
             throw std::overflow_error("Gemma 3 F16 KV storage produced nonfinite values");
         }
-        if (capture) FeatureSinkRuntimeAccess::complete_capture(
-            feature_sink, command, position_span, count);
         return stats;
     } catch (...) {
-        if (capture) {
-            if (submitted) FeatureSinkRuntimeAccess::poison(feature_sink);
-            else FeatureSinkRuntimeAccess::abort_unsubmitted(feature_sink);
-        }
         if (submitted && (!completion || completion->completion_unknown))
             Gemma2MetalVerificationStateAccess::poison(target);
         throw;
@@ -379,7 +345,7 @@ metal::MetalCommandStats execute_contiguous_chunk(
 Gemma2MetalResidentDecodeResult run_gemma3_resident_decode(
     Gemma2MetalModelPlan& target, std::uint32_t position, std::uint32_t token,
     float embedding_scale, std::optional<TokenSelectionRequest> request,
-    FeatureSinkBinding feature_sink, Gemma2MetalDecodeOutputMode mode,
+    Gemma2MetalDecodeOutputMode mode,
     Gemma2ExecutionReceipt* completion) {
     auto& workspace = ordinary_workspace(target);
     const auto& logits = target.decode_scratch().logits;
@@ -387,7 +353,7 @@ Gemma2MetalResidentDecodeResult run_gemma3_resident_decode(
     const std::array<std::uint32_t, 1> tokens {token};
     const auto produced = mode == Gemma2MetalDecodeOutputMode::logits;
     const auto stats = execute_contiguous_chunk(target, workspace, tokens, position,
-        embedding_scale, logits, produced, request, feature_sink, completion, selector_dispatches);
+        embedding_scale, logits, produced, request, completion, selector_dispatches);
     auto result = Gemma2MetalResidentDecodeResult { .logits = logits, .produced_logits = produced };
     result.execution = decode_stats(stats);
     account_contiguous_attention(result.execution, target.config(), position, 1U);
@@ -409,7 +375,7 @@ Gemma2MetalResidentDecodeResult run_gemma3_resident_decode(
 Gemma2MetalResidentPrefillResult run_gemma3_resident_prefill(
     Gemma2MetalModelPlan& target, std::span<const std::uint32_t> tokens, std::uint32_t position,
     float embedding_scale, std::optional<TokenSelectionRequest> request,
-    FeatureSinkBinding feature_sink, Gemma2ExecutionReceipt* completion) {
+    Gemma2ExecutionReceipt* completion) {
     auto& workspace = ordinary_workspace(target);
     const auto& logits = target.prefill_scratch().logits;
     Gemma2MetalResidentPrefillResult result { .logits = logits };
@@ -420,7 +386,7 @@ Gemma2MetalResidentPrefillResult run_gemma3_resident_prefill(
         std::uint32_t selector_dispatches = 0;
         const auto stats = execute_contiguous_chunk(target, workspace, tokens.subspan(offset, count),
             position + static_cast<std::uint32_t>(offset), embedding_scale, logits, last,
-            last ? request : std::nullopt, feature_sink, completion, selector_dispatches, true);
+            last ? request : std::nullopt, completion, selector_dispatches, true);
         add_prefill_stats(result.execution, stats);
         account_contiguous_attention(result.execution, target.config(),
             position + static_cast<std::uint32_t>(offset), count);

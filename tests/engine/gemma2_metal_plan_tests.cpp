@@ -1,14 +1,15 @@
 #include "gemma2_metal_plan_tests.hpp"
 
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
-#include "local_gguf_engine/engine/gemma2_model.hpp"
-#include "local_gguf_engine/engine/gemma2_reference.hpp"
+#include "local_gguf_engine/engine/gemma_model.hpp"
+#include "gemma2_reference.hpp"
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/model.hpp"
-#include "local_gguf_engine/engine/prepared_gemma2_plan.hpp"
+#include "local_gguf_engine/engine/prepared_gemma_plan.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
 #include "local_gguf_engine/engine/retrieval_proposer.hpp"
 #include "local_gguf_engine/engine/target_verifier.hpp"
+#include "local_gguf_engine/benchmarks/target_verifier_episode.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
@@ -31,9 +32,8 @@
 #include "tensor_test_support.hpp"
 #include "gemma2_reference_test_support.hpp"
 #include "../../src/tensor/backends/metal/metal_command_context.hpp"
-#include "../../src/tensor/backends/metal/metal_test_hooks.hpp"
-#include "../../src/engine/target_verifier_test_hooks.hpp"
-#include "../../src/engine/prepared_plan_test_hooks.hpp"
+#include "metal_test_hooks.hpp"
+#include "target_verifier_test_hooks.hpp"
 
 #include <algorithm>
 #include <array>
@@ -41,10 +41,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -56,14 +58,14 @@ using local_gguf_engine::engine::Gemma2MetalSchedulePhase;
 using local_gguf_engine::engine::Gemma2MetalScratchOwnership;
 using local_gguf_engine::engine::Gemma2MetalDecodeOutputMode;
 using local_gguf_engine::engine::Gemma2MetalModelPlan;
-using local_gguf_engine::engine::Gemma2OutputHeadPolicy;
-using local_gguf_engine::engine::Gemma2ModelWeights;
-using local_gguf_engine::engine::Gemma2ModelConfig;
+using local_gguf_engine::engine::GemmaOutputHeadPolicy;
+using local_gguf_engine::engine::GemmaModelWeights;
+using local_gguf_engine::engine::GemmaModelConfig;
 using local_gguf_engine::engine::create_gemma2_metal_decode_schedule;
 using local_gguf_engine::engine::create_gemma2_metal_model_plan;
 using local_gguf_engine::engine::create_gemma2_metal_prefill_schedule;
 using local_gguf_engine::engine::create_gemma2_metal_verifier_schedule;
-using local_gguf_engine::engine::bind_gemma2_model_weights;
+using local_gguf_engine::engine::bind_gemma_model_weights;
 using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens;
 using local_gguf_engine::engine::generate_gemma2_metal_argmax_tokens_with_plan;
 using local_gguf_engine::engine::generate_gemma2_metal_sampled_tokens_with_plan;
@@ -73,7 +75,7 @@ using local_gguf_engine::engine::gemma2_metal_prefill_chunk_size;
 using local_gguf_engine::engine::run_gemma2_metal_resident_prefill;
 using local_gguf_engine::engine::run_gemma2_metal_resident_decode_step;
 using local_gguf_engine::engine::run_gemma2_metal_width_two_verifier;
-using local_gguf_engine::engine::resolve_gemma2_output_head_policy;
+using local_gguf_engine::engine::resolve_gemma_output_head_policy;
 using local_gguf_engine::engine::commit_gemma2_metal_width_two_verification;
 using local_gguf_engine::engine::provisionally_commit_gemma2_metal_width_two_verification;
 using local_gguf_engine::engine::finalize_gemma2_metal_width_two_verification;
@@ -142,9 +144,6 @@ using local_gguf_engine::tensor::backends::metal::set_metal_device_unavailable_f
 using local_gguf_engine::engine::TargetVerifierFailurePoint;
 using local_gguf_engine::engine::set_target_verifier_failure_for_testing;
 using local_gguf_engine::engine::clear_target_verifier_failure_for_testing;
-using local_gguf_engine::engine::PreparedPlanFailurePoint;
-using local_gguf_engine::engine::set_prepared_plan_failure_for_testing;
-using local_gguf_engine::engine::clear_prepared_plan_failure_for_testing;
 #endif
 using local_gguf_engine::tests::TestCase;
 using local_gguf_engine::tests::TestFailure;
@@ -366,6 +365,7 @@ TinyGemma2PayloadStore nonzero_tiny_gemma2_payload_store(std::uint32_t block_cou
 }
 
 namespace engine = local_gguf_engine::engine;
+namespace benchmarks = local_gguf_engine::benchmarks;
 
 constexpr std::uint64_t kTargetVerifierArenaEpoch = 0x89abU;
 constexpr std::uint64_t kTargetVerifierHistoryDigest = 0x1234U;
@@ -840,7 +840,7 @@ void initialize_target_verifier_node(
         std::move(payload_store.payloads)
     );
     return create_gemma2_metal_model_plan(
-        load_engine_model_from_gguf(view), Gemma2OutputHeadPolicy::q8_0
+        load_engine_model_from_gguf(view), GemmaOutputHeadPolicy::q8_0
     );
 }
 
@@ -974,6 +974,141 @@ void test_target_verifier_validation_proof_is_bound_to_target_shape_when_availab
         complete_gemma2_metal_target_verifier(ticket)
     );
     return ticket;
+}
+
+static_assert(!std::is_copy_constructible_v<Gemma2MetalModelPlan>);
+static_assert(!std::is_copy_assignable_v<Gemma2MetalModelPlan>);
+static_assert(std::is_nothrow_move_constructible_v<Gemma2MetalModelPlan>);
+static_assert(std::is_nothrow_move_assignable_v<Gemma2MetalModelPlan>);
+static_assert(!std::is_copy_constructible_v<engine::Gemma2MetalTargetVerifierPlan>);
+static_assert(!std::is_copy_assignable_v<engine::Gemma2MetalTargetVerifierPlan>);
+static_assert(std::is_nothrow_move_constructible_v<engine::Gemma2MetalTargetVerifierPlan>);
+static_assert(std::is_nothrow_move_assignable_v<engine::Gemma2MetalTargetVerifierPlan>);
+
+void test_target_verifier_tickets_retain_moved_and_destroyed_plan_owners_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    constexpr std::array states {VerifierTransactionState::encoded,
+        VerifierTransactionState::submitted, VerifierTransactionState::completed,
+        VerifierTransactionState::provisional};
+    constexpr std::array<std::uint32_t, 4> path {0U, 1U, 2U, 3U};
+    for (const auto state : states) {
+        auto target = std::make_unique<Gemma2MetalModelPlan>(make_target_verifier_test_plan());
+        const auto scale = std::sqrt(static_cast<float>(target->config().embedding_length));
+        constexpr std::array<std::uint32_t, 2> prefix {0U, 1U};
+        (void)run_gemma2_metal_resident_prefill(*target, prefix, 0U, scale);
+        auto verifier = std::make_unique<engine::Gemma2MetalTargetVerifierPlan>(
+            create_gemma2_metal_target_verifier_plan(*target, 4U));
+        const auto identities = target->allocation_identities();
+        const auto scratch_identity = &backend_buffer_storage(verifier->scratch().normalized_hidden);
+        const auto cache = target->kv_cache();
+        std::vector<TensorStorage> before_key, before_value;
+        for (const auto& layer : cache) {
+            before_key.push_back(copy_tensor_from_backend(layer.key));
+            before_value.push_back(copy_tensor_from_backend(layer.value));
+        }
+        auto ticket = std::make_unique<engine::TargetVerificationTicket>(
+            encode_target_verifier_test_ticket(*target, *verifier, scale));
+        std::unique_ptr<engine::TargetVerifierCompletionResult> completion;
+        if (state != VerifierTransactionState::encoded) submit_gemma2_metal_target_verifier(*ticket);
+        if (state == VerifierTransactionState::completed || state == VerifierTransactionState::provisional) {
+            completion = std::make_unique<engine::TargetVerifierCompletionResult>(
+                complete_gemma2_metal_target_verifier(*ticket));
+        }
+        if (state == VerifierTransactionState::provisional) {
+            (void)provisionally_commit_gemma2_metal_target_verifier(*ticket, path);
+        }
+
+        // Both construction and assignment transfer the same active storage;
+        // the ticket and completed span must survive the old facade addresses.
+        auto moved_target = std::make_unique<Gemma2MetalModelPlan>(std::move(*target));
+        auto moved_verifier = std::make_unique<engine::Gemma2MetalTargetVerifierPlan>(std::move(*verifier));
+        *target = std::move(*moved_target);
+        *verifier = std::move(*moved_verifier);
+        moved_target.reset();
+        moved_verifier.reset();
+        expect(target->allocation_identities() == identities && target->verification_state() == state
+                && &backend_buffer_storage(verifier->scratch().normalized_hidden) == scratch_identity,
+            "plan moves changed storage identity or detached the active verification ledger");
+        auto moved_ticket = std::make_unique<engine::TargetVerificationTicket>(std::move(*ticket));
+        ticket.reset();
+        const auto first = completion ? completion->candidates.front() : engine::CompactTokenCandidates {};
+        target.reset();
+        verifier.reset();
+        if (completion) {
+            expect(completion->candidates.size() == 4U
+                    && completion->candidates.front().count == first.count
+                    && completion->candidates.front().values[0].token == first.values[0].token
+                    && completion->candidates.front().values[0].logit == first.values[0].logit,
+                "completed candidate span did not survive destruction of both plan facades");
+        }
+        if (state == VerifierTransactionState::encoded) submit_gemma2_metal_target_verifier(*moved_ticket);
+        if (state == VerifierTransactionState::encoded || state == VerifierTransactionState::submitted) {
+            completion = std::make_unique<engine::TargetVerifierCompletionResult>(
+                complete_gemma2_metal_target_verifier(*moved_ticket));
+            expect(completion->candidate_row_count == 4U && completion->candidates.front().count > 0U,
+                "ticket could not complete after both plan owners were destroyed");
+        }
+        if (state != VerifierTransactionState::provisional) {
+            (void)provisionally_commit_gemma2_metal_target_verifier(*moved_ticket, path);
+        }
+        (void)finalize_gemma2_metal_target_verifier(*moved_ticket, 0U);
+        expect(moved_ticket->state() == VerifierTransactionState::idle,
+            "owner-retaining ticket did not finalize its private transaction");
+        for (std::size_t layer = 0U; layer < cache.size(); ++layer) {
+            const auto actual_key = copy_tensor_from_backend(cache[layer].key);
+            const auto actual_value = copy_tensor_from_backend(cache[layer].value);
+            expect(std::equal(actual_key.bytes().begin(), actual_key.bytes().end(), before_key[layer].bytes().begin())
+                    && std::equal(actual_value.bytes().begin(), actual_value.bytes().end(), before_value[layer].bytes().begin()),
+                "finalization after owner destruction failed to restore the original durable K/V");
+        }
+    }
+}
+
+void test_target_verifier_ticket_destruction_keeps_owners_through_rollback_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    constexpr std::array states {VerifierTransactionState::encoded,
+        VerifierTransactionState::submitted, VerifierTransactionState::completed,
+        VerifierTransactionState::provisional};
+    constexpr std::array<std::uint32_t, 4> path {0U, 1U, 2U, 3U};
+    for (const auto state : states) {
+        auto target = make_target_verifier_test_plan();
+        const auto scale = std::sqrt(static_cast<float>(target.config().embedding_length));
+        constexpr std::array<std::uint32_t, 2> prefix {0U, 1U};
+        (void)run_gemma2_metal_resident_prefill(target, prefix, 0U, scale);
+        auto verifier = std::make_unique<engine::Gemma2MetalTargetVerifierPlan>(
+            create_gemma2_metal_target_verifier_plan(target, 4U));
+        std::vector<TensorStorage> before_key, before_value;
+        for (const auto& layer : target.kv_cache()) {
+            before_key.push_back(copy_tensor_from_backend(layer.key));
+            before_value.push_back(copy_tensor_from_backend(layer.value));
+        }
+        auto ticket = std::make_unique<engine::TargetVerificationTicket>(
+            encode_target_verifier_test_ticket(target, *verifier, scale));
+        if (state != VerifierTransactionState::encoded) submit_gemma2_metal_target_verifier(*ticket);
+        if (state == VerifierTransactionState::completed || state == VerifierTransactionState::provisional) {
+            (void)complete_gemma2_metal_target_verifier(*ticket);
+        }
+        if (state == VerifierTransactionState::provisional) {
+            (void)provisionally_commit_gemma2_metal_target_verifier(*ticket, path);
+        }
+        auto moved_target = std::move(target);
+        verifier.reset();
+        ticket.reset();
+        if (state == VerifierTransactionState::submitted) {
+            expect(moved_target.verification_poisoned(),
+                "abandoning a submitted ticket after owner moves did not poison the live target ledger");
+            continue;
+        }
+        expect(!moved_target.has_pending_verification(),
+            "ticket destructor did not release the moved target's encoded, completed or restored transaction");
+        for (std::size_t layer = 0U; layer < moved_target.kv_cache().size(); ++layer) {
+            const auto actual_key = copy_tensor_from_backend(moved_target.kv_cache()[layer].key);
+            const auto actual_value = copy_tensor_from_backend(moved_target.kv_cache()[layer].value);
+            expect(std::equal(actual_key.bytes().begin(), actual_key.bytes().end(), before_key[layer].bytes().begin())
+                    && std::equal(actual_value.bytes().begin(), actual_value.bytes().end(), before_value[layer].bytes().begin()),
+                "ticket destructor lost K/V owners before completing provisional restoration");
+        }
+    }
 }
 
 [[nodiscard]] engine::TargetVerificationTicket encode_target_verifier_request_for_test(
@@ -1165,7 +1300,7 @@ void expect_f16_ring_matches_f32(
     }
 }
 
-std::size_t expected_kv_cache_byte_count(const Gemma2ModelConfig& config) {
+std::size_t expected_kv_cache_byte_count(const GemmaModelConfig& config) {
     std::size_t bytes = 0;
     for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
         const auto rows = local_gguf_engine::engine::gemma2_layer_uses_sliding_window(layer)
@@ -1300,9 +1435,9 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
     auto plan = create_gemma2_metal_model_plan(model);
 
     expect(plan.backend() == BackendKind::metal, "Gemma2 Metal plan backend mismatch");
-    auto resolved_config = model.gemma2_config();
+    auto resolved_config = model.gemma_config();
     resolved_config.kv_precision = engine::GemmaKVPrecision::f16;
-    expect(plan.config() == resolved_config && model.gemma2_config().kv_precision == engine::GemmaKVPrecision::automatic,
+    expect(plan.config() == resolved_config && model.gemma_config().kv_precision == engine::GemmaKVPrecision::automatic,
         "Gemma2 Metal plan must resolve F16 without changing loaded metadata");
     expect(plan.uploaded_weight_byte_count() == expected_weight_bytes, "Gemma2 Metal uploaded byte count mismatch");
     expect(plan.kv_cache_byte_count() == expected_kv_cache_byte_count(plan.config()), "Gemma2 Metal KV byte count mismatch");
@@ -1412,12 +1547,12 @@ void test_gemma2_q8_output_policy_preserves_f16_embedding_when_available() {
     );
     auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
-    auto plan = create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::q8_0);
+    auto plan = create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::q8_0);
 
     const auto expected_q8_bytes = TensorDescriptor::from_quantized_gguf_weight_matrix(
         Shape::from({256U, 4U}), DType::q8_0
     ).byte_count;
-    expect(plan.output_head_policy() == Gemma2OutputHeadPolicy::q8_0, "Gemma2 Q8 output policy mismatch");
+    expect(plan.output_head_policy() == GemmaOutputHeadPolicy::q8_0, "Gemma2 Q8 output policy mismatch");
     expect(plan.weights().token_embedding_weight.descriptor().dtype == DType::f16,
         "Gemma2 Q8 policy changed embedding dtype");
     expect(plan.weights().output_weight.descriptor().dtype == DType::q8_0,
@@ -1432,34 +1567,34 @@ void test_gemma2_q8_output_policy_preserves_f16_embedding_when_available() {
 }
 
 void test_gemma2_output_head_policy_resolution_is_explicit_and_validated() {
-    static_assert(static_cast<std::uint32_t>(Gemma2OutputHeadPolicy::automatic) == 0U);
-    static_assert(static_cast<std::uint32_t>(Gemma2OutputHeadPolicy::f16) == 1U);
-    static_assert(static_cast<std::uint32_t>(Gemma2OutputHeadPolicy::q8_0) == 2U);
+    static_assert(static_cast<std::uint32_t>(GemmaOutputHeadPolicy::automatic) == 0U);
+    static_assert(static_cast<std::uint32_t>(GemmaOutputHeadPolicy::f16) == 1U);
+    static_assert(static_cast<std::uint32_t>(GemmaOutputHeadPolicy::q8_0) == 2U);
 
     auto payload_store = tiny_gemma2_payload_store();
     auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
-    const auto weights = bind_gemma2_model_weights(model);
+    const auto weights = bind_gemma_model_weights(model);
 
     expect(
-        resolve_gemma2_output_head_policy(
-            model.gemma2_config(), weights, Gemma2OutputHeadPolicy::automatic
-        ) == Gemma2OutputHeadPolicy::f16,
+        resolve_gemma_output_head_policy(
+            model.gemma_config(), weights, GemmaOutputHeadPolicy::automatic
+        ) == GemmaOutputHeadPolicy::f16,
         "automatic output-head policy should resolve to F16 for a non-retained model"
     );
     expect(
-        resolve_gemma2_output_head_policy(
-            model.gemma2_config(), weights, Gemma2OutputHeadPolicy::q8_0
-        ) == Gemma2OutputHeadPolicy::q8_0,
+        resolve_gemma_output_head_policy(
+            model.gemma_config(), weights, GemmaOutputHeadPolicy::q8_0
+        ) == GemmaOutputHeadPolicy::q8_0,
         "explicit Q8 output-head policy should be preserved"
     );
 
     bool rejected = false;
     try {
-        (void)resolve_gemma2_output_head_policy(
-            model.gemma2_config(),
+        (void)resolve_gemma_output_head_policy(
+            model.gemma_config(),
             weights,
-            static_cast<Gemma2OutputHeadPolicy>(999U)
+            static_cast<GemmaOutputHeadPolicy>(999U)
         );
     } catch (const std::invalid_argument&) {
         rejected = true;
@@ -2071,7 +2206,7 @@ void test_gemma2_metal_decode_matches_nonzero_cpu_reference_when_available() {
     auto payload_store = nonzero_tiny_gemma2_payload_store();
     auto view = tiny_model_view(tiny_gemma2_metadata(2), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
-    const auto weights = bind_gemma2_model_weights(model);
+    const auto weights = bind_gemma_model_weights(model);
     auto plan = create_gemma2_metal_model_plan(model);
     auto no_selection_plan = create_gemma2_metal_model_plan(model);
     auto kv_only_plan = create_gemma2_metal_model_plan(model);
@@ -2653,7 +2788,7 @@ void test_gemma2_width_two_verifier_matches_sequential_decode_and_commits_transa
             std::move(payload_store.payloads)
         );
         const auto model = load_engine_model_from_gguf(view);
-        return create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::q8_0);
+        return create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::q8_0);
     };
     auto candidate = make_plan();
     auto control = make_plan();
@@ -2828,7 +2963,7 @@ void test_gemma2_width_two_verifier_restores_kv_after_post_submit_candidate_fail
         std::move(payload_store.payloads)
     );
     const auto model = load_engine_model_from_gguf(view);
-    auto plan = create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::q8_0);
+    auto plan = create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::q8_0);
     const auto embedding_scale = std::sqrt(static_cast<float>(plan.config().embedding_length));
     const std::array<std::uint32_t, 2> prefix {0U, 1U};
     (void)run_gemma2_metal_resident_prefill(plan, prefix, 0U, embedding_scale);
@@ -2920,7 +3055,7 @@ void test_gemma2_speculative_controller_matches_seeded_baseline_and_rolls_back_c
             std::move(payload_store.payloads)
         );
         return create_gemma2_metal_model_plan(
-            load_engine_model_from_gguf(view), Gemma2OutputHeadPolicy::q8_0
+            load_engine_model_from_gguf(view), GemmaOutputHeadPolicy::q8_0
         );
     };
     const std::array<std::uint32_t, 2> prompt {0U, 1U};
@@ -3102,11 +3237,11 @@ void test_gemma2_rejects_f32_cache_before_device_preparation() {
     for (const auto low_level : {false, true}) {
         try {
             if (low_level) {
-                auto config = model.gemma2_config();
+                auto config = model.gemma_config();
                 config.kv_precision = engine::GemmaKVPrecision::f32;
-                (void)create_gemma2_metal_model_plan(config, engine::bind_gemma2_model_weights(model));
+                (void)create_gemma2_metal_model_plan(config, engine::bind_gemma_model_weights(model));
             } else {
-                (void)create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::automatic,
+                (void)create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::automatic,
                     0U, engine::GemmaKVPrecision::f32);
             }
             throw TestFailure("Gemma2 accepted an unsupported F32 cache policy");
@@ -3321,8 +3456,8 @@ void test_gemma2_packed_short_context_preserves_retrieval_rows_when_available() 
     auto view = tiny_model_view(tiny_gemma2_metadata(2U, 2U, 1U, 256U, 16U, 8U),
         std::move(payload.payloads));
     const auto model = load_engine_model_from_gguf(view);
-    auto candidate = packed_test_plan(create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::q8_0, 4U));
-    auto control = packed_test_plan(create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::q8_0, 4U));
+    auto candidate = packed_test_plan(create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::q8_0, 4U));
+    auto control = packed_test_plan(create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::q8_0, 4U));
     constexpr std::array<std::uint32_t, 1> prefix {1U};
     constexpr std::array<std::uint32_t, 2> tokens {2U, 3U};
     const auto scale = std::sqrt(float(candidate.config().embedding_length));
@@ -3362,10 +3497,10 @@ void test_gemma2_sequential_decode_trace_matches_each_metal_row_and_kv_when_avai
         std::move(payload_store.payloads)
     );
     const auto model = load_engine_model_from_gguf(view);
-    auto weights = bind_gemma2_model_weights(model);
-    const auto& config = model.gemma2_config();
+    auto weights = bind_gemma_model_weights(model);
+    const auto& config = model.gemma_config();
     auto plan = create_gemma2_metal_model_plan(model,
-        packed ? Gemma2OutputHeadPolicy::q8_0 : Gemma2OutputHeadPolicy::f16);
+        packed ? GemmaOutputHeadPolicy::q8_0 : GemmaOutputHeadPolicy::f16);
     const auto output_weight = copy_tensor_from_backend(plan.weights().output_weight);
     if (packed) {
         weights.output_weight = output_weight.view();
@@ -3589,7 +3724,7 @@ void test_target_verifier_width_four_matches_independent_decode_and_kv_when_avai
             std::move(payload_store.payloads)
         );
         auto plan = create_gemma2_metal_model_plan(
-            load_engine_model_from_gguf(view), Gemma2OutputHeadPolicy::q8_0
+            load_engine_model_from_gguf(view), GemmaOutputHeadPolicy::q8_0
         );
         return packed ? packed_test_plan(std::move(plan)) : std::move(plan);
     };
@@ -3859,7 +3994,7 @@ void test_target_verifier_live_chain_episode_gates_real_tiles_and_fallback_when_
             std::move(payload_store.payloads)
         );
         return create_gemma2_metal_model_plan(
-            load_engine_model_from_gguf(view), Gemma2OutputHeadPolicy::q8_0
+            load_engine_model_from_gguf(view), GemmaOutputHeadPolicy::q8_0
         );
     };
     constexpr std::array<std::uint32_t, 2> prefix {0U, 1U};
@@ -3903,7 +4038,7 @@ void test_target_verifier_live_chain_episode_gates_real_tiles_and_fallback_when_
             )
         );
         auto verifier = create_gemma2_metal_target_verifier_plan(candidate, 2U);
-        auto workspace = std::make_unique<engine::TargetVerifierEpisodeWorkspace>();
+        auto workspace = std::make_unique<benchmarks::TargetVerifierEpisodeWorkspace>();
         engine::SpeculativeControllerScenario scenario;
         scenario.graph = graph.get();
         scenario.chain_schedule = cascade;
@@ -3925,7 +4060,7 @@ void test_target_verifier_live_chain_episode_gates_real_tiles_and_fallback_when_
             scenario.callbacks[0] = engine::ControllerCallbackDecision::stop_generation;
         }
 
-        const auto episode = run_gemma2_metal_target_verifier_chain_episode(
+        const auto episode = benchmarks::run_target_verifier_chain_episode(
             candidate, verifier, *validated, scenario, sampler, *workspace,
             embedding_scale
         );
@@ -4022,7 +4157,7 @@ void test_target_verifier_live_registered_horizons_follow_exact_controller_when_
             std::move(payload_store.payloads)
         );
         auto plan = create_gemma2_metal_model_plan(
-            load_engine_model_from_gguf(view), Gemma2OutputHeadPolicy::q8_0
+            load_engine_model_from_gguf(view), GemmaOutputHeadPolicy::q8_0
         );
         const auto embedding_scale = std::sqrt(
             static_cast<float>(plan.config().embedding_length)
@@ -4059,7 +4194,7 @@ void test_target_verifier_live_registered_horizons_follow_exact_controller_when_
             )
         );
         auto verifier = create_gemma2_metal_target_verifier_plan(plan, max_tile_rows);
-        auto workspace = std::make_unique<engine::TargetVerifierEpisodeWorkspace>();
+        auto workspace = std::make_unique<benchmarks::TargetVerifierEpisodeWorkspace>();
         engine::SpeculativeControllerScenario scenario;
         scenario.graph = graph.get();
         scenario.chain_schedule = schedule;
@@ -4076,7 +4211,7 @@ void test_target_verifier_live_registered_horizons_follow_exact_controller_when_
         scenario.callbacks.fill(engine::ControllerCallbackDecision::continue_generation);
         scenario.tile_gates.fill(engine::ControllerTileGateDecision::accept);
 
-        const auto episode = run_gemma2_metal_target_verifier_chain_episode(
+        const auto episode = benchmarks::run_target_verifier_chain_episode(
             plan, verifier, *validated, scenario, sampler, *workspace, embedding_scale
         );
         expect(episode.executed_tile_count == schedule.tile_count
@@ -4104,7 +4239,7 @@ void test_target_verifier_live_forests_sample_only_selected_paths_when_available
             std::move(payload_store.payloads)
         );
         return create_gemma2_metal_model_plan(
-            load_engine_model_from_gguf(view), Gemma2OutputHeadPolicy::q8_0
+            load_engine_model_from_gguf(view), GemmaOutputHeadPolicy::q8_0
         );
     };
     constexpr std::array<std::uint32_t, 2> prefix {0U, 1U};
@@ -4148,7 +4283,7 @@ void test_target_verifier_live_forests_sample_only_selected_paths_when_available
         auto verifier = create_gemma2_metal_target_verifier_plan(
             candidate, graph->storage().header.materialized_node_count
         );
-        auto workspace = std::make_unique<engine::TargetVerifierEpisodeWorkspace>();
+        auto workspace = std::make_unique<benchmarks::TargetVerifierEpisodeWorkspace>();
         engine::SpeculativeControllerScenario scenario;
         scenario.graph = graph.get();
         scenario.proposal_source = engine::SpeculativeProposalSource::learned_external;
@@ -4165,7 +4300,7 @@ void test_target_verifier_live_forests_sample_only_selected_paths_when_available
         scenario.available_context_rows = 30U;
         scenario.callbacks.fill(engine::ControllerCallbackDecision::continue_generation);
 
-        const auto episode = run_gemma2_metal_target_verifier_forest_episode(
+        const auto episode = benchmarks::run_target_verifier_forest_episode(
             candidate, verifier, *validated, scenario, sampler, *workspace,
             embedding_scale
         );
@@ -4254,7 +4389,7 @@ void test_target_verifier_root_leaf_executes_and_publishes_candidate_when_availa
         )
     );
     auto verifier = create_gemma2_metal_target_verifier_plan(candidate, 1U);
-    auto workspace = std::make_unique<engine::TargetVerifierEpisodeWorkspace>();
+    auto workspace = std::make_unique<benchmarks::TargetVerifierEpisodeWorkspace>();
     engine::SpeculativeControllerScenario scenario;
     scenario.graph = graph.get();
     scenario.proposal_source = engine::SpeculativeProposalSource::learned_external;
@@ -4269,7 +4404,7 @@ void test_target_verifier_root_leaf_executes_and_publishes_candidate_when_availa
     scenario.available_context_rows = 30U;
     scenario.callbacks.fill(engine::ControllerCallbackDecision::continue_generation);
 
-    const auto episode = run_gemma2_metal_target_verifier_forest_episode(
+    const auto episode = benchmarks::run_target_verifier_forest_episode(
         candidate, verifier, *validated, scenario, sampler, *workspace,
         embedding_scale
     );
@@ -4411,128 +4546,6 @@ void test_target_verifier_forest_masks_siblings_and_commits_selected_path_when_a
         expect(std::equal(actual_value.bytes().begin(), actual_value.bytes().end(),
                     expected_value.bytes().begin()),
             "forest verifier selected value path differs from ordinary decode");
-    }
-}
-
-void test_target_verifier_promotes_only_selected_feature_path_and_truncates_finalize_when_available() {
-    if (!tensor_backend_is_available(BackendKind::metal)) return;
-
-    auto candidate = make_target_verifier_test_plan();
-    auto control = make_target_verifier_test_plan();
-    const auto make_sinks = [&]() {
-        std::vector<float> values(256U * 4U);
-        for (std::size_t index = 0U; index < values.size(); ++index) {
-            values[index] = static_cast<float>(static_cast<int>(index % 17U) - 8) / 64.0F;
-        }
-        const auto weight = tensor_f16_gguf_matrix(
-            256U, 4U, std::span<const float>(values)
-        );
-        engine::FeatureBankSpec spec;
-        spec.bank_id = 1U;
-        spec.tap_count = 1U;
-        spec.taps[0] = {.stage = engine::FeatureTapStage::final_normalized};
-        spec.child_count = 1U;
-        spec.children[0] = {
-            .child_id = 3U,
-            .output_width = 4U,
-            .weight_dtype = DType::f16,
-            .schedule = engine::FeatureProjectionSchedule::eager,
-            .payload_offset = 0U,
-            .payload_byte_count = weight.bytes().size(),
-            .payload_digest = local_gguf_engine::runtime::sha256(weight.bytes()),
-        };
-        const std::array specs {spec};
-        return engine::create_feature_sink_set(
-            specs, weight.bytes(), 256U, 2U, 64U, 4U
-        );
-    };
-    auto candidate_sinks = make_sinks();
-    auto control_sinks = make_sinks();
-    const auto embedding_scale = std::sqrt(
-        static_cast<float>(candidate.config().embedding_length)
-    );
-    constexpr std::array<std::uint32_t, 2U> prefix {0U, 1U};
-    (void)run_gemma2_metal_resident_prefill(
-        candidate, prefix, 0U, embedding_scale, std::nullopt,
-        engine::FeatureSinkBinding {
-            .sinks = &candidate_sinks,
-            .destination = engine::FeatureCaptureDestination::canonical,
-            .execution_epoch = 1U,
-        }
-    );
-    (void)run_gemma2_metal_resident_prefill(
-        control, prefix, 0U, embedding_scale, std::nullopt,
-        engine::FeatureSinkBinding {
-            .sinks = &control_sinks,
-            .destination = engine::FeatureCaptureDestination::canonical,
-            .execution_epoch = 1U,
-        }
-    );
-    const auto options = engine::TokenSamplerOptions {
-        .temperature = 0.8F, .top_k = 2U, .top_p = 0.95F, .min_p = 0.0F,
-        .repetition_penalty = 1.2F, .seed = 42U, .repetition_window = 8U,
-    };
-    TokenSampler sampler(options);
-    constexpr std::array<std::uint32_t, 3U> selected_through_root {0U, 1U, 2U};
-    sampler.observe_tokens(selected_through_root);
-    const auto graph = std::make_unique<engine::ValidatedProposalGraph>(
-        make_target_verifier_forest_graph(2U, candidate.config().vocab_size)
-    );
-    auto request = std::make_unique<VerifierEncodeRequest>();
-    populate_target_verifier_request(
-        *request, *graph, engine::ChainVerifierSchedule {}, candidate, sampler, options
-    );
-    auto verifier = create_gemma2_metal_target_verifier_plan(candidate, 4U);
-    auto ticket = encode_gemma2_metal_target_verifier(
-        candidate, verifier,
-        validate_verifier_encode_request(
-            *request, candidate.config().vocab_size,
-            candidate.config().block_count, candidate.config().context_length,
-            candidate.config().sliding_window
-        ),
-        embedding_scale,
-        engine::FeatureSinkBinding {
-            .sinks = &candidate_sinks,
-            .destination = engine::FeatureCaptureDestination::speculative,
-            .execution_epoch = 2U,
-            .arena_epoch = kTargetVerifierArenaEpoch,
-        }
-    );
-    submit_gemma2_metal_target_verifier(ticket);
-    static_cast<void>(complete_gemma2_metal_target_verifier(ticket));
-    expect(candidate_sinks.canonical_frontier() == 2U,
-        "unselected verifier features escaped speculative storage");
-
-    constexpr std::array<std::uint32_t, 3U> selected_path {0U, 1U, 3U};
-    const std::array<std::uint32_t, 3U> selected_tokens {2U, 3U, 1U};
-    for (std::uint32_t row = 0U; row < 3U; ++row) {
-        (void)run_gemma2_metal_resident_decode_step(
-            control, create_gemma2_metal_decode_schedule(control, 2U + row),
-            selected_tokens[row], embedding_scale, std::nullopt,
-            Gemma2MetalDecodeOutputMode::logits,
-            engine::FeatureSinkBinding {
-                .sinks = &control_sinks,
-                .destination = engine::FeatureCaptureDestination::canonical,
-                .execution_epoch = 2U + row,
-            }
-        );
-    }
-    (void)provisionally_commit_gemma2_metal_target_verifier(ticket, selected_path);
-    expect(candidate_sinks.canonical_frontier() == 5U,
-        "selected verifier features were not atomically promoted");
-    (void)finalize_gemma2_metal_target_verifier(ticket, 2U);
-    expect(candidate_sinks.canonical_frontier() == 4U
-        && !candidate_sinks.target_state_view(3U, 4U).has_value(),
-        "feature finalize did not discard the rolled-back selected suffix");
-
-    const auto actual = candidate_sinks.copy_canonical_child_feature_rows(3U, 0U, 4U);
-    const auto expected = control_sinks.copy_canonical_child_feature_rows(3U, 0U, 4U);
-    for (std::uint32_t position = 0U; position < 4U; ++position) {
-        for (std::uint32_t column = 0U; column < 4U; ++column) {
-            const std::array<std::uint64_t, 2U> index {position, column};
-            expect(read_f16_as_f32(actual, index) == read_f16_as_f32(expected, index),
-                "promoted verifier feature differs from ordinary target feature");
-        }
     }
 }
 
@@ -5040,7 +5053,7 @@ void test_target_verifier_rolls_back_at_context_tail_and_runs_ordinary_endpoint_
             std::move(payload_store.payloads)
         );
         return create_gemma2_metal_model_plan(
-            load_engine_model_from_gguf(view), Gemma2OutputHeadPolicy::q8_0
+            load_engine_model_from_gguf(view), GemmaOutputHeadPolicy::q8_0
         );
     };
     for (const auto prefix_count : {27U, 28U}) {
@@ -5139,7 +5152,7 @@ void test_target_verifier_rolls_back_at_context_tail_and_runs_ordinary_endpoint_
     }
 }
 
-void test_prepared_gemma2_plan_authenticates_and_streams_all_prefill_features_when_available() {
+void test_prepared_gemma_plan_authenticates_target_and_preserves_poison_when_available() {
     if (!tensor_backend_is_available(BackendKind::metal)) return;
     auto payload_store = nonzero_tiny_gemma2_payload_store(2U);
     auto view = tiny_model_view(
@@ -5154,240 +5167,29 @@ void test_prepared_gemma2_plan_authenticates_and_streams_all_prefill_features_wh
     engine::ResidentTargetPayloadReceipt resident;
     {
         auto receipt_plan = create_gemma2_metal_model_plan(
-            model, Gemma2OutputHeadPolicy::q8_0, resident
+            model, GemmaOutputHeadPolicy::q8_0, resident
         );
         expect(resident.byte_count == receipt_plan.uploaded_weight_byte_count(),
             "resident receipt does not cover every uploaded target byte");
     }
 
-    std::vector<float> projection_values(256U * 4U);
-    for (std::size_t index = 0U; index < projection_values.size(); ++index) {
-        projection_values[index] = static_cast<float>(
-            static_cast<int>(index % 13U) - 6
-        ) / 32.0F;
-    }
-    const auto projection = tensor_f16_gguf_matrix(
-        256U, 4U, std::span<const float>(projection_values)
-    );
-    std::vector<std::uint8_t> artifact_payload(
-        projection.bytes().begin(), projection.bytes().end()
-    );
-    engine::FeatureBankSpec bank;
-    bank.bank_id = 1U;
-    bank.tap_count = 1U;
-    bank.taps[0] = {.stage = engine::FeatureTapStage::layer_residual, .layer_index = 1U};
-    bank.child_count = 1U;
-    bank.children[0] = {
-        .child_id = 9U, .output_width = 4U, .weight_dtype = DType::f16,
-        .schedule = engine::FeatureProjectionSchedule::eager,
-        .payload_offset = 0U, .payload_byte_count = artifact_payload.size(),
-        .payload_digest = local_gguf_engine::runtime::sha256(artifact_payload),
-    };
-    auto features = engine::create_feature_sink_set(std::span(&bank, 1U), artifact_payload,
-        model.gemma2_config().embedding_length, model.gemma2_config().block_count,
-        model.gemma2_config().context_length, 1'025U);
-    auto capture = engine::prepare_gemma2_target_only_plan(model, Gemma2OutputHeadPolicy::q8_0);
-    auto baseline = engine::prepare_gemma2_target_only_plan(model, Gemma2OutputHeadPolicy::q8_0);
-    expect(capture.mode() == engine::PreparedGemma2Mode::target_only
-        && capture.model_receipt() == model.payload_receipt()
-        && capture.resident_receipt() == resident && !capture.artifact_digest(),
+    auto prepared = engine::prepare_gemma_target_only_plan(model, GemmaOutputHeadPolicy::q8_0);
+    expect(prepared.mode() == engine::PreparedGemmaMode::target_only
+        && prepared.model_receipt() == model.payload_receipt()
+        && prepared.resident_receipt() == resident && !prepared.artifact_digest(),
         "prepared target identity differs from its authenticated source/residency");
-    std::uint64_t execution_epoch = 0U;
-    const auto bind_features = [&] {
-        return engine::FeatureSinkBinding {
-            .sinks = &features,
-            .destination = engine::FeatureCaptureDestination::canonical,
-            .execution_epoch = ++execution_epoch,
-        };
-    };
-
-    std::vector<std::uint32_t> tokens(130U);
-    for (std::size_t index = 0U; index < tokens.size(); ++index) {
-        tokens[index] = static_cast<std::uint32_t>(index % 4U);
-    }
-    const auto scale = engine::gemma2_input_embedding_scale(
-        model.gemma2_config().embedding_length
-    );
-    const auto baseline_result = run_gemma2_metal_resident_prefill(
-        baseline.target(), tokens, 0U, scale
-    );
-    const auto baseline_logits = copy_tensor_from_backend(baseline_result.logits);
-    auto binding = bind_features();
-    const auto captured_result = run_gemma2_metal_resident_prefill(
-        capture.target(), tokens, 0U, scale, std::nullopt, binding
-    );
-    const auto captured_logits = copy_tensor_from_backend(captured_result.logits);
-    expect(std::equal(
-        baseline_logits.bytes().begin(), baseline_logits.bytes().end(),
-        captured_logits.bytes().begin()
-    ), "feature capture changed authoritative prefill logits");
-    expect(features.canonical_frontier() == 130U
-        && features.target_state_view(9U, 0U).has_value()
-        && features.target_state_view(9U, 127U).has_value()
-        && features.target_state_view(9U, 129U).has_value(),
-        "feature sink did not capture every multi-command prefill row");
-
-    constexpr auto generated_token = std::uint32_t {2U};
-    const auto baseline_decode = run_gemma2_metal_resident_decode_step(
-        baseline.target(),
-        create_gemma2_metal_decode_schedule(baseline.target(), 130U),
-        generated_token, scale
-    );
-    const auto captured_decode = run_gemma2_metal_resident_decode_step(
-        capture.target(),
-        create_gemma2_metal_decode_schedule(capture.target(), 130U),
-        generated_token, scale, std::nullopt,
-        Gemma2MetalDecodeOutputMode::logits,
-        bind_features()
-    );
-    const auto baseline_decode_logits = copy_tensor_from_backend(baseline_decode.logits);
-    const auto captured_decode_logits = copy_tensor_from_backend(captured_decode.logits);
-    expect(std::equal(
-        baseline_decode_logits.bytes().begin(), baseline_decode_logits.bytes().end(),
-        captured_decode_logits.bytes().begin()
-    ), "feature capture changed authoritative ordinary-decode logits");
-    expect(features.canonical_frontier() == 131U
-        && features.target_state_view(9U, 130U).has_value(),
-        "feature sink did not capture an ordinary generated row");
-
-    constexpr auto endpoint_token = std::uint32_t {3U};
-    const auto baseline_endpoint = run_gemma2_metal_resident_decode_step(
-        baseline.target(),
-        create_gemma2_metal_decode_schedule(baseline.target(), 131U),
-        endpoint_token, scale, std::nullopt,
-        Gemma2MetalDecodeOutputMode::kv_only
-    );
-    const auto captured_endpoint = run_gemma2_metal_resident_decode_step(
-        capture.target(),
-        create_gemma2_metal_decode_schedule(capture.target(), 131U),
-        endpoint_token, scale, std::nullopt,
-        Gemma2MetalDecodeOutputMode::kv_only,
-        bind_features()
-    );
-    expect(!baseline_endpoint.produced_logits && !captured_endpoint.produced_logits
-        && features.canonical_frontier() == 132U
-        && features.target_state_view(9U, 131U).has_value(),
-        "feature sink did not capture the output-head-elided endpoint row");
-    for (std::size_t layer = 0U; layer < capture.target().kv_cache().size(); ++layer) {
-        const auto baseline_key = copy_tensor_from_backend(
-            baseline.target().kv_cache()[layer].key
-        );
-        const auto captured_key = copy_tensor_from_backend(
-            capture.target().kv_cache()[layer].key
-        );
-        const auto baseline_value = copy_tensor_from_backend(
-            baseline.target().kv_cache()[layer].value
-        );
-        const auto captured_value = copy_tensor_from_backend(
-            capture.target().kv_cache()[layer].value
-        );
-        expect(std::equal(
-            baseline_key.bytes().begin(), baseline_key.bytes().end(),
-            captured_key.bytes().begin()
-        ), "feature capture changed endpoint key-cache bytes");
-        expect(std::equal(
-            baseline_value.bytes().begin(), baseline_value.bytes().end(),
-            captured_value.bytes().begin()
-        ), "feature capture changed endpoint value-cache bytes");
-    }
-
-    auto corrupted_payload = artifact_payload;
-    corrupted_payload[0] ^= 1U;
+    prepared.poison();
     bool rejected = false;
-    try {
-        static_cast<void>(engine::create_feature_sink_set(std::span(&bank, 1U), corrupted_payload,
-            model.gemma2_config().embedding_length, model.gemma2_config().block_count,
-            model.gemma2_config().context_length, 1'025U));
-    } catch (const std::invalid_argument&) { rejected = true; }
-    expect(rejected, "feature projection accepted bytes that differ from its digest");
-    capture.poison();
-    rejected = false;
-    try { capture.reset_draft_state(); }
+    try { prepared.reset_draft_state(); }
     catch (const std::logic_error&) { rejected = true; }
-    expect(rejected && !capture.ready(), "poisoned prepared target was reset into a usable state");
-}
-
-void test_feature_prefill_failure_at_every_chunk_is_exact_or_poisoned_when_available() {
-    if (!tensor_backend_is_available(BackendKind::metal)) return;
-    const std::array points {
-        PreparedPlanFailurePoint::prefill_encode,
-        PreparedPlanFailurePoint::prefill_commit,
-        PreparedPlanFailurePoint::prefill_wait,
-        PreparedPlanFailurePoint::prefill_completion,
-    };
-    std::vector<std::uint32_t> tokens(257U);
-    for (std::size_t index = 0U; index < tokens.size(); ++index) {
-        tokens[index] = static_cast<std::uint32_t>(index % 4U);
-    }
-    std::vector<float> projection_values(256U, 1.0F / 256.0F);
-    const auto projection = tensor_f16_gguf_matrix(
-        256U, 1U, std::span<const float>(projection_values)
-    );
-    engine::FeatureBankSpec spec;
-    spec.bank_id = 1U;
-    spec.tap_count = 1U;
-    spec.taps[0] = {.stage = engine::FeatureTapStage::final_normalized};
-    spec.child_count = 1U;
-    spec.children[0] = {
-        .child_id = 1U,
-        .output_width = 1U,
-        .weight_dtype = DType::f16,
-        .schedule = engine::FeatureProjectionSchedule::eager,
-        .payload_offset = 0U,
-        .payload_byte_count = projection.bytes().size(),
-        .payload_digest = local_gguf_engine::runtime::sha256(projection.bytes()),
-    };
-    const std::array specs {spec};
-
-    for (const auto point : points) {
-        for (std::uint32_t chunk = 0U; chunk < 3U; ++chunk) {
-            auto payload_store = nonzero_tiny_gemma2_payload_store(2U);
-            auto view = tiny_model_view(
-                tiny_gemma2_metadata(2U, 2U, 1U, 256U, 512U, 8U),
-                std::move(payload_store.payloads)
-            );
-            auto plan = create_gemma2_metal_model_plan(
-                load_engine_model_from_gguf(view), Gemma2OutputHeadPolicy::q8_0
-            );
-            auto sinks = engine::create_feature_sink_set(
-                specs, projection.bytes(), 256U, 2U, 512U, 1'025U
-            );
-            set_prepared_plan_failure_for_testing(point, chunk);
-            auto rejected = false;
-            try {
-                static_cast<void>(run_gemma2_metal_resident_prefill(
-                    plan, tokens, 0U,
-                    engine::gemma2_input_embedding_scale(256U), std::nullopt,
-                    engine::FeatureSinkBinding {
-                        .sinks = &sinks,
-                        .destination = engine::FeatureCaptureDestination::canonical,
-                        .execution_epoch = 1U,
-                    }
-                ));
-            } catch (const std::runtime_error&) {
-                rejected = true;
-            }
-            clear_prepared_plan_failure_for_testing();
-            expect(rejected, "requested prefill chunk failure was not injected");
-            const auto can_restore_exactly = chunk == 0U
-                && (point == PreparedPlanFailurePoint::prefill_encode
-                    || point == PreparedPlanFailurePoint::prefill_commit);
-            if (can_restore_exactly) {
-                expect(!sinks.poisoned() && sinks.canonical_frontier() == 0U
-                    && !plan.has_pending_verification(),
-                    "known-unsubmitted first-chunk failure did not restore exact state");
-            } else {
-                expect(sinks.poisoned() && plan.has_pending_verification(),
-                    "partial or uncertain prefill failure left a reusable session");
-                sinks.reset();
-                expect(sinks.poisoned(),
-                    "feature reset reused partial or unknown-completion state");
-            }
-        }
-    }
+    expect(rejected && !prepared.ready(), "poisoned prepared target was reset into a usable state");
 }
 
 const TestCase kGemma2MetalPlanTests[] = {
+    {"target verifier tickets retain moved and destroyed plan owners through every transaction state",
+        test_target_verifier_tickets_retain_moved_and_destroyed_plan_owners_when_available},
+    {"target verifier ticket destruction retains owners through rollback and poisons abandoned submission",
+        test_target_verifier_ticket_destruction_keeps_owners_through_rollback_when_available},
     {"Gemma2 F32 cache policy fails before device preparation", test_gemma2_rejects_f32_cache_before_device_preparation},
     {"target verifier validation proof is bound to the actual target shape when available",
         test_target_verifier_validation_proof_is_bound_to_target_shape_when_available},
@@ -5536,10 +5338,6 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_target_verifier_forest_masks_siblings_and_commits_selected_path_when_available,
     },
     {
-        "target verifier promotes only selected feature path and truncates finalize when available",
-        test_target_verifier_promotes_only_selected_feature_path_and_truncates_finalize_when_available,
-    },
-    {
         "target verifier repeated roots preserve beam identity when available",
         test_target_verifier_repeated_roots_preserve_beam_identity_when_available,
     },
@@ -5560,12 +5358,8 @@ const TestCase kGemma2MetalPlanTests[] = {
         test_target_verifier_rolls_back_at_context_tail_and_runs_ordinary_endpoint_when_available,
     },
     {
-        "prepared Gemma2 plan authenticates and streams every prefill feature row when available",
-        test_prepared_gemma2_plan_authenticates_and_streams_all_prefill_features_when_available,
-    },
-    {
-        "feature prefill failures at every chunk restore exactly or poison when available",
-        test_feature_prefill_failure_at_every_chunk_is_exact_or_poisoned_when_available,
+        "prepared Gemma plan authenticates target identity and preserves poison when available",
+        test_prepared_gemma_plan_authenticates_target_and_preserves_poison_when_available,
     },
     {
         "reports Gemma2 Metal plan unavailable when Metal missing",

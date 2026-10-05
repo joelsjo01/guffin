@@ -1,6 +1,6 @@
 #pragma once
 
-#include "local_gguf_engine/engine/gemma2_model.hpp"
+#include "local_gguf_engine/engine/gemma_model.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
@@ -13,18 +13,18 @@
 
 namespace local_gguf_engine::engine {
 
-enum class Gemma2OutputHeadPolicy : std::uint32_t {
+enum class GemmaOutputHeadPolicy : std::uint32_t {
     automatic = 0U,
     f16 = 1U,
     q8_0 = 2U,
     q6_k = 3U,
 };
 
-[[nodiscard]] const char* gemma2_output_head_policy_name(Gemma2OutputHeadPolicy policy) noexcept;
-[[nodiscard]] Gemma2OutputHeadPolicy resolve_gemma2_output_head_policy(
-    const Gemma2ModelConfig& config,
-    const Gemma2ModelWeights& weights,
-    Gemma2OutputHeadPolicy requested_policy
+[[nodiscard]] const char* gemma_output_head_policy_name(GemmaOutputHeadPolicy policy) noexcept;
+[[nodiscard]] GemmaOutputHeadPolicy resolve_gemma_output_head_policy(
+    const GemmaModelConfig& config,
+    const GemmaModelWeights& weights,
+    GemmaOutputHeadPolicy requested_policy
 );
 
 struct Gemma2MetalAttentionWeightBuffers {
@@ -226,11 +226,12 @@ struct Gemma2MetalLayerSchedule {
 struct Gemma2MetalVerificationStateAccess;
 struct ResidentTargetPayloadReceipt;
 class Gemma2MetalTargetVerifierPlan;
+class TargetVerificationTicket;
 
 class Gemma2MetalModelPlan final {
 public:
     Gemma2MetalModelPlan(
-        Gemma2ModelConfig config,
+        GemmaModelConfig config,
         Gemma2MetalModelWeightBuffers weights,
         std::vector<Gemma2MetalKVCacheLayer> kv_cache,
         Gemma2MetalPrefillScratch prefill_scratch,
@@ -238,16 +239,25 @@ public:
         Gemma2MetalVerifierScratch verifier_scratch,
         Gemma2MetalSelectionWorkspace selection_workspace,
         std::vector<Gemma2MetalLayerState> layers,
-        Gemma2OutputHeadPolicy output_head_policy,
+        GemmaOutputHeadPolicy output_head_policy,
         Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes,
         std::size_t uploaded_weight_byte_count,
         std::size_t kv_cache_byte_count,
         std::size_t scratch_byte_count
     );
 
+    // A moved-from plan supports destruction and reassignment. Active tickets
+    // keep its original resources; the destination owns the same cache ledger.
+    Gemma2MetalModelPlan(const Gemma2MetalModelPlan&) = delete;
+    Gemma2MetalModelPlan& operator=(const Gemma2MetalModelPlan&) = delete;
+    Gemma2MetalModelPlan(Gemma2MetalModelPlan&&) noexcept = default;
+    Gemma2MetalModelPlan& operator=(Gemma2MetalModelPlan&&) noexcept = default;
+
+    [[nodiscard]] static std::size_t host_storage_byte_count() noexcept;
+
     [[nodiscard]] runtime::BackendKind backend() const noexcept;
-    [[nodiscard]] const Gemma2ModelConfig& config() const noexcept;
-    [[nodiscard]] Gemma2OutputHeadPolicy output_head_policy() const noexcept;
+    [[nodiscard]] const GemmaModelConfig& config() const noexcept;
+    [[nodiscard]] GemmaOutputHeadPolicy output_head_policy() const noexcept;
     [[nodiscard]] const Gemma2MetalModelWeightBuffers& weights() const noexcept;
     [[nodiscard]] std::vector<Gemma2MetalKVCacheLayer>& kv_cache() noexcept;
     [[nodiscard]] const std::vector<Gemma2MetalKVCacheLayer>& kv_cache() const noexcept;
@@ -272,36 +282,42 @@ public:
 
 private:
     friend struct Gemma2MetalVerificationStateAccess;
+    friend class TargetVerificationTicket;
 
-    void set_pending_verification(
-        std::uint32_t cache_position,
-        std::uint32_t row_count,
-        VerifierTransactionState state = VerifierTransactionState::submitted
-    );
-    void mark_pending_verification_submitted();
-    void mark_pending_verification_completed();
-    void set_provisionally_committed_token_count(std::uint32_t token_count);
-    void clear_pending_verification() noexcept;
-    void poison_pending_verification() noexcept;
+    // Tickets retain this setup-owned storage, so moving or destroying a plan
+    // facade cannot invalidate its cache ledger or in-flight GPU resources.
+    struct Storage {
+        void set_pending_verification(
+            std::uint32_t cache_position,
+            std::uint32_t row_count,
+            VerifierTransactionState state = VerifierTransactionState::submitted
+        );
+        void mark_pending_verification_submitted();
+        void mark_pending_verification_completed();
+        void set_provisionally_committed_token_count(std::uint32_t token_count);
+        void clear_pending_verification() noexcept;
+        void poison_pending_verification() noexcept;
 
-    Gemma2ModelConfig config_;
-    Gemma2MetalModelWeightBuffers weights_;
-    std::vector<Gemma2MetalKVCacheLayer> kv_cache_;
-    Gemma2MetalPrefillScratch prefill_scratch_;
-    Gemma2MetalDecodeScratch decode_scratch_;
-    Gemma2MetalVerifierScratch verifier_scratch_;
-    Gemma2MetalSelectionWorkspace selection_workspace_;
-    std::vector<Gemma2MetalLayerState> layers_;
-    Gemma2OutputHeadPolicy output_head_policy_ = Gemma2OutputHeadPolicy::f16;
-    Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes_;
-    std::size_t uploaded_weight_byte_count_ = 0;
-    std::size_t kv_cache_byte_count_ = 0;
-    std::size_t scratch_byte_count_ = 0;
-    VerifierTransactionState verification_state_ = VerifierTransactionState::idle;
-    std::uint32_t pending_verification_position_ = 0;
-    std::uint32_t pending_verification_row_count_ = 0;
-    std::uint32_t provisionally_committed_token_count_ = 0;
-    std::shared_ptr<Gemma2MetalTargetVerifierPlan> target_execution_workspace_;
+        GemmaModelConfig config_;
+        Gemma2MetalModelWeightBuffers weights_;
+        std::vector<Gemma2MetalKVCacheLayer> kv_cache_;
+        Gemma2MetalPrefillScratch prefill_scratch_;
+        Gemma2MetalDecodeScratch decode_scratch_;
+        Gemma2MetalVerifierScratch verifier_scratch_;
+        Gemma2MetalSelectionWorkspace selection_workspace_;
+        std::vector<Gemma2MetalLayerState> layers_;
+        GemmaOutputHeadPolicy output_head_policy_ = GemmaOutputHeadPolicy::f16;
+        Gemma2DecodeScheduledWeightBytes decode_scheduled_weight_bytes_;
+        std::size_t uploaded_weight_byte_count_ = 0;
+        std::size_t kv_cache_byte_count_ = 0;
+        std::size_t scratch_byte_count_ = 0;
+        VerifierTransactionState verification_state_ = VerifierTransactionState::idle;
+        std::uint32_t pending_verification_position_ = 0;
+        std::uint32_t pending_verification_row_count_ = 0;
+        std::uint32_t provisionally_committed_token_count_ = 0;
+        std::shared_ptr<Gemma2MetalTargetVerifierPlan> target_execution_workspace_;
+    };
+    std::shared_ptr<Storage> storage_;
 };
 
 class Gemma2MetalSchedule final {
@@ -359,25 +375,25 @@ struct Gemma3MetalMemoryEstimate {
 // Descriptor accounting only: validates the native Gemma 3 layout without
 // uploading weights or allocating device storage. Tested against owned ledgers.
 [[nodiscard]] Gemma3MetalMemoryEstimate estimate_gemma3_metal_memory(
-    const Gemma2ModelConfig& config, const Gemma2ModelWeights& weights);
+    const GemmaModelConfig& config, const GemmaModelWeights& weights);
 
 [[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const EngineModel& model,
-    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic,
+    GemmaOutputHeadPolicy policy = GemmaOutputHeadPolicy::automatic,
     std::uint32_t context_length = 0U,
     GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic
 );
 [[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
     const EngineModel& model,
-    Gemma2OutputHeadPolicy policy,
+    GemmaOutputHeadPolicy policy,
     ResidentTargetPayloadReceipt& resident_receipt,
     std::uint32_t context_length = 0U,
     GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic
 );
 [[nodiscard]] Gemma2MetalModelPlan create_gemma2_metal_model_plan(
-    const Gemma2ModelConfig& config,
-    const Gemma2ModelWeights& weights,
-    Gemma2OutputHeadPolicy policy = Gemma2OutputHeadPolicy::automatic
+    const GemmaModelConfig& config,
+    const GemmaModelWeights& weights,
+    GemmaOutputHeadPolicy policy = GemmaOutputHeadPolicy::automatic
 );
 [[nodiscard]] Gemma2MetalSchedule create_gemma2_metal_prefill_schedule(
     const Gemma2MetalModelPlan& plan,

@@ -1,9 +1,9 @@
 #include "local_gguf_engine/engine/target_verifier.hpp"
 
-#include "feature_bank_runtime.hpp"
-#include "draft_cache_runtime.hpp"
 #include "gemma2_verification_state_access.hpp"
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
 #include "target_verifier_test_hooks.hpp"
+#endif
 #include "gemma_target_runtime.hpp"
 #include "../tensor/backends/metal/metal_command_context.hpp"
 
@@ -25,25 +25,9 @@ namespace metal = tensor::backends::metal;
 
 namespace {
 
-class UnsubmittedFeatureCaptureGuard final {
-public:
-    explicit UnsubmittedFeatureCaptureGuard(FeatureSinkBinding binding) noexcept
-        : binding_(binding), armed_(binding.sinks != nullptr) {}
-    UnsubmittedFeatureCaptureGuard(const UnsubmittedFeatureCaptureGuard&) = delete;
-    UnsubmittedFeatureCaptureGuard& operator=(const UnsubmittedFeatureCaptureGuard&) = delete;
-    ~UnsubmittedFeatureCaptureGuard() {
-        if (armed_) FeatureSinkRuntimeAccess::abort_unsubmitted(binding_);
-    }
-    void release() noexcept { armed_ = false; }
-
-private:
-    FeatureSinkBinding binding_;
-    bool armed_ = false;
-};
 
 struct TargetVerifierTicketMetadata {
     std::array<std::uint32_t, VerifierRowMax> parent_indices {};
-    std::array<std::uint32_t, VerifierRowMax> absolute_positions {};
     std::array<std::uint16_t, VerifierRowMax> depths {};
     std::uint64_t graph_identity = 0;
     std::uint64_t attention_token_count = 0;
@@ -70,10 +54,6 @@ static_assert(sizeof(TargetVerifierTicketMetadata) <= 16U * 1024U);
     std::copy_n(
         topology.parent_indices.begin(), topology.input_row_count,
         metadata.parent_indices.begin()
-    );
-    std::copy_n(
-        topology.absolute_positions.begin(), topology.input_row_count,
-        metadata.absolute_positions.begin()
     );
     std::copy_n(
         topology.depths.begin(), topology.input_row_count,
@@ -269,9 +249,21 @@ void validate_plan_binding(
 
 }  // namespace
 
+struct TargetVerifierRuntimeAccess {
+    using Storage = Gemma2MetalTargetVerifierPlan::Storage;
+
+    static std::shared_ptr<TargetVerifierRuntimeState> get(Gemma2MetalTargetVerifierPlan& plan) {
+        return plan.storage_->runtime_;
+    }
+
+    static std::shared_ptr<Storage> owner(Gemma2MetalTargetVerifierPlan& plan) noexcept {
+        return plan.storage_;
+    }
+};
+
 struct TargetVerifierRuntimeState final {
-    Gemma2MetalModelPlan* target = nullptr;
-    Gemma2MetalTargetVerifierPlan* verifier = nullptr;
+    Gemma2MetalVerificationStateAccess::Storage* target = nullptr;
+    TargetVerifierRuntimeAccess::Storage* verifier = nullptr;
     TargetVerifierTicketMetadata metadata;
     explicit TargetVerifierRuntimeState(bool precise)
         : command("Gemma target verifier", true, precise),
@@ -283,18 +275,20 @@ struct TargetVerifierRuntimeState final {
     std::uint32_t selector_dispatch_count = 0;
     std::array<std::uint32_t, external_speculation_max_horizon + 1U> provisional_path {};
     std::uint32_t provisional_count = 0;
-    FeatureSinkBinding feature_sink;
-    DraftCacheBinding draft_cache;
 
+    void clear_owners() noexcept {
+        target = nullptr;
+        verifier = nullptr;
+    }
+
+    void clear_transaction() noexcept {
+        state = VerifierTransactionState::idle;
+        clear_owners();
+    }
 };
 std::shared_ptr<TargetVerifierRuntimeState> make_target_verifier_runtime_state(bool precise_math) {
     return std::make_shared<TargetVerifierRuntimeState>(precise_math);
 }
-struct TargetVerifierRuntimeAccess {
-    static std::shared_ptr<TargetVerifierRuntimeState> get(Gemma2MetalTargetVerifierPlan& plan) {
-        return plan.runtime_;
-    }
-};
 
 metal::MetalCommandContext& target_workspace_command(Gemma2MetalTargetVerifierPlan& workspace) {
     auto runtime = TargetVerifierRuntimeAccess::get(workspace);
@@ -309,8 +303,12 @@ CompactTokenCandidates target_workspace_completed_candidates(
     return TargetVerifierRuntimeAccess::get(workspace)->command.read_token_candidates(selection);
 }
 
-TargetVerificationTicket::TargetVerificationTicket(std::shared_ptr<TargetVerifierRuntimeState> impl)
-    : impl_(std::move(impl)), lease_epoch_(impl_->epoch) {}
+TargetVerificationTicket::TargetVerificationTicket(
+    std::shared_ptr<TargetVerifierRuntimeState> impl,
+    std::shared_ptr<Gemma2MetalModelPlan::Storage> target_owner,
+    std::shared_ptr<Gemma2MetalTargetVerifierPlan::Storage> verifier_owner
+) : impl_(std::move(impl)), target_owner_(std::move(target_owner)),
+    verifier_owner_(std::move(verifier_owner)), lease_epoch_(impl_->epoch) {}
 
 TargetVerificationTicket::TargetVerificationTicket(TargetVerificationTicket&&) noexcept = default;
 
@@ -318,30 +316,22 @@ TargetVerificationTicket::~TargetVerificationTicket() {
     if (!impl_ || impl_->epoch != lease_epoch_ || impl_->state == VerifierTransactionState::idle) return;
     if (impl_->state == VerifierTransactionState::encoded
         || impl_->state == VerifierTransactionState::completed) {
-        if (impl_->state == VerifierTransactionState::encoded) {
-            FeatureSinkRuntimeAccess::abort_unsubmitted(impl_->feature_sink);
-        } else {
-            FeatureSinkRuntimeAccess::discard_speculative(impl_->feature_sink);
-        }
         Gemma2MetalVerificationStateAccess::clear(*impl_->target);
-        impl_->state = VerifierTransactionState::idle;
-        return;
-    }
-    if (impl_->state == VerifierTransactionState::provisional) {
+        impl_->clear_transaction();
+    } else if (impl_->state == VerifierTransactionState::provisional) {
         try {
             static_cast<void>(finalize_gemma2_metal_target_verifier(*this, 0U));
         } catch (...) {
-            FeatureSinkRuntimeAccess::poison(impl_->feature_sink);
-            DraftCacheRuntimeAccess::poison(impl_->draft_cache);
             Gemma2MetalVerificationStateAccess::poison(*impl_->target);
             impl_->state = VerifierTransactionState::poisoned;
         }
-        return;
+    } else {
+        Gemma2MetalVerificationStateAccess::poison(*impl_->target);
+        impl_->state = VerifierTransactionState::poisoned;
     }
-    FeatureSinkRuntimeAccess::poison(impl_->feature_sink);
-    DraftCacheRuntimeAccess::poison(impl_->draft_cache);
-    Gemma2MetalVerificationStateAccess::poison(*impl_->target);
-    impl_->state = VerifierTransactionState::poisoned;
+    // Owners remain retained by this ticket throughout rollback and poisoning.
+    // An idle or poisoned arena must not keep pointers after they are released.
+    impl_->clear_owners();
 }
 
 VerifierTransactionState TargetVerificationTicket::state() const noexcept {
@@ -360,9 +350,7 @@ TargetVerificationTicket encode_gemma2_metal_target_verifier(
     Gemma2MetalModelPlan& target,
     Gemma2MetalTargetVerifierPlan& verifier,
     const ValidatedVerifierEncodeRequest& request,
-    float embedding_scale,
-    FeatureSinkBinding feature_sink,
-    DraftCacheBinding draft_cache
+    float embedding_scale
 ) {
 #if defined(LOCAL_GGUF_ENGINE_TESTING)
     inject_target_verifier_failure_for_testing(TargetVerifierFailurePoint::encode);
@@ -381,26 +369,9 @@ TargetVerificationTicket encode_gemma2_metal_target_verifier(
     }
     auto* command = &runtime->command;
     command->restart();
-    UnsubmittedFeatureCaptureGuard feature_guard(feature_sink);
     stage_topology(*command, verifier, encoded);
     const auto& topology = encoded.topology;
     const auto& scratch = verifier.scratch();
-    DraftCacheRuntimeAccess::validate_binding(
-        draft_cache, topology.device_arena_epoch, topology.input_row_count
-    );
-    if (feature_sink_bound(feature_sink)) {
-        if (feature_sink.destination != FeatureCaptureDestination::speculative) {
-            throw std::invalid_argument("target verifier feature sink must be speculative");
-        }
-        FeatureSinkRuntimeAccess::begin_capture(
-            feature_sink, *command,
-            std::span<const std::uint32_t>(topology.absolute_positions)
-                .first(topology.input_row_count),
-            std::span<const std::uint32_t>(topology.token_ids)
-                .first(topology.input_row_count),
-            topology.input_row_count
-        );
-    }
     const tensor::BackendBuffer* token_source = &scratch.token_id_staging;
     const tensor::BackendBuffer* request_source = &scratch.selection.raw_request_staging;
     auto token_offset = std::uint32_t {0};
@@ -432,7 +403,7 @@ TargetVerificationTicket encode_gemma2_metal_target_verifier(
     );
     command->encode_memory_barrier();
     encode_gemma_target_blocks(*command, target, scratch, verifier.row_capacity(),
-        topology.input_row_count, *token_source, token_offset, embedding_scale, feature_sink);
+        topology.input_row_count, *token_source, token_offset, embedding_scale);
     const auto& config = target.config();
     auto selector_dispatches = std::uint32_t {0};
     for (std::uint32_t first = 0; first < topology.input_row_count;
@@ -456,12 +427,12 @@ TargetVerificationTicket encode_gemma2_metal_target_verifier(
     }
 
     auto metadata = make_ticket_metadata(topology);
-    runtime->target = &target;
-    runtime->verifier = &verifier;
+    auto target_owner = Gemma2MetalVerificationStateAccess::owner(target);
+    auto verifier_owner = TargetVerifierRuntimeAccess::owner(verifier);
+    runtime->target = target_owner.get();
+    runtime->verifier = verifier_owner.get();
     runtime->metadata = metadata;
     runtime->selector_dispatch_count = selector_dispatches;
-    runtime->feature_sink = feature_sink;
-    runtime->draft_cache = draft_cache;
     runtime->provisional_count = 0;
     runtime->state = VerifierTransactionState::encoded;
     ++runtime->epoch;
@@ -469,8 +440,8 @@ TargetVerificationTicket encode_gemma2_metal_target_verifier(
         target, first_root_position(topology), topology.input_row_count,
         VerifierTransactionState::encoded
     );
-    feature_guard.release();
-    return TargetVerificationTicket(std::move(runtime));
+    return TargetVerificationTicket(
+        std::move(runtime), std::move(target_owner), std::move(verifier_owner));
 }
 
 void submit_gemma2_metal_target_verifier(TargetVerificationTicket& ticket) {
@@ -485,9 +456,8 @@ void submit_gemma2_metal_target_verifier(TargetVerificationTicket& ticket) {
         Gemma2MetalVerificationStateAccess::mark_submitted(*ticket.impl_->target);
         ticket.impl_->state = VerifierTransactionState::submitted;
     } catch (...) {
-        FeatureSinkRuntimeAccess::abort_unsubmitted(ticket.impl_->feature_sink);
         Gemma2MetalVerificationStateAccess::clear(*ticket.impl_->target);
-        ticket.impl_->state = VerifierTransactionState::idle;
+        ticket.impl_->clear_transaction();
         throw;
     }
 }
@@ -504,17 +474,9 @@ TargetVerifierCompletionResult complete_gemma2_metal_target_verifier(
         inject_target_verifier_failure_for_testing(TargetVerifierFailurePoint::wait);
 #endif
         stats = ticket.impl_->command.wait_until_completed();
-        FeatureSinkRuntimeAccess::complete_capture(
-            ticket.impl_->feature_sink, ticket.impl_->command,
-            std::span<const std::uint32_t>(ticket.impl_->metadata.absolute_positions)
-                .first(ticket.impl_->metadata.input_row_count),
-            ticket.impl_->metadata.input_row_count
-        );
         Gemma2MetalVerificationStateAccess::mark_completed(*ticket.impl_->target);
         ticket.impl_->state = VerifierTransactionState::completed;
     } catch (...) {
-        FeatureSinkRuntimeAccess::poison(ticket.impl_->feature_sink);
-        DraftCacheRuntimeAccess::poison(ticket.impl_->draft_cache);
         Gemma2MetalVerificationStateAccess::poison(*ticket.impl_->target);
         ticket.impl_->state = VerifierTransactionState::poisoned;
         throw;
@@ -527,7 +489,7 @@ TargetVerifierCompletionResult complete_gemma2_metal_target_verifier(
         inject_target_verifier_failure_for_testing(TargetVerifierFailurePoint::readback);
 #endif
         const auto status = ticket.impl_->command.read_verifier_status(
-            ticket.impl_->verifier->scratch().input_status
+            ticket.impl_->verifier->scratch_.input_status
         );
         if ((status & metal::verifier_kv_nonfinite_status) != 0U) {
             throw std::overflow_error("Gemma 3 F16 KV storage produced nonfinite values");
@@ -537,18 +499,17 @@ TargetVerifierCompletionResult complete_gemma2_metal_target_verifier(
         }
         result.candidate_row_count = metadata.input_row_count;
         result.cache_position = metadata.cache_position;
-        const auto candidates = ticket.impl_->verifier->completion_candidates()
+        const auto candidates = std::span(ticket.impl_->verifier->completion_candidates_)
             .first(result.candidate_row_count);
         ticket.impl_->command.read_target_token_candidates(
-            ticket.impl_->verifier->scratch().selection,
+            ticket.impl_->verifier->scratch_.selection,
             0U,
             candidates
         );
         result.candidates = candidates;
     } catch (...) {
-        FeatureSinkRuntimeAccess::discard_speculative(ticket.impl_->feature_sink);
         Gemma2MetalVerificationStateAccess::clear(*ticket.impl_->target);
-        ticket.impl_->state = VerifierTransactionState::idle;
+        ticket.impl_->clear_transaction();
         throw;
     }
     auto bytes = std::uint32_t {0};
@@ -561,9 +522,8 @@ TargetVerifierCompletionResult complete_gemma2_metal_target_verifier(
             bytes += result.candidates[row].readback_bytes;
         }
     } catch (...) {
-        FeatureSinkRuntimeAccess::discard_speculative(ticket.impl_->feature_sink);
         Gemma2MetalVerificationStateAccess::clear(*ticket.impl_->target);
-        ticket.impl_->state = VerifierTransactionState::idle;
+        ticket.impl_->clear_transaction();
         throw;
     }
     result.execution = make_execution_stats(
@@ -598,51 +558,31 @@ TargetVerifierCommitReceipt provisionally_commit_gemma2_metal_target_verifier(
     const auto position = metadata.cache_position;
     auto& command = ticket.impl_->commit_command;
     command.restart();
-    command.write_u32s(ticket.impl_->verifier->scratch().selected_path_staging, 0U,
+    command.write_u32s(ticket.impl_->verifier->scratch_.selected_path_staging, 0U,
         selected_node_path);
-    std::array<std::uint32_t, external_speculation_max_horizon + 1U>
-        selected_absolute_positions {};
-    for (std::uint32_t row = 0U; row < count; ++row) {
-        selected_absolute_positions[row] =
-            metadata.absolute_positions[selected_node_path[row]];
+    command.encode_memory_barrier();
+    const auto& config = ticket.impl_->target->config_;
+    const auto row_width = config.attention_head_count_kv * config.attention_key_length;
+    // Backups read independent durable layers; join all old-row reads once
+    // before publishing any selected private rows into those ring slots.
+    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        const auto& cache = ticket.impl_->target->kv_cache_[layer];
+        const auto& private_cache = ticket.impl_->verifier->scratch_.kv_layers[layer];
+        const auto backup_mask = static_cast<std::uint32_t>(
+            private_cache.accepted_backup_key.descriptor().shape.dimension(0)) - 1U;
+        command.encode_gemma2_kv_cache_copy(cache.key, cache.value,
+            private_cache.accepted_backup_key, private_cache.accepted_backup_value,
+            position, count, cache.row_mask, backup_mask);
     }
-    try {
-        FeatureSinkRuntimeAccess::encode_speculative_promotion(
-            ticket.impl_->feature_sink, command, selected_node_path,
-            std::span<const std::uint32_t>(selected_absolute_positions).first(count)
+    command.encode_memory_barrier();
+    for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        const auto& cache = ticket.impl_->target->kv_cache_[layer];
+        const auto& private_cache = ticket.impl_->verifier->scratch_.kv_layers[layer];
+        command.encode_verifier_kv_scatter(
+            private_cache.private_key, private_cache.private_value,
+            ticket.impl_->verifier->scratch_.selected_path_staging,
+            cache.key, cache.value, position, count, row_width, cache.row_mask
         );
-        DraftCacheRuntimeAccess::encode_promotion(
-            ticket.impl_->draft_cache, command, selected_node_path,
-            std::span<const std::uint32_t>(selected_absolute_positions).first(count)
-        );
-        command.encode_memory_barrier();
-        const auto& config = ticket.impl_->target->config();
-        const auto row_width = config.attention_head_count_kv * config.attention_key_length;
-        // Backups read independent durable layers; join all old-row reads once
-        // before publishing any selected private rows into those ring slots.
-        for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
-            const auto& cache = ticket.impl_->target->kv_cache()[layer];
-            const auto& private_cache = ticket.impl_->verifier->scratch().kv_layers[layer];
-            const auto backup_mask = static_cast<std::uint32_t>(
-                private_cache.accepted_backup_key.descriptor().shape.dimension(0)) - 1U;
-            command.encode_gemma2_kv_cache_copy(cache.key, cache.value,
-                private_cache.accepted_backup_key, private_cache.accepted_backup_value,
-                position, count, cache.row_mask, backup_mask);
-        }
-        command.encode_memory_barrier();
-        for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
-            const auto& cache = ticket.impl_->target->kv_cache()[layer];
-            const auto& private_cache = ticket.impl_->verifier->scratch().kv_layers[layer];
-            command.encode_verifier_kv_scatter(
-                private_cache.private_key, private_cache.private_value,
-                ticket.impl_->verifier->scratch().selected_path_staging,
-                cache.key, cache.value, position, count, row_width, cache.row_mask
-            );
-        }
-    } catch (...) {
-        FeatureSinkRuntimeAccess::abort_promotion(ticket.impl_->feature_sink);
-        DraftCacheRuntimeAccess::abort_promotion(ticket.impl_->draft_cache);
-        throw;
     }
     metal::MetalCommandStats stats;
     try {
@@ -650,15 +590,7 @@ TargetVerifierCommitReceipt provisionally_commit_gemma2_metal_target_verifier(
         inject_target_verifier_failure_for_testing(TargetVerifierFailurePoint::commit);
 #endif
         stats = command.commit_and_wait();
-        FeatureSinkRuntimeAccess::complete_speculative_promotion(
-            ticket.impl_->feature_sink, command
-        );
-        DraftCacheRuntimeAccess::complete_promotion(
-            ticket.impl_->draft_cache, command
-        );
     } catch (...) {
-        FeatureSinkRuntimeAccess::poison(ticket.impl_->feature_sink);
-        DraftCacheRuntimeAccess::poison(ticket.impl_->draft_cache);
         Gemma2MetalVerificationStateAccess::poison(*ticket.impl_->target);
         ticket.impl_->state = VerifierTransactionState::poisoned;
         throw;
@@ -696,16 +628,14 @@ TargetVerifierCommitReceipt finalize_gemma2_metal_target_verifier(
         try {
             inject_target_verifier_failure_for_testing(TargetVerifierFailurePoint::restore);
         } catch (...) {
-            FeatureSinkRuntimeAccess::poison(ticket.impl_->feature_sink);
-            DraftCacheRuntimeAccess::poison(ticket.impl_->draft_cache);
             Gemma2MetalVerificationStateAccess::poison(*ticket.impl_->target);
             ticket.impl_->state = VerifierTransactionState::poisoned;
             throw;
         }
 #endif
-        for (std::uint32_t layer = 0; layer < ticket.impl_->target->config().block_count; ++layer) {
-            const auto& cache = ticket.impl_->target->kv_cache()[layer];
-            const auto& private_cache = ticket.impl_->verifier->scratch().kv_layers[layer];
+        for (std::uint32_t layer = 0; layer < ticket.impl_->target->config_.block_count; ++layer) {
+            const auto& cache = ticket.impl_->target->kv_cache_[layer];
+            const auto& private_cache = ticket.impl_->verifier->scratch_.kv_layers[layer];
             const auto backup_mask = static_cast<std::uint32_t>(
                 private_cache.accepted_backup_key.descriptor().shape.dimension(0)) - 1U;
             command.encode_gemma2_kv_cache_copy(
@@ -717,8 +647,6 @@ TargetVerifierCommitReceipt finalize_gemma2_metal_target_verifier(
         try {
             stats = command.commit_and_wait();
         } catch (...) {
-            FeatureSinkRuntimeAccess::poison(ticket.impl_->feature_sink);
-            DraftCacheRuntimeAccess::poison(ticket.impl_->draft_cache);
             Gemma2MetalVerificationStateAccess::poison(*ticket.impl_->target);
             ticket.impl_->state = VerifierTransactionState::poisoned;
             throw;
@@ -728,44 +656,14 @@ TargetVerifierCommitReceipt finalize_gemma2_metal_target_verifier(
     try {
         inject_target_verifier_failure_for_testing(TargetVerifierFailurePoint::finalize);
     } catch (...) {
-        FeatureSinkRuntimeAccess::poison(ticket.impl_->feature_sink);
-        DraftCacheRuntimeAccess::poison(ticket.impl_->draft_cache);
         Gemma2MetalVerificationStateAccess::poison(*ticket.impl_->target);
         ticket.impl_->state = VerifierTransactionState::poisoned;
         throw;
     }
 #endif
-    if (ticket.impl_->feature_sink.sinks != nullptr) {
-        try {
-            FeatureSinkRuntimeAccess::truncate(
-                *ticket.impl_->feature_sink.sinks,
-                ticket.impl_->metadata.cache_position + retained_row_count
-            );
-        } catch (...) {
-            FeatureSinkRuntimeAccess::poison(ticket.impl_->feature_sink);
-            DraftCacheRuntimeAccess::poison(ticket.impl_->draft_cache);
-            Gemma2MetalVerificationStateAccess::poison(*ticket.impl_->target);
-            ticket.impl_->state = VerifierTransactionState::poisoned;
-            throw;
-        }
-    }
-    if (ticket.impl_->draft_cache.arena != nullptr) {
-        try {
-            DraftCacheRuntimeAccess::truncate(
-                *ticket.impl_->draft_cache.arena,
-                ticket.impl_->metadata.cache_position + retained_row_count
-            );
-        } catch (...) {
-            FeatureSinkRuntimeAccess::poison(ticket.impl_->feature_sink);
-            DraftCacheRuntimeAccess::poison(ticket.impl_->draft_cache);
-            Gemma2MetalVerificationStateAccess::poison(*ticket.impl_->target);
-            ticket.impl_->state = VerifierTransactionState::poisoned;
-            throw;
-        }
-    }
     const auto execution = execution_from_commit(stats, ticket.impl_->metadata);
     Gemma2MetalVerificationStateAccess::clear(*ticket.impl_->target);
-    ticket.impl_->state = VerifierTransactionState::idle;
+    ticket.impl_->clear_transaction();
     TargetVerifierCommitReceipt receipt;
     receipt.retained_row_count = retained_row_count;
     std::copy_n(ticket.impl_->provisional_path.begin(), retained_row_count,
@@ -782,13 +680,8 @@ void discard_gemma2_metal_target_verifier(TargetVerificationTicket& ticket) {
     }
     if (ticket.impl_->state == VerifierTransactionState::encoded
         || ticket.impl_->state == VerifierTransactionState::completed) {
-        if (ticket.impl_->state == VerifierTransactionState::encoded) {
-            FeatureSinkRuntimeAccess::abort_unsubmitted(ticket.impl_->feature_sink);
-        } else {
-            FeatureSinkRuntimeAccess::discard_speculative(ticket.impl_->feature_sink);
-        }
         Gemma2MetalVerificationStateAccess::clear(*ticket.impl_->target);
-        ticket.impl_->state = VerifierTransactionState::idle;
+        ticket.impl_->clear_transaction();
         return;
     }
     throw std::logic_error("submitted or poisoned target verifier cannot be discarded safely");

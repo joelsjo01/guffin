@@ -39,19 +39,19 @@ void encode_gemma_target_blocks(
     const Gemma2MetalTargetVerifierScratch& scratch,
     std::uint32_t row_capacity, std::uint32_t row_count,
     const tensor::BackendBuffer& token_source, std::uint32_t token_offset,
-    float embedding_scale, FeatureSinkBinding feature_sink = {},
+    float embedding_scale,
     bool produce_final_hidden = true, bool prefill_projection = false
 );
 
 Gemma2MetalResidentDecodeResult run_gemma3_resident_decode(
     Gemma2MetalModelPlan&, std::uint32_t position, std::uint32_t token,
     float embedding_scale, std::optional<TokenSelectionRequest>,
-    FeatureSinkBinding, Gemma2MetalDecodeOutputMode, Gemma2ExecutionReceipt*
+    Gemma2MetalDecodeOutputMode, Gemma2ExecutionReceipt*
 );
 Gemma2MetalResidentPrefillResult run_gemma3_resident_prefill(
     Gemma2MetalModelPlan&, std::span<const std::uint32_t>, std::uint32_t position,
     float embedding_scale, std::optional<TokenSelectionRequest>,
-    FeatureSinkBinding, Gemma2ExecutionReceipt*
+    Gemma2ExecutionReceipt*
 );
 Gemma2MetalVerifierResult run_gemma_target_width_two_verifier(
     Gemma2MetalModelPlan&, std::uint32_t position,

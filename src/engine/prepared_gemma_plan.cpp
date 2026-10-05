@@ -1,4 +1,4 @@
-#include "local_gguf_engine/engine/prepared_gemma2_plan.hpp"
+#include "local_gguf_engine/engine/prepared_gemma_plan.hpp"
 #include "../tensor/backends/metal_backend.hpp"
 
 #include <algorithm>
@@ -9,51 +9,51 @@
 
 namespace local_gguf_engine::engine {
 
-PreparedGemma2Plan::PreparedGemma2Plan(
-    PreparedGemma2Mode mode, Gemma2MetalModelPlan target,
+PreparedGemmaPlan::PreparedGemmaPlan(
+    PreparedGemmaMode mode, Gemma2MetalModelPlan target,
     std::optional<EngineModelPayloadReceipt> model_receipt,
     std::optional<ResidentTargetPayloadReceipt> resident_receipt,
     std::optional<runtime::Sha256Digest> artifact_digest
 ) : mode_(mode), target_(std::move(target)), model_receipt_(std::move(model_receipt)),
     resident_receipt_(std::move(resident_receipt)), artifact_digest_(std::move(artifact_digest)) {}
 
-PreparedGemma2Mode PreparedGemma2Plan::mode() const noexcept { return mode_; }
-PreparedGemma2Lifecycle PreparedGemma2Plan::lifecycle() const noexcept {
-    if (lifecycle_ == PreparedGemma2Lifecycle::poisoned || target_.verification_poisoned()
-        || (standalone_ && standalone_->poisoned())) return PreparedGemma2Lifecycle::poisoned;
-    return PreparedGemma2Lifecycle::ready;
+PreparedGemmaMode PreparedGemmaPlan::mode() const noexcept { return mode_; }
+PreparedGemmaLifecycle PreparedGemmaPlan::lifecycle() const noexcept {
+    if (lifecycle_ == PreparedGemmaLifecycle::poisoned || target_.verification_poisoned()
+        || (standalone_ && standalone_->poisoned())) return PreparedGemmaLifecycle::poisoned;
+    return PreparedGemmaLifecycle::ready;
 }
-bool PreparedGemma2Plan::ready() const noexcept { return lifecycle() == PreparedGemma2Lifecycle::ready; }
-Gemma2MetalModelPlan& PreparedGemma2Plan::target() {
+bool PreparedGemmaPlan::ready() const noexcept { return lifecycle() == PreparedGemmaLifecycle::ready; }
+Gemma2MetalModelPlan& PreparedGemmaPlan::target() {
     if (!ready()) throw std::logic_error("prepared Gemma2 plan is poisoned");
     return target_;
 }
-const Gemma2MetalModelPlan& PreparedGemma2Plan::target() const {
+const Gemma2MetalModelPlan& PreparedGemmaPlan::target() const {
     if (!ready()) throw std::logic_error("prepared Gemma2 plan is poisoned");
     return target_;
 }
-const std::optional<EngineModelPayloadReceipt>& PreparedGemma2Plan::model_receipt() const noexcept {
+const std::optional<EngineModelPayloadReceipt>& PreparedGemmaPlan::model_receipt() const noexcept {
     return model_receipt_;
 }
-const std::optional<ResidentTargetPayloadReceipt>& PreparedGemma2Plan::resident_receipt() const noexcept {
+const std::optional<ResidentTargetPayloadReceipt>& PreparedGemmaPlan::resident_receipt() const noexcept {
     return resident_receipt_;
 }
-const std::optional<runtime::Sha256Digest>& PreparedGemma2Plan::artifact_digest() const noexcept {
+const std::optional<runtime::Sha256Digest>& PreparedGemmaPlan::artifact_digest() const noexcept {
     return artifact_digest_;
 }
-void PreparedGemma2Plan::reset_draft_state() {
-    if (lifecycle() == PreparedGemma2Lifecycle::poisoned || target_.has_pending_verification()) {
+void PreparedGemmaPlan::reset_draft_state() {
+    if (lifecycle() == PreparedGemmaLifecycle::poisoned || target_.has_pending_verification()) {
         throw std::logic_error("cannot reset a poisoned prepared plan or one with a pending target ticket");
     }
     if (standalone_) standalone_->reset();
 }
-void PreparedGemma2Plan::poison() noexcept { lifecycle_ = PreparedGemma2Lifecycle::poisoned; }
-StandaloneChatPlan* PreparedGemma2Plan::standalone() noexcept { return standalone_ ? &*standalone_ : nullptr; }
-const StandaloneChatPlan* PreparedGemma2Plan::standalone() const noexcept { return standalone_ ? &*standalone_ : nullptr; }
+void PreparedGemmaPlan::poison() noexcept { lifecycle_ = PreparedGemmaLifecycle::poisoned; }
+StandaloneChatPlan* PreparedGemmaPlan::standalone() noexcept { return standalone_ ? &*standalone_ : nullptr; }
+const StandaloneChatPlan* PreparedGemmaPlan::standalone() const noexcept { return standalone_ ? &*standalone_ : nullptr; }
 
-PreparedGemma2Plan prepare_gemma2_standalone_plan(const EngineModel& model,
+PreparedGemmaPlan prepare_gemma_standalone_plan(const EngineModel& model,
     const tokenizer::Tokenizer& tokenizer, std::shared_ptr<StandaloneDraftArtifact> source,
-    StandaloneExecutionOptions execution, Gemma2OutputHeadPolicy policy, std::uint32_t context_length,
+    StandaloneExecutionOptions execution, GemmaOutputHeadPolicy policy, std::uint32_t context_length,
     GemmaKVPrecision kv_precision) {
     const auto resolved_precision = resolve_gemma_kv_precision(model.architecture(), kv_precision);
     if (!model.payload_receipt())
@@ -72,20 +72,21 @@ PreparedGemma2Plan prepare_gemma2_standalone_plan(const EngineModel& model,
     {
         const StandaloneTliMapping mapping(tokenizer, source->tokenizer());
         if (model.architecture() == ModelArchitecture::gemma3) {
-            auto config = model.gemma2_config();
+            auto config = model.gemma_config();
             config.kv_precision = resolved_precision;
             if (context_length) config.context_length = context_length;
-            const auto weights = bind_gemma2_model_weights(model);
-            static_cast<void>(resolve_gemma2_output_head_policy(config, weights, policy));
+            const auto weights = bind_gemma_model_weights(model);
+            static_cast<void>(resolve_gemma_output_head_policy(config, weights, policy));
             const auto target_bytes = estimate_gemma3_metal_memory(config, weights);
             admitted_standalone_bytes = StandaloneChatPlan::estimate_owned_bytes(
                 config, tokenizer, source->tokenizer(), mapping, execution);
-            std::size_t required = sizeof(PreparedGemma2Plan);
+            std::size_t required = sizeof(PreparedGemmaPlan);
             const auto add = [&](std::size_t bytes) {
                 if (bytes > std::numeric_limits<std::size_t>::max() - required)
                     throw std::overflow_error("paired Gemma 3 resource estimate overflow");
                 required += bytes;
             };
+            add(Gemma2MetalModelPlan::host_storage_byte_count());
             add(target_bytes.weights); add(target_bytes.kv_cache); add(target_bytes.scratch);
             add(*admitted_standalone_bytes);
             // These tokenizers also remain live outside StandaloneChatPlan's
@@ -106,7 +107,7 @@ PreparedGemma2Plan prepare_gemma2_standalone_plan(const EngineModel& model,
     }
     ResidentTargetPayloadReceipt resident;
     auto target = create_gemma2_metal_model_plan(model, policy, resident, context_length, resolved_precision);
-    PreparedGemma2Plan result(PreparedGemma2Mode::standalone_gemma3_tli, std::move(target),
+    PreparedGemmaPlan result(PreparedGemmaMode::standalone_gemma3_tli, std::move(target),
         *model.payload_receipt(), resident, source->digest());
     result.standalone_.emplace(std::move(source), tokenizer, result.target_, execution);
     if (admitted_standalone_bytes && result.standalone_->owned_bytes() > *admitted_standalone_bytes)
@@ -114,15 +115,15 @@ PreparedGemma2Plan prepare_gemma2_standalone_plan(const EngineModel& model,
     return result;
 }
 
-PreparedGemma2Plan prepare_gemma2_target_only_plan(const EngineModel& model, Gemma2OutputHeadPolicy policy,
+PreparedGemmaPlan prepare_gemma_target_only_plan(const EngineModel& model, GemmaOutputHeadPolicy policy,
     std::uint32_t context_length, GemmaKVPrecision kv_precision) {
     if (model.payload_receipt()) {
         ResidentTargetPayloadReceipt resident;
         auto target = create_gemma2_metal_model_plan(model, policy, resident, context_length, kv_precision);
-        return PreparedGemma2Plan(PreparedGemma2Mode::target_only, std::move(target),
+        return PreparedGemmaPlan(PreparedGemmaMode::target_only, std::move(target),
             *model.payload_receipt(), resident, std::nullopt);
     }
-    return PreparedGemma2Plan(PreparedGemma2Mode::target_only,
+    return PreparedGemmaPlan(PreparedGemmaMode::target_only,
         create_gemma2_metal_model_plan(model, policy, context_length, kv_precision),
         std::nullopt, std::nullopt, std::nullopt);
 }

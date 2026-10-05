@@ -862,8 +862,8 @@ slot print_timings:        eval time =   10800.00 ms /   150 tokens (72.00 ms pe
                 return types.SimpleNamespace(stdout=values[tuple(command)])
 
             environment = QUICK.collect_environment(
-                str(model), "build/release/local-gguf-generate",
-                "build/release/local-gguf-bench", kernel_diagnostics_fixture(), runner,
+                str(model), "build/release/guffin",
+                "build/release/guffin-bench", kernel_diagnostics_fixture(), runner,
             )
             self.assertEqual(environment["engine_build"], "test-build")
             self.assertEqual(environment["model"]["gguf_version"], 3)

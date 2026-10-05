@@ -114,37 +114,6 @@ public:
         const BackendBuffer& logits_tile,
         std::uint32_t row_count
     );
-    void encode_feature_tap_copy(
-        const BackendBuffer& input,
-        std::uint32_t input_row_start,
-        const BackendBuffer& fused_output,
-        std::uint32_t output_column_start,
-        std::uint32_t row_count
-    );
-    void encode_feature_tap_store_f16(
-        const BackendBuffer& input,
-        std::uint32_t input_row_start,
-        const BackendBuffer& output,
-        std::uint32_t output_column_start,
-        std::uint32_t row_count
-    );
-    void encode_feature_scatter(
-        const BackendBuffer& source_f32,
-        const BackendBuffer& source_rows_u32,
-        const BackendBuffer& destination_rows_u32,
-        const BackendBuffer& destination,
-        const BackendBuffer& status_u32,
-        std::uint32_t row_count,
-        std::uint32_t width
-    );
-    void encode_f16_row_scatter(
-        const BackendBuffer& source,
-        const BackendBuffer& source_rows_u32,
-        const BackendBuffer& destination_rows_u32,
-        const BackendBuffer& destination,
-        const BackendBuffer& status_u32,
-        std::uint32_t row_count
-    );
     // Each head has its own RMS denominator and shares the learned norm vector.
     // Input and output may alias. Gemma 3's released 12B head width is 256.
     void encode_head_rms_norm(

@@ -1,295 +1,189 @@
-# local-gguf-engine
+# Guffin
 
-A from-scratch local GGUF inference engine optimized for a MacBook Air M4.
-The native Metal path runs Gemma 3 12B Q4_K_M text chat and retains Gemma 2 9B
-Q4 support, with resident weights, KV caches, prefill, decode, and sampling. External inference engines
-are used only as references and benchmarks.
+**Native Gemma inference for a fanless Mac.**
 
-Gemma 3 target execution includes batched verification, transactional cache
-publication and optional lossless speculation with the complete native Gemma 3
-270M drafter. Compact lossless weight packing and coalesced Metal projections
-improve verification; H=1 passed the recorded cooled chat speedup gate on both
-turns. Ordinary decoding remains the default, with speculation explicitly
-selected. Read
-[what we learned about speculation](docs/SPECULATIVE_DECODING_RETROSPECTIVE.md)
-and [the current boundary and research archive](docs/NEXT_TASK.md) before
-continuing that work.
+Guffin is a C++20 and Metal GGUF engine built for local chat on a **16 GiB
+MacBook Air M4**. It owns model loading, tokenization, quantized kernels, caches
+and sampling. **Gemma 3 12B** is the main target, with a native **270M drafter**
+for lossless speculative decoding. **Gemma 2 9B** remains supported.
 
-## Requirements
+[Run](#quick-start) · [Design](#inside-the-engine) · [Results](#measured-results) ·
+[Experiments](docs/SPECULATIVE_DECODING_RETROSPECTIVE.md) · [Code map](docs/GRAPH.md)
 
-- An Apple Silicon Mac. The optimized release build currently targets M4.
-- macOS with Metal support.
-- Apple Clang and the Xcode Command Line Tools.
-- A local supported Gemma 2 GGUF or Gemma 3 12B Q4_K_M GGUF (native Q6_K tied head).
+## Quick start
 
-Install the command-line tools if `clang --version` is unavailable:
+Install the Xcode Command Line Tools if needed: `xcode-select --install`.
+Build and install:
 
-```bash
-xcode-select --install
+```sh
+git clone https://github.com/Coach6/guffin.git
+cd guffin
+make -j4 install
 ```
 
-Model files are not included. Put them under `models/`; that directory is
-ignored by Git. The commands below assume:
+Download the [tested Gemma 3 12B Q4_K_M GGUF][target-model] into `models/`.
+Chat is the default:
 
-```text
-models/gemma-2-9b-Q4.gguf
+```sh
+guffin -m models/gemma-3-12b-it-Q4_K_M.gguf
 ```
 
-Model file size is not the runtime memory footprint. Resident weights, KV
-cache and scratch buffers share unified memory with macOS and other apps.
-Head and context settings affect these allocations; `--decode-diagnostics`
-reports the actual prepared buffers.
+The command works from any directory; model paths may be relative or absolute.
+Installation selects `/opt/homebrew/bin` when present, otherwise `/usr/local/bin`.
+For a custom location, use `make install PREFIX="$HOME/.local"` and add
+`$HOME/.local/bin` to `PATH`.
 
-## Quick Start
+## Lossless speculative decoding
 
-From the repository root:
+Download the [supported Gemma 3 270M Q8_0 checkpoint][draft-model] into
+`models/`, then:
 
-```bash
-make MODE=release generate
-
-./build/release/local-gguf-generate \
-  models/gemma-2-9b-Q4.gguf \
-  "What is the capital of France?" \
-  32 \
-  --backend metal \
-  --greedy
-```
-
-The final positional number is the maximum number of new tokens. One-shot
-generation supports Gemma 2 and Gemma 3 on Metal with greedy selection.
-
-Startup loads the model and prepares its Metal execution plan before prompt
-processing begins.
-
-## Interactive Chat
-
-Build and start a persistent chat session:
-
-```bash
-make MODE=release generate
-
-./build/release/local-gguf-generate \
-  models/gemma-2-9b-Q4.gguf \
-  --chat \
-  --backend metal
-```
-
-Chat uses the same effective defaults as ordinary `llama-cli`: temperature
-`0.8`, top-k `40`, top-p `0.95`, min-p `0.05`, repetition penalty `1.0`, a
-64-token repetition window, and a random seed. A turn runs until Gemma emits
-end-of-turn/EOS, the user interrupts it, or the context is exhausted.
-
-Use explicit options when reproducible output or a response limit is useful:
-
-```bash
-./build/release/local-gguf-generate \
-  models/gemma-2-9b-Q4.gguf \
-  --chat \
-  --max-new-tokens 128 \
-  --backend metal \
-  --temperature 0.8 \
-  --top-k 40 \
-  --top-p 0.95 \
-  --min-p 0.05 \
-  --repeat-penalty 1.0 \
-  --seed 42
-```
-
-`--max-new-tokens N` adds an optional per-turn cap. `--context-shift` opts into
-dropping the oldest complete turns when the context fills; it is disabled by
-default.
-
-Available chat commands:
-
-- `/exit` or `/quit`: leave chat;
-- `/clear`: clear conversation state while keeping the loaded plan;
-- `/reset`: reset the session;
-- `/regen`: regenerate the last assistant response;
-- `/tokens`: show cached and remaining context tokens;
-- `/read <path>`: use a text file as the next prompt.
-
-End an input line with `\` to continue a prompt on the next line. Successful
-turns print llama.cpp-compatible prompt/generation throughput and internal
-TTFT, plus the raw token counts and durations behind those rates.
-
-## Gemma 3 12B Chat
-
-```bash
-make MODE=release generate
-./build/release/local-gguf-generate \
-  models/gemma-3-12b-it-Q4_K_M.gguf --chat --context-size 16384
-```
-
-The default capacity is 16K; `--context-size 32768` requests 32K. Capacities
-must be powers of two, at least the local window, within model metadata and the
-device memory budget. Weights retain their GGUF values. The default
-`--kv-cache auto` selects native F16 target cache storage for ordinary and
-speculative decoding; `--kv-cache f32` selects the previous numerical policy.
-Attention arithmetic remains F32. The precision
-is fixed for the session, including reset and regeneration; the drafter remains
-F32. F16 defines a slightly different numerical target, and lossless speculation
-preserves the distribution of that selected target policy.
-`--decode-diagnostics` reports capacity, cache precision and resident allocations.
-128K is the model's advertised limit, not the default allocation on a 16 GiB Mac.
-This is text-only inference; no vision encoder or projector is loaded.
-
-On macOS 15 and later with supported Apple GPUs, the engine requests that model
-buffers stay resident for three minutes after inference, helping avoid memory
-restoration delays between messages. This is automatic for ordinary and speculative decoding;
-after that idle window, residency refreshes stop.
-
-Gemma 3 starts with ordinary target decoding. `--retrieval` explicitly enables
-the existing experimental retrieval proposer; `--no-speculative` disables all
-speculation. `--draft-model` explicitly enables the supported 270M pairing
-described below.
-
-For independent checkpoint checks, generate ignored goldens with
-`scripts/gemma3_target_reference.py` using the optional reference environment,
-then run the test binary with `LOCAL_GGUF_GEMMA3_TARGET_GOLDENS` pointing at that
-directory. For F16, generate a separate reference with `--cache-dtype f16` and
-set `LOCAL_GGUF_GEMMA3_TARGET_F16_GOLDENS`; casting F32 reference caches does not
-reproduce F16 inference. Production inference does not import Python or external
-runtimes.
-
-## Optional Gemma 3 Drafter
-
-For the supported, pinned `gemma-3-270m-it-Q8_0.gguf` drafter with Gemma 3 12B:
-
-```bash
-make MODE=release generate
-./build/release/local-gguf-generate \
-  models/gemma-3-12b-it-Q4_K_M.gguf --chat \
+```sh
+guffin -m models/gemma-3-12b-it-Q4_K_M.gguf \
   --draft-model models/gemma-3-270m-it-Q8_0.gguf
 ```
 
-Supplying the drafter selects the retained setup by default: F16 target KV,
-horizon 1, full verification and lossless sampling, with a 16K context capacity.
-The fused Q4 sums and packed weights remain enabled. No tuning flags are needed.
-See `docs/NEXT_TASK.md` for the measured memory and chat results.
+The retained **H1** path drafts one token and verifies two causal rows together,
+sharing weight fragments across rows. Acceptance uses the target/draft
+probability ratio; rejection uses a corrected distribution. This preserves the
+configured target's sampling distribution, including its filters. It need not
+produce identical seeded text.
 
-This runs the complete native drafter, not an external inference engine. The
-target sampling distribution is preserved, but the same seed can produce
-different text from ordinary generation. Missing or incompatible draft files
-fail explicitly. No Python environment is needed for inference.
-
-The engine validates all token IDs before using direct history synchronization,
-keeps independent model caches, and checks the combined memory requirement
-before uploading the target. The drafter supports at most 32K context; actual
-paired capacity also depends on the device budget. Full and conditional
-verification support prepared horizons from 1 through 23, shortened near output
-or context limits. `--draft-horizon` and `--speculative-schedule full|conditional`
-remain explicit overrides; larger horizons do not necessarily run faster.
-`--decode-diagnostics` reports actual proposals, reached depths, draft work and
-the effective sampling policy. The existing Gemma 2 target pairing remains
-available through the same explicit options.
-
-Offline Gemma 3 reference checks use optional dependencies listed in
-`scripts/reference_requirements.txt`; the production executable does not.
-
-## Inspect A GGUF File
-
-```bash
-make MODE=release gguf-inspect
-./build/release/gguf-inspect models/gemma-2-9b-Q4.gguf
+```mermaid
+flowchart LR
+    R["Target-selected root r"] --> D["270M proposes x"]
+    D --> V["12B evaluates r and x together"]
+    V --> A{"Accept x?"}
+    A -->|Yes| K["Commit r and x<br/>reuse next-token candidates"]
+    A -->|No| C["Commit r<br/>carry corrected token z"]
 ```
 
-This prints a concise model, metadata, and tensor summary without running
-inference.
+Both outcomes select the next root without another target forward. Private KV
+and transaction finalization preserve the committed prefix, restoring any
+provisionally published suffix after stopping or interrupted callbacks. Larger
+horizons did not earn a retained chat advantage.
 
-## Build And Test
+## Inside the engine
 
-The default build is an unoptimized debug build:
-
-```bash
-make generate
-make gguf-inspect
+```mermaid
+flowchart TD
+    F["GGUF files"] --> P["Validated preparation<br/>tokenizer · weights · KV · scratch"]
+    I["guffin CLI / text"] --> S["Chat session<br/>conversation · context · stopping"]
+    P --> S
+    S --> T["Native Gemma target<br/>prefill · decode · verification"]
+    S -. optional .-> D["Native 270M on Metal<br/>proposals + probability law"]
+    D -.-> T
+    T --> M["Metal kernels + resident buffers"]
+    M --> C["Compact candidates + CPU sampler"]
+    C --> O["Streamed answer + cache finalization"]
 ```
 
-Use release mode for inference and performance measurements:
+The CLI adapts the engine session. Independent references, fault injection and
+benchmark drivers stay outside the installed execution path.
 
-```bash
-make MODE=release generate
-make MODE=release gguf-inspect
+### Where the speed comes from
+
+Optimizations extend beyond speculation and match the actual Gemma shapes:
+
+| Mechanism | Work saved |
+| --- | --- |
+| [Quantized weight packing](include/local_gguf_engine/tensor/kquant_packing.hpp) | Pack eight output columns once for SIMD access; two-row kernels reuse quantized fragments. No floating-point model copy. |
+| [Producer-fused Q4 sums](src/engine/gemma_target_runtime.cpp) | Normalization, GELU and attention producers calculate reusable correction sums: Gemma 3 ordinary/H1 and Gemma 2 shared verification. |
+| [Prompt matrix tiles](src/tensor/backends/metal/metal_command_context.mm) | Larger Gemma 3 tiles share decoded weights across more useful prompt rows, preserving F32 arithmetic. |
+| [F16 KV and online attention](src/tensor/backends/metal/metal_kernels.mm) | Halve target KV storage; accumulate attention in F32 without a full decode score matrix. Local layers use bounded rings. |
+| [Compact candidate selection](src/engine/sampling.cpp) | Keep vocabulary logits on the GPU; transfer compact candidates for configured CPU sampling. |
+| [Gemma 2 weight preparation](src/engine/gemma2_metal_plan.cpp) | Requantize Q6 down weights to Q4 and the F16 head to Q8. This changes weights; Gemma 3 preserves native Q4/Q6 values. |
+
+Persistent scratch, cached conversation prefixes and Metal residency support
+repeated chat. Gemma 3's tied embedding/output head shares one allocation;
+ordinary and speculative execution share the target block encoder.
+
+[llama.cpp](https://github.com/ggml-org/llama.cpp) supports far more models and
+hardware. Guffin specializes these Gemma paths for M4. Its contribution is the
+native layout, scheduling and lifecycle integration of established algorithms,
+with retention decided by correctness and actual chat measurements.
+
+## Measured results
+
+![Recorded Gemma 3 chat throughput and target KV allocation](docs/assets/gemma3-performance.svg)
+
+*September 29 development snapshot, macOS 26.6.2: one cooled, naturally stopping
+two-turn conversation per mode, seed 42. Rates use complete generation time.
+Different responses and histories make these observed throughputs rather than
+identical-work speedups.*
+
+| Retained change | Recorded result |
+| --- | --- |
+| Gemma 3 F16 target KV | **+4.64% ordinary / +15.87% H1** throughput; **half the KV storage**. Natural-stop workloads differ. |
+| Gemma 3 packed projections | **+18.86% H1** throughput, matching outputs/counts; ordinary throughput −0.82%. |
+| Gemma 3 M32 prompt tiles | **14–21% higher prompt throughput**, matching outputs; **9.48 s saved** across a long conversation. |
+| Gemma 2 target kernel port | **16.51 → 16.85 tokens/s (+2.05%)**, matching outputs. Standard chat includes suffix retrieval. |
+
+F16 H1 recorded **15.78 versus 11.00 tokens/s** ordinary: **43.52% higher
+observed throughput**. The table covers separate experiments; gains do not add.
+The saved llama.cpp baseline and faster manual comparisons have OS, timing and
+weight-policy limitations. [Performance evidence](docs/PERFORMANCE.md) separates
+those comparisons and records exact counts, durations and identities.
+
+## Everyday use
+
+Interactive replies show **prompt tokens/s**, **generation tokens/s** and
+**internal TTFT**. Internal TTFT ends at the first selected token; visible text
+can arrive later. Loading and startup warmup are separate.
+
+```sh
+# One answer; timings go to stderr
+guffin -m models/gemma-3-12b-it-Q4_K_M.gguf -p "Explain unified memory." -n 128 --stats
+
+# Gemma 2 chat
+guffin -m models/gemma-2-9b-Q4.gguf
+
+# Inspect without inference
+guffin inspect models/gemma-3-12b-it-Q4_K_M.gguf
 ```
 
-Run the debug test suite and repository checks:
+`-c, --context-size` sets capacity. `/help` lists chat commands; Ctrl+C stops a
+reply and Ctrl+D exits at the prompt. Piped stdout contains answers.
+`guffin --help` lists sampling and output options, `--help-all` includes
+advanced diagnostics, and `--version` reports the compiled build identity.
 
-```bash
-make test
-bash scripts/ci.sh
+## Support and limits
+
+- **Validated setup:** M4 / 16 GiB, macOS 26.6.2, Apple clang 21 and Metal.
+  Release builds target M4; other chips and OS versions are unvalidated.
+- **Models:** tested Gemma 3 12B IT Q4_K_M, Gemma 2 9B IT Q4_K_M and the
+  authenticated 270M Q8_0 drafter. Family names alone do not establish compatibility.
+- **Context:** Gemma 3 defaults to 16K; larger target capacities are explicit
+  and must fit model/device limits. The drafter caps paired execution at 32K.
+  The tested Gemma 2 model declares 8K. `--context-shift` enables explicit shifting.
+- **Memory:** recorded 16K F16 physical-footprint high-water was approximately
+  **8.56 GiB ordinary / 9.05 GiB with the drafter**. Leave room for macOS.
+- **Scope:** text-only Gemma 2/3. Gemma 4 is future work. Short authenticated
+  numerical references pass; an independent 128-token natural-prompt comparison
+  exceeds existing bounds for an unresolved reason. See the
+  [retrospective](docs/SPECULATIVE_DECODING_RETROSPECTIVE.md#numerical-validation-has-a-boundary).
+
+Models are separate downloads with their own terms. Installed inference needs
+no Python environment, external inference framework or network connection.
+
+## Development
+
+```sh
+make                      # optimized executable
+make MODE=debug test      # native correctness checks
+bash scripts/ci.sh        # native and Python repository checks
+make release-test         # optimized correctness checks
+make uninstall            # use the installation PREFIX, if customized
 ```
 
-Run optimized tests or remove all build output:
+Checks cover independent equations, quantized layouts, lossless probability
+laws, cache rollback, owner lifetimes and chat recovery. Optional checkpoint
+references require their authenticated artifacts.
 
-```bash
-make release-test
-make clean
-```
+- [Engineering retrospective](docs/SPECULATIVE_DECODING_RETROSPECTIVE.md): retained mechanisms, rejected experiments and lessons.
+- [Performance evidence](docs/PERFORMANCE.md): measured snapshots and protocol.
+- [Code map](docs/GRAPH.md) and [principles](docs/ENGINE_PRINCIPLES.md): ownership and engineering contracts.
+- [Current state](docs/NEXT_TASK.md): development handoff.
 
-Build products are written to `build/debug/` or `build/release/`.
-
-## Benchmark The Real Generation Path
-
-Build and run the canonical local benchmark:
-
-```bash
-make MODE=release benchmark
-scripts/quick_benchmark.py --model models/gemma-3-12b-it-Q4_K_M.gguf \
-  --context-size 16384 --no-speculative --skip-kernels
-```
-
-The headline invokes the real `local-gguf-generate --chat` product with the
-fixed two-turn conversation, seed 42, and normal sampled generation. Responses
-run until their ordinary stop condition, without a short token cap. Session
-preparation includes the documented 16-token prefill and decode/verifier warm-up. The script reports the chat product's rates plus evaluated,
-cached, and decoded counts and raw timing durations.
-
-When attached to a terminal, the runner renders both chat streams in the
-terminal's alternate screen during measurement. This preserves the real
-streaming/compositor load, then restores the screen before printing the compact
-result tables. It submits the follow-up only after the first response finishes,
-with a fixed five-second input pause; keyboard waiting is not timed, but the
-normal between-turn Metal power state is preserved.
-
-The quick screen uses one fresh process and four-minute idle periods before chat
-and kernel diagnostics because repeated natural responses can heat this fanless
-machine enough to bias results. Local kernel probes run only after the headline
-chat in a separate process. Gemma 3 uses `--skip-kernels` because those standalone
-probes describe the Gemma 2 kernel mix; actual chat remains measured. Use `--json` for
-machine-readable output; benchmark result files are local artifacts and should
-not be committed.
-
-The pinned llama.cpp run is intentionally separate and stored in
-`docs/LLAMA_CPP_REFERENCE_BASELINE.md`. Re-run it only under that document's
-stated invalidation conditions. Retaining an optimization requires a comparable
-candidate/baseline pair with separate cooldowns and the criteria in `AGENTS.md`.
-
-## Current Scope
-
-- Runnable inference: Gemma 2 and Gemma 3 text chat on resident Metal.
-- Main target: Gemma 3 12B Q4_K_M with losslessly packed mixed Q4_K/Q6_K projections.
-- CPU operators: correctness references and tests, not the product path.
-- Runnable tools: `local-gguf-generate` and `gguf-inspect`.
-- Current phase: measuring and removing end-to-end decode and prefill
-  bottlenecks.
-
-For contributors, start with `AGENTS.md`, then `docs/ENGINE_PRINCIPLES.md` and
-`docs/NEXT_TASK.md`. Use `docs/GRAPH.md` only to locate relevant code and tests.
-
-## Common Problems
-
-`Metal backend unavailable`
-: Run on a Metal-capable Apple Silicon Mac and avoid environments that block
-  access to the system Metal device.
-
-`local-gguf-generate supports Gemma 2 and Gemma 3 generation`
-: The selected GGUF uses another architecture. Other model families are not a
-  current production runtime target.
-
-The process appears idle after loading the model
-: Metal plan creation is currently slow. Allow roughly 12 seconds before
-  treating startup as stuck.
-
-The process exits because of memory pressure
-: Reduce `--context-size` and inspect `--decode-diagnostics`. Model weights,
-  cache, scratch, tokenizers and macOS share the same physical memory.
+[target-model]: https://huggingface.co/ggml-org/gemma-3-12b-it-GGUF/blob/e5feec63a04a7a5f9b4128bf469781359d1a3b1a/gemma-3-12b-it-Q4_K_M.gguf
+[draft-model]: https://huggingface.co/ggml-org/gemma-3-270m-it-GGUF/blob/e7647be17ae1108f2f605ed061ca0608b171afff/gemma-3-270m-it-Q8_0.gguf

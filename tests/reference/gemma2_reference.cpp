@@ -1,4 +1,4 @@
-#include "local_gguf_engine/engine/gemma2_reference.hpp"
+#include "gemma2_reference.hpp"
 
 #include <cmath>
 #include <numeric>
@@ -27,14 +27,6 @@ void require_positive(float value, const char* name) {
 }
 
 }  // namespace
-
-float gemma2_input_embedding_scale(std::uint32_t embedding_length) {
-    if (embedding_length == 0) {
-        throw std::invalid_argument("embedding_length");
-    }
-
-    return std::sqrt(static_cast<float>(embedding_length));
-}
 
 bool gemma2_layer_uses_sliding_window(std::uint32_t layer_index) noexcept {
     return layer_index % 2U == 0U;

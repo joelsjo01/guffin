@@ -1,4 +1,4 @@
-#include "local_gguf_engine/engine/gemma2_model.hpp"
+#include "local_gguf_engine/engine/gemma_model.hpp"
 
 #include <string>
 #include <cmath>
@@ -35,9 +35,9 @@ namespace {
     return token_embedding_weight;
 }
 
-[[nodiscard]] Gemma2BlockWeights bind_gemma2_block_weights(const EngineModel& model, std::uint32_t block_index) {
-    return Gemma2BlockWeights {
-        .attention = Gemma2AttentionWeights {
+[[nodiscard]] GemmaBlockWeights bind_gemma_block_weights(const EngineModel& model, std::uint32_t block_index) {
+    return GemmaBlockWeights {
+        .attention = GemmaAttentionWeights {
             .attention_norm_weight = require_tensor_view(model, block_tensor_name(block_index, "attn_norm.weight")),
             .post_attention_norm_weight = require_tensor_view(
                 model,
@@ -47,14 +47,14 @@ namespace {
             .key_weight = require_tensor_view(model, block_tensor_name(block_index, "attn_k.weight")),
             .value_weight = require_tensor_view(model, block_tensor_name(block_index, "attn_v.weight")),
             .output_weight = require_tensor_view(model, block_tensor_name(block_index, "attn_output.weight")),
-            .query_norm_weight = model.gemma2_config().uses_qk_norm
+            .query_norm_weight = model.gemma_config().uses_qk_norm
                 ? std::optional(require_tensor_view(model, block_tensor_name(block_index, "attn_q_norm.weight")))
                 : std::nullopt,
-            .key_norm_weight = model.gemma2_config().uses_qk_norm
+            .key_norm_weight = model.gemma_config().uses_qk_norm
                 ? std::optional(require_tensor_view(model, block_tensor_name(block_index, "attn_k_norm.weight")))
                 : std::nullopt,
         },
-        .feed_forward = Gemma2FeedForwardWeights {
+        .feed_forward = GemmaFeedForwardWeights {
             .feed_forward_norm_weight = require_tensor_view(model, block_tensor_name(block_index, "ffn_norm.weight")),
             .post_feed_forward_norm_weight = require_tensor_view(
                 model,
@@ -69,7 +69,7 @@ namespace {
 
 }  // namespace
 
-Gemma2ModelWeights bind_gemma2_model_weights(const EngineModel& model) {
+GemmaModelWeights bind_gemma_model_weights(const EngineModel& model) {
     if (model.architecture() != ModelArchitecture::gemma2 && model.architecture() != ModelArchitecture::gemma3) {
         throw EngineModelError(
             EngineModelErrorCode::unsupported_architecture,
@@ -77,26 +77,26 @@ Gemma2ModelWeights bind_gemma2_model_weights(const EngineModel& model) {
         );
     }
 
-    std::vector<Gemma2BlockWeights> blocks;
-    blocks.reserve(model.gemma2_config().block_count);
-    for (std::uint32_t block_index = 0; block_index < model.gemma2_config().block_count; ++block_index) {
-        blocks.push_back(bind_gemma2_block_weights(model, block_index));
+    std::vector<GemmaBlockWeights> blocks;
+    blocks.reserve(model.gemma_config().block_count);
+    for (std::uint32_t block_index = 0; block_index < model.gemma_config().block_count; ++block_index) {
+        blocks.push_back(bind_gemma_block_weights(model, block_index));
     }
 
     const auto token_embedding_weight = require_tensor_view(model, "token_embd.weight");
-    auto weights = Gemma2ModelWeights {
+    auto weights = GemmaModelWeights {
         .token_embedding_weight = token_embedding_weight,
         .output_norm_weight = require_tensor_view(model, "output_norm.weight"),
         .output_weight = output_weight_or_tied_embedding(model, token_embedding_weight),
         .blocks = std::move(blocks),
     };
     if (model.architecture() == ModelArchitecture::gemma3) {
-        validate_gemma3_model_weights(model.gemma2_config(), weights);
+        validate_gemma3_model_weights(model.gemma_config(), weights);
     }
     return weights;
 }
 
-void validate_gemma3_model_weights(const Gemma2ModelConfig& config, const Gemma2ModelWeights& weights) {
+void validate_gemma3_model_weights(const GemmaModelConfig& config, const GemmaModelWeights& weights) {
     using tensor::DType;
     const auto invalid = [](std::string detail) {
         throw EngineModelError(EngineModelErrorCode::invalid_tensor, std::move(detail));

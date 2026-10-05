@@ -1,8 +1,7 @@
-#include "local_gguf_engine/engine/gemma2_chat_session.hpp"
+#include "local_gguf_engine/engine/gemma_chat_session.hpp"
 
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
-#include "local_gguf_engine/engine/gemma2_reference.hpp"
-#include "local_gguf_engine/engine/gemma2_model.hpp"
+#include "local_gguf_engine/engine/gemma_model.hpp"
 
 #include <algorithm>
 #include <array>
@@ -20,7 +19,7 @@ namespace local_gguf_engine::engine {
 
 namespace {
 
-[[nodiscard]] SpeculativeSamplingMode resolve_speculative_sampling(const Gemma2ChatSessionOptions& options) {
+[[nodiscard]] SpeculativeSamplingMode resolve_speculative_sampling(const GemmaChatSessionOptions& options) {
     const auto sampling = options.speculative_sampling.value_or(options.standalone_draft_model
         ? SpeculativeSamplingMode::lossless : SpeculativeSamplingMode::exact_match);
     if (sampling != SpeculativeSamplingMode::exact_match && sampling != SpeculativeSamplingMode::lossless)
@@ -157,7 +156,7 @@ private:
 }
 
 void emit_text_delta(
-    const Gemma2ChatStreamCallback& on_text_delta,
+    const GemmaChatStreamCallback& on_text_delta,
     std::string_view text,
     std::size_t& emitted_size,
     std::size_t target_size
@@ -177,16 +176,16 @@ void emit_text_delta(
 
 }  // namespace
 
-Gemma2ChatSessionState::Gemma2ChatSessionState(
+GemmaChatSessionState::GemmaChatSessionState(
     model_format::GGUFFileBackedModel file, EngineModel model,
-    tokenizer::Tokenizer tokenizer, PreparedGemma2Plan prepared,
+    tokenizer::Tokenizer tokenizer, PreparedGemmaPlan prepared,
     std::shared_ptr<StandaloneDraftArtifact> standalone, std::optional<std::filesystem::path> standalone_path
 ) : file_model_(std::move(file)), model_(std::move(model)),
     tokenizer_(std::move(tokenizer)), prepared_(std::move(prepared)),
     standalone_source_(std::move(standalone)), requested_standalone_(std::move(standalone_path)) {}
 
-Gemma2ChatSessionState Gemma2ChatSessionState::prepare(
-    model_format::GGUFFileBackedModel file, const Gemma2ChatSessionOptions& options,
+GemmaChatSessionState GemmaChatSessionState::prepare(
+    model_format::GGUFFileBackedModel file, const GemmaChatSessionOptions& options,
     bool authenticate_target
 ) {
     if (options.backend != runtime::BackendKind::metal) {
@@ -209,22 +208,22 @@ Gemma2ChatSessionState Gemma2ChatSessionState::prepare(
         : load_engine_model_from_gguf(file.view());
     auto tokenizer = tokenizer::load_tokenizer_from_gguf_metadata(file.view().directory.metadata);
     auto prepared = standalone
-        ? prepare_gemma2_standalone_plan(model, tokenizer, standalone, options.standalone_execution,
+        ? prepare_gemma_standalone_plan(model, tokenizer, standalone, options.standalone_execution,
             options.output_head_policy, options.context_length, options.kv_precision)
-        : prepare_gemma2_target_only_plan(model, options.output_head_policy, options.context_length, options.kv_precision);
-    return Gemma2ChatSessionState(std::move(file), std::move(model), std::move(tokenizer),
+        : prepare_gemma_target_only_plan(model, options.output_head_policy, options.context_length, options.kv_precision);
+    return GemmaChatSessionState(std::move(file), std::move(model), std::move(tokenizer),
         std::move(prepared), std::move(standalone), options.standalone_draft_model);
 }
 
-Gemma2ChatSession::Gemma2ChatSession(
+GemmaChatSession::GemmaChatSession(
     model_format::GGUFFileBackedModel file_model,
-    Gemma2ChatSessionOptions options
+    GemmaChatSessionOptions options
 )
-    : Gemma2ChatSession(Gemma2ChatSessionState::prepare(std::move(file_model), options), options) {}
+    : GemmaChatSession(GemmaChatSessionState::prepare(std::move(file_model), options), options) {}
 
-Gemma2ChatSession::Gemma2ChatSession(
-    Gemma2ChatSessionState state,
-    Gemma2ChatSessionOptions options
+GemmaChatSession::GemmaChatSession(
+    GemmaChatSessionState state,
+    GemmaChatSessionOptions options
 )
     : file_model_(std::move(state.file_model_)),
       model_(std::move(state.model_)),
@@ -260,8 +259,8 @@ Gemma2ChatSession::Gemma2ChatSession(
         || bool(standalone_source_) != options.standalone_draft_model.has_value()
         || state.requested_standalone_ != options.standalone_draft_model
         || (standalone_source_ && !options.speculative_decode)
-        || output_head_policy_ != resolve_gemma2_output_head_policy(model_.gemma2_config(),
-            bind_gemma2_model_weights(model_), options.output_head_policy)) {
+        || output_head_policy_ != resolve_gemma_output_head_policy(model_.gemma_config(),
+            bind_gemma_model_weights(model_), options.output_head_policy)) {
         throw std::invalid_argument("prepared session and requested speculation mode differ");
     }
     if (auto* standalone = prepared_->standalone()) {
@@ -279,19 +278,19 @@ Gemma2ChatSession::Gemma2ChatSession(
     warm_up_plan();
 }
 
-Gemma2MetalModelPlan& Gemma2ChatSession::plan() {
+Gemma2MetalModelPlan& GemmaChatSession::plan() {
     if (!prepared_) throw std::logic_error("chat session requires reset after failed rebuild");
     return prepared_->target();
 }
-const Gemma2MetalModelPlan& Gemma2ChatSession::plan() const {
+const Gemma2MetalModelPlan& GemmaChatSession::plan() const {
     if (!prepared_) throw std::logic_error("chat session requires reset after failed rebuild");
     return prepared_->target();
 }
-bool Gemma2ChatSession::poisoned() const noexcept { return !prepared_ || !prepared_->ready(); }
+bool GemmaChatSession::poisoned() const noexcept { return !prepared_ || !prepared_->ready(); }
 
-void Gemma2ChatSession::rebuild_durable_cache() {
+void GemmaChatSession::rebuild_durable_cache() {
     const auto tokens = std::span<const std::uint32_t>(cached_token_ids_);
-    const auto scale = gemma2_input_embedding_scale(model_.gemma2_config().embedding_length);
+    const auto scale = gemma_input_embedding_scale(model_.gemma_config().embedding_length);
     std::uint32_t restored = 0;
     for (const auto& segment : cache_segments_) {
         if (segment.begin != restored || segment.prompt_end <= segment.begin
@@ -311,7 +310,7 @@ void Gemma2ChatSession::rebuild_durable_cache() {
     if (prepared_->standalone()) prepared_->standalone()->synchronize_context(tokens);
 }
 
-void Gemma2ChatSession::warm_up_plan() {
+void GemmaChatSession::warm_up_plan() {
     warmup_stats_.reset();
     const auto token_id = tokenizer_.special_tokens().bos_token_id.value_or(
         tokenizer_.special_tokens().eos_token_id.value_or(0U)
@@ -331,7 +330,7 @@ void Gemma2ChatSession::warm_up_plan() {
     }
 }
 
-std::vector<tokenizer::ChatMessage> Gemma2ChatSession::message_views_with_user(
+std::vector<tokenizer::ChatMessage> GemmaChatSession::message_views_with_user(
     std::string_view content,
     std::size_t first_message_index
 ) const {
@@ -356,7 +355,7 @@ std::vector<tokenizer::ChatMessage> Gemma2ChatSession::message_views_with_user(
     return messages;
 }
 
-std::vector<std::uint32_t> Gemma2ChatSession::encode_messages(
+std::vector<std::uint32_t> GemmaChatSession::encode_messages(
     std::span<const tokenizer::ChatMessage> messages
 ) const {
     const auto formatted_prompt = tokenizer::format_chat_prompt_from_gguf_metadata(
@@ -375,7 +374,7 @@ std::vector<std::uint32_t> Gemma2ChatSession::encode_messages(
     );
 }
 
-std::vector<std::uint32_t> Gemma2ChatSession::visible_assistant_token_ids(
+std::vector<std::uint32_t> GemmaChatSession::visible_assistant_token_ids(
     std::span<const std::uint32_t> generated_token_ids
 ) const {
     std::vector<std::uint32_t> visible_token_ids;
@@ -391,23 +390,23 @@ std::vector<std::uint32_t> Gemma2ChatSession::visible_assistant_token_ids(
     return visible_token_ids;
 }
 
-Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(std::string_view content) {
-    return generate_user_turn(content, Gemma2ChatTurnOptions {});
+GemmaChatTurnResult GemmaChatSession::generate_user_turn(std::string_view content) {
+    return generate_user_turn(content, GemmaChatTurnOptions {});
 }
 
-Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
+GemmaChatTurnResult GemmaChatSession::generate_user_turn(
     std::string_view content,
-    const Gemma2ChatStreamCallback& on_text_delta
+    const GemmaChatStreamCallback& on_text_delta
 ) {
     return generate_user_turn(
         content,
-        Gemma2ChatTurnOptions {
+        GemmaChatTurnOptions {
             .on_text_delta = on_text_delta,
         }
     );
 }
 
-std::vector<std::uint32_t> Gemma2ChatSession::visible_token_prefix_for_text(
+std::vector<std::uint32_t> GemmaChatSession::visible_token_prefix_for_text(
     std::span<const std::uint32_t> visible_token_ids,
     std::string_view text
 ) const {
@@ -431,9 +430,9 @@ std::vector<std::uint32_t> Gemma2ChatSession::visible_token_prefix_for_text(
     return prefix_token_ids;
 }
 
-Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
+GemmaChatTurnResult GemmaChatSession::generate_user_turn(
     std::string_view content,
-    const Gemma2ChatTurnOptions& turn_options
+    const GemmaChatTurnOptions& turn_options
 ) {
     ActiveTurn active(turn_active_);
     static_cast<void>(plan());
@@ -462,7 +461,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
         const auto response_budget = max_new_tokens_ == 0U
             ? std::string("unlimited")
             : std::to_string(max_new_tokens_);
-        throw Gemma2ChatContextError(
+        throw GemmaChatContextError(
             "turn requires prompt=" + std::to_string(rendered_token_ids.size())
                 + " plus response-budget=" + response_budget
                 + " tokens but the model limit is " + std::to_string(context_length)
@@ -525,7 +524,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             next_turn_token_ids.end()
         );
         if (exceeds_context(rendered_token_ids.size())) {
-            throw Gemma2ChatContextError(
+            throw GemmaChatContextError(
                 "incremental turn plus response budget exceeds the model context; shorten the prompt"
             );
         }
@@ -614,7 +613,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
         catch (...) { callback_threw = true; throw; }
     };
     std::optional<std::uint64_t> first_text_ns;
-    const Gemma2ChatStreamCallback stream_text_delta = [&](std::string_view text_delta) {
+    const GemmaChatStreamCallback stream_text_delta = [&](std::string_view text_delta) {
         if (text_delta.empty()) {
             return;
         }
@@ -686,7 +685,6 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             on_generated_token,
             clock_,
             speculative_decode_ ? &proposer_ : nullptr,
-            turn_options.trace,
             &journal,
             prepared_->standalone(),
             rendered_token_ids
@@ -734,7 +732,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             generation_metrics.last_token_selected_ns
         )
     );
-    auto result = Gemma2ChatTurnResult {
+    auto result = GemmaChatTurnResult {
         .text = std::move(final_text),
         .cache_position = cache_position,
         .appended_token_count = checked_cached_token_count(appended_token_ids.size()),
@@ -749,7 +747,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
         .interrupted = interrupted,
         .trimmed_turn_count = checked_cached_token_count(trimmed_turn_count),
         .rebuilt_context = first_retained_message > 0U,
-        .metrics = Gemma2ChatTurnMetrics {
+        .metrics = GemmaChatTurnMetrics {
             .generation = generation_metrics,
             .prompt_processing_duration_ns = prompt_processing_duration_ns,
             .generation_duration_ns = generation_duration_ns,
@@ -770,8 +768,8 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
             .initial_cache_position = cache_position,
             .reused_cached_token_count = cache_position,
             .selection_mode = sampler_before_turn.is_greedy()
-                ? Gemma2TokenSelectionMode::greedy
-                : Gemma2TokenSelectionMode::sampled,
+                ? GemmaTokenSelectionMode::greedy
+                : GemmaTokenSelectionMode::sampled,
             .trimmed_turn_count = checked_cached_token_count(trimmed_turn_count),
             .rebuilt_context = first_retained_message > 0U,
             .output_head_policy = plan().output_head_policy(),
@@ -817,12 +815,12 @@ Gemma2ChatTurnResult Gemma2ChatSession::generate_user_turn(
     }
 }
 
-Gemma2ChatTurnResult Gemma2ChatSession::regenerate_last_turn() {
-    return regenerate_last_turn(Gemma2ChatTurnOptions {});
+GemmaChatTurnResult GemmaChatSession::regenerate_last_turn() {
+    return regenerate_last_turn(GemmaChatTurnOptions {});
 }
 
-Gemma2ChatTurnResult Gemma2ChatSession::regenerate_last_turn(
-    const Gemma2ChatTurnOptions& turn_options
+GemmaChatTurnResult GemmaChatSession::regenerate_last_turn(
+    const GemmaChatTurnOptions& turn_options
 ) {
     if (turn_active_ || poisoned()) throw std::logic_error("cannot regenerate in this chat state");
     const auto started = monotonic_now_ns(clock_);
@@ -855,7 +853,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::regenerate_last_turn(
     try {
         // Rewinding a wrapped sliding ring cannot reuse rows overwritten by
         // the removed turn. Reconstruct the retained execution, without RNG.
-        if (cache_position > 0U && previous_cache.size() > model_.gemma2_config().sliding_window) {
+        if (cache_position > 0U && previous_cache.size() > model_.gemma_config().sliding_window) {
             try { rebuild_durable_cache(); }
             catch (...) { prepared_->poison(); throw; }
         }
@@ -887,7 +885,7 @@ Gemma2ChatTurnResult Gemma2ChatSession::regenerate_last_turn(
     }
 }
 
-void Gemma2ChatSession::clear() {
+void GemmaChatSession::clear() {
     if (turn_active_) throw std::logic_error("cannot clear an active chat turn");
     if (poisoned()) throw std::logic_error("poisoned chat requires reset");
     prepared_->reset_draft_state();
@@ -899,70 +897,70 @@ void Gemma2ChatSession::clear() {
     sampler_ = TokenSampler(initial_sampler_options_);
 }
 
-void Gemma2ChatSession::reset() {
+void GemmaChatSession::reset() {
     if (turn_active_) throw std::logic_error("cannot reset an active chat turn");
     // Release the old residency before allocating its replacement. The opened
     // weight source survives; a replaced pathname cannot silently change it.
     prepared_.reset();
     prepared_.emplace(standalone_source_
-        ? prepare_gemma2_standalone_plan(model_, tokenizer_, standalone_source_, standalone_execution_,
+        ? prepare_gemma_standalone_plan(model_, tokenizer_, standalone_source_, standalone_execution_,
             output_head_policy_, context_length_, kv_precision_)
-        : prepare_gemma2_target_only_plan(model_, output_head_policy_, context_length_, kv_precision_));
+        : prepare_gemma_target_only_plan(model_, output_head_policy_, context_length_, kv_precision_));
     clear();
     try { warm_up_plan(); }
     catch (...) { prepared_->poison(); throw; }
     ++plan_revision_;
 }
 
-void Gemma2ChatSession::set_sampler_options(TokenSamplerOptions options) {
+void GemmaChatSession::set_sampler_options(TokenSamplerOptions options) {
     if (turn_active_ || poisoned()) throw std::logic_error("chat sampler cannot change in this state");
     static_cast<void>(TokenSampler(options));
     initial_sampler_options_ = std::move(options);
     clear();
 }
 
-void Gemma2ChatSession::set_max_new_tokens(std::size_t max_new_tokens) {
+void GemmaChatSession::set_max_new_tokens(std::size_t max_new_tokens) {
     if (turn_active_) throw std::logic_error("cannot change token budget during a chat turn");
     max_new_tokens_ = max_new_tokens;
 }
 
-std::uint32_t Gemma2ChatSession::cached_token_count() const noexcept {
+std::uint32_t GemmaChatSession::cached_token_count() const noexcept {
     return static_cast<std::uint32_t>(cached_token_ids_.size());
 }
 
-std::uint32_t Gemma2ChatSession::context_length() const noexcept {
+std::uint32_t GemmaChatSession::context_length() const noexcept {
     return context_length_;
 }
 
-std::uint32_t Gemma2ChatSession::remaining_context_tokens() const noexcept {
+std::uint32_t GemmaChatSession::remaining_context_tokens() const noexcept {
     return context_length() - cached_token_count();
 }
 
-std::size_t Gemma2ChatSession::max_new_tokens() const noexcept {
+std::size_t GemmaChatSession::max_new_tokens() const noexcept {
     return max_new_tokens_;
 }
 
-std::size_t Gemma2ChatSession::message_count() const noexcept {
+std::size_t GemmaChatSession::message_count() const noexcept {
     return messages_.size();
 }
 
-std::size_t Gemma2ChatSession::plan_revision() const noexcept {
+std::size_t GemmaChatSession::plan_revision() const noexcept {
     return plan_revision_;
 }
 
-std::span<const std::uint32_t> Gemma2ChatSession::stop_token_ids() const noexcept {
+std::span<const std::uint32_t> GemmaChatSession::stop_token_ids() const noexcept {
     return stop_token_ids_;
 }
 
-std::span<const std::string> Gemma2ChatSession::reverse_stop_strings() const noexcept {
+std::span<const std::string> GemmaChatSession::reverse_stop_strings() const noexcept {
     return reverse_stop_strings_;
 }
 
-std::array<std::uintptr_t, 4> Gemma2ChatSession::plan_allocation_identities() const noexcept {
+std::array<std::uintptr_t, 4> GemmaChatSession::plan_allocation_identities() const noexcept {
     return poisoned() ? std::array<std::uintptr_t, 4>{} : plan().allocation_identities();
 }
 
-const std::optional<Gemma2MetalWarmupStats>& Gemma2ChatSession::warmup_stats() const noexcept {
+const std::optional<Gemma2MetalWarmupStats>& GemmaChatSession::warmup_stats() const noexcept {
     return warmup_stats_;
 }
 

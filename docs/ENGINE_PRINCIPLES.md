@@ -2,6 +2,27 @@
 
 This file defines the project's permanent engineering and coding principles.
 
+## Maintain the Software
+
+- Give each module a coherent responsibility and keep dependencies directed
+  toward the component that owns the behavior.
+- Define contracts for shapes, precision, cache positions, committed state,
+  cancellation and failure. Keep ownership and resource lifetimes explicit.
+- Keep authoritative configuration and model capabilities in one place;
+  adapters should pass the resolved configuration rather than recreate it.
+- Share mechanisms when their behavior is shared. Keep architectural differences
+  explicit and introduce abstractions when existing cases justify them.
+- Remove abandoned execution paths and their exclusive tests and probes after
+  tracing callers. Preserve useful findings in documentation and history.
+- Keep independent numerical references, fault injection and developer probes
+  outside the production execution dependency.
+- Preserve behavior and hardware costs when refactoring: review allocations,
+  transfers, synchronization and dispatches as part of the contract.
+- Test observable behavior and meaningful invariants so internal structure can
+  improve without rewriting tests merely to mirror the implementation.
+- Keep builds and installation reproducible from a fresh checkout. Compiler
+  dependency tracking must cover public and private headers.
+
 ## Optimize the System
 
 - Treat end-to-end inference as the product. Optimize a subsystem only when

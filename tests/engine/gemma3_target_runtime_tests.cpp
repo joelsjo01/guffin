@@ -354,8 +354,8 @@ void test_complete_synthetic_reference_and_wrapped_batch(GemmaKVPrecision precis
     if (!have_metal()) return;
     NumericalFixture fixture;
     Reference reference(fixture, precision);
-    auto batch = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, precision);
-    auto scalar = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, precision);
+    auto batch = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, precision);
+    auto scalar = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, precision);
     constexpr std::array<std::uint32_t, 13> tokens {2U, 7U, 1U, 19U, 3U, 11U, 5U, 13U, 17U, 29U, 23U, 0U, 31U};
     // 512-term dense sums have gamma_n below 3.1e-5. Mixed 3e-4 bounds
     // accommodate six residual/norm blocks and F32 nonlinear reductions while
@@ -378,7 +378,7 @@ void test_complete_synthetic_reference_and_wrapped_batch(GemmaKVPrecision precis
     check_cache(batch, reference, 13U);
     // Replaying the same prefill/decode segmentation must preserve the stored
     // representation exactly, even after local slots have wrapped.
-    auto replay = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, precision);
+    auto replay = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, precision);
     (void)run_gemma2_metal_resident_prefill(replay, std::span(tokens).first(12U), 0U, 16.0F);
     const auto replay_last = run_gemma2_metal_resident_prefill(replay, std::span(tokens).last(1U), 12U, 16.0F);
     expect(read(replay_last.logits) == read(result.logits), "segmented target replay changed logits");
@@ -391,7 +391,7 @@ void test_width_two_prefix_publication_and_rollback(GemmaKVPrecision precision) 
     constexpr std::array<std::uint32_t, 9> tokens {2U, 7U, 1U, 19U, 3U, 11U, 5U, 13U, 17U};
     Reference reference(fixture, precision);
     for (const auto token : tokens) (void)reference.append(token);
-    auto ordinary = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, precision);
+    auto ordinary = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, precision);
     (void)run_gemma2_metal_resident_prefill(ordinary, std::span(tokens).first(7U), 0U, 16.0F);
     const auto ordinary_rows = run_gemma2_metal_resident_prefill(ordinary, std::span(tokens).last(2U), 7U, 16.0F);
     (void)run_gemma2_metal_resident_prefill(ordinary, std::span(tokens).first(7U), 0U, 16.0F);
@@ -399,7 +399,7 @@ void test_width_two_prefix_publication_and_rollback(GemmaKVPrecision precision) 
     for (std::uint32_t i = 0U; i < 2U; ++i) ordinary_logits[i] = read(run_gemma2_metal_resident_decode_step(ordinary,
         create_gemma2_metal_decode_schedule(ordinary, 7U + i), tokens[7U + i], 16.0F).logits);
     for (std::uint32_t retained = 0U; retained <= 2U; ++retained) {
-        auto plan = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, precision);
+        auto plan = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, precision);
         (void)run_gemma2_metal_resident_prefill(plan, std::span(tokens).first(7U), 0U, 16.0F);
         std::vector<std::vector<std::uint8_t>> before;
         for (const auto& layer : plan.kv_cache()) {
@@ -446,8 +446,8 @@ void test_width_two_prefix_publication_and_rollback(GemmaKVPrecision precision) 
 void test_actual_plan_bounds_and_invalid_scales_preserve_state(GemmaKVPrecision precision) {
     if (!have_metal()) return;
     NumericalFixture fixture;
-    auto target = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 16U, precision);
-    const auto larger = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, precision);
+    auto target = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 16U, precision);
+    const auto larger = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, precision);
     constexpr std::array<std::uint32_t, 2> tokens {2U, 7U};
     (void)run_gemma2_metal_resident_prefill(target, tokens, 0U, 16.0F);
     Reference reference(fixture, precision);
@@ -503,7 +503,7 @@ void test_scripted_chain_callbacks_stops_full_and_conditional(GemmaKVPrecision p
         reference_sampler.observe_tokens(std::span<const std::uint32_t>(&token, 1U));
         last = reference.append(token);
     }
-    auto ordinary = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, precision);
+    auto ordinary = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, precision);
     (void)run_gemma2_metal_resident_prefill(ordinary, prefix, 0U, 16.0F);
     std::array<Floats, 4> ordinary_logits;
     for (std::uint32_t row = 0U; row < chain.size(); ++row) ordinary_logits[row] = read(
@@ -511,7 +511,7 @@ void test_scripted_chain_callbacks_stops_full_and_conditional(GemmaKVPrecision p
             create_gemma2_metal_decode_schedule(ordinary, 7U + row), chain[row], 16.0F).logits);
     for (const bool conditional : {false, true}) {
         for (const auto outcome : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U}) {
-            auto plan = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, precision);
+            auto plan = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, precision);
             (void)run_gemma2_metal_resident_prefill(plan, prefix, 0U, 16.0F);
             TokenSampler sampler(options);
             sampler.observe_tokens(prefix); sampler.observe_tokens(std::span(chain).first(1U));
@@ -636,7 +636,7 @@ void test_f16_cache_overflow_preserves_transaction_boundaries() {
     };
     constexpr std::array<std::uint32_t, 2> tokens {2U, 7U};
     {
-        auto plan = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, GemmaKVPrecision::f32);
+        auto plan = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, GemmaKVPrecision::f32);
         prefill_prefix(plan);
         (void)run_gemma2_metal_resident_decode_step(plan, create_gemma2_metal_decode_schedule(plan, 1U),
             tokens[0], 16.0F, std::nullopt, Gemma2MetalDecodeOutputMode::kv_only);
@@ -646,7 +646,7 @@ void test_f16_cache_overflow_preserves_transaction_boundaries() {
             "overflow fixture must distinguish finite F32 V from unrepresentable F16 V");
     }
     {
-        auto plan = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, GemmaKVPrecision::f16);
+        auto plan = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, GemmaKVPrecision::f16);
         prefill_prefix(plan);
         overflow([&] { (void)run_gemma2_metal_resident_decode_step(plan,
             create_gemma2_metal_decode_schedule(plan, 1U), tokens[0], 16.0F,
@@ -654,7 +654,7 @@ void test_f16_cache_overflow_preserves_transaction_boundaries() {
         expect(plan.verification_poisoned(), "ordinary F16 overflow must poison already published cache state");
     }
     {
-        auto plan = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, GemmaKVPrecision::f16);
+        auto plan = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, GemmaKVPrecision::f16);
         prefill_prefix(plan);
         const auto before = snapshot(plan);
         overflow([&] { (void)run_gemma2_metal_width_two_verifier(plan,
@@ -664,7 +664,7 @@ void test_f16_cache_overflow_preserves_transaction_boundaries() {
         expect(snapshot(plan) == before, "width-two F16 overflow did not restore every physical half cache bit");
     }
     for (const bool conditional : {false, true}) {
-        auto plan = create_gemma2_metal_model_plan(fixture.model(), Gemma2OutputHeadPolicy::automatic, 32U, GemmaKVPrecision::f16);
+        auto plan = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 32U, GemmaKVPrecision::f16);
         prefill_prefix(plan);
         const auto before = snapshot(plan);
         TokenSampler sampler({.temperature = 0.0F, .top_k = 1U});
@@ -812,7 +812,7 @@ void test_actual_checkpoint_independent_goldens_when_requested(GemmaKVPrecision 
     const auto model = load_engine_model_from_gguf(mapped.view());
     // Exercise the production default against the independent F16 checkpoint;
     // retain an explicit F32 run against its original numerical target.
-    auto plan = create_gemma2_metal_model_plan(model, Gemma2OutputHeadPolicy::automatic, 1024U,
+    auto plan = create_gemma2_metal_model_plan(model, GemmaOutputHeadPolicy::automatic, 1024U,
         half ? GemmaKVPrecision::automatic : precision);
     expect(plan.config().kv_precision == precision,
         "12B checkpoint must use the requested numerical target");

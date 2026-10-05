@@ -1,6 +1,5 @@
 #include "quick_benchmark_tests.hpp"
 
-#include "local_gguf_engine/benchmarks/feature_capture_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/quick_benchmark.hpp"
 #include "local_gguf_engine/benchmarks/immutable_weight_benchmark.hpp"
 
@@ -224,18 +223,7 @@ void test_quick_kernel_benchmark_rejects_empty_model_path() {
     expect(rejected, "quick kernel benchmark should reject empty model path");
 }
 
-void test_feature_capture_benchmark_rejects_empty_model_path() {
-    bool rejected = false;
-    try {
-        static_cast<void>(benchmarks::run_feature_capture_benchmark("", false));
-    } catch (const std::invalid_argument&) {
-        rejected = true;
-    }
-    expect(rejected, "feature capture benchmark should reject empty model path");
-}
-
-
-const std::array<TestCase, 10> kTests {{
+const std::array<TestCase, 9> kTests {{
     {"immutable weight policy parsing and labels", test_immutable_weight_policy_parsing_and_labels},
     {"immutable weight policy accounting", test_immutable_weight_policy_accounting},
     {"no-copy mapping constraint validation", test_no_copy_mapping_constraint_validation},
@@ -245,8 +233,6 @@ const std::array<TestCase, 10> kTests {{
     {"quick kernel measurement rejects invalid inputs", test_quick_kernel_measurement_rejects_invalid_inputs},
     {"quick kernel statistics reject non-finite values", test_quick_kernel_statistics_reject_non_finite_values},
     {"quick kernel benchmark rejects empty model path", test_quick_kernel_benchmark_rejects_empty_model_path},
-    {"feature capture benchmark rejects empty model path",
-        test_feature_capture_benchmark_rejects_empty_model_path},
 }};
 
 }  // namespace

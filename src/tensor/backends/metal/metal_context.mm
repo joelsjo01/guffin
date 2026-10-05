@@ -1,4 +1,5 @@
 #include "metal_context.hpp"
+#include "metal_kernels.hpp"
 
 #if defined(LOCAL_GGUF_ENGINE_TESTING)
 #include "metal_test_hooks.hpp"
@@ -349,22 +350,6 @@ MatmulPipelineState::MatmulPipelineState(bool precise_math) {
         @"matmul_f32_q8_0_target_rows_kernel", 4, 112,
         "Q8_0 112-block target-head row-parallel matmul"
     );
-    feature_tap_copy_pipeline = make_pipeline(
-        @"feature_tap_copy_f32_kernel", "feature tap copy"
-    );
-    feature_tap_store_f16_pipeline = make_pipeline(
-        @"feature_tap_store_f16_kernel", "F16 trace feature tap store"
-    );
-    feature_scatter_f32_pipeline = make_pipeline(
-        @"feature_scatter_f32_kernel", "F32 feature scatter"
-    );
-    feature_scatter_f16_pipeline = make_pipeline(
-        @"feature_scatter_f16_kernel", "F16 feature scatter"
-    );
-    f16_row_scatter_pipeline = make_pipeline(
-        @"f16_row_scatter_kernel", "F16 row scatter"
-    );
-
     matmul_q4_k_tiled_pipeline = make_tiled_pipeline(0, false, "Q4_K tiled matmul");
     matmul_q4_k_tiled_exact_16_pipeline =
         make_tiled_pipeline(0, true, "Q4_K exact 16-row tiled matmul");
@@ -821,9 +806,6 @@ MatmulPipelineState::MatmulPipelineState(bool precise_math) {
     target_candidate_batch_top1_pipeline = make_candidate_pipeline(
         @"target_candidate_batch_top1_f32_kernel",
         "Metal target-candidate batch top-1 pipeline creation failed"
-    );
-    draft_topk_merge_pipeline = make_candidate_pipeline(
-        @"draft_topk_merge_f32_kernel", "Metal draft top-k merge pipeline creation failed"
     );
     if (token_candidate_tile_pipeline.maxTotalThreadsPerThreadgroup < 512U
         || token_candidate_top1_pipeline.maxTotalThreadsPerThreadgroup < 512U

@@ -47,7 +47,7 @@ enum class GemmaKVPrecision { automatic, f32, f16 };
 );
 [[nodiscard]] std::string_view gemma_kv_precision_name(GemmaKVPrecision precision) noexcept;
 
-struct Gemma2ModelConfig {
+struct GemmaModelConfig {
     std::uint32_t context_length = 0;
     std::uint32_t embedding_length = 0;
     std::uint32_t block_count = 0;
@@ -63,7 +63,7 @@ struct Gemma2ModelConfig {
     float final_logit_softcap = 0.0F;
     bool uses_tied_output_weight = false;
 
-    // Shared resident execution policy. The historical type name is retained
+    // Shared resident execution policy. The shared configuration is retained
     // so Gemma 2 cache, chat and transaction ownership remain one foundation.
     ModelArchitecture architecture = ModelArchitecture::gemma2;
     // Zero on legacy hand-built Gemma 2 fixtures means context_length.
@@ -78,19 +78,21 @@ struct Gemma2ModelConfig {
     // resolved precision for durable, current-chunk, private and rollback K/V.
     GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic;
 
-    constexpr bool operator==(const Gemma2ModelConfig&) const = default;
+    constexpr bool operator==(const GemmaModelConfig&) const = default;
 };
 
+[[nodiscard]] float gemma_input_embedding_scale(std::uint32_t embedding_length);
+
 [[nodiscard]] bool gemma_layer_uses_sliding_window(
-    const Gemma2ModelConfig& config, std::uint32_t layer_index
+    const GemmaModelConfig& config, std::uint32_t layer_index
 ) noexcept;
 [[nodiscard]] float gemma_layer_rope_freq_base(
-    const Gemma2ModelConfig& config, std::uint32_t layer_index
+    const GemmaModelConfig& config, std::uint32_t layer_index
 ) noexcept;
 [[nodiscard]] float gemma_layer_rope_freq_scale(
-    const Gemma2ModelConfig& config, std::uint32_t layer_index
+    const GemmaModelConfig& config, std::uint32_t layer_index
 ) noexcept;
-[[nodiscard]] tensor::DType gemma_kv_dtype(const Gemma2ModelConfig& config);
+[[nodiscard]] tensor::DType gemma_kv_dtype(const GemmaModelConfig& config);
 
 struct EngineTensorView {
     std::string name;
@@ -128,7 +130,7 @@ public:
     EngineModel(
         ModelArchitecture architecture,
         std::optional<std::string> name,
-        Gemma2ModelConfig gemma2_config,
+        GemmaModelConfig gemma_config,
         std::vector<EngineTensorView> tensor_views,
         std::optional<EngineModelPayloadReceipt> payload_receipt = std::nullopt,
         std::optional<runtime::Sha256Digest> tokenizer_identity = std::nullopt
@@ -136,7 +138,7 @@ public:
 
     [[nodiscard]] ModelArchitecture architecture() const noexcept;
     [[nodiscard]] const std::optional<std::string>& name() const noexcept;
-    [[nodiscard]] const Gemma2ModelConfig& gemma2_config() const noexcept;
+    [[nodiscard]] const GemmaModelConfig& gemma_config() const noexcept;
     [[nodiscard]] const std::vector<EngineTensorView>& tensor_views() const noexcept;
     [[nodiscard]] const std::optional<EngineModelPayloadReceipt>& payload_receipt() const noexcept;
     [[nodiscard]] const std::optional<runtime::Sha256Digest>& tokenizer_identity() const noexcept;
@@ -145,7 +147,7 @@ public:
 private:
     ModelArchitecture architecture_;
     std::optional<std::string> name_;
-    Gemma2ModelConfig gemma2_config_;
+    GemmaModelConfig gemma_config_;
     std::vector<EngineTensorView> tensor_views_;
     std::optional<EngineModelPayloadReceipt> payload_receipt_;
     // Standalone plans bind the actual source tokenizer independently of the

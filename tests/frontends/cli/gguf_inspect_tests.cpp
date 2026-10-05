@@ -172,7 +172,7 @@ void test_rejects_gguf_inspect_missing_path() {
 
     expect(exit_code == EXIT_FAILURE, "gguf-inspect missing path exit code mismatch");
     expect(output.str().empty(), "gguf-inspect missing path should not write stdout");
-    expect(error.str().find("usage: gguf-inspect <model.gguf>") != std::string::npos, "gguf-inspect usage missing");
+    expect(error.str().find("usage: guffin inspect MODEL") != std::string::npos, "gguf-inspect usage missing");
     expect(error.str().find("missing GGUF path") != std::string::npos, "gguf-inspect missing path error missing");
 }
 

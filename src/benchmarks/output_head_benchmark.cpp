@@ -1,7 +1,6 @@
 #include "local_gguf_engine/benchmarks/output_head_benchmark.hpp"
 
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
-#include "local_gguf_engine/engine/gemma2_reference.hpp"
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
@@ -30,7 +29,7 @@
 namespace local_gguf_engine::benchmarks {
 namespace {
 
-using engine::Gemma2OutputHeadPolicy;
+using engine::GemmaOutputHeadPolicy;
 
 struct BaselineRows {
     std::vector<float> logits;
@@ -140,12 +139,12 @@ template <typename Consumer>
 std::size_t run_teacher_forced(
     const engine::EngineModel& model,
     std::span<const std::uint32_t> tokens,
-    Gemma2OutputHeadPolicy policy,
+    GemmaOutputHeadPolicy policy,
     std::array<QuickKernelMeasurement, 2>& kernel_measurements,
     Consumer consume
 ) {
     auto plan = engine::create_gemma2_metal_model_plan(model, policy);
-    const auto scale = engine::gemma2_input_embedding_scale(plan.config().embedding_length);
+    const auto scale = engine::gemma_input_embedding_scale(plan.config().embedding_length);
     auto prefill = engine::run_gemma2_metal_resident_prefill(plan, tokens.first(1U), 0U, scale);
     consume(0U, prefill.logits, plan.prefill_scratch().final_normalized_hidden);
     kernel_measurements = measure_output_kernel(
@@ -210,8 +209,8 @@ OutputHeadQualityResult run_output_head_quality_benchmark(
         file_model.view().directory.metadata
     );
     const auto tokens = fixture_tokens(tokenizer, prediction_count);
-    const auto vocab = model.gemma2_config().vocab_size;
-    const auto hidden = model.gemma2_config().embedding_length;
+    const auto vocab = model.gemma_config().vocab_size;
+    const auto hidden = model.gemma_config().embedding_length;
     BaselineRows baseline;
     std::array<QuickKernelMeasurement, 2> f16_kernel_measurements;
     baseline.logits.reserve(static_cast<std::size_t>(prediction_count) * vocab);
@@ -219,7 +218,7 @@ OutputHeadQualityResult run_output_head_quality_benchmark(
     baseline.resident_weight_bytes = run_teacher_forced(
         model,
         tokens,
-        Gemma2OutputHeadPolicy::f16,
+        GemmaOutputHeadPolicy::f16,
         f16_kernel_measurements,
         [&](std::size_t, const tensor::BackendBuffer& logits, const tensor::BackendBuffer& normalized_hidden) {
             auto logit_values = f32_values(logits);
@@ -252,7 +251,7 @@ OutputHeadQualityResult run_output_head_quality_benchmark(
     result.q8_resident_weight_bytes = run_teacher_forced(
         model,
         tokens,
-        Gemma2OutputHeadPolicy::q8_0,
+        GemmaOutputHeadPolicy::q8_0,
         result.q8_kernel_measurements,
         [&](std::size_t position, const tensor::BackendBuffer& logits, const tensor::BackendBuffer& normalized_hidden) {
             const auto q8 = f32_values(logits);

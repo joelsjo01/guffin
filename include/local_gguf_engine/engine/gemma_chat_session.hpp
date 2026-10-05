@@ -5,7 +5,7 @@
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
 #include "local_gguf_engine/engine/retrieval_proposer.hpp"
-#include "local_gguf_engine/engine/prepared_gemma2_plan.hpp"
+#include "local_gguf_engine/engine/prepared_gemma_plan.hpp"
 #include "local_gguf_engine/model_format/gguf_reader.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/tokenizer/tokenizer.hpp"
@@ -22,16 +22,16 @@
 
 namespace local_gguf_engine::engine {
 
-class Gemma2ChatContextError final : public std::runtime_error {
+class GemmaChatContextError final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
-struct Gemma2ChatSessionOptions {
+struct GemmaChatSessionOptions {
     // Zero means generate until a stop token, cancellation, or context exhaustion.
     std::size_t max_new_tokens = 0;
     runtime::BackendKind backend = runtime::BackendKind::metal;
-    Gemma2OutputHeadPolicy output_head_policy = Gemma2OutputHeadPolicy::automatic;
+    GemmaOutputHeadPolicy output_head_policy = GemmaOutputHeadPolicy::automatic;
     std::uint32_t context_length = 0;
     GemmaKVPrecision kv_precision = GemmaKVPrecision::automatic;
     bool context_shift = false;
@@ -47,12 +47,12 @@ struct Gemma2ChatSessionOptions {
     Gemma2MonotonicClock clock;
 };
 
-enum class Gemma2TokenSelectionMode {
+enum class GemmaTokenSelectionMode {
     greedy,
     sampled,
 };
 
-struct Gemma2ChatTurnMetrics {
+struct GemmaChatTurnMetrics {
     Gemma2GenerationMetrics generation;
     // Matches llama.cpp result_timings: tokenized prompt processing through
     // first selection, then first selection through final selection.
@@ -77,10 +77,10 @@ struct Gemma2ChatTurnMetrics {
     SpeculativeSamplingMode speculative_sampling = SpeculativeSamplingMode::exact_match;
     std::uint32_t initial_cache_position = 0;
     std::uint32_t reused_cached_token_count = 0;
-    Gemma2TokenSelectionMode selection_mode = Gemma2TokenSelectionMode::greedy;
+    GemmaTokenSelectionMode selection_mode = GemmaTokenSelectionMode::greedy;
     std::uint32_t trimmed_turn_count = 0;
     bool rebuilt_context = false;
-    Gemma2OutputHeadPolicy output_head_policy = Gemma2OutputHeadPolicy::f16;
+    GemmaOutputHeadPolicy output_head_policy = GemmaOutputHeadPolicy::f16;
     ModelArchitecture model_architecture = ModelArchitecture::gemma2;
     std::uint32_t context_capacity = 0;
     GemmaKVPrecision kv_precision = GemmaKVPrecision::f16;
@@ -95,7 +95,7 @@ struct Gemma2ChatTurnMetrics {
     Gemma2MetalDecodeExecutionStats decode_execution;
 };
 
-struct Gemma2ChatTurnResult {
+struct GemmaChatTurnResult {
     std::string text;
     std::uint32_t cache_position = 0;
     std::uint32_t appended_token_count = 0;
@@ -110,67 +110,64 @@ struct Gemma2ChatTurnResult {
     bool interrupted = false;
     std::uint32_t trimmed_turn_count = 0;
     bool rebuilt_context = false;
-    Gemma2ChatTurnMetrics metrics;
+    GemmaChatTurnMetrics metrics;
 };
 
-using Gemma2ChatStreamCallback = std::function<void(std::string_view text_delta)>;
-using Gemma2ChatShouldStopCallback = std::function<bool()>;
+using GemmaChatStreamCallback = std::function<void(std::string_view text_delta)>;
+using GemmaChatShouldStopCallback = std::function<bool()>;
 
-struct Gemma2ChatTurnOptions {
-    Gemma2ChatStreamCallback on_text_delta;
-    Gemma2ChatShouldStopCallback should_stop;
-    // Synchronous developer/offline capture binding. The caller retains the
-    // binding and its sinks through generate_user_turn().
-    const Gemma2GenerationTraceBinding* trace = nullptr;
+struct GemmaChatTurnOptions {
+    GemmaChatStreamCallback on_text_delta;
+    GemmaChatShouldStopCallback should_stop;
 };
 
-class Gemma2ChatSessionState final {
+class GemmaChatSessionState final {
 public:
-    [[nodiscard]] static Gemma2ChatSessionState prepare(
+    [[nodiscard]] static GemmaChatSessionState prepare(
         model_format::GGUFFileBackedModel file_model,
-        const Gemma2ChatSessionOptions& options, bool authenticate_target = false
+        const GemmaChatSessionOptions& options, bool authenticate_target = false
     );
-    Gemma2ChatSessionState(Gemma2ChatSessionState&&) noexcept = default;
-    Gemma2ChatSessionState& operator=(Gemma2ChatSessionState&&) noexcept = default;
+    GemmaChatSessionState(GemmaChatSessionState&&) noexcept = default;
+    GemmaChatSessionState& operator=(GemmaChatSessionState&&) noexcept = default;
     [[nodiscard]] const EngineModel& model() const noexcept { return model_; }
     [[nodiscard]] const tokenizer::Tokenizer& tokenizer() const noexcept { return tokenizer_; }
-    [[nodiscard]] const PreparedGemma2Plan& prepared() const noexcept { return prepared_; }
+    [[nodiscard]] const PreparedGemmaPlan& prepared() const noexcept { return prepared_; }
 private:
-    friend class Gemma2ChatSession;
-    Gemma2ChatSessionState(model_format::GGUFFileBackedModel, EngineModel,
-        tokenizer::Tokenizer, PreparedGemma2Plan, std::shared_ptr<StandaloneDraftArtifact>,
+    friend class GemmaChatSession;
+    GemmaChatSessionState(model_format::GGUFFileBackedModel, EngineModel,
+        tokenizer::Tokenizer, PreparedGemmaPlan, std::shared_ptr<StandaloneDraftArtifact>,
         std::optional<std::filesystem::path>);
     model_format::GGUFFileBackedModel file_model_;
     EngineModel model_;
     tokenizer::Tokenizer tokenizer_;
-    PreparedGemma2Plan prepared_;
+    PreparedGemmaPlan prepared_;
     std::shared_ptr<StandaloneDraftArtifact> standalone_source_;
     std::optional<std::filesystem::path> requested_standalone_;
 };
 
-class Gemma2ChatSession final {
+class GemmaChatSession final {
 public:
-    Gemma2ChatSession(
+    GemmaChatSession(
         model_format::GGUFFileBackedModel file_model,
-        Gemma2ChatSessionOptions options
+        GemmaChatSessionOptions options
     );
-    Gemma2ChatSession(
-        Gemma2ChatSessionState state,
-        Gemma2ChatSessionOptions options
+    GemmaChatSession(
+        GemmaChatSessionState state,
+        GemmaChatSessionOptions options
     );
 
-    [[nodiscard]] Gemma2ChatTurnResult generate_user_turn(std::string_view content);
-    [[nodiscard]] Gemma2ChatTurnResult generate_user_turn(
+    [[nodiscard]] GemmaChatTurnResult generate_user_turn(std::string_view content);
+    [[nodiscard]] GemmaChatTurnResult generate_user_turn(
         std::string_view content,
-        const Gemma2ChatStreamCallback& on_text_delta
+        const GemmaChatStreamCallback& on_text_delta
     );
-    [[nodiscard]] Gemma2ChatTurnResult generate_user_turn(
+    [[nodiscard]] GemmaChatTurnResult generate_user_turn(
         std::string_view content,
-        const Gemma2ChatTurnOptions& turn_options
+        const GemmaChatTurnOptions& turn_options
     );
-    [[nodiscard]] Gemma2ChatTurnResult regenerate_last_turn();
-    [[nodiscard]] Gemma2ChatTurnResult regenerate_last_turn(
-        const Gemma2ChatTurnOptions& turn_options
+    [[nodiscard]] GemmaChatTurnResult regenerate_last_turn();
+    [[nodiscard]] GemmaChatTurnResult regenerate_last_turn(
+        const GemmaChatTurnOptions& turn_options
     );
     void clear();
     void reset();
@@ -220,9 +217,9 @@ private:
     model_format::GGUFFileBackedModel file_model_;
     EngineModel model_;
     tokenizer::Tokenizer tokenizer_;
-    std::optional<PreparedGemma2Plan> prepared_;
+    std::optional<PreparedGemmaPlan> prepared_;
     std::shared_ptr<StandaloneDraftArtifact> standalone_source_;
-    Gemma2OutputHeadPolicy output_head_policy_;
+    GemmaOutputHeadPolicy output_head_policy_;
     GemmaKVPrecision kv_precision_;
     std::vector<OwnedChatMessage> messages_;
     std::vector<std::uint32_t> cached_token_ids_;

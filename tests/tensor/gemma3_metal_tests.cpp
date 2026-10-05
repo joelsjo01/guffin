@@ -8,7 +8,7 @@
 #include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "../../src/tensor/backends/metal/metal_command_context.hpp"
-#include "../../src/tensor/backends/metal/metal_test_hooks.hpp"
+#include "metal_test_hooks.hpp"
 #include "../../src/tensor/backends/metal_backend.hpp"
 
 #include <algorithm>

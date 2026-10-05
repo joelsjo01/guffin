@@ -1,4 +1,4 @@
-#include "local_gguf_engine/engine/target_verifier.hpp"
+#include "local_gguf_engine/benchmarks/target_verifier_episode.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,8 @@
 #include <span>
 #include <stdexcept>
 
-namespace local_gguf_engine::engine {
+namespace local_gguf_engine::benchmarks {
+using namespace engine;
 namespace {
 
 using EpisodeClock = std::chrono::steady_clock;
@@ -343,7 +344,7 @@ struct ForestPath {
 
 }  // namespace
 
-TargetVerifierEpisodeResult run_gemma2_metal_target_verifier_chain_episode(
+TargetVerifierEpisodeResult run_target_verifier_chain_episode(
     Gemma2MetalModelPlan& target,
     Gemma2MetalTargetVerifierPlan& verifier,
     const ValidatedVerifierEncodeRequest& full_request,
@@ -551,7 +552,7 @@ TargetVerifierEpisodeResult run_gemma2_metal_target_verifier_chain_episode(
     }
 }
 
-TargetVerifierEpisodeResult run_gemma2_metal_target_verifier_forest_episode(
+TargetVerifierEpisodeResult run_target_verifier_forest_episode(
     Gemma2MetalModelPlan& target,
     Gemma2MetalTargetVerifierPlan& verifier,
     const ValidatedVerifierEncodeRequest& full_request,
@@ -708,4 +709,4 @@ TargetVerifierEpisodeResult run_gemma2_metal_target_verifier_forest_episode(
     return result;
 }
 
-}  // namespace local_gguf_engine::engine
+}  // namespace local_gguf_engine::benchmarks

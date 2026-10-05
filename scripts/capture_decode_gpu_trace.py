@@ -11,7 +11,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--local", default="build/release/local-gguf-generate")
+    parser.add_argument("--local", default="build/release/guffin")
     args = parser.parse_args()
 
     output = pathlib.Path(args.output).expanduser().resolve()
@@ -24,7 +24,7 @@ def main():
     command = [
         args.local,
         args.model,
-        "--chat",
+        "--interactive",
         "--backend",
         "metal",
         "--greedy",

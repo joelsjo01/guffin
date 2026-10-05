@@ -1,12 +1,13 @@
 #include "local_gguf_engine/engine/target_verifier.hpp"
 
-#include "local_gguf_engine/engine/gemma2_reference.hpp"
 #include "local_gguf_engine/runtime/backend_kind.hpp"
 #include "local_gguf_engine/runtime/backend_error.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
 #include "local_gguf_engine/tensor/dtype.hpp"
 #include "local_gguf_engine/tensor/shape.hpp"
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
 #include "target_verifier_test_hooks.hpp"
+#endif
 
 #include <algorithm>
 #include <bit>
@@ -30,7 +31,7 @@ using tensor::TensorDescriptor;
 }
 
 [[nodiscard]] std::optional<TensorDescriptor> q4_input_sums_descriptor(
-    const Gemma2ModelConfig& config, std::uint32_t row_capacity
+    const GemmaModelConfig& config, std::uint32_t row_capacity
 ) {
     if (config.architecture != ModelArchitecture::gemma3
         && (config.embedding_length % 256U != 0U
@@ -556,7 +557,7 @@ const VerifierEncodeRequest& ValidatedVerifierEncodeRequest::request() const noe
     return *request_;
 }
 
-bool ValidatedVerifierEncodeRequest::validated_for(const Gemma2ModelConfig& target) const noexcept {
+bool ValidatedVerifierEncodeRequest::validated_for(const GemmaModelConfig& target) const noexcept {
     return validation_shape_ == std::array<std::uint32_t, 5> {
         target.vocab_size, target.block_count, target.context_length,
         target.sliding_window, target.attention_global_layer_period,
@@ -781,35 +782,42 @@ Gemma2MetalTargetVerifierPlan::Gemma2MetalTargetVerifierPlan(
     std::uintptr_t target_weight_identity,
     std::size_t allocated_byte_count,
     bool precise_math
-) : runtime_(make_target_verifier_runtime_state(precise_math)), scratch_(std::move(scratch)),
-    row_capacity_(row_capacity),
-    layer_count_(layer_count),
-    vocabulary_size_(vocabulary_size),
-    target_weight_identity_(target_weight_identity),
-    allocated_byte_count_(allocated_byte_count),
-    completion_candidates_(row_capacity) {}
+) : storage_(std::make_shared<Storage>(Storage {
+        .runtime_ = make_target_verifier_runtime_state(precise_math),
+        .scratch_ = std::move(scratch),
+        .row_capacity_ = row_capacity,
+        .layer_count_ = layer_count,
+        .vocabulary_size_ = vocabulary_size,
+        .target_weight_identity_ = target_weight_identity,
+        .allocated_byte_count_ = allocated_byte_count,
+        .completion_candidates_ = std::vector<CompactTokenCandidates>(row_capacity),
+    })) {}
+
+std::size_t Gemma2MetalTargetVerifierPlan::host_storage_byte_count() noexcept {
+    return sizeof(Storage);
+}
 
 const Gemma2MetalTargetVerifierScratch& Gemma2MetalTargetVerifierPlan::scratch() const noexcept {
-    return scratch_;
+    return storage_->scratch_;
 }
 
-std::uint32_t Gemma2MetalTargetVerifierPlan::row_capacity() const noexcept { return row_capacity_; }
-std::uint32_t Gemma2MetalTargetVerifierPlan::layer_count() const noexcept { return layer_count_; }
+std::uint32_t Gemma2MetalTargetVerifierPlan::row_capacity() const noexcept { return storage_->row_capacity_; }
+std::uint32_t Gemma2MetalTargetVerifierPlan::layer_count() const noexcept { return storage_->layer_count_; }
 std::uint32_t Gemma2MetalTargetVerifierPlan::vocabulary_size() const noexcept {
-    return vocabulary_size_;
+    return storage_->vocabulary_size_;
 }
 std::uintptr_t Gemma2MetalTargetVerifierPlan::target_weight_identity() const noexcept {
-    return target_weight_identity_;
+    return storage_->target_weight_identity_;
 }
 std::size_t Gemma2MetalTargetVerifierPlan::allocated_byte_count() const noexcept {
-    return allocated_byte_count_;
+    return storage_->allocated_byte_count_;
 }
 std::span<CompactTokenCandidates>
 Gemma2MetalTargetVerifierPlan::completion_candidates() noexcept {
-    return completion_candidates_;
+    return storage_->completion_candidates_;
 }
 
-std::size_t estimate_target_verifier_bytes(const Gemma2ModelConfig& config, std::uint32_t row_capacity) {
+std::size_t estimate_target_verifier_bytes(const GemmaModelConfig& config, std::uint32_t row_capacity) {
     // An ordinary workspace may have a runtime context shorter than the
     // model's local window. It never creates ancestry; topology admission
     // below the public verifier boundary retains its stricter window check.
@@ -874,8 +882,8 @@ Gemma2MetalTargetVerifierPlan create_gemma2_metal_target_verifier_plan(
             "target verifier requires an available Metal device"
         );
     }
-    if (target.output_head_policy() != Gemma2OutputHeadPolicy::q8_0
-        && target.output_head_policy() != Gemma2OutputHeadPolicy::q6_k) {
+    if (target.output_head_policy() != GemmaOutputHeadPolicy::q8_0
+        && target.output_head_policy() != GemmaOutputHeadPolicy::q6_k) {
         throw std::invalid_argument("target verifier requires a native Q8 or Q6 output head");
     }
     if (row_capacity == 0U || row_capacity > VerifierRowMax) {

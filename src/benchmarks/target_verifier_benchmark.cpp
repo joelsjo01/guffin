@@ -1,4 +1,5 @@
 #include "local_gguf_engine/benchmarks/target_verifier_benchmark.hpp"
+#include "local_gguf_engine/benchmarks/target_verifier_episode.hpp"
 
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/engine/target_verifier.hpp"
@@ -382,8 +383,8 @@ TargetVerifierBenchmarkResult run_target_verifier_benchmark(
     auto model = engine::load_engine_model_from_gguf(file_model.view());
     const auto gemma3 = model.architecture() == engine::ModelArchitecture::gemma3;
     auto plan = engine::create_gemma2_metal_model_plan(
-        model, gemma3 ? engine::Gemma2OutputHeadPolicy::automatic
-                      : engine::Gemma2OutputHeadPolicy::q8_0
+        model, gemma3 ? engine::GemmaOutputHeadPolicy::automatic
+                      : engine::GemmaOutputHeadPolicy::q8_0
     );
     const auto& config = plan.config();
     constexpr auto root_position = std::uint32_t {16U};
@@ -648,10 +649,10 @@ TargetVerifierBenchmarkResult run_target_verifier_benchmark(
             config.context_length, config.sliding_window, config.attention_global_layer_period
         )
     );
-    auto episode_workspace = std::make_unique<engine::TargetVerifierEpisodeWorkspace>();
+    auto episode_workspace = std::make_unique<TargetVerifierEpisodeWorkspace>();
     if (conditional) {
         auto warm_sampler = root_sampler;
-        static_cast<void>(engine::run_gemma2_metal_target_verifier_chain_episode(
+        static_cast<void>(run_target_verifier_chain_episode(
             plan, verifier, *validated_episode, scenario, warm_sampler,
             *episode_workspace, scale
         ));
@@ -660,11 +661,11 @@ TargetVerifierBenchmarkResult run_target_verifier_benchmark(
     auto episode_sampler = root_sampler;
     const auto episode_begin = Clock::now();
     const auto episode = forest || repeated
-        ? engine::run_gemma2_metal_target_verifier_forest_episode(
+        ? run_target_verifier_forest_episode(
             plan, verifier, *validated_episode, scenario, episode_sampler,
             *episode_workspace, scale
         )
-        : engine::run_gemma2_metal_target_verifier_chain_episode(
+        : run_target_verifier_chain_episode(
             plan, verifier, *validated_episode, scenario, episode_sampler,
             *episode_workspace, scale
         );

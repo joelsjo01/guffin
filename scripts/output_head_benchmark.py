@@ -18,7 +18,7 @@ SCHEMA_VERSION = 1
 def run_chat(binary, model, policy):
     stdout, stderr = run_process(
         [
-            binary, model, "--chat", "--backend", "metal", "--seed", str(SEED),
+            binary, model, "--interactive", "--backend", "metal", "--seed", str(SEED),
             "--decode-diagnostics", "--output-head", policy,
         ],
         "[ Detail:",
@@ -89,7 +89,7 @@ def decide(samples):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
-    parser.add_argument("--binary", default="build/release/local-gguf-generate")
+    parser.add_argument("--binary", default="build/release/guffin")
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--cooldown", type=float, default=10.0)
     parser.add_argument("--json", action="store_true")

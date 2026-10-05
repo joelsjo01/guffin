@@ -7,7 +7,7 @@
 
 namespace local_gguf_engine::engine {
 
-struct Gemma2AttentionWeights {
+struct GemmaAttentionWeights {
     tensor::TensorView attention_norm_weight;
     tensor::TensorView post_attention_norm_weight;
     tensor::TensorView query_weight;
@@ -18,7 +18,7 @@ struct Gemma2AttentionWeights {
     std::optional<tensor::TensorView> key_norm_weight;
 };
 
-struct Gemma2FeedForwardWeights {
+struct GemmaFeedForwardWeights {
     tensor::TensorView feed_forward_norm_weight;
     tensor::TensorView post_feed_forward_norm_weight;
     tensor::TensorView gate_weight;
@@ -26,21 +26,21 @@ struct Gemma2FeedForwardWeights {
     tensor::TensorView down_weight;
 };
 
-struct Gemma2BlockWeights {
-    Gemma2AttentionWeights attention;
-    Gemma2FeedForwardWeights feed_forward;
+struct GemmaBlockWeights {
+    GemmaAttentionWeights attention;
+    GemmaFeedForwardWeights feed_forward;
 };
 
-struct Gemma2ModelWeights {
+struct GemmaModelWeights {
     tensor::TensorView token_embedding_weight;
     tensor::TensorView output_norm_weight;
     tensor::TensorView output_weight;
-    std::vector<Gemma2BlockWeights> blocks;
+    std::vector<GemmaBlockWeights> blocks;
 };
 
-[[nodiscard]] Gemma2ModelWeights bind_gemma2_model_weights(const EngineModel& model);
+[[nodiscard]] GemmaModelWeights bind_gemma_model_weights(const EngineModel& model);
 // Used before residency allocation, including callers supplying borrowed
 // weights directly rather than going through the GGUF binding entry point.
-void validate_gemma3_model_weights(const Gemma2ModelConfig& config, const Gemma2ModelWeights& weights);
+void validate_gemma3_model_weights(const GemmaModelConfig& config, const GemmaModelWeights& weights);
 
 }  // namespace local_gguf_engine::engine

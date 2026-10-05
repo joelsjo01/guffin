@@ -20,7 +20,7 @@
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
 #include "../../src/tensor/backends/metal/metal_command_context.hpp"
-#include "../../src/tensor/backends/metal/metal_test_hooks.hpp"
+#include "metal_test_hooks.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1211,7 +1211,7 @@ void test_rejects_explicit_metal_matmul_rows_beyond_input_before_encoding() {
     }
 }
 
-void test_force_injected_unavailable_metal_small_batch_paths() {
+void test_force_injected_unavailable_metal_device_paths() {
 #if !defined(LOCAL_GGUF_ENGINE_TESTING)
     throw TestFailure("Metal unavailable-device fault injection is absent from the test build");
 #else
@@ -1239,6 +1239,22 @@ void test_force_injected_unavailable_metal_small_batch_paths() {
                 == "Metal backend unavailable: no system default Metal device",
             "injected unavailable Metal reason mismatch"
         );
+
+        const auto valid_descriptor = TensorDescriptor::from(Shape::from({2, 2}), DType::f32);
+        auto invalid_descriptor = valid_descriptor;
+        invalid_descriptor.byte_count = std::numeric_limits<std::size_t>::max();
+        try {
+            (void)allocate_backend_buffer(invalid_descriptor, BackendKind::metal);
+            throw TestFailure("malformed Metal descriptor should fail before device lookup");
+        } catch (const std::invalid_argument&) {
+        }
+        try {
+            (void)allocate_backend_buffer(valid_descriptor, BackendKind::metal);
+            throw TestFailure("valid Metal allocation should report the unavailable device");
+        } catch (const BackendError& error) {
+            expect(error.code() == BackendErrorCode::unavailable_metal_device,
+                "valid Metal allocation changed unavailable-device behavior");
+        }
 
         constexpr auto shared = std::uint64_t {256U};
         constexpr auto columns = std::uint64_t {3U};
@@ -1509,6 +1525,35 @@ void test_allocates_metal_backend_buffer_when_available() {
     expect(buffer.backend() == BackendKind::metal, "Metal allocated backend buffer kind mismatch");
     expect(buffer.descriptor() == descriptor, "Metal allocated backend buffer descriptor mismatch");
     expect(roundtrip.descriptor() == descriptor, "Metal allocated backend buffer roundtrip descriptor mismatch");
+}
+
+void test_metal_buffer_views_validate_descriptors_when_available() {
+#if !defined(LOCAL_GGUF_ENGINE_TESTING)
+    throw TestFailure("Metal buffer view fault helper is absent from the test build");
+#else
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const auto parent = allocate_backend_buffer(
+        TensorDescriptor::from(Shape::from({8}), DType::f32), BackendKind::metal);
+    const auto descriptor = TensorDescriptor::from(Shape::from({2}), DType::f32);
+    const auto view = local_gguf_engine::tensor::backends::metal::shared_metal_buffer_view_for_testing(
+        parent, descriptor, sizeof(float));
+    expect(view.descriptor() == descriptor, "valid Metal subview descriptor mismatch");
+    for (const auto invalid : {0U, 1U, 2U, 3U}) {
+        auto forged = descriptor;
+        switch (invalid) {
+            case 0U: ++forged.element_count; break;
+            case 1U: forged.byte_count = sizeof(float); break;
+            case 2U: forged.shape = Shape::from({4}); break;
+            case 3U: forged.dtype = DType::f16; break;
+        }
+        try {
+            (void)local_gguf_engine::tensor::backends::metal::shared_metal_buffer_view_for_testing(
+                parent, forged, sizeof(float));
+            throw TestFailure("Metal subview accepted an inconsistent descriptor");
+        } catch (const std::invalid_argument&) {
+        }
+    }
+#endif
 }
 
 void test_multiplies_f32_by_metal_backend_f16_gguf_weight_buffer_when_available() {
@@ -2205,6 +2250,7 @@ void test_reports_unavailable_metal_backend_operations_when_missing() {
 }
 
 const TestCase tensor_backend_tests[] {
+    {"Metal buffer views validate descriptors when available", test_metal_buffer_views_validate_descriptors_when_available},
     {
         "multiplies F32 by F16 GGUF weight matrix on CPU backend",
         test_multiplies_f32_by_f16_gguf_weight_matrix_on_cpu_backend,
@@ -2282,8 +2328,8 @@ const TestCase tensor_backend_tests[] {
         test_rejects_explicit_metal_matmul_rows_beyond_input_before_encoding,
     },
     {
-        "force-injected unavailable Metal rejects 3-8-row K-quant paths",
-        test_force_injected_unavailable_metal_small_batch_paths,
+        "force-injected unavailable Metal validates allocations and rejects K-quant paths",
+        test_force_injected_unavailable_metal_device_paths,
     },
     {
         "exact-16 K-quant projection overwrites poison at real tiny widths on Metal",

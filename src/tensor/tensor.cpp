@@ -10,22 +10,7 @@ namespace local_gguf_engine::tensor {
 
 namespace {
 
-void validate_tensor_packing(const TensorDescriptor& descriptor) {
-    if (descriptor.packing == TensorPacking::canonical) {
-        return;
-    }
-    if (descriptor.packing != TensorPacking::kquant_columns8) {
-        throw std::invalid_argument("unknown tensor packing");
-    }
-    const auto expected = TensorDescriptor::from_interleaved_kquant_weight_matrix(
-        descriptor.shape, descriptor.dtype);
-    if (descriptor != expected) {
-        throw std::invalid_argument("interleaved K-quant tensor descriptor is inconsistent");
-    }
-}
-
 void validate_storage_byte_count(const TensorDescriptor& descriptor, std::size_t actual_byte_count) {
-    validate_tensor_packing(descriptor);
     if (actual_byte_count != descriptor.byte_count) {
         throw TensorError(
             TensorErrorCode::invalid_storage_byte_count,
@@ -36,6 +21,31 @@ void validate_storage_byte_count(const TensorDescriptor& descriptor, std::size_t
 }
 
 }  // namespace
+
+void validate_tensor_descriptor(const TensorDescriptor& descriptor) {
+    const auto expected = [&] {
+        switch (descriptor.packing) {
+            case TensorPacking::canonical: {
+                const auto layout = dtype_layout(descriptor.dtype);
+                // GGUF matrices store blocks along the shared first dimension;
+                // their output columns may end in a partial tile.
+                if (descriptor.shape.rank() == 2
+                    && descriptor.shape.dimension(1) % layout.block_element_count != 0U) {
+                    return TensorDescriptor::from_quantized_gguf_weight_matrix(
+                        descriptor.shape, descriptor.dtype);
+                }
+                return TensorDescriptor::from(descriptor.shape, descriptor.dtype);
+            }
+            case TensorPacking::kquant_columns8:
+                return TensorDescriptor::from_interleaved_kquant_weight_matrix(
+                    descriptor.shape, descriptor.dtype);
+        }
+        throw std::invalid_argument("unknown tensor packing");
+    }();
+    if (descriptor != expected) {
+        throw std::invalid_argument("tensor descriptor is inconsistent with its shape, dtype and packing");
+    }
+}
 
 TensorDescriptor TensorDescriptor::from(const Shape& shape, DType dtype) {
     return TensorDescriptor(
@@ -124,7 +134,7 @@ TensorDescriptor::TensorDescriptor(
 }
 
 TensorStorage TensorStorage::allocate(const TensorDescriptor& descriptor) {
-    validate_tensor_packing(descriptor);
+    validate_tensor_descriptor(descriptor);
     return TensorStorage(descriptor, std::vector<std::uint8_t>(descriptor.byte_count));
 }
 
@@ -132,6 +142,7 @@ TensorStorage TensorStorage::from_bytes(
     const TensorDescriptor& descriptor,
     std::span<const std::uint8_t> bytes
 ) {
+    validate_tensor_descriptor(descriptor);
     validate_storage_byte_count(descriptor, bytes.size());
     std::vector<std::uint8_t> storage(bytes.size());
     std::copy(bytes.begin(), bytes.end(), storage.begin());
@@ -150,8 +161,10 @@ std::span<std::uint8_t> TensorStorage::mutable_bytes() noexcept {
     return std::span<std::uint8_t>(bytes_.data(), bytes_.size());
 }
 
-TensorView TensorStorage::view() const noexcept {
-    return TensorView::from_bytes(descriptor_, bytes());
+TensorView TensorStorage::view() const {
+    // A move can remove backing bytes; the descriptor was validated on entry.
+    validate_storage_byte_count(descriptor_, bytes_.size());
+    return TensorView(descriptor_, bytes());
 }
 
 TensorStorage::TensorStorage(TensorDescriptor descriptor, std::vector<std::uint8_t> bytes)
@@ -162,6 +175,7 @@ TensorView TensorView::from_bytes(
     const TensorDescriptor& descriptor,
     std::span<const std::uint8_t> bytes
 ) {
+    validate_tensor_descriptor(descriptor);
     validate_storage_byte_count(descriptor, bytes.size());
     return TensorView(descriptor, bytes);
 }

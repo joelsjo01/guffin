@@ -1,6 +1,5 @@
 #pragma once
 
-#include "local_gguf_engine/engine/feature_bank.hpp"
 #include "local_gguf_engine/engine/gemma2_metal_plan.hpp"
 #include "local_gguf_engine/engine/gemma2_runtime.hpp"
 #include "local_gguf_engine/engine/sampling.hpp"
@@ -138,7 +137,7 @@ public:
     ValidatedVerifierEncodeRequest& operator=(ValidatedVerifierEncodeRequest&&) noexcept = default;
 
     [[nodiscard]] const VerifierEncodeRequest& request() const noexcept;
-    [[nodiscard]] bool validated_for(const Gemma2ModelConfig& target) const noexcept;
+    [[nodiscard]] bool validated_for(const GemmaModelConfig& target) const noexcept;
 
 private:
     friend ValidatedVerifierEncodeRequest validate_verifier_encode_request(
@@ -271,6 +270,15 @@ public:
         bool precise_math = false
     );
 
+    // A moved-from arena supports destruction and reassignment. Its live
+    // ticket retains the original scratch and completed-candidate storage.
+    Gemma2MetalTargetVerifierPlan(const Gemma2MetalTargetVerifierPlan&) = delete;
+    Gemma2MetalTargetVerifierPlan& operator=(const Gemma2MetalTargetVerifierPlan&) = delete;
+    Gemma2MetalTargetVerifierPlan(Gemma2MetalTargetVerifierPlan&&) noexcept = default;
+    Gemma2MetalTargetVerifierPlan& operator=(Gemma2MetalTargetVerifierPlan&&) noexcept = default;
+
+    // Stable host arena storage, allocated once in addition to the facade.
+    [[nodiscard]] static std::size_t host_storage_byte_count() noexcept;
     [[nodiscard]] const Gemma2MetalTargetVerifierScratch& scratch() const noexcept;
     [[nodiscard]] std::uint32_t row_capacity() const noexcept;
     [[nodiscard]] std::uint32_t layer_count() const noexcept;
@@ -283,19 +291,24 @@ public:
 
 private:
     friend struct TargetVerifierRuntimeAccess;
-    std::shared_ptr<TargetVerifierRuntimeState> runtime_;
-    Gemma2MetalTargetVerifierScratch scratch_;
-    std::uint32_t row_capacity_ = 0;
-    std::uint32_t layer_count_ = 0;
-    std::uint32_t vocabulary_size_ = 0;
-    std::uintptr_t target_weight_identity_ = 0;
-    std::size_t allocated_byte_count_ = 0;
-    std::vector<CompactTokenCandidates> completion_candidates_;
+    friend class TargetVerificationTicket;
+
+    struct Storage {
+        std::shared_ptr<TargetVerifierRuntimeState> runtime_;
+        Gemma2MetalTargetVerifierScratch scratch_;
+        std::uint32_t row_capacity_ = 0;
+        std::uint32_t layer_count_ = 0;
+        std::uint32_t vocabulary_size_ = 0;
+        std::uintptr_t target_weight_identity_ = 0;
+        std::size_t allocated_byte_count_ = 0;
+        std::vector<CompactTokenCandidates> completion_candidates_;
+    };
+    std::shared_ptr<Storage> storage_;
 };
 
 // The same descriptor ledger as the prepared arena; no device work is performed.
 [[nodiscard]] std::size_t estimate_target_verifier_bytes(
-    const Gemma2ModelConfig& config, std::uint32_t row_capacity);
+    const GemmaModelConfig& config, std::uint32_t row_capacity);
 
 [[nodiscard]] Gemma2MetalTargetVerifierPlan create_gemma2_metal_target_verifier_plan(
     const Gemma2MetalModelPlan& target,
@@ -347,35 +360,9 @@ struct TargetVerifierCommitReceipt {
     TargetVerifierExecutionStats execution;
 };
 
-struct TargetVerifierEpisodeWorkspace {
-    // This request is intentionally caller-owned and reusable. It is roughly
-    // VerifierRowMax-shaped, so placing it inside a per-call stack frame would
-    // both risk stack exhaustion and violate the steady-state allocation
-    // contract.
-    VerifierEncodeRequest tile_request;
-    SpeculativeControllerScenario controller_scenario;
-};
-
-struct TargetVerifierEpisodeResult {
-    SpeculativeControllerOutcome controller;
-    TargetVerifierExecutionStats target_execution;
-    Gemma2MetalDecodeExecutionStats endpoint_execution;
-    Gemma2MetalDecodeExecutionStats ordinary_fallback_execution;
-    CompactTokenCandidates next_candidates;
-    CompactTokenCandidates ordinary_fallback_candidates;
-    std::uint64_t controller_wall_ns = 0;
-    std::uint64_t target_wall_ns = 0;
-    std::uint64_t target_gpu_ns = 0;
-    std::uint64_t commit_wall_ns = 0;
-    std::uint64_t commit_gpu_ns = 0;
-    std::uint64_t endpoint_wall_ns = 0;
-    std::uint64_t ordinary_fallback_wall_ns = 0;
-    std::uint32_t executed_tile_count = 0;
-    std::uint32_t endpoint_count = 0;
-    bool has_next_candidates = false;
-    bool executed_ordinary_fallback = false;
-};
-
+// Access to a target, its verifier arena, tickets and borrowed completion views
+// is serialized by the caller. Moving or destroying plan facades is safe while
+// a ticket owns the transaction; finishing/reusing its arena ends the view lease.
 class TargetVerificationTicket final {
 public:
     TargetVerificationTicket(TargetVerificationTicket&&) noexcept;
@@ -390,14 +377,16 @@ public:
     [[nodiscard]] std::uint64_t graph_identity() const noexcept;
 
 private:
-    explicit TargetVerificationTicket(std::shared_ptr<TargetVerifierRuntimeState> impl);
+    TargetVerificationTicket(
+        std::shared_ptr<TargetVerifierRuntimeState> impl,
+        std::shared_ptr<Gemma2MetalModelPlan::Storage> target_owner,
+        std::shared_ptr<Gemma2MetalTargetVerifierPlan::Storage> verifier_owner
+    );
     friend TargetVerificationTicket encode_gemma2_metal_target_verifier(
         Gemma2MetalModelPlan&,
         Gemma2MetalTargetVerifierPlan&,
         const ValidatedVerifierEncodeRequest&,
-        float,
-        FeatureSinkBinding,
-        DraftCacheBinding
+        float
     );
     friend void submit_gemma2_metal_target_verifier(TargetVerificationTicket&);
     friend TargetVerifierCompletionResult complete_gemma2_metal_target_verifier(
@@ -413,6 +402,10 @@ private:
     );
     friend void discard_gemma2_metal_target_verifier(TargetVerificationTicket&);
     std::shared_ptr<TargetVerifierRuntimeState> impl_;
+    // The preallocated runtime borrows these stable resources. Retain both
+    // until destruction has completed any provisional K/V restoration.
+    std::shared_ptr<Gemma2MetalModelPlan::Storage> target_owner_;
+    std::shared_ptr<Gemma2MetalTargetVerifierPlan::Storage> verifier_owner_;
     std::uint64_t lease_epoch_ = 0;
 };
 
@@ -420,9 +413,7 @@ private:
     Gemma2MetalModelPlan& target,
     Gemma2MetalTargetVerifierPlan& verifier,
     const ValidatedVerifierEncodeRequest& request,
-    float embedding_scale,
-    FeatureSinkBinding feature_sink = {},
-    DraftCacheBinding draft_cache = {}
+    float embedding_scale
 );
 
 void submit_gemma2_metal_target_verifier(TargetVerificationTicket& ticket);
@@ -443,40 +434,8 @@ void submit_gemma2_metal_target_verifier(TargetVerificationTicket& ticket);
 
 void discard_gemma2_metal_target_verifier(TargetVerificationTicket& ticket);
 
-// Drives a validated chain through the exact controller one available target
-// sample at a time. A later tile is encoded only after the controller reaches
-// it; all preceding gate, context, stop, budget, callback, and mismatch
-// decisions therefore suppress that Metal submission rather than merely
-// discounting it after execution. The authoritative sampler must already be
-// at scenario.origin_checkpoint (the checkpoint after selecting x0).
-[[nodiscard]] TargetVerifierEpisodeResult
-run_gemma2_metal_target_verifier_chain_episode(
-    Gemma2MetalModelPlan& target,
-    Gemma2MetalTargetVerifierPlan& verifier,
-    const ValidatedVerifierEncodeRequest& full_request,
-    const SpeculativeControllerScenario& scenario,
-    TokenSampler& authoritative_sampler,
-    TargetVerifierEpisodeWorkspace& workspace,
-    float embedding_scale
-);
-
-// Single-submission prefix-closed forest/repeated-root counterpart. Sampling
-// walks only the target-selected causal path; unused leaf rows never consume a
-// sampler ticket, and only that path can reach resident K/V.
-[[nodiscard]] TargetVerifierEpisodeResult
-run_gemma2_metal_target_verifier_forest_episode(
-    Gemma2MetalModelPlan& target,
-    Gemma2MetalTargetVerifierPlan& verifier,
-    const ValidatedVerifierEncodeRequest& full_request,
-    const SpeculativeControllerScenario& scenario,
-    TokenSampler& authoritative_sampler,
-    TargetVerifierEpisodeWorkspace& workspace,
-    float embedding_scale
-);
-
 // Caches an authoritative terminal token that was selected from a verifier
-// row but was not itself among the verifier inputs. This is the single target
-// endpoint to which Phase 3 attaches feature and draft-cache maintenance.
+// row but was not itself among the verifier inputs.
 [[nodiscard]] Gemma2MetalDecodeExecutionStats run_gemma2_metal_target_verifier_endpoint(
     Gemma2MetalModelPlan& target,
     std::uint32_t token_id,

@@ -2,7 +2,7 @@
 #include "local_gguf_engine/engine/standalone_draft_artifact.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/backend.hpp"
-#include "../../src/tensor/backends/metal/metal_test_hooks.hpp"
+#include "metal_test_hooks.hpp"
 #include "test_support.hpp"
 #include "gemma3_golden_hashes.hpp"
 

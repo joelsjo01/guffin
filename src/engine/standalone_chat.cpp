@@ -1,5 +1,4 @@
 #include "local_gguf_engine/engine/standalone_chat.hpp"
-#include "local_gguf_engine/engine/gemma2_reference.hpp"
 #include "local_gguf_engine/engine/gemma3_draft.hpp"
 
 #include <algorithm>
@@ -276,7 +275,7 @@ std::size_t StandaloneChatPlan::tokenizer_workspace_bytes_for_testing() const no
 #endif
 StandaloneChatPlan::StandaloneChatPlan(StandaloneChatPlan&&) noexcept = default;
 StandaloneChatPlan& StandaloneChatPlan::operator=(StandaloneChatPlan&&) noexcept = default;
-std::size_t StandaloneChatPlan::estimate_owned_bytes(const Gemma2ModelConfig& target,
+std::size_t StandaloneChatPlan::estimate_owned_bytes(const GemmaModelConfig& target,
     const tokenizer::Tokenizer& target_tokenizer, const tokenizer::Tokenizer& draft_tokenizer,
     const StandaloneTliMapping& mapping, StandaloneExecutionOptions execution) {
     if (execution.horizon == 0 || execution.horizon > external_speculation_max_horizon
@@ -627,7 +626,7 @@ void StandaloneChatPlan::warm_up(Gemma2MetalModelPlan& target, const TokenSample
     auto warm_sampler = sampler;
     warm_sampler.observe_tokens(prompt);
     static_cast<void>(run_gemma2_metal_resident_prefill(target, prompt, 0,
-        gemma2_input_embedding_scale(target.config().embedding_length), warm_sampler.selection_request()));
+        gemma_input_embedding_scale(target.config().embedding_length), warm_sampler.selection_request()));
     warm_sampler.observe_tokens(prompt);
     const auto stop = [](const ChainCommittedToken&) { return Gemma2MetalTokenStreamDecision::stop_generation; };
     static_cast<void>(run(target, warm_sampler, prompt[0], 1, horizon() + 1, {}, stop));

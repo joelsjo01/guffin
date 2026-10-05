@@ -68,7 +68,7 @@ struct ChainCycleResult {
 };
 
 // Target transaction and callback-prefix ownership are independent of how a
-// chain was drafted. R feature leases and autonomous draft K/V stay outside.
+// chain was drafted. Autonomous draft K/V stays outside.
 class ChainChatVerifier final {
 public:
     ChainChatVerifier(const Gemma2MetalModelPlan& target, std::uint32_t horizon,
@@ -78,10 +78,9 @@ public:
     ChainChatVerifier& operator=(ChainChatVerifier&&) noexcept;
     ChainChatVerifier(const ChainChatVerifier&) = delete;
     ChainChatVerifier& operator=(const ChainChatVerifier&) = delete;
-    [[nodiscard]] static std::size_t estimate_owned_bytes(const Gemma2ModelConfig& config,
+    [[nodiscard]] static std::size_t estimate_owned_bytes(const GemmaModelConfig& config,
         std::uint32_t horizon, bool conditional);
     [[nodiscard]] std::size_t owned_bytes() const noexcept;
-    [[nodiscard]] const tensor::BackendBuffer& last_hidden() const;
     void warm_up_tiles(Gemma2MetalModelPlan& target);
     [[nodiscard]] ChainCycleResult run(Gemma2MetalModelPlan& target, TokenSampler& sampler,
         std::uint32_t root, std::uint32_t position, std::size_t remaining,

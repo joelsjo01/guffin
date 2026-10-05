@@ -488,7 +488,7 @@ ImmutableWeightBenchmarkResult run_no_copy_weight_feasibility_benchmark(
         throw std::runtime_error("Metal no-copy parent properties differ from request");
     }
 
-    const auto& config = model.gemma2_config();
+    const auto& config = model.gemma_config();
     const auto hidden = static_cast<std::uint64_t>(config.embedding_length);
     const auto feed_forward = static_cast<std::uint64_t>(config.feed_forward_length);
     const std::vector<std::pair<std::string, const engine::EngineTensorView*>> representatives {
@@ -593,7 +593,7 @@ ImmutableWeightBenchmarkResult run_immutable_weight_benchmark(
     auto file_model = model_format::read_file_backed_gguf_model(model_path);
     auto model = engine::load_engine_model_from_gguf(file_model.view());
     auto& state = shared_matmul_pipeline_state();
-    const auto& config = model.gemma2_config();
+    const auto& config = model.gemma_config();
     const auto hidden = static_cast<std::uint64_t>(config.embedding_length);
     const auto feed_forward = static_cast<std::uint64_t>(config.feed_forward_length);
     const std::vector<std::pair<std::string, const engine::EngineTensorView*>> representatives {

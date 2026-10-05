@@ -1,6 +1,6 @@
 #include "engine_model_tests.hpp"
 
-#include "local_gguf_engine/engine/gemma2_model.hpp"
+#include "local_gguf_engine/engine/gemma_model.hpp"
 #include "local_gguf_engine/engine/model.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor.hpp"
 #include "local_gguf_engine/tensor/layout.hpp"
@@ -19,8 +19,8 @@ namespace {
 
 using local_gguf_engine::engine::EngineModelError;
 using local_gguf_engine::engine::EngineModelErrorCode;
-using local_gguf_engine::engine::Gemma2ModelConfig;
-using local_gguf_engine::engine::bind_gemma2_model_weights;
+using local_gguf_engine::engine::GemmaModelConfig;
+using local_gguf_engine::engine::bind_gemma_model_weights;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
 using local_gguf_engine::engine::ModelArchitecture;
 using local_gguf_engine::engine::model_architecture_name;
@@ -193,7 +193,7 @@ void test_loads_engine_model_from_gemma2_gguf_view() {
     expect(model.name().has_value(), "Gemma2 engine model name should be present");
     expect(*model.name() == "Tiny Gemma 2 Fixture", "Gemma2 engine model name mismatch");
 
-    const auto expected_config = Gemma2ModelConfig {
+    const auto expected_config = GemmaModelConfig {
         .context_length = 16,
         .embedding_length = 256,
         .block_count = 1,
@@ -209,7 +209,7 @@ void test_loads_engine_model_from_gemma2_gguf_view() {
         .final_logit_softcap = 30.0F,
         .uses_tied_output_weight = true,
     };
-    expect(model.gemma2_config() == expected_config, "Gemma2 config mismatch");
+    expect(model.gemma_config() == expected_config, "Gemma2 config mismatch");
     expect(model.tensor_views().size() == 13, "Gemma2 tensor view count mismatch");
 
     const auto* token_embedding = model.find_tensor_view("token_embd.weight");
@@ -225,7 +225,7 @@ void test_binds_gemma2_model_weights_with_mixed_k_quant_tensors() {
     auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
     const auto model = load_engine_model_from_gguf(view);
 
-    const auto weights = bind_gemma2_model_weights(model);
+    const auto weights = bind_gemma_model_weights(model);
 
     expect(weights.blocks.size() == 1, "Gemma2 bound block count mismatch");
     expect(
@@ -383,7 +383,7 @@ void test_rejects_gemma2_weight_binding_missing_tensor() {
     const auto model = load_engine_model_from_gguf(view);
 
     try {
-        (void)bind_gemma2_model_weights(model);
+        (void)bind_gemma_model_weights(model);
         throw TestFailure("Gemma2 weight binding should reject missing post-FFN norm");
     } catch (const EngineModelError& error) {
         expect(error.code() == EngineModelErrorCode::missing_tensor, "Gemma2 missing tensor error mismatch");

@@ -74,7 +74,7 @@ public:
     StandaloneChatPlan& operator=(StandaloneChatPlan&&) noexcept;
     StandaloneChatPlan(const StandaloneChatPlan&) = delete;
     StandaloneChatPlan& operator=(const StandaloneChatPlan&) = delete;
-    [[nodiscard]] static std::size_t estimate_owned_bytes(const Gemma2ModelConfig& target,
+    [[nodiscard]] static std::size_t estimate_owned_bytes(const GemmaModelConfig& target,
         const tokenizer::Tokenizer& target_tokenizer, const tokenizer::Tokenizer& draft_tokenizer,
         const StandaloneTliMapping& mapping, StandaloneExecutionOptions execution);
     [[nodiscard]] std::uint32_t horizon() const noexcept;

@@ -340,7 +340,7 @@ def run_local_chat(binary, model, cooldown, speculative=True, *, retrieval=True,
         print(f"cooling down for {cooldown:g}s before local chat...", file=sys.stderr)
         time.sleep(cooldown)
     command = [
-        binary, model, "--chat", "--backend", "metal", "--seed", str(SEED),
+        binary, model, "--interactive", "--backend", "metal", "--seed", str(SEED),
         "--decode-diagnostics",
     ]
     if context_size is not None:
@@ -608,8 +608,8 @@ def print_human(local, kernels, terminal_rendered):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
-    parser.add_argument("--local", default="build/release/local-gguf-generate")
-    parser.add_argument("--kernels", default="build/release/local-gguf-bench")
+    parser.add_argument("--local", default="build/release/guffin")
+    parser.add_argument("--kernels", default="build/release/guffin-bench")
     parser.add_argument("--context-size", type=int)
     parser.add_argument("--kv-cache", choices=("auto", "f32", "f16"))
     parser.add_argument("--skip-kernels", action="store_true",

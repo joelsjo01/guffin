@@ -107,7 +107,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--candidate", required=True)
-    parser.add_argument("--binary", type=Path, default=Path("build/release/local-gguf-bench"))
+    parser.add_argument("--binary", type=Path, default=Path("build/release/guffin-bench"))
     parser.add_argument("--pairs", type=int, default=3)
     parser.add_argument("--cooldown", type=float, default=10.0)
     parser.add_argument("--json", action="store_true")
