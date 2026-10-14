@@ -447,7 +447,7 @@ const MetalBackendBufferStorage& storage(const BackendBuffer& buffer) {
 }
 
 void* contents(const BackendBuffer& buffer) {
-    return metal_buffer_contents(storage(buffer));
+    return tensor::backends::metal::mutable_metal_buffer_contents(storage(buffer));
 }
 
 void bind(id<MTLComputeCommandEncoder> encoder, const BackendBuffer& buffer, NSUInteger index,
@@ -560,7 +560,8 @@ struct Gemma3DraftPlan::Impl {
     Buffer compact_ids;
     Buffer compact_cdfs;
     std::array<id<MTLComputePipelineState>, pipeline_count> pipelines{};
-    MatmulPipelineState* shared = nullptr;
+    id<MTLDevice> device = nil;
+    id<MTLCommandQueue> queue = nil;
     id<MTLCommandBuffer> command = nil;
     id<MTLComputeCommandEncoder> encoder = nil;
     std::vector<std::int32_t> reverse_map;
@@ -672,14 +673,14 @@ struct Gemma3DraftPlan::Impl {
         }
         if (!mapped_count)
             throw std::invalid_argument("Gemma3 TLI intersection is empty");
-        (void)metal_device_or_throw();
-        shared = &shared_matmul_pipeline_state();
+        device = metal_device_or_throw();
+        queue = shared_metal_command_queue();
         MTLCompileOptions* options = [MTLCompileOptions new];
         options.mathMode = MTLMathModeSafe;
         options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsPrecise;
         NSError* error = nil;
         auto library =
-            [shared->device newLibraryWithSource:[NSString stringWithUTF8String:draft_kernel_source]
+            [device newLibraryWithSource:[NSString stringWithUTF8String:draft_kernel_source]
                                          options:options
                                            error:&error];
         if (!library)
@@ -688,7 +689,7 @@ struct Gemma3DraftPlan::Impl {
         for (std::size_t index = 0; index < pipeline_count; ++index) {
             auto function =
                 [library newFunctionWithName:[NSString stringWithUTF8String:pipeline_names[index]]];
-            pipelines[index] = [shared->device newComputePipelineStateWithFunction:function
+            pipelines[index] = [device newComputePipelineStateWithFunction:function
                                                                              error:&error];
             if (!pipelines[index] || pipelines[index].threadExecutionWidth != 32 ||
                 pipelines[index].maxTotalThreadsPerThreadgroup < (index == sort_tile ? 512U : 256U))
@@ -764,7 +765,7 @@ struct Gemma3DraftPlan::Impl {
         command_started_ns = now_ns();
         *static_cast<std::uint32_t*>(contents(status)) = 0;
         running.uploaded_bytes = sizeof(std::uint32_t);
-        command = [shared->queue commandBuffer];
+        command = [queue commandBuffer];
         if (!command)
             throw std::runtime_error("Gemma3 command allocation failed");
         command.label = @"Gemma3 resident draft";

@@ -1,20 +1,21 @@
 #include "local_gguf_engine/tensor/quantization.hpp"
 
 #include "local_gguf_engine/tensor/f16.hpp"
+#include "local_gguf_engine/tensor/kquant_packing.hpp"
+
+#include "kquant_packing_internal.hpp"
+#include "weight_preparation.hpp"
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstring>
-#include <exception>
 #include <limits>
-#include <mutex>
 #include <numeric>
 #include <stdexcept>
-#include <thread>
 #include <vector>
+
 
 namespace local_gguf_engine::tensor {
 
@@ -31,6 +32,56 @@ void require_quantized_descriptor(const TensorDescriptor& descriptor, DType expe
             static_cast<std::uint64_t>(static_cast<std::uint8_t>(descriptor.dtype))
         );
     }
+}
+
+TensorDescriptor q8_0_conversion_descriptor(TensorView source) {
+    const auto& source_descriptor = source.descriptor();
+    if (source_descriptor.dtype != DType::f16) {
+        throw TensorError(
+            TensorErrorCode::unsupported_operator_dtype,
+            static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::f16)),
+            static_cast<std::uint64_t>(static_cast<std::uint8_t>(source_descriptor.dtype))
+        );
+    }
+    if (source_descriptor.shape.rank() != 2U) {
+        throw TensorError(
+            TensorErrorCode::invalid_shape_rank,
+            2U,
+            static_cast<std::uint64_t>(source_descriptor.shape.rank())
+        );
+    }
+    const auto shared = source_descriptor.shape.dimension(0);
+    if (shared % Q8_0BlockView::element_count != 0U) {
+        throw TensorError(
+            TensorErrorCode::invalid_quantized_element_count,
+            Q8_0BlockView::element_count,
+            shared
+        );
+    }
+
+    return TensorDescriptor::from_quantized_gguf_weight_matrix(source_descriptor.shape, DType::q8_0);
+}
+
+TensorDescriptor q6_k_conversion_descriptor(TensorView source) {
+    const auto& descriptor = source.descriptor();
+    require_quantized_descriptor(descriptor, DType::q6_k);
+    if (descriptor.shape.rank() != 2U) {
+        throw TensorError(
+            TensorErrorCode::invalid_shape_rank,
+            2U,
+            static_cast<std::uint64_t>(descriptor.shape.rank())
+        );
+    }
+    const auto shared = descriptor.shape.dimension(0);
+    if (shared % Q6_KBlockView::element_count != 0U) {
+        throw TensorError(
+            TensorErrorCode::invalid_quantized_element_count,
+            Q6_KBlockView::element_count,
+            shared
+        );
+    }
+
+    return TensorDescriptor::from_quantized_gguf_weight_matrix(descriptor.shape, DType::q4_k);
 }
 
 [[nodiscard]] std::uint16_t read_little_endian_u16(std::span<const std::uint8_t> bytes) noexcept {
@@ -575,70 +626,49 @@ std::array<float, Q8_0BlockView::element_count> dequantize_q8_0_block(
 }
 
 TensorStorage quantize_f16_gguf_weight_q8_0(const TensorView& source) {
-    const auto& source_descriptor = source.descriptor();
-    if (source_descriptor.dtype != DType::f16) {
-        throw TensorError(
-            TensorErrorCode::unsupported_operator_dtype,
-            static_cast<std::uint64_t>(static_cast<std::uint8_t>(DType::f16)),
-            static_cast<std::uint64_t>(static_cast<std::uint8_t>(source_descriptor.dtype))
-        );
-    }
-    if (source_descriptor.shape.rank() != 2U) {
-        throw TensorError(
-            TensorErrorCode::invalid_shape_rank,
-            2U,
-            static_cast<std::uint64_t>(source_descriptor.shape.rank())
-        );
-    }
-    const auto shared = source_descriptor.shape.dimension(0);
-    if (shared % Q8_0BlockView::element_count != 0U) {
-        throw TensorError(
-            TensorErrorCode::invalid_quantized_element_count,
-            Q8_0BlockView::element_count,
-            shared
-        );
-    }
-
-    const auto destination_descriptor = TensorDescriptor::from_quantized_gguf_weight_matrix(
-        source_descriptor.shape,
-        DType::q8_0
-    );
-    auto destination = TensorStorage::allocate(destination_descriptor);
-    const auto source_bytes = source.bytes();
-    auto destination_bytes = destination.mutable_bytes();
-    const auto block_count = destination_descriptor.element_count / Q8_0BlockView::element_count;
-
-    for (std::uint64_t block_index = 0; block_index < block_count; ++block_index) {
-        std::array<float, Q8_0BlockView::element_count> values {};
-        float absolute_maximum = 0.0F;
-        for (std::size_t element = 0; element < values.size(); ++element) {
-            const auto linear_index = block_index * values.size() + element;
-            const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(std::uint16_t));
-            const auto bits = static_cast<std::uint16_t>(
-                static_cast<std::uint16_t>(source_bytes[byte_offset])
-                | static_cast<std::uint16_t>(static_cast<std::uint16_t>(source_bytes[byte_offset + 1U]) << 8U)
-            );
-            values[element] = f16_bits_to_f32(bits);
-            if (!std::isfinite(values[element])) {
-                throw std::invalid_argument("Q8_0 F16 weight quantization requires finite values");
-            }
-            absolute_maximum = std::max(absolute_maximum, std::abs(values[element]));
-        }
-
-        const float scale = absolute_maximum / 127.0F;
-        const float inverse_scale = scale == 0.0F ? 0.0F : 1.0F / scale;
-        const auto scale_bits = f32_to_f16_bits(scale);
-        const auto destination_offset = static_cast<std::size_t>(block_index * Q8_0BlockView::byte_count);
-        destination_bytes[destination_offset] = static_cast<std::uint8_t>(scale_bits & 0xFFU);
-        destination_bytes[destination_offset + 1U] = static_cast<std::uint8_t>(scale_bits >> 8U);
-        for (std::size_t element = 0; element < values.size(); ++element) {
-            const auto rounded = std::round(values[element] * inverse_scale);
-            const auto quantized = static_cast<std::int8_t>(rounded);
-            destination_bytes[destination_offset + 2U + element] = std::bit_cast<std::uint8_t>(quantized);
-        }
-    }
-
+    auto destination = TensorStorage::allocate(q8_0_conversion_descriptor(source));
+    quantize_f16_gguf_weight_q8_0_into(source, destination.descriptor(), destination.mutable_bytes());
     return destination;
+}
+
+void quantize_f16_gguf_weight_q8_0_into(TensorView source,
+    const TensorDescriptor& destination_descriptor, std::span<std::uint8_t> destination_bytes) {
+    const auto expected = q8_0_conversion_descriptor(source);
+    detail::validate_preparation_destination(source, destination_descriptor,
+        expected, destination_bytes);
+    const auto source_bytes = source.bytes();
+    const auto block_count = destination_bytes.size() / Q8_0BlockView::byte_count;
+    detail::prepare_weight_ranges(block_count, 4096U, [&](std::size_t begin, std::size_t end) {
+        for (std::size_t block_index = begin; block_index < end; ++block_index) {
+            std::array<float, Q8_0BlockView::element_count> values {};
+            float absolute_maximum = 0.0F;
+            for (std::size_t element = 0; element < values.size(); ++element) {
+                const auto linear_index = block_index * values.size() + element;
+                const auto byte_offset = static_cast<std::size_t>(linear_index * sizeof(std::uint16_t));
+                const auto bits = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(source_bytes[byte_offset])
+                    | static_cast<std::uint16_t>(static_cast<std::uint16_t>(source_bytes[byte_offset + 1U]) << 8U)
+                );
+                values[element] = f16_bits_to_f32(bits);
+                if (!std::isfinite(values[element])) {
+                    throw std::invalid_argument("Q8_0 F16 weight quantization requires finite values");
+                }
+                absolute_maximum = std::max(absolute_maximum, std::abs(values[element]));
+            }
+
+            const float scale = absolute_maximum / 127.0F;
+            const float inverse_scale = scale == 0.0F ? 0.0F : 1.0F / scale;
+            const auto scale_bits = f32_to_f16_bits(scale);
+            const auto destination_offset = static_cast<std::size_t>(block_index * Q8_0BlockView::byte_count);
+            destination_bytes[destination_offset] = static_cast<std::uint8_t>(scale_bits & 0xFFU);
+            destination_bytes[destination_offset + 1U] = static_cast<std::uint8_t>(scale_bits >> 8U);
+            for (std::size_t element = 0; element < values.size(); ++element) {
+                const auto rounded = std::round(values[element] * inverse_scale);
+                const auto quantized = static_cast<std::int8_t>(rounded);
+                destination_bytes[destination_offset + 2U + element] = std::bit_cast<std::uint8_t>(quantized);
+            }
+        }
+    });
 }
 
 std::uint64_t q4_k_block_count(const TensorDescriptor& descriptor) {
@@ -714,32 +744,24 @@ std::array<float, Q6_KBlockView::element_count> dequantize_q6_k_block(
 }
 
 TensorStorage requantize_q6_k_gguf_weight_q4_k(const TensorView& source) {
-    const auto& descriptor = source.descriptor();
-    require_quantized_descriptor(descriptor, DType::q6_k);
-    if (descriptor.shape.rank() != 2U) {
-        throw TensorError(
-            TensorErrorCode::invalid_shape_rank,
-            2U,
-            static_cast<std::uint64_t>(descriptor.shape.rank())
-        );
-    }
-    const auto shared = descriptor.shape.dimension(0);
-    if (shared % Q6_KBlockView::element_count != 0U) {
-        throw TensorError(
-            TensorErrorCode::invalid_quantized_element_count,
-            Q6_KBlockView::element_count,
-            shared
-        );
-    }
+    auto destination = TensorStorage::allocate(q6_k_conversion_descriptor(source));
+    requantize_q6_k_gguf_weight_q4_k_into(source, destination.descriptor(), destination.mutable_bytes());
+    return destination;
+}
 
-    const auto destination_descriptor = TensorDescriptor::from_quantized_gguf_weight_matrix(
-        descriptor.shape, DType::q4_k
-    );
-    auto destination = TensorStorage::allocate(destination_descriptor);
+void requantize_q6_k_gguf_weight_q4_k_into(TensorView source,
+    const TensorDescriptor& destination_descriptor, std::span<std::uint8_t> destination_bytes) {
+    const auto native_descriptor = q6_k_conversion_descriptor(source);
+    const auto& descriptor = source.descriptor();
+    const auto shared = descriptor.shape.dimension(0);
+    const bool packed = destination_descriptor.packing == TensorPacking::kquant_columns8;
+    detail::validate_preparation_destination(source, destination_descriptor,
+        packed ? TensorDescriptor::from_interleaved_kquant_weight_matrix(descriptor.shape, DType::q4_k)
+               : native_descriptor,
+        destination_bytes);
     const auto source_bytes = source.bytes();
-    auto destination_bytes = destination.mutable_bytes();
-    const auto block_count = descriptor.element_count / Q6_KBlockView::element_count;
-    const auto convert_block = [&](std::uint64_t block_index) {
+    const auto convert_block = [&](std::size_t block_index,
+        std::span<std::uint8_t, Q4_KBlockView::byte_count> output) {
         const auto source_offset = static_cast<std::size_t>(block_index * Q6_KBlockView::byte_count);
         const auto source_block = source_bytes.subspan(source_offset, Q6_KBlockView::byte_count);
         const Q6_KBlockView block(
@@ -752,59 +774,49 @@ TensorStorage requantize_q6_k_gguf_weight_q4_k(const TensorView& source) {
             read_little_endian_u16(source_block.last<2>())
         );
         std::array<float, Q6_KBlockView::element_count> values {};
-        for (std::size_t element = 0; element < values.size(); ++element) {
-            values[element] = block.dequantized_value(element);
-            if (!std::isfinite(values[element])) {
-                throw std::invalid_argument("Q6_K to Q4_K requantization requires finite decoded values");
+        const auto scale = block.scale();
+        for (std::size_t group = 0U; group < Q6_KBlockView::scale_byte_count; ++group) {
+            const auto group_scale = scale * static_cast<float>(block.scale_value(group));
+            for (std::size_t lane = 0U; lane < 16U; ++lane) {
+                const auto element = group * 16U + lane;
+                values[element] = group_scale * static_cast<float>(block.quantized_value(element));
+                if (!std::isfinite(values[element])) {
+                    throw std::invalid_argument("Q6_K to Q4_K requantization requires finite decoded values");
+                }
             }
         }
-        const auto destination_offset = static_cast<std::size_t>(block_index * Q4_KBlockView::byte_count);
-        encode_q4_k_block(
-            values,
-            std::span<std::uint8_t, Q4_KBlockView::byte_count>(
-                destination_bytes.data() + destination_offset, Q4_KBlockView::byte_count
-            )
-        );
+        encode_q4_k_block(values, output);
     };
-
-    // Target matrices contain roughly 200k independent blocks. Four workers
-    // use the M4 performance cores without turning a one-time conversion into
-    // a full-machine thermal load; small tensors stay serial for low overhead.
-    constexpr std::uint64_t parallel_block_threshold = 4096U;
-    constexpr std::size_t worker_count = 4U;
-    if (block_count < parallel_block_threshold) {
-        for (std::uint64_t block_index = 0; block_index < block_count; ++block_index) {
-            convert_block(block_index);
-        }
-        return destination;
-    }
-
-    std::atomic<std::uint64_t> next_block {0U};
-    std::atomic<bool> failed {false};
-    std::exception_ptr first_error;
-    std::mutex error_mutex;
-    std::vector<std::thread> workers;
-    workers.reserve(worker_count);
-    for (std::size_t worker = 0; worker < worker_count; ++worker) {
-        workers.emplace_back([&] {
-            try {
-                while (!failed.load(std::memory_order_relaxed)) {
-                    const auto block_index = next_block.fetch_add(1U, std::memory_order_relaxed);
-                    if (block_index >= block_count) break;
-                    convert_block(block_index);
-                }
-            } catch (...) {
-                failed.store(true, std::memory_order_relaxed);
-                std::lock_guard lock(error_mutex);
-                if (first_error == nullptr) first_error = std::current_exception();
+    if (!packed) {
+        const auto block_count = destination_bytes.size() / Q4_KBlockView::byte_count;
+        detail::prepare_weight_ranges(block_count, 4096U, [&](std::size_t begin, std::size_t end) {
+            for (std::size_t index = begin; index < end; ++index) {
+                convert_block(index, std::span<std::uint8_t, Q4_KBlockView::byte_count>(
+                    destination_bytes.data() + index * Q4_KBlockView::byte_count, Q4_KBlockView::byte_count));
             }
         });
+        return;
     }
-    for (auto& worker : workers) worker.join();
-    if (first_error != nullptr) {
-        std::rethrow_exception(first_error);
-    }
-    return destination;
+
+    const auto blocks = static_cast<std::size_t>(shared / Q6_KBlockView::element_count);
+    const auto columns = static_cast<std::size_t>(descriptor.shape.dimension(1));
+    const auto tile_count = destination_bytes.size() / kquant_q4_columns8_tile_bytes;
+    // One worker owns each complete packed tile, including partial-column padding.
+    detail::prepare_weight_ranges(tile_count, 512U, [&](std::size_t begin, std::size_t end) {
+        std::array<std::uint8_t, Q4_KBlockView::byte_count> native {};
+        for (std::size_t index = begin; index < end; ++index) {
+            const auto first_column = index / blocks * kquant_packing_columns;
+            const auto block = index % blocks;
+            const auto lanes = std::min(kquant_packing_columns, columns - first_column);
+            auto tile = destination_bytes.subspan(index * kquant_q4_columns8_tile_bytes,
+                kquant_q4_columns8_tile_bytes);
+            if (lanes < kquant_packing_columns) std::fill(tile.begin(), tile.end(), 0U);
+            for (std::size_t lane = 0U; lane < lanes; ++lane) {
+                convert_block((first_column + lane) * blocks + block, native);
+                detail::pack_q4_k_columns8_lane(native, tile, lane);
+            }
+        }
+    });
 }
 
 std::vector<float> dequantize_q6_k_row(const TensorStorage& storage, std::uint64_t row_index) {

@@ -630,7 +630,7 @@ TensorStorage matmul_f32_f16_gguf_weight_with_metal_right_buffer(
     const auto dispatch = select_f16_matmul_dispatch(state, rows, columns);
     [encoder setComputePipelineState:dispatch.pipeline];
     [encoder setBuffer:left_buffer offset:0 atIndex:0];
-    [encoder setBuffer:right.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:right.buffer() offset:metal_buffer_binding_offset(right) atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -695,8 +695,8 @@ BackendBuffer matmul_f32_f16_gguf_weight_with_metal_buffers(
 
     const auto dispatch = select_f16_matmul_dispatch(state, rows, columns);
     [encoder setComputePipelineState:dispatch.pipeline];
-    [encoder setBuffer:left.buffer() offset:0 atIndex:0];
-    [encoder setBuffer:right.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:left.buffer() offset:metal_buffer_binding_offset(left) atIndex:0];
+    [encoder setBuffer:right.buffer() offset:metal_buffer_binding_offset(right) atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -751,7 +751,7 @@ BackendBuffer rope_neox_f32_by_heads_with_metal_buffer(
         throw metal_error(runtime::BackendErrorCode::metal_execution_failed, "Metal NeoX RoPE encoding failed");
     }
     [encoder setComputePipelineState:state.rope_neox_by_heads_pipeline];
-    [encoder setBuffer:input.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:input.buffer() offset:metal_buffer_binding_offset(input) atIndex:0];
     [encoder setBuffer:output_buffer offset:0 atIndex:1];
     [encoder setBuffer:dims_buffer offset:0 atIndex:2];
     const MTLSize threads_per_threadgroup = MTLSizeMake(16, 16, 1);
@@ -823,7 +823,7 @@ BackendBuffer embed_f16_gguf_weight_token_ids_with_metal_buffer(
 
     [encoder setComputePipelineState:state.embedding_pipeline];
     [encoder setBuffer:token_ids_buffer offset:0 atIndex:0];
-    [encoder setBuffer:embedding_weight.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:embedding_weight.buffer() offset:metal_buffer_binding_offset(embedding_weight) atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -889,8 +889,8 @@ BackendBuffer rms_norm_f32_with_metal_buffers(
     }
 
     [encoder setComputePipelineState:state.rms_norm_pipeline];
-    [encoder setBuffer:input.buffer() offset:0 atIndex:0];
-    [encoder setBuffer:weight.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:input.buffer() offset:metal_buffer_binding_offset(input) atIndex:0];
+    [encoder setBuffer:weight.buffer() offset:metal_buffer_binding_offset(weight) atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -959,7 +959,7 @@ BackendBuffer rope_f32_by_heads_with_metal_buffer(
     }
 
     [encoder setComputePipelineState:state.rope_by_heads_pipeline];
-    [encoder setBuffer:input.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:input.buffer() offset:metal_buffer_binding_offset(input) atIndex:0];
     [encoder setBuffer:output_buffer offset:0 atIndex:1];
     [encoder setBuffer:dims_buffer offset:0 atIndex:2];
 
@@ -1038,8 +1038,8 @@ BackendBuffer causal_grouped_attention_scores_f32_with_metal_buffers(
     }
 
     [encoder setComputePipelineState:state.causal_grouped_attention_scores_pipeline];
-    [encoder setBuffer:query.buffer() offset:0 atIndex:0];
-    [encoder setBuffer:key.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:query.buffer() offset:metal_buffer_binding_offset(query) atIndex:0];
+    [encoder setBuffer:key.buffer() offset:metal_buffer_binding_offset(key) atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -1116,8 +1116,8 @@ BackendBuffer causal_grouped_attention_values_f32_with_metal_buffers(
     }
 
     [encoder setComputePipelineState:state.causal_grouped_attention_values_pipeline];
-    [encoder setBuffer:probabilities.buffer() offset:0 atIndex:0];
-    [encoder setBuffer:value.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:probabilities.buffer() offset:metal_buffer_binding_offset(probabilities) atIndex:0];
+    [encoder setBuffer:value.buffer() offset:metal_buffer_binding_offset(value) atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -1178,7 +1178,7 @@ BackendBuffer softmax_f32_with_metal_buffer(const MetalBackendBufferStorage& inp
     }
 
     [encoder setComputePipelineState:state.softmax_pipeline];
-    [encoder setBuffer:input.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:input.buffer() offset:metal_buffer_binding_offset(input) atIndex:0];
     [encoder setBuffer:output_buffer offset:0 atIndex:1];
     [encoder setBuffer:dims_buffer offset:0 atIndex:2];
 
@@ -1246,7 +1246,7 @@ BackendBuffer softcap_f32_with_metal_buffer(
     }
 
     [encoder setComputePipelineState:state.softcap_pipeline];
-    [encoder setBuffer:input.buffer() offset:0 atIndex:0];
+    [encoder setBuffer:input.buffer() offset:metal_buffer_binding_offset(input) atIndex:0];
     [encoder setBuffer:output_buffer offset:0 atIndex:1];
     [encoder setBuffer:dims_buffer offset:0 atIndex:2];
 
@@ -1310,8 +1310,8 @@ BackendBuffer matmul_f32_quantized_gguf_weight_with_metal_buffers(
         state, right.descriptor().dtype, rows, shared, columns
     );
     [encoder setComputePipelineState:dispatch.pipeline];
-    [encoder setBuffer:left.buffer() offset:0 atIndex:0];
-    [encoder setBuffer:right.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:left.buffer() offset:metal_buffer_binding_offset(left) atIndex:0];
+    [encoder setBuffer:right.buffer() offset:metal_buffer_binding_offset(right) atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -1403,7 +1403,7 @@ ops::F32F16GGUFWeightTripleMatmulBackendBuffers matmul_f32_f16_gguf_weight_tripl
     }
 
     auto encode_matmul = [&](
-        id<MTLBuffer> right_buffer,
+        const MetalBackendBufferStorage& right,
         id<MTLBuffer> output_buffer,
         id<MTLBuffer> dims_buffer,
         std::uint64_t output_columns
@@ -1418,8 +1418,8 @@ ops::F32F16GGUFWeightTripleMatmulBackendBuffers matmul_f32_f16_gguf_weight_tripl
 
         const auto dispatch = select_f16_matmul_dispatch(state, rows, output_columns);
         [encoder setComputePipelineState:dispatch.pipeline];
-        [encoder setBuffer:left.buffer() offset:0 atIndex:0];
-        [encoder setBuffer:right_buffer offset:0 atIndex:1];
+        [encoder setBuffer:left.buffer() offset:metal_buffer_binding_offset(left) atIndex:0];
+        [encoder setBuffer:right.buffer() offset:metal_buffer_binding_offset(right) atIndex:1];
         [encoder setBuffer:output_buffer offset:0 atIndex:2];
         [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -1428,9 +1428,9 @@ ops::F32F16GGUFWeightTripleMatmulBackendBuffers matmul_f32_f16_gguf_weight_tripl
         [encoder endEncoding];
     };
 
-    encode_matmul(first_right.buffer(), first_buffer, first_dims_buffer, first_columns);
-    encode_matmul(second_right.buffer(), second_buffer, second_dims_buffer, second_columns);
-    encode_matmul(third_right.buffer(), third_buffer, third_dims_buffer, third_columns);
+    encode_matmul(first_right, first_buffer, first_dims_buffer, first_columns);
+    encode_matmul(second_right, second_buffer, second_dims_buffer, second_columns);
+    encode_matmul(third_right, third_buffer, third_dims_buffer, third_columns);
 
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
@@ -1484,8 +1484,8 @@ BackendBuffer silu_multiply_f32_with_metal_buffers(
     }
 
     [encoder setComputePipelineState:state.silu_multiply_pipeline];
-    [encoder setBuffer:gate.buffer() offset:0 atIndex:0];
-    [encoder setBuffer:up.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:gate.buffer() offset:metal_buffer_binding_offset(gate) atIndex:0];
+    [encoder setBuffer:up.buffer() offset:metal_buffer_binding_offset(up) atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -1542,8 +1542,8 @@ BackendBuffer gelu_tanh_multiply_f32_with_metal_buffers(
     }
 
     [encoder setComputePipelineState:state.gelu_tanh_multiply_pipeline];
-    [encoder setBuffer:gate.buffer() offset:0 atIndex:0];
-    [encoder setBuffer:up.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:gate.buffer() offset:metal_buffer_binding_offset(gate) atIndex:0];
+    [encoder setBuffer:up.buffer() offset:metal_buffer_binding_offset(up) atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -1608,8 +1608,8 @@ BackendBuffer add_f32_with_metal_buffers(
     }
 
     [encoder setComputePipelineState:state.add_pipeline];
-    [encoder setBuffer:left.buffer() offset:0 atIndex:0];
-    [encoder setBuffer:right.buffer() offset:0 atIndex:1];
+    [encoder setBuffer:left.buffer() offset:metal_buffer_binding_offset(left) atIndex:0];
+    [encoder setBuffer:right.buffer() offset:metal_buffer_binding_offset(right) atIndex:1];
     [encoder setBuffer:output_buffer offset:0 atIndex:2];
     [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -1709,7 +1709,8 @@ BackendBuffer gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
 
     auto encode_matmul = [&](
         id<MTLBuffer> left_buffer,
-        id<MTLBuffer> right_buffer,
+        NSUInteger left_offset,
+        const MetalBackendBufferStorage& right,
         id<MTLBuffer> matmul_output_buffer,
         id<MTLBuffer> dims_buffer,
         std::uint64_t output_rows,
@@ -1727,8 +1728,8 @@ BackendBuffer gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
             state, output_rows, output_columns_for_dispatch
         );
         [encoder setComputePipelineState:dispatch.pipeline];
-        [encoder setBuffer:left_buffer offset:0 atIndex:0];
-        [encoder setBuffer:right_buffer offset:0 atIndex:1];
+        [encoder setBuffer:left_buffer offset:left_offset atIndex:0];
+        [encoder setBuffer:right.buffer() offset:metal_buffer_binding_offset(right) atIndex:1];
         [encoder setBuffer:matmul_output_buffer offset:0 atIndex:2];
         [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -1737,8 +1738,8 @@ BackendBuffer gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
         [encoder endEncoding];
     };
 
-    encode_matmul(left.buffer(), gate_weight.buffer(), gate_buffer, gate_dims_buffer, rows, feed_forward);
-    encode_matmul(left.buffer(), up_weight.buffer(), up_buffer, gate_dims_buffer, rows, feed_forward);
+    encode_matmul(left.buffer(), metal_buffer_binding_offset(left), gate_weight, gate_buffer, gate_dims_buffer, rows, feed_forward);
+    encode_matmul(left.buffer(), metal_buffer_binding_offset(left), up_weight, up_buffer, gate_dims_buffer, rows, feed_forward);
 
     id<MTLComputeCommandEncoder> silu_encoder = [command_buffer computeCommandEncoder];
     if (silu_encoder == nil) {
@@ -1762,7 +1763,7 @@ BackendBuffer gated_silu_projection_f32_f16_gguf_weight_with_metal_buffers(
                  threadsPerThreadgroup:activation_threads_per_threadgroup];
     [silu_encoder endEncoding];
 
-    encode_matmul(gated_buffer, down_weight.buffer(), output_buffer, down_dims_buffer, rows, output_columns);
+    encode_matmul(gated_buffer, 0U, down_weight, output_buffer, down_dims_buffer, rows, output_columns);
 
     [command_buffer commit];
     [command_buffer waitUntilCompleted];
@@ -1887,7 +1888,8 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buff
 
     auto encode_matmul = [&](
         id<MTLBuffer> left_buffer,
-        id<MTLBuffer> right_buffer,
+        NSUInteger left_offset,
+        const MetalBackendBufferStorage& right,
         id<MTLBuffer> matmul_output_buffer,
         id<MTLBuffer> dims_buffer,
         std::uint64_t output_rows,
@@ -1905,8 +1907,8 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buff
             state, output_rows, output_columns_for_dispatch
         );
         [encoder setComputePipelineState:dispatch.pipeline];
-        [encoder setBuffer:left_buffer offset:0 atIndex:0];
-        [encoder setBuffer:right_buffer offset:0 atIndex:1];
+        [encoder setBuffer:left_buffer offset:left_offset atIndex:0];
+        [encoder setBuffer:right.buffer() offset:metal_buffer_binding_offset(right) atIndex:1];
         [encoder setBuffer:matmul_output_buffer offset:0 atIndex:2];
         [encoder setBuffer:dims_buffer offset:0 atIndex:3];
 
@@ -1915,7 +1917,8 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buff
         [encoder endEncoding];
     };
 
-    auto encode_add = [&](id<MTLBuffer> left_buffer, id<MTLBuffer> right_buffer, id<MTLBuffer> add_output_buffer) {
+    auto encode_add = [&](id<MTLBuffer> left_buffer, NSUInteger left_offset,
+        id<MTLBuffer> right_buffer, id<MTLBuffer> add_output_buffer) {
         id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
         if (encoder == nil) {
             throw metal_error(
@@ -1925,7 +1928,7 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buff
         }
 
         [encoder setComputePipelineState:state.add_pipeline];
-        [encoder setBuffer:left_buffer offset:0 atIndex:0];
+        [encoder setBuffer:left_buffer offset:left_offset atIndex:0];
         [encoder setBuffer:right_buffer offset:0 atIndex:1];
         [encoder setBuffer:add_output_buffer offset:0 atIndex:2];
         [encoder setBuffer:hidden_elementwise_dims_buffer offset:0 atIndex:3];
@@ -1938,14 +1941,15 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buff
     };
 
     encode_matmul(
-        attention_output.buffer(),
-        attention_output_weight.buffer(),
+        attention_output.buffer(), metal_buffer_binding_offset(attention_output),
+        attention_output_weight,
         attention_projected_buffer,
         attention_output_dims_buffer,
         rows,
         hidden
     );
-    encode_add(input.buffer(), attention_projected_buffer, attention_residual_buffer);
+    encode_add(input.buffer(), metal_buffer_binding_offset(input),
+        attention_projected_buffer, attention_residual_buffer);
 
     id<MTLComputeCommandEncoder> rms_norm_encoder = [command_buffer computeCommandEncoder];
     if (rms_norm_encoder == nil) {
@@ -1956,7 +1960,7 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buff
     }
     [rms_norm_encoder setComputePipelineState:state.rms_norm_pipeline];
     [rms_norm_encoder setBuffer:attention_residual_buffer offset:0 atIndex:0];
-    [rms_norm_encoder setBuffer:feed_forward_norm_weight.buffer() offset:0 atIndex:1];
+    [rms_norm_encoder setBuffer:feed_forward_norm_weight.buffer() offset:metal_buffer_binding_offset(feed_forward_norm_weight) atIndex:1];
     [rms_norm_encoder setBuffer:normalized_buffer offset:0 atIndex:2];
     [rms_norm_encoder setBuffer:rms_norm_dims_buffer offset:0 atIndex:3];
 
@@ -1967,8 +1971,8 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buff
                      threadsPerThreadgroup:rms_norm_threads_per_threadgroup];
     [rms_norm_encoder endEncoding];
 
-    encode_matmul(normalized_buffer, gate_weight.buffer(), gate_buffer, gate_dims_buffer, rows, feed_forward);
-    encode_matmul(normalized_buffer, up_weight.buffer(), up_buffer, gate_dims_buffer, rows, feed_forward);
+    encode_matmul(normalized_buffer, 0U, gate_weight, gate_buffer, gate_dims_buffer, rows, feed_forward);
+    encode_matmul(normalized_buffer, 0U, up_weight, up_buffer, gate_dims_buffer, rows, feed_forward);
 
     id<MTLComputeCommandEncoder> silu_encoder = [command_buffer computeCommandEncoder];
     if (silu_encoder == nil) {
@@ -1992,8 +1996,8 @@ BackendBuffer residual_gated_silu_projection_f32_f16_gguf_weight_with_metal_buff
                  threadsPerThreadgroup:activation_threads_per_threadgroup];
     [silu_encoder endEncoding];
 
-    encode_matmul(gated_buffer, down_weight.buffer(), feed_forward_projected_buffer, down_dims_buffer, rows, hidden);
-    encode_add(attention_residual_buffer, feed_forward_projected_buffer, output_buffer);
+    encode_matmul(gated_buffer, 0U, down_weight, feed_forward_projected_buffer, down_dims_buffer, rows, hidden);
+    encode_add(attention_residual_buffer, 0U, feed_forward_projected_buffer, output_buffer);
 
     [command_buffer commit];
     [command_buffer waitUntilCompleted];

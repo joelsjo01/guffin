@@ -933,6 +933,149 @@ void f16_attention_extreme_finite_scores() {
     }
 }
 
+// Keep an independently materialized FP64 softmax. Exact dyadic K/V values
+// isolate attention from cache conversion, while NaN padding and view guards
+// make incorrectly admitted future, old, or out-of-view rows observable.
+void expect_bulk_prefill_attention_reference(std::uint32_t rows, std::uint32_t origin,
+    std::uint32_t window, std::uint32_t capacity, std::uint32_t query_heads = 4U,
+    std::uint32_t kv_heads = 2U, bool large_scores = false, bool sensitive_query = false) {
+    constexpr std::uint32_t dimension = 256U, stage_rows = 128U;
+    constexpr float poison = std::numeric_limits<float>::quiet_NaN(), guard = -13.25F;
+    const auto width = kv_heads * dimension, query_width = query_heads * dimension;
+    const auto end = origin + rows;
+    const auto first = origin + 1U > window ? origin + 1U - window : 0U;
+    std::vector<float> logical_key(static_cast<std::size_t>(end) * width);
+    std::vector<float> logical_value(logical_key.size());
+    for (std::uint32_t position = first; position < end; ++position) {
+        for (std::uint32_t head = 0U; head < kv_heads; ++head) {
+            for (std::uint32_t column = 0U; column < dimension; ++column) {
+                const auto index = static_cast<std::size_t>(position) * width + head * dimension + column;
+                const auto key_pattern = static_cast<int>((position * 97U + head * 19U + column * 37U) % 251U) - 125;
+                const auto value_pattern = static_cast<int>((position * 41U + head * 29U + column * 11U) % 127U) - 63;
+                logical_key[index] = sensitive_query ? (position == 0U ? 1.0F : -1.0F)
+                    : static_cast<float>(key_pattern) / 64.0F;
+                logical_value[index] = sensitive_query ? (position == 0U ? 1.0F : -1.0F)
+                    : static_cast<float>(value_pattern) / 64.0F;
+            }
+        }
+    }
+    std::vector<float> query_values(static_cast<std::size_t>(rows) * query_width);
+    for (std::uint32_t row = 0U; row < rows; ++row) {
+        for (std::uint32_t head = 0U; head < query_heads; ++head) {
+            for (std::uint32_t column = 0U; column < dimension; ++column) {
+                const auto value_pattern = static_cast<int>((row * 43U + head * 23U + column * 17U) % 257U) - 128;
+                query_values[static_cast<std::size_t>(row) * query_width + head * dimension + column]
+                    = sensitive_query ? (column < 128U ? 1.0002F : -1.0F)
+                    : static_cast<float>(value_pattern) * (large_scores ? 0.500173F : 0.0078173F)
+                        + static_cast<float>(head % 3U) * 0.000173F;
+            }
+        }
+    }
+    std::vector<float> resident_key(static_cast<std::size_t>(capacity) * width, poison);
+    std::vector<float> resident_value(resident_key.size(), poison);
+    std::vector<float> private_key(static_cast<std::size_t>(stage_rows) * width, poison);
+    std::vector<float> private_value(private_key.size(), poison);
+    for (std::uint32_t position = first; position < end; ++position) {
+        const bool is_private = position >= origin;
+        const auto destination = is_private ? position - origin : position & (capacity - 1U);
+        auto& key = is_private ? private_key : resident_key;
+        auto& value = is_private ? private_value : resident_value;
+        std::copy_n(logical_key.data() + static_cast<std::size_t>(position) * width,
+            width, key.data() + static_cast<std::size_t>(destination) * width);
+        std::copy_n(logical_value.data() + static_cast<std::size_t>(position) * width,
+            width, value.data() + static_cast<std::size_t>(destination) * width);
+    }
+    std::vector<BackendBuffer> owners;
+    const auto cache = [&](std::uint32_t count, const std::vector<float>& data, bool private_rows) {
+        // Rank-three resident and rank-two private caches are the production
+        // layouts. Nonzero child offsets also exercise actual buffer binding.
+        std::vector<float> guarded(data.size() + 16U, guard);
+        std::copy(data.begin(), data.end(), guarded.begin() + 8U);
+        auto owner = cache_upload(1U, static_cast<std::uint32_t>(guarded.size()), guarded, DType::f16);
+        const auto shape = private_rows ? Shape::from({count, width}) : Shape::from({count, kv_heads, dimension});
+        auto view = tensor::backends::metal::shared_metal_buffer_view_for_testing(owner,
+            TensorDescriptor::from(shape, DType::f16), 8U * sizeof(std::uint16_t));
+        owners.push_back(std::move(owner));
+        return view;
+    };
+    const auto key = cache(capacity, resident_key, false), value = cache(capacity, resident_value, false);
+    const auto current_key = cache(stage_rows, private_key, true), current_value = cache(stage_rows, private_value, true);
+    std::vector<std::vector<std::uint16_t>> original_cache;
+    for (const auto& owner : owners) original_cache.push_back(half_bits(owner));
+    const auto query = upload(rows, query_width, query_values);
+    const auto output_owner = upload(rows + 2U, query_width,
+        std::vector<float>(static_cast<std::size_t>(rows + 2U) * query_width, guard));
+    const auto output = tensor::backends::metal::shared_metal_buffer_view_for_testing(output_owner,
+        TensorDescriptor::from(Shape::from({rows, query_width}), DType::f32), query_width * sizeof(float));
+    MetalCommandContext command("Gemma3 bulk prompt independent attention", false, true);
+    command.encode_f16_prefill_attention(query, key, value, current_key, current_value,
+        output, origin, query_heads, kv_heads, dimension, dimension, window,
+        1.0F / 16.0F, 0.0F, capacity - 1U, rows, true, origin);
+    const auto stats = command.commit_and_wait();
+    expect(stats.compute_dispatch_count == 1U && stats.transient_buffer_allocation_count == 0U,
+        "bulk prompt attention uses one dispatch and persistent storage");
+    const auto actual = values(output);
+    for (std::uint32_t row = 0U; row < rows; ++row) {
+        const auto position = origin + row;
+        const auto start = position + 1U > window ? position + 1U - window : 0U;
+        const auto count = position + 1U - start;
+        for (std::uint32_t head = 0U; head < query_heads; ++head) {
+            const auto kv_head = head / (query_heads / kv_heads);
+            std::vector<double> probabilities(count);
+            for (std::uint32_t token = 0U; token < count; ++token) {
+                double dot = 0.0;
+                for (std::uint32_t column = 0U; column < dimension; ++column) {
+                    dot += double(query_values[static_cast<std::size_t>(row) * query_width + head * dimension + column])
+                        * logical_key[static_cast<std::size_t>(start + token) * width + kv_head * dimension + column];
+                }
+                probabilities[token] = dot / 16.0;
+            }
+            const auto maximum = *std::max_element(probabilities.begin(), probabilities.end());
+            double denominator = 0.0;
+            for (auto& probability : probabilities) { probability = std::exp(probability - maximum); denominator += probability; }
+            for (std::uint32_t column = 0U; column < dimension; ++column) {
+                double expected = 0.0;
+                for (std::uint32_t token = 0U; token < count; ++token) {
+                    expected += probabilities[token] / denominator
+                        * logical_value[static_cast<std::size_t>(start + token) * width + kv_head * dimension + column];
+                }
+                // Keep the existing fused prompt operator's 4e-4 budget;
+                // neither a native comparison nor a looser gate defines it.
+                expect_close(actual[static_cast<std::size_t>(row) * query_width + head * dimension + column],
+                    static_cast<float>(expected), 4.0e-4F, "independent bulk causal Gemma3 attention");
+            }
+        }
+    }
+    const auto guarded_output = values(output_owner);
+    expect(std::all_of(guarded_output.begin(), guarded_output.begin() + query_width,
+            [](float value) { return value == guard; })
+        && std::all_of(guarded_output.end() - query_width, guarded_output.end(),
+            [](float value) { return value == guard; }), "bulk attention preserves both output guard rows");
+    for (std::size_t index = 0U; index < owners.size(); ++index)
+        expect(half_bits(owners[index]) == original_cache[index],
+            "bulk attention preserves exact F16 private/resident storage and guards");
+}
+
+void bulk_prefill_attention_causal_tails_and_wrapped_prefix() {
+    if (!metal_available()) return;
+    for (const auto rows : {8U, 9U, 31U, 32U, 33U, 127U, 128U}) {
+        expect_bulk_prefill_attention_reference(rows, 0U, rows, 256U);
+        // The unaligned logical origin cannot be used as a private array
+        // index. The old local prefix stays intact while this chunk wraps.
+        expect_bulk_prefill_attention_reference(rows, 141U, 8U, 32U);
+    }
+}
+
+void bulk_prefill_attention_target_geometry_and_f32_queries() {
+    if (!metal_available()) return;
+    expect_bulk_prefill_attention_reference(9U, 1021U, 1024U, 1024U, 16U, 8U);
+    expect_bulk_prefill_attention_reference(33U, 257U, 290U, 512U, 16U, 8U);
+    expect_bulk_prefill_attention_reference(9U, 141U, 32U, 32U, 16U, 8U, true);
+    // Rounding Q to F16 would cancel both row-1 scores and return zero;
+    // retained F32 query information produces about 0.0016 instead.
+    expect_bulk_prefill_attention_reference(8U, 0U, 8U, 16U, 4U, 2U, false, true);
+}
+
 void oversized_chunk_publication_keeps_newest_rows() {
     if (!metal_available()) return;
     constexpr std::uint32_t rows = 12U, capacity = 8U, width = 256U, position = 7U;
@@ -1000,8 +1143,18 @@ void uncapped_candidate_selection() {
 
 void hybrid_prefill_preserves_native_precision() {
     if (!metal_available()) return;
-    constexpr std::uint32_t rows = 128U, columns = 37U;
-    for (const auto width : {3840U, 4096U, 15360U}) {
+    constexpr std::uint32_t rows = 128U;
+    constexpr std::array<std::uint32_t, 18> original_tails {
+        1U, 2U, 3U, 4U, 5U, 7U, 8U, 9U, 15U, 16U, 17U, 31U, 32U, 33U, 63U, 64U, 65U, 127U
+    };
+    constexpr std::array<std::uint32_t, 6> matrix_tails {32U, 33U, 63U, 64U, 65U, 127U};
+    // Keep actual input-width precision checks and cross the wider output
+    // tile using one quantization block. Full 128-row execution is checked
+    // below; only the added matrix boundaries need another tail sweep.
+    for (const auto [width, columns] : std::array {
+             std::array {3840U, 37U}, std::array {4096U, 37U}, std::array {15360U, 37U},
+             std::array {256U, 63U}, std::array {256U, 64U},
+             std::array {256U, 65U}, std::array {256U, 129U}}) {
         const auto input_values = pattern(rows * width, 0.027F);
         const auto input = upload(rows, width, input_values);
         for (const auto dtype : {DType::q4_k, DType::q6_k}) {
@@ -1045,7 +1198,10 @@ void hybrid_prefill_preserves_native_precision() {
                 "columns8 prefill preserves native-layout F32 matrix arithmetic");
             expect(values(packed_output) == packed,
                 "columns8 verifier preserves native-layout arithmetic for all rows");
-            for (const auto tail_rows : {1U, 2U, 3U, 4U, 5U, 7U, 8U, 9U, 15U, 16U, 17U, 31U, 32U, 33U, 63U, 64U, 65U, 127U}) {
+            const auto tail_shapes = columns == 37U
+                ? std::span<const std::uint32_t>(original_tails)
+                : std::span<const std::uint32_t>(matrix_tails);
+            for (const auto tail_rows : tail_shapes) {
                 const auto tail_output = buffer({tail_rows, columns});
                 command.restart();
                 command.encode_verifier_matmul(input, weight, tail_output, tail_rows, true);
@@ -1207,6 +1363,57 @@ void hybrid_prefill_preserves_native_precision() {
             }
         }
     }
+}
+
+void direct_f32_prompt_guards_exact_sized_tail() {
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+    if (!metal_available()) return;
+    constexpr std::uint32_t rows = 33U, width = 256U, columns = 65U;
+    const auto input_values = pattern(rows * width, 0.027F);
+    const auto exact_input = upload(rows, width, input_values);
+    auto padded_values = input_values;
+    padded_values.resize(40U * width, 0.0F);
+    const auto padded_input = upload(40U, width, padded_values);
+    auto prefixed_values = std::vector<float>(34U * width, std::numeric_limits<float>::quiet_NaN());
+    std::copy(input_values.begin(), input_values.end(), prefixed_values.begin() + width);
+    const auto prefixed_input = upload(34U, width, prefixed_values);
+    const auto input_view = tensor::backends::metal::shared_metal_buffer_view_for_testing(prefixed_input,
+        TensorDescriptor::from(Shape::from({rows, width}), DType::f32), width * sizeof(float));
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        const auto host = dtype == DType::q4_k
+            ? tensor_q4_k_stress_gguf_weight_matrix(width, columns, 51U)
+            : tensor_q6_k_stress_gguf_weight_matrix(width, columns, 71U);
+        const auto native = copy_tensor_to_backend(host, BackendKind::metal);
+        const auto packed = copy_tensor_to_backend(repack_kquant_weight_columns8(host.view()), BackendKind::metal);
+        for (const auto* weight : {&native, &packed}) {
+            const auto reference = buffer({40U, columns});
+            const auto actual = buffer({rows, columns});
+            const auto guarded = upload(rows + 2U, columns, std::vector<float>((rows + 2U) * columns, -777.0F));
+            const auto output_view = tensor::backends::metal::shared_metal_buffer_view_for_testing(guarded,
+                TensorDescriptor::from(Shape::from({rows, columns}), DType::f32), columns * sizeof(float));
+            MetalCommandContext command("F32 direct prompt exact-sized boundaries", false, true);
+            // Eight rows force the unchanged M8 kernel. Zero-pad only this
+            // independent reference; the candidate input ends at row33.
+            for (std::uint32_t first = 0U; first < 40U; first += 8U) {
+                const auto source = tensor::backends::metal::shared_metal_buffer_view_for_testing(padded_input,
+                    TensorDescriptor::from(Shape::from({8U, width}), DType::f32), first * width * sizeof(float));
+                const auto target = tensor::backends::metal::shared_metal_buffer_view_for_testing(reference,
+                    TensorDescriptor::from(Shape::from({8U, columns}), DType::f32), first * columns * sizeof(float));
+                command.encode_verifier_matmul(source, *weight, target, 8U, true);
+            }
+            command.encode_verifier_matmul(exact_input, *weight, actual, rows, true);
+            command.encode_verifier_matmul(input_view, *weight, output_view, rows, true);
+            static_cast<void>(command.commit_and_wait());
+            const auto expected = values(reference), got = values(actual);
+            expect(std::equal(got.begin(), got.end(), expected.begin()) && values(output_view) == got,
+                "direct F32 A tiles preserve every M8 bit at simultaneous M/N tails and nonzero views");
+            const auto guards = values(guarded);
+            expect(std::all_of(guards.begin(), guards.begin() + columns, [](float v) { return v == -777.0F; })
+                && std::all_of(guards.end() - columns, guards.end(), [](float v) { return v == -777.0F; }),
+                "direct F32 prompt output views preserve both guard rows");
+        }
+    }
+#endif
 }
 
 void matrix_operands_retain_f32_information() {
@@ -1517,9 +1724,12 @@ std::span<const TestCase> gemma3_metal_test_cases() {
         TestCase{"Gemma3 F16 attention extreme finite scores", f16_attention_extreme_finite_scores},
         TestCase{"Metal attention dispatch follows host-staged visible rows", attention_dispatch_uses_host_staged_visible_rows},
         TestCase{"Metal attention dispatch rejects invalid host schedules", attention_dispatch_rejects_invalid_host_schedules},
+        TestCase{"Gemma3 bulk prompt attention causal tails and wrapped private origin", bulk_prefill_attention_causal_tails_and_wrapped_prefix},
+        TestCase{"Gemma3 bulk prompt attention target geometry and F32 queries", bulk_prefill_attention_target_geometry_and_f32_queries},
         TestCase{"Gemma3 oversized private chunk publication", oversized_chunk_publication_keeps_newest_rows},
         TestCase{"Gemma3 uncapped compact token selection", uncapped_candidate_selection},
         TestCase{"Gemma3 hybrid F32 prefill and scalar independent projection parity", hybrid_prefill_preserves_native_precision},
+        TestCase{"Gemma3 F32 direct prompt guards exact-sized row and column tails", direct_f32_prompt_guards_exact_sized_tail},
         TestCase{"Gemma3 FP32 matrix operands retain native information", matrix_operands_retain_f32_information},
         TestCase{"Gemma3 Metal resource and primitive validation", metal_resource_and_input_validation},
         TestCase{"Gemma3 columns8 storage boundaries", columns8_storage_boundaries},

@@ -16,6 +16,17 @@ namespace local_gguf_engine::frontends::cli {
 namespace {
 using engine::model_architecture_name;
 
+[[nodiscard]] const char* stop_reason_name(engine::Gemma2GenerationStopReason reason) {
+    switch (reason) {
+    case engine::Gemma2GenerationStopReason::token_limit: return "token_limit";
+    case engine::Gemma2GenerationStopReason::stop_token: return "stop_token";
+    case engine::Gemma2GenerationStopReason::callback_stop: return "callback_stop";
+    case engine::Gemma2GenerationStopReason::reverse_stop: return "reverse_stop";
+    case engine::Gemma2GenerationStopReason::interrupted: return "interrupted";
+    }
+    throw std::logic_error("invalid generation stop reason in diagnostics");
+}
+
 [[nodiscard]] std::string format_tokens_per_second(
     std::uint32_t token_count,
     std::uint64_t duration_ns
@@ -152,6 +163,7 @@ std::string format_chat_decode_attribution_line(const engine::GemmaChatTurnMetri
          << ",\"kv_cache_dtype\":\""
          << engine::gemma_kv_precision_name(metrics.kv_precision) << "\""
          << ",\"selected_tokens\":" << metrics.generation.selected_token_count
+         << ",\"stop_reason\":\"" << stop_reason_name(metrics.generation.stop_reason) << "\""
          << ",\"selected_token_hash\":\"" << token_hash.str() << "\""
          << ",\"decoded_tokens\":" << metrics.generation.decode_token_count
          << ",\"initial_cache_position\":" << metrics.initial_cache_position

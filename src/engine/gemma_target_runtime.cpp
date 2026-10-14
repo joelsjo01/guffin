@@ -16,8 +16,14 @@ void encode_gemma_target_blocks(
     std::uint32_t row_capacity, std::uint32_t row_count,
     const tensor::BackendBuffer& token_source, std::uint32_t token_offset,
     float embedding_scale, bool produce_final_hidden,
-    bool prefill_projection
+    std::optional<std::uint32_t> contiguous_prompt_position
 ) {
+    const auto& config = target.config();
+    if (contiguous_prompt_position
+        && (row_count == 0U || *contiguous_prompt_position > config.context_length
+            || row_count > config.context_length - *contiguous_prompt_position)) {
+        throw std::invalid_argument("Gemma contiguous prompt block exceeds the bound target context");
+    }
     auto* command = &encoder;
     command->encode_embedding(
         token_source,
@@ -29,7 +35,12 @@ void encode_gemma_target_blocks(
     );
     command->encode_memory_barrier();
 
-    const auto& config = target.config();
+    const bool prefill_projection = contiguous_prompt_position.has_value();
+    // Small query batches retain the measured vector path; 64+ useful rows
+    // amortize the shared matrix tile, including its partially filled key tiles.
+    const bool bulk_attention = prefill_projection && row_count >= 64U
+        && config.architecture == ModelArchitecture::gemma3
+        && gemma_kv_dtype(config) == tensor::DType::f16;
     const auto* kv_numerical_status = config.architecture == ModelArchitecture::gemma3
         && gemma_kv_dtype(config) == tensor::DType::f16 ? &scratch.input_status : nullptr;
     const auto* reusable_sums = !prefill_projection && row_count <= 2U && scratch.q4_input_sums.has_value()
@@ -45,6 +56,9 @@ void encode_gemma_target_blocks(
         const auto& block = target.weights().blocks[layer];
         const auto& cache = target.kv_cache()[layer];
         const auto& private_cache = scratch.kv_layers[layer];
+        const bool terminal_kv_only = prefill_projection
+            && config.architecture == ModelArchitecture::gemma3
+            && !produce_final_hidden && layer + 1U == config.block_count;
         const bool qkv_sums = sums_for(block.attention.query_weight)
             || sums_for(block.attention.key_weight) || sums_for(block.attention.value_weight);
         const bool feed_forward_sums = sums_for(block.feed_forward.gate_weight)
@@ -57,10 +71,12 @@ void encode_gemma_target_blocks(
             row_count, 0U, qkv_sums ? reusable_sums : nullptr
         );
         command->encode_memory_barrier();
-        command->encode_verifier_matmul(
-            scratch.normalized_hidden, block.attention.query_weight,
-            scratch.raw_query, row_count, prefill_projection, sums_for(block.attention.query_weight)
-        );
+        if (!terminal_kv_only) {
+            command->encode_verifier_matmul(
+                scratch.normalized_hidden, block.attention.query_weight,
+                scratch.raw_query, row_count, prefill_projection, sums_for(block.attention.query_weight)
+            );
+        }
         command->encode_verifier_matmul(
             scratch.normalized_hidden, block.attention.key_weight,
             scratch.raw_key, row_count, prefill_projection, sums_for(block.attention.key_weight)
@@ -71,11 +87,13 @@ void encode_gemma_target_blocks(
         );
         command->encode_memory_barrier();
         if (config.uses_qk_norm) {
-            command->encode_head_rms_norm(
-                scratch.raw_query, block.attention.query_norm_weight.value(),
-                scratch.raw_query, config.rms_norm_epsilon, row_count,
-                config.attention_head_count, config.attention_key_length
-            );
+            if (!terminal_kv_only) {
+                command->encode_head_rms_norm(
+                    scratch.raw_query, block.attention.query_norm_weight.value(),
+                    scratch.raw_query, config.rms_norm_epsilon, row_count,
+                    config.attention_head_count, config.attention_key_length
+                );
+            }
             command->encode_head_rms_norm(
                 scratch.raw_key, block.attention.key_norm_weight.value(),
                 scratch.raw_key, config.rms_norm_epsilon, row_count,
@@ -83,13 +101,15 @@ void encode_gemma_target_blocks(
             );
             command->encode_memory_barrier();
         }
-        command->encode_verifier_rope(
-            scratch.raw_query, scratch.absolute_position_staging, scratch.query,
-            row_count, config.attention_head_count,
-            config.attention_key_length, config.attention_key_length,
-            gemma_layer_rope_freq_base(config, layer),
-            gemma_layer_rope_freq_scale(config, layer)
-        );
+        if (!terminal_kv_only) {
+            command->encode_verifier_rope(
+                scratch.raw_query, scratch.absolute_position_staging, scratch.query,
+                row_count, config.attention_head_count,
+                config.attention_key_length, config.attention_key_length,
+                gemma_layer_rope_freq_base(config, layer),
+                gemma_layer_rope_freq_scale(config, layer)
+            );
+        }
         command->encode_verifier_kv_store(
             scratch.raw_key, scratch.raw_value, scratch.absolute_position_staging,
             private_cache.private_key, private_cache.private_value,
@@ -99,20 +119,43 @@ void encode_gemma_target_blocks(
             gemma_layer_rope_freq_scale(config, layer), kv_numerical_status
         );
         command->encode_memory_barrier();
-        const auto schedule_offset = static_cast<std::uint64_t>(layer)
-            * row_capacity * 4U * sizeof(std::uint32_t);
-        command->encode_verifier_attention(
-            scratch.query, cache.key, cache.value,
-            private_cache.private_key, private_cache.private_value,
-            scratch.attention_schedule_staging, schedule_offset,
-            scratch.ancestor_index_staging,
-            scratch.attention_output, scratch.attention_partial_output,
-            scratch.attention_partial_maxima, scratch.attention_partial_denominators,
-            row_count, cache.row_mask,
-            config.attention_head_count, config.attention_head_count_kv,
-            config.attention_key_length, config.attention_value_length,
-            attention_scale, config.attention_logit_softcap, sums_for(block.attention.output_weight)
-        );
+        // Future attention reads final-layer K/V formed from this block's
+        // input, independent of its Q/attention/MLP outputs. A non-final prompt
+        // chunk has no logits and no later block consuming those outputs.
+        if (terminal_kv_only) continue;
+        if (bulk_attention) {
+            const auto position = *contiguous_prompt_position;
+            const auto end = position + row_count;
+            const auto attention_tokens = gemma_layer_uses_sliding_window(config, layer)
+                ? std::min(end, config.sliding_window) : end;
+            // Private rows start at slot zero even for an unaligned follow-up.
+            // Keep the durable ring unchanged until every query has consumed
+            // its own causal window; publication remains after all blocks.
+            command->encode_f16_prefill_attention(
+                scratch.query, cache.key, cache.value,
+                private_cache.private_key, private_cache.private_value,
+                scratch.attention_output, position,
+                config.attention_head_count, config.attention_head_count_kv,
+                config.attention_key_length, config.attention_value_length,
+                attention_tokens, attention_scale, config.attention_logit_softcap,
+                cache.row_mask, row_count, true, position
+            );
+        } else {
+            const auto schedule_offset = static_cast<std::uint64_t>(layer)
+                * row_capacity * 4U * sizeof(std::uint32_t);
+            command->encode_verifier_attention(
+                scratch.query, cache.key, cache.value,
+                private_cache.private_key, private_cache.private_value,
+                scratch.attention_schedule_staging, schedule_offset,
+                scratch.ancestor_index_staging,
+                scratch.attention_output, scratch.attention_partial_output,
+                scratch.attention_partial_maxima, scratch.attention_partial_denominators,
+                row_count, cache.row_mask,
+                config.attention_head_count, config.attention_head_count_kv,
+                config.attention_key_length, config.attention_value_length,
+                attention_scale, config.attention_logit_softcap, sums_for(block.attention.output_weight)
+            );
+        }
         command->encode_memory_barrier();
         command->encode_verifier_matmul(
             scratch.attention_output, block.attention.output_weight,
@@ -242,10 +285,12 @@ void publish_contiguous_rows(metal::MetalCommandContext& command,
 
 template <class Stats>
 void account_contiguous_attention(Stats& stats, const GemmaModelConfig& config,
-    std::uint32_t position, std::uint32_t count) {
-    // Matches the verifier's per-query counters; these are logical work counts,
-    // independent of partition launches and the optional reduction dispatch.
+    std::uint32_t position, std::uint32_t count, bool final_prompt_chunk = true) {
+    // Count evaluated queries independently of partition/reduction launches.
+    // Non-final Gemma 3 prompt chunks materialize terminal K/V without queries.
     for (std::uint32_t layer = 0; layer < config.block_count; ++layer) {
+        if (!final_prompt_chunk && config.architecture == ModelArchitecture::gemma3
+            && layer + 1U == config.block_count) continue;
         for (std::uint32_t row = 0; row < count; ++row) {
             const auto tokens = gemma_layer_uses_sliding_window(config, layer)
                 ? std::min(position + row + 1U, config.sliding_window) : position + row + 1U;
@@ -310,7 +355,7 @@ metal::MetalCommandStats execute_contiguous_chunk(
         stage_contiguous_rows(command, target, workspace, tokens, position);
         encode_gemma_target_blocks(command, target, scratch, workspace.row_capacity(),
             count, scratch.token_id_staging, 0U, embedding_scale, produce_logits,
-            prompt_prefill);
+            prompt_prefill ? std::optional<std::uint32_t>(position) : std::nullopt);
         if (produce_logits) {
             command.encode_target_head_rows(scratch.normalized_hidden, count - 1U,
                 target.weights().output_weight, logits, 1U);
@@ -389,7 +434,7 @@ Gemma2MetalResidentPrefillResult run_gemma3_resident_prefill(
             last ? request : std::nullopt, completion, selector_dispatches, true);
         add_prefill_stats(result.execution, stats);
         account_contiguous_attention(result.execution, target.config(),
-            position + static_cast<std::uint32_t>(offset), count);
+            position + static_cast<std::uint32_t>(offset), count, last);
         ++result.execution.chunk_count;
         result.execution.scheduled_layer_execution_count += target.config().block_count;
         result.execution.kv_write_count += target.config().block_count;

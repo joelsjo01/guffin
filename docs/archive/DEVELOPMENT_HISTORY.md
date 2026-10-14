@@ -1,4 +1,18 @@
-# Next Task
+# Development history
+
+This archive preserves the original research, implementation decisions and
+failed alternatives through October 5, 2026. It is a historical record, not the
+current operating contract or active baton. Use [current state](../NEXT_TASK.md),
+[the retrospective](../SPECULATIVE_DECODING_RETROSPECTIVE.md) and
+[performance evidence](../PERFORMANCE.md) for today's handoff and release claims.
+
+Earlier local benchmark outputs were deleted when the three final release
+campaigns became the retained evidence. Original artifact paths and availability
+claims below describe what existed at the time; they are preserved as provenance,
+not live evidence links. Historical pending work and stop instructions do not
+set current authorization. Findings, counts, numerical limits and incomplete
+design distinctions remain in their original context; new task diaries are not
+relocated here.
 
 ## Guffin CLI and installation complete (2026-10-05)
 
@@ -6182,7 +6196,7 @@ The complete research archive is
 `4579c7f5b903006e7db4f7c82e6e2dce9b6533da`.
 The prior cleanup handoff, including its exact measurements, is recoverable with
 `git show dff16f0:docs/NEXT_TASK.md`. See
-[SPECULATIVE_DECODING_RETROSPECTIVE.md](SPECULATIVE_DECODING_RETROSPECTIVE.md)
+[SPECULATIVE_DECODING_RETROSPECTIVE.md](../SPECULATIVE_DECODING_RETROSPECTIVE.md)
 for the readable account. Do not resume archived training arms, compact heads,
 shape registries, or broad experiments as prerequisites for this integration.
 

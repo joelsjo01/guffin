@@ -33,6 +33,8 @@ inline bool gemma_target_uses_shared_retrieval(const Gemma2MetalModelPlan& targe
 
 // The same block schedule consumes either a contiguous prompt or validated
 // speculative ancestry. Only the caller owns publication and rollback.
+// A contiguous prompt start enables bulk projections and attention; absence
+// preserves the packed ordinary/speculative decode arithmetic.
 void encode_gemma_target_blocks(
     tensor::backends::metal::MetalCommandContext& command,
     Gemma2MetalModelPlan& target,
@@ -40,7 +42,8 @@ void encode_gemma_target_blocks(
     std::uint32_t row_capacity, std::uint32_t row_count,
     const tensor::BackendBuffer& token_source, std::uint32_t token_offset,
     float embedding_scale,
-    bool produce_final_hidden = true, bool prefill_projection = false
+    bool produce_final_hidden = true,
+    std::optional<std::uint32_t> contiguous_prompt_position = std::nullopt
 );
 
 Gemma2MetalResidentDecodeResult run_gemma3_resident_decode(

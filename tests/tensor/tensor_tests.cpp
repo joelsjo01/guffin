@@ -77,6 +77,9 @@ using local_gguf_engine::tensor::TensorPacking;
 using local_gguf_engine::tensor::TensorStorage;
 using local_gguf_engine::tensor::TensorView;
 using local_gguf_engine::tensor::repack_kquant_weight_columns8;
+using local_gguf_engine::tensor::repack_kquant_weight_columns8_into;
+using local_gguf_engine::tensor::requantize_q6_k_gguf_weight_q4_k_into;
+using local_gguf_engine::tensor::quantize_f16_gguf_weight_q8_0_into;
 using local_gguf_engine::tensor::restore_native_kquant_weight;
 using local_gguf_engine::tensor::write_f16_from_f32;
 using local_gguf_engine::tensor::write_f32;
@@ -511,6 +514,15 @@ void test_quantizes_f16_gguf_weight_to_q8_0_exact_bytes() {
     expect(quantized.descriptor().dtype == DType::q8_0, "Q8_0 converter dtype mismatch");
     expect(quantized.descriptor().shape == source.descriptor().shape, "Q8_0 converter shape mismatch");
     expect(quantized.bytes().size() == 68U, "Q8_0 converter byte count mismatch");
+    std::array<std::uint8_t, 76> guarded;
+    guarded.fill(0xA5U);
+    quantize_f16_gguf_weight_q8_0_into(source.view(), quantized.descriptor(),
+        std::span<std::uint8_t>(guarded).subspan(4U, 68U));
+    expect(std::equal(quantized.bytes().begin(), quantized.bytes().end(), guarded.begin() + 4),
+        "direct Q8_0 preparation changed exact output bytes");
+    expect(std::all_of(guarded.begin(), guarded.begin() + 4, [](auto byte) { return byte == 0xA5U; })
+        && std::all_of(guarded.end() - 4, guarded.end(), [](auto byte) { return byte == 0xA5U; }),
+        "direct Q8_0 preparation wrote outside its extent");
     const auto first = q8_0_block_view(quantized, 0U);
     expect_close(first.scale(), 1.0F, 0.0F, "Q8_0 converter scale mismatch");
     expect(first.quantized_value(0U) == -127, "Q8_0 converter negative maximum mismatch");
@@ -573,6 +585,16 @@ void test_requantizes_q6_k_gguf_weight_to_q4_k() {
     }
     expect(first_block_hash == 1718757788837238422ULL,
         "Q6-to-Q4 converter reference block bytes mismatch");
+    for (const auto packing : {TensorPacking::canonical, TensorPacking::kquant_columns8}) {
+        const auto descriptor = packing == TensorPacking::canonical ? converted.descriptor()
+            : TensorDescriptor::from_interleaved_kquant_weight_matrix(converted.descriptor().shape, DType::q4_k);
+        auto direct = TensorStorage::allocate(descriptor);
+        std::fill(direct.mutable_bytes().begin(), direct.mutable_bytes().end(), 0xA5U);
+        requantize_q6_k_gguf_weight_q4_k_into(source.view(), descriptor, direct.mutable_bytes());
+        const auto native = packing == TensorPacking::canonical ? direct : restore_native_kquant_weight(direct.view());
+        expect(std::equal(converted.bytes().begin(), converted.bytes().end(), native.bytes().begin()),
+            "direct Q6-to-Q4 preparation changed reference bytes");
+    }
 
     double squared_source = 0.0;
     double squared_error = 0.0;
@@ -2954,12 +2976,229 @@ void expect_invalid_packing(Function&& function, std::string_view message) {
     throw TestFailure(std::string(message));
 }
 
+void test_direct_weight_preparation_rejects_invalid_destinations() {
+    const auto check = [](const auto& source, const TensorDescriptor& descriptor, auto convert) {
+        std::vector<std::uint8_t> output(descriptor.byte_count, 0xA5U);
+        auto wrong = descriptor;
+        ++wrong.element_count;
+        expect_invalid_packing([&] { convert(source.view(), wrong, output); },
+            "direct weight preparation accepted inconsistent metadata");
+        expect_invalid_packing([&] {
+            convert(source.view(), descriptor, std::span<std::uint8_t>(output).first(output.size() - 1U));
+        }, "direct weight preparation accepted a short output extent");
+        expect(std::all_of(output.begin(), output.end(), [](auto byte) { return byte == 0xA5U; }),
+            "invalid preparation destination was modified before validation");
+        std::vector<std::uint8_t> overlapping(std::max(source.bytes().size(), descriptor.byte_count), 0xA5U);
+        std::copy(source.bytes().begin(), source.bytes().end(), overlapping.begin());
+        const auto view = TensorView::from_bytes(source.descriptor(),
+            std::span<const std::uint8_t>(overlapping).first(source.bytes().size()));
+        expect_invalid_packing([&] {
+            convert(view, descriptor, std::span<std::uint8_t>(overlapping).first(descriptor.byte_count));
+        }, "direct weight preparation accepted overlapping source and destination");
+        expect(std::equal(source.bytes().begin(), source.bytes().end(), overlapping.begin()),
+            "overlapping preparation modified the source before validation");
+    };
+    const auto f16 = tensor_f16_gguf_matrix(32U, 1U, std::array<float, 32> {});
+    check(f16, TensorDescriptor::from_quantized_gguf_weight_matrix(f16.descriptor().shape, DType::q8_0),
+        quantize_f16_gguf_weight_q8_0_into);
+    const auto q6 = tensor_q6_k_gguf_weight_matrix(256U, 9U, 19U);
+    check(q6, TensorDescriptor::from_quantized_gguf_weight_matrix(q6.descriptor().shape, DType::q4_k),
+        requantize_q6_k_gguf_weight_q4_k_into);
+    check(q6, TensorDescriptor::from_interleaved_kquant_weight_matrix(q6.descriptor().shape, DType::q4_k),
+        requantize_q6_k_gguf_weight_q4_k_into);
+    check(q6, TensorDescriptor::from_interleaved_kquant_weight_matrix(q6.descriptor().shape, DType::q6_k),
+        repack_kquant_weight_columns8_into);
+}
+
+void test_q6_k_preparation_preserves_frozen_diverse_reference_bytes() {
+    auto source = TensorStorage::allocate(TensorDescriptor::from_quantized_gguf_weight_matrix(
+        Shape::from({256U, 257U}), DType::q6_k));
+    constexpr std::array<std::uint16_t, 12> scales {
+        0U, 0x8000U, 1U, 0x8001U, 0x03FFU, 0x83FFU, 0x0400U, 0x8400U,
+        0x3555U, 0xB555U, 0x6400U, 0xE400U,
+    };
+    std::uint32_t random = 0x43B19D27U;
+    for (std::size_t block = 0U; block < 257U; ++block) {
+        auto bytes = source.mutable_bytes().subspan(block * 210U, 210U);
+        for (auto& byte : bytes) {
+            random ^= random << 13U;
+            random ^= random >> 17U;
+            random ^= random << 5U;
+            byte = static_cast<std::uint8_t>(random);
+        }
+        if (block % 17U == 0U) std::fill(bytes.begin(), bytes.end(), 0U);
+        if (block % 17U == 2U) {
+            std::fill(bytes.begin(), bytes.end(), 0U);
+            std::fill(bytes.begin() + 192, bytes.begin() + 208, 127U);
+        }
+        if (block % 17U == 3U) {
+            std::fill(bytes.begin(), bytes.end(), 255U);
+            std::fill(bytes.begin() + 192, bytes.begin() + 208, 128U);
+        }
+        if (block % 17U == 4U) {
+            for (std::size_t group = 0U; group < 16U; ++group)
+                bytes[192U + group] = static_cast<std::uint8_t>(group % 3U == 0U ? 0U : 1U + group % 2U);
+        }
+        const auto scale = block % 17U == 4U
+            ? static_cast<std::uint16_t>(block % 2U ? 0x8001U : 1U) : scales[block % scales.size()];
+        bytes[208U] = static_cast<std::uint8_t>(scale);
+        bytes[209U] = static_cast<std::uint8_t>(scale >> 8U);
+    }
+    // Captured from the frozen production scalar implementation before this
+    // optimization. Includes signed zero, subnormal and signed scales, constant
+    // groups, extreme signed subscales, random codes and packed column padding.
+    const auto native = requantize_q6_k_gguf_weight_q4_k(source.view());
+    auto packed = TensorStorage::allocate(TensorDescriptor::from_interleaved_kquant_weight_matrix(
+        source.descriptor().shape, DType::q4_k));
+    std::fill(packed.mutable_bytes().begin(), packed.mutable_bytes().end(), 0xA5U);
+    requantize_q6_k_gguf_weight_q4_k_into(source.view(), packed.descriptor(), packed.mutable_bytes());
+    const auto hash = [](std::span<const std::uint8_t> bytes) {
+        std::uint64_t value = 14695981039346656037ULL;
+        for (const auto byte : bytes) { value ^= byte; value *= 1099511628211ULL; }
+        return value;
+    };
+    // The original scalar loop has different compiler contraction in the
+    // shipped release/debug builds. Pin each independently frozen byte stream.
+#ifdef NDEBUG
+    constexpr std::uint64_t native_hash = 13229880714056247414ULL;
+    constexpr std::uint64_t packed_hash = 4737508404606728898ULL;
+#else
+    constexpr std::uint64_t native_hash = 12352273232305988732ULL;
+    constexpr std::uint64_t packed_hash = 11615112846179753654ULL;
+#endif
+    expect(hash(native.bytes()) == native_hash,
+        "Q6 preparation changed frozen diverse native reference bytes");
+    expect(hash(packed.bytes()) == packed_hash,
+        "Q6 preparation changed frozen diverse packed reference bytes");
+}
+
+void test_kquant_columns8_allocator_preserves_frozen_parallel_reference_bytes() {
+    const auto hash = [](std::span<const std::uint8_t> bytes) {
+        std::uint64_t value = 14695981039346656037ULL;
+        for (const auto byte : bytes) { value ^= byte; value *= 1099511628211ULL; }
+        return value;
+    };
+    // Frozen original serial output, independent of the parallel implementation.
+    // Both inputs exceed 2 MiB. The 4097 tiles split unevenly across four workers
+    // and leave one occupied lane in the final tile; source bytes are unaligned.
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        const auto descriptor = TensorDescriptor::from_quantized_gguf_weight_matrix(
+            Shape::from({256U, 32769U}), dtype);
+        std::vector<std::uint8_t> input(descriptor.byte_count + 2U, 0xA5U);
+        auto bytes = std::span<std::uint8_t>(input).subspan(1U, descriptor.byte_count);
+        std::uint32_t random = 0x6A09E667U;
+        for (auto& byte : bytes) {
+            random ^= random << 13U;
+            random ^= random >> 17U;
+            random ^= random << 5U;
+            byte = static_cast<std::uint8_t>(random);
+        }
+        const auto source_hash = hash(bytes);
+        const auto packed = repack_kquant_weight_columns8(TensorView::from_bytes(descriptor, bytes));
+        const bool q4 = dtype == DType::q4_k;
+        const auto expected_hash = q4 ? 0xBF78630882A1B6D0ULL : 0x2D606FA107D066C2ULL;
+        expect(hash(packed.bytes()) == expected_hash,
+            "parallel allocating K-quant packing changed frozen original bytes");
+        expect(input.front() == 0xA5U && input.back() == 0xA5U && hash(bytes) == source_hash,
+            "parallel allocating K-quant packing modified source bytes or guards");
+        const auto tile = packed.bytes().last(q4 ? 1184U : 1680U);
+        const auto expect_zero = [](std::span<const std::uint8_t> padding) {
+            expect(std::all_of(padding.begin(), padding.end(), [](auto byte) { return byte == 0U; }),
+                "parallel allocating K-quant packing left nonzero tail padding");
+        };
+        for (std::size_t lane = 1U; lane < 8U; ++lane) {
+            for (std::size_t word = 0U; word < 64U; ++word) {
+                expect_zero(tile.subspan((word * 8U + lane) * 2U, 2U));
+                if (!q4) expect_zero(tile.subspan(1024U + word * 8U + lane, 1U));
+            }
+            for (std::size_t group = 0U; group < (q4 ? 8U : 16U); ++group)
+                expect_zero(q4 ? tile.subspan(1024U + (group * 8U + lane) * 2U, 2U)
+                    : tile.subspan(1536U + group * 8U + lane, 1U));
+            expect_zero(q4 ? tile.subspan(1152U + lane * 4U, 4U)
+                : tile.subspan(1664U + lane * 2U, 2U));
+        }
+    }
+}
+
+void test_parallel_weight_preparation_covers_odd_ranges_and_propagates_errors() {
+    constexpr std::size_t blocks = 4097U;
+    std::array<float, 32> values {};
+    values[0] = -127.0F;
+    values[1] = -0.5F;
+    values[2] = 0.5F;
+    values[31] = 127.0F;
+    const auto f16_block = tensor_f16_gguf_matrix(32U, 1U, values);
+    auto f16 = TensorStorage::allocate(TensorDescriptor::from(Shape::from({32U, blocks}), DType::f16));
+    for (std::size_t block = 0U; block < blocks; ++block)
+        std::copy(f16_block.bytes().begin(), f16_block.bytes().end(), f16.mutable_bytes().subspan(block * 64U).begin());
+    auto q8 = TensorStorage::allocate(TensorDescriptor::from_quantized_gguf_weight_matrix(f16.descriptor().shape, DType::q8_0));
+    std::fill(q8.mutable_bytes().begin(), q8.mutable_bytes().end(), 0xA5U);
+    quantize_f16_gguf_weight_q8_0_into(f16.view(), q8.descriptor(), q8.mutable_bytes());
+    std::array<std::uint8_t, 34> expected_q8 {};
+    expected_q8[1] = 0x3CU;
+    expected_q8[2] = 0x81U;
+    expected_q8[3] = 0xFFU;
+    expected_q8[4] = 0x01U;
+    expected_q8[33] = 0x7FU;
+    for (std::size_t block = 0U; block < blocks; ++block)
+        expect(std::equal(expected_q8.begin(), expected_q8.end(), q8.bytes().subspan(block * 34U).begin()),
+            "parallel Q8 preparation missed a block or changed rounding");
+
+    // Repeat the independently pinned GGML Q4 golden source, including across
+    // static range boundaries and the partially occupied final packed tile.
+    const auto q6_sample = tensor_q6_k_gguf_weight_matrix(512U, 2U, 19U);
+    auto q6 = TensorStorage::allocate(TensorDescriptor::from_quantized_gguf_weight_matrix(
+        Shape::from({256U, blocks}), DType::q6_k));
+    for (std::size_t block = 0U; block < blocks; ++block)
+        std::copy_n(q6_sample.bytes().begin(), 210U, q6.mutable_bytes().subspan(block * 210U).begin());
+    for (const auto packing : {TensorPacking::canonical, TensorPacking::kquant_columns8}) {
+        const auto descriptor = packing == TensorPacking::canonical
+            ? TensorDescriptor::from_quantized_gguf_weight_matrix(q6.descriptor().shape, DType::q4_k)
+            : TensorDescriptor::from_interleaved_kquant_weight_matrix(q6.descriptor().shape, DType::q4_k);
+        auto output = TensorStorage::allocate(descriptor);
+        std::fill(output.mutable_bytes().begin(), output.mutable_bytes().end(), 0xA5U);
+        requantize_q6_k_gguf_weight_q4_k_into(q6.view(), descriptor, output.mutable_bytes());
+        const auto native = packing == TensorPacking::canonical ? output : restore_native_kquant_weight(output.view());
+        for (std::size_t block = 0U; block < blocks; ++block) {
+            std::uint64_t hash = 14695981039346656037ULL;
+            for (const auto byte : native.bytes().subspan(block * 144U, 144U)) {
+                hash ^= byte;
+                hash *= 1099511628211ULL;
+            }
+            expect(hash == 1718757788837238422ULL, "parallel Q6 preparation changed a golden block");
+        }
+    }
+    f16.mutable_bytes()[(blocks - 1U) * 64U] = 0U;
+    f16.mutable_bytes()[(blocks - 1U) * 64U + 1U] = 0x7CU;
+    expect_invalid_packing([&] {
+        quantize_f16_gguf_weight_q8_0_into(f16.view(), q8.descriptor(), q8.mutable_bytes());
+    }, "parallel Q8 worker did not propagate a nonfinite input error");
+    q6.mutable_bytes().back() = 0x7CU;
+    q6.mutable_bytes()[q6.bytes().size() - 2U] = 0U;
+    expect_invalid_packing([&] { (void)requantize_q6_k_gguf_weight_q4_k(q6.view()); },
+        "parallel Q6 worker did not propagate a nonfinite input error");
+
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        const auto source = arbitrary_kquant_weight(dtype, 256U, 32769U);
+        auto packed = TensorStorage::allocate(TensorDescriptor::from_interleaved_kquant_weight_matrix(
+            source.descriptor().shape, dtype));
+        std::fill(packed.mutable_bytes().begin(), packed.mutable_bytes().end(), 0xA5U);
+        repack_kquant_weight_columns8_into(source.view(), packed.descriptor(), packed.mutable_bytes());
+        const auto restored = restore_native_kquant_weight(packed.view());
+        expect(std::equal(source.bytes().begin(), source.bytes().end(), restored.bytes().begin()),
+            "parallel packed preparation lost native bits at a static range boundary");
+    }
+}
+
 void test_kquant_columns8_round_trips_all_native_bits() {
     for (const auto dtype : {DType::q4_k, DType::q6_k}) {
         for (const std::uint64_t shared : {256U, 512U, 3840U}) {
             for (const std::uint64_t columns : {1U, 7U, 8U, 9U, 17U}) {
                 const auto native = arbitrary_kquant_weight(dtype, shared, columns);
-                const auto packed = repack_kquant_weight_columns8(native.view());
+                auto packed = TensorStorage::allocate(TensorDescriptor::from_interleaved_kquant_weight_matrix(
+                    native.descriptor().shape, dtype));
+                std::fill(packed.mutable_bytes().begin(), packed.mutable_bytes().end(), 0xA5U);
+                repack_kquant_weight_columns8_into(native.view(), packed.descriptor(), packed.mutable_bytes());
                 const auto restored = restore_native_kquant_weight(packed.view());
                 const auto& descriptor = packed.descriptor();
                 expect(descriptor.packing == TensorPacking::kquant_columns8, "packed tensor lost packing tag");
@@ -2982,7 +3221,10 @@ void test_kquant_columns8_matches_native_codes_and_zeroes_padding() {
     constexpr std::size_t blocks = 2U;
     for (const auto dtype : {DType::q4_k, DType::q6_k}) {
         const auto native = arbitrary_kquant_weight(dtype, blocks * 256U, columns);
-        const auto packed = repack_kquant_weight_columns8(native.view());
+        auto packed = TensorStorage::allocate(TensorDescriptor::from_interleaved_kquant_weight_matrix(
+            native.descriptor().shape, dtype));
+        std::fill(packed.mutable_bytes().begin(), packed.mutable_bytes().end(), 0xA5U);
+        repack_kquant_weight_columns8_into(native.view(), packed.descriptor(), packed.mutable_bytes());
         const std::size_t tile_bytes = dtype == DType::q4_k ? 1184U : 1680U;
         for (std::size_t column = 0U; column < 16U; ++column) {
             for (std::size_t block = 0U; block < blocks; ++block) {
@@ -3034,6 +3276,31 @@ void test_kquant_columns8_matches_native_codes_and_zeroes_padding() {
                     expect(packed_test_u16(tile, 1664U + lane * 2U) == reference.scale_bits(), "Q6 raw scale bits changed");
                 }
             }
+        }
+    }
+}
+
+void test_kquant_columns8_preserves_unaligned_bytes_and_guards() {
+    for (const auto dtype : {DType::q4_k, DType::q6_k}) {
+        for (const std::uint64_t columns : {8U, 9U, 17U}) {
+            const auto native = arbitrary_kquant_weight(dtype, 512U, columns);
+            std::vector<std::uint8_t> input(native.bytes().size() + 2U, 0xA5U);
+            std::copy(native.bytes().begin(), native.bytes().end(), input.begin() + 1);
+            const auto source = TensorView::from_bytes(native.descriptor(),
+                std::span<const std::uint8_t>(input).subspan(1U, native.bytes().size()));
+            const auto descriptor = TensorDescriptor::from_interleaved_kquant_weight_matrix(native.descriptor().shape, dtype);
+            std::vector<std::uint8_t> output(descriptor.byte_count + 8U, 0xA5U);
+            auto bytes = std::span<std::uint8_t>(output).subspan(3U, descriptor.byte_count);
+            repack_kquant_weight_columns8_into(source, descriptor, bytes);
+            const auto restored = restore_native_kquant_weight(TensorView::from_bytes(descriptor, bytes));
+            expect(std::equal(native.bytes().begin(), native.bytes().end(), restored.bytes().begin()),
+                "unaligned packing changed native bits in a complete tile or tail");
+            expect(std::all_of(output.begin(), output.begin() + 3, [](auto byte) { return byte == 0xA5U; })
+                && std::all_of(output.end() - 5, output.end(), [](auto byte) { return byte == 0xA5U; }),
+                "unaligned packing modified output guards");
+            expect(input.front() == 0xA5U && input.back() == 0xA5U
+                && std::equal(native.bytes().begin(), native.bytes().end(), input.begin() + 1),
+                "unaligned packing modified source bytes or guards");
         }
     }
 }
@@ -3105,9 +3372,14 @@ const TestCase tensor_core_tests[] = {
     {"tensor construction rejects invalid layouts and overflow", test_tensor_construction_rejects_invalid_layouts_and_overflow},
     {"tensor construction accepts native and packed output tails", test_tensor_construction_accepts_native_and_packed_output_tails},
     {"moved tensor storage rejects unbacked view", test_moved_tensor_storage_rejects_unbacked_view},
+    {"direct weight preparation rejects invalid destinations", test_direct_weight_preparation_rejects_invalid_destinations},
+    {"parallel weight preparation covers odd ranges and propagates errors", test_parallel_weight_preparation_covers_odd_ranges_and_propagates_errors},
+    {"Q6 preparation preserves frozen diverse reference bytes", test_q6_k_preparation_preserves_frozen_diverse_reference_bytes},
+    {"K-quant columns8 allocator preserves frozen parallel reference bytes", test_kquant_columns8_allocator_preserves_frozen_parallel_reference_bytes},
     {"K-quant columns8 round trips every native bit", test_kquant_columns8_round_trips_all_native_bits},
     {"K-quant columns8 matches native codes and zeroes padding", test_kquant_columns8_matches_native_codes_and_zeroes_padding},
     {"K-quant columns8 rejects invalid descriptors and overflow", test_kquant_columns8_rejects_invalid_descriptors_and_overflow},
+    {"K-quant columns8 preserves unaligned bytes and guards", test_kquant_columns8_preserves_unaligned_bytes_and_guards},
     {"native CPU quantized operations reject interleaved packing", test_native_cpu_quantized_operations_reject_interleaved_packing},
     {"default backend starts on CPU", test_default_backend_starts_on_cpu},
     {"tensor shape accepts valid shapes", test_tensor_shape_accepts_valid_shapes},

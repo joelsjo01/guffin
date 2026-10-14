@@ -37,6 +37,8 @@ public:
         return descriptor_;
     }
 
+    [[nodiscard]] int release() noexcept { return std::exchange(descriptor_, -1); }
+
 private:
     int descriptor_ = -1;
 };
@@ -687,46 +689,19 @@ std::array<std::uint8_t, 4> GGUFReadError::actual_magic() const noexcept {
     return actual_magic_;
 }
 
-GGUFFileBackedModel::GGUFFileBackedModel(GGUFFileBackedModel&& other) noexcept
-    : data_(std::exchange(other.data_, nullptr)),
-      byte_count_(std::exchange(other.byte_count_, 0)),
-      model_(std::move(other.model_)) {}
-
-GGUFFileBackedModel& GGUFFileBackedModel::operator=(GGUFFileBackedModel&& other) noexcept {
-    if (this != &other) {
-        reset();
-        data_ = std::exchange(other.data_, nullptr);
-        byte_count_ = std::exchange(other.byte_count_, 0);
-        model_ = std::move(other.model_);
-    }
-
-    return *this;
-}
-
-GGUFFileBackedModel::~GGUFFileBackedModel() {
-    reset();
-}
+GGUFFileBackedModel::GGUFFileBackedModel(GGUFFileBackedModel&& other) noexcept = default;
+GGUFFileBackedModel& GGUFFileBackedModel::operator=(GGUFFileBackedModel&& other) noexcept = default;
+GGUFFileBackedModel::~GGUFFileBackedModel() = default;
 
 std::span<const std::uint8_t> GGUFFileBackedModel::bytes() const noexcept {
-    return std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(data_), byte_count_);
+    return backing_.bytes();
 }
 
-const GGUFModelView& GGUFFileBackedModel::view() const noexcept {
-    return model_;
-}
+const GGUFModelView& GGUFFileBackedModel::view() const noexcept { return model_; }
+const runtime::OwnedReadOnlyBytes& GGUFFileBackedModel::source_backing() const noexcept { return backing_; }
 
-GGUFFileBackedModel::GGUFFileBackedModel(void* data, std::size_t byte_count, GGUFModelView model)
-    : data_(data),
-      byte_count_(byte_count),
-      model_(std::move(model)) {}
-
-void GGUFFileBackedModel::reset() noexcept {
-    if (data_ != nullptr) {
-        (void)::munmap(data_, byte_count_);
-        data_ = nullptr;
-        byte_count_ = 0;
-    }
-}
+GGUFFileBackedModel::GGUFFileBackedModel(runtime::OwnedReadOnlyBytes backing, GGUFModelView model)
+    : backing_(std::move(backing)), model_(std::move(model)) {}
 
 GGUFHeader read_gguf_header(std::span<const std::uint8_t> bytes) {
     if (bytes.size() < GGUFHeader::encoded_byte_count) {
@@ -849,20 +824,47 @@ GGUFFileBackedModel read_file_backed_gguf_model(const std::filesystem::path& pat
         throw GGUFReadError(GGUFReadErrorCode::truncated_header, GGUFHeader::encoded_byte_count, 0);
     }
 
-    void* data = ::mmap(nullptr, byte_count, PROT_READ, MAP_PRIVATE, file.get(), 0);
+    const auto page_size_result = ::sysconf(_SC_PAGESIZE);
+    if (page_size_result <= 0) throw file_error("could not determine mapping page size for", path);
+    const auto page_size = static_cast<std::size_t>(page_size_result);
+    if (byte_count > std::numeric_limits<std::size_t>::max() - (page_size - 1U))
+        throw std::runtime_error("could not map '" + path.string() + "': page extent overflows");
+    const auto mapped_byte_count = (byte_count + page_size - 1U) / page_size * page_size;
+    void* data = ::mmap(nullptr, mapped_byte_count, PROT_READ, MAP_PRIVATE, file.get(), 0);
     if (data == MAP_FAILED) {
         throw file_error("could not map", path);
     }
 
-    try {
-        auto model = read_gguf_model_view(
-            std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(data), byte_count)
-        );
-        return GGUFFileBackedModel(data, byte_count, std::move(model));
-    } catch (...) {
-        (void)::munmap(data, byte_count);
-        throw;
-    }
+    // One shared owner retains both the mapping and its read-only descriptor,
+    // including through native buffers after every file facade is destroyed.
+    // If allocating its control block fails, shared_ptr invokes the deleter.
+    const auto owned_descriptor = file.release();
+    std::shared_ptr<const void> owner(data, [mapped_byte_count, owned_descriptor](const void* address) {
+        (void)::munmap(const_cast<void*>(address), mapped_byte_count);
+        (void)::close(owned_descriptor);
+    });
+    const auto read_ahead = [owner, owned_descriptor](std::size_t offset, std::size_t length) noexcept {
+        static_cast<void>(owner);
+#if defined(F_RDADVISE)
+        while (length != 0U) {
+            const auto chunk = std::min(length, static_cast<std::size_t>(std::numeric_limits<int>::max()));
+            radvisory advice {static_cast<off_t>(offset), static_cast<int>(chunk)};
+            if (::fcntl(owned_descriptor, F_RDADVISE, &advice) == -1) return false;
+            offset += chunk;
+            length -= chunk;
+        }
+        return true;
+#else
+        static_cast<void>(owned_descriptor);
+        static_cast<void>(offset);
+        static_cast<void>(length);
+        return false;
+#endif
+    };
+    runtime::OwnedReadOnlyBytes backing(owner,
+        {static_cast<const std::uint8_t*>(data), byte_count}, mapped_byte_count, read_ahead);
+    auto model = read_gguf_model_view(backing.bytes());
+    return GGUFFileBackedModel(std::move(backing), std::move(model));
 }
 
 }  // namespace local_gguf_engine::model_format

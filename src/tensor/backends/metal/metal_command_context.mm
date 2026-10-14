@@ -135,56 +135,24 @@ struct Gemma2KVCacheCopyDimensions {
     std::uint32_t destination_row_mask;
 };
 
-struct GroupedAttentionScoreDimensions {
-    std::uint32_t query_rows;
-    std::uint32_t key_rows;
-    std::uint32_t head_count;
-    std::uint32_t kv_head_count;
-    std::uint32_t key_length;
-    std::uint32_t attention_token_count;
-    std::uint32_t query_position_start;
-    std::uint32_t cache_row_mask;
-    float scale;
-    float logit_softcap;
-};
-
-struct Gemma2WrappedPrefillAttentionScoreDimensions {
+// Field order and size match Gemma2PrefillAttentionDimensions in the embedded shader.
+struct F16PrefillAttentionDimensions {
     std::uint32_t query_rows;
     std::uint32_t head_count;
     std::uint32_t kv_head_count;
-    std::uint32_t key_length;
+    std::uint32_t key_dimension;
+    std::uint32_t value_dimension;
     std::uint32_t attention_token_count;
     std::uint32_t query_position_start;
     std::uint32_t cache_row_mask;
     std::uint32_t current_chunk_row_mask;
+    std::uint32_t uses_staged_chunk;
+    std::uint32_t current_chunk_position_origin;
     float scale;
     float logit_softcap;
 };
 
-struct GroupedAttentionValueDimensions {
-    std::uint32_t query_rows;
-    std::uint32_t value_rows;
-    std::uint32_t head_count;
-    std::uint32_t kv_head_count;
-    std::uint32_t value_length;
-    std::uint32_t attention_token_count;
-    std::uint32_t query_position_start;
-    std::uint32_t cache_row_mask;
-};
-
-struct Gemma2WrappedPrefillAttentionValueDimensions {
-    std::uint32_t query_rows;
-    std::uint32_t head_count;
-    std::uint32_t kv_head_count;
-    std::uint32_t value_length;
-    std::uint32_t attention_token_count;
-    std::uint32_t query_position_start;
-    std::uint32_t cache_row_mask;
-    std::uint32_t current_chunk_row_mask;
-};
-
-static_assert(sizeof(Gemma2WrappedPrefillAttentionScoreDimensions) == 40U);
-static_assert(sizeof(Gemma2WrappedPrefillAttentionValueDimensions) == 32U);
+static_assert(sizeof(F16PrefillAttentionDimensions) == 52U);
 
 struct Gemma2DecodeAttentionDimensions {
     std::uint32_t cache_row_mask;
@@ -200,11 +168,6 @@ struct Gemma2DecodeAttentionDimensions {
 };
 
 static_assert(sizeof(Gemma2DecodeAttentionDimensions) == 40U);
-
-struct SoftmaxDimensions {
-    std::uint32_t rows;
-    std::uint32_t columns;
-};
 
 struct TokenCandidateSelectionDimensions {
     std::uint32_t columns;
@@ -318,6 +281,15 @@ void bind_buffer(
                atIndex:index];
 }
 
+void bind_output_buffer(id<MTLComputeCommandEncoder> encoder, const BackendBuffer& buffer,
+    NSUInteger index, std::uint64_t operation_byte_offset = 0) {
+    const auto& value = storage(buffer);
+    require_writable_metal_buffer(value);
+    [encoder setBuffer:value.buffer()
+                offset:metal_buffer_binding_offset(value, operation_byte_offset)
+               atIndex:index];
+}
+
 [[nodiscard]] std::uint32_t u32(std::uint64_t value, const char* name) {
     if (value > std::numeric_limits<std::uint32_t>::max()) {
         throw std::invalid_argument(std::string("Metal resident execution ") + name + " exceeds uint32 range");
@@ -412,7 +384,7 @@ struct PackedRowDispatch {
         if (allow_prefill_matrix && rows >= 4U && state.gemma3_prompt_matrix[1][0][0] != nil) {
             const auto tile = rows >= 32U ? 1U : 0U;
             return {state.gemma3_prompt_matrix[1][dtype == DType::q4_k ? 0U : 1U][tile],
-                tile == 1U ? 32U : 8U, 32U, 128U};
+                tile == 1U ? 32U : 8U, tile == 1U ? 64U : 32U, 128U};
         }
         const auto tile = rows == 1U ? 1U : 2U;
         return {dtype == DType::q4_k ? (prepared_q4 ? state.columns8_q4_prepared_rows[tile - 1U]
@@ -426,7 +398,7 @@ struct PackedRowDispatch {
     if (allow_prefill_matrix && rows >= 4U && state.gemma3_prompt_matrix[0][0][0] != nil) {
         const auto tile = rows >= 32U ? 1U : 0U;
         return {state.gemma3_prompt_matrix[0][dtype == DType::q4_k ? 0U : 1U][tile],
-            tile == 1U ? 32U : 8U, 32U, 128U};
+            tile == 1U ? 32U : 8U, tile == 1U ? 64U : 32U, 128U};
     }
     // Keep the retained Q4 scalar kernel; the shared two-row kernel preserves
     // its exact per-worker arithmetic. Two-row tiles bound register use for
@@ -483,7 +455,7 @@ BackendBuffer shared_metal_buffer_view_for_testing(
 ) {
     const auto& owner = storage(parent);
     return make_metal_backend_buffer_view(std::move(descriptor), owner.buffer(),
-        metal_buffer_binding_offset(owner, byte_offset));
+        metal_buffer_binding_offset(owner, byte_offset), owner.read_only());
 }
 #endif
 
@@ -563,7 +535,7 @@ void fill_shared_metal_buffer_u32(
         );
     }
     auto* words = static_cast<std::uint32_t*>(
-        metal_buffer_contents(storage(buffer))
+        mutable_metal_buffer_contents(storage(buffer))
     );
     std::fill_n(
         words,
@@ -626,7 +598,7 @@ MetalCommandContext& MetalCommandContext::operator=(MetalCommandContext&&) noexc
 
 void MetalCommandContext::write_u32(const BackendBuffer& destination, std::uint32_t value) {
     require_capacity(destination, sizeof(value), "u32 staging");
-    std::memcpy(metal_buffer_contents(storage(destination)), &value, sizeof(value));
+    std::memcpy(mutable_metal_buffer_contents(storage(destination)), &value, sizeof(value));
 }
 
 void MetalCommandContext::write_u32s(
@@ -638,7 +610,7 @@ void MetalCommandContext::write_u32s(
     const auto byte_count = static_cast<std::uint64_t>(values.size()) * sizeof(std::uint32_t);
     require_capacity(destination, byte_offset + byte_count, "u32 staging");
     std::memcpy(
-        metal_buffer_contents(storage(destination), byte_offset),
+        mutable_metal_buffer_contents(storage(destination), byte_offset),
         values.data(),
         static_cast<std::size_t>(byte_count)
     );
@@ -682,7 +654,7 @@ void MetalCommandContext::encode_embedding(
     [encoder setBuffer:weight_storage.buffer()
                 offset:metal_buffer_binding_offset(weight_storage)
                atIndex:1];
-    bind_buffer(encoder, output, 2);
+    bind_output_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((hidden + 15U) / 16U),
@@ -786,7 +758,7 @@ void MetalCommandContext::encode_matmul(
     [encoder setComputePipelineState:pipeline];
     bind_buffer(encoder, input, 0);
     bind_buffer(encoder, weight, 1);
-    bind_buffer(encoder, output, 2, output_byte_offset);
+    bind_output_buffer(encoder, output, 2, output_byte_offset);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     if (quantized) {
         [encoder dispatchThreadgroups:quantized_dispatch.threadgroups
@@ -869,7 +841,7 @@ void MetalCommandContext::encode_verifier_matmul(
         [encoder setComputePipelineState:pipeline];
         bind_buffer(encoder, input, 0);
         bind_buffer(encoder, weight, 1);
-        bind_buffer(encoder, output, 2);
+        bind_output_buffer(encoder, output, 2);
         [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
         if (q4_input_sums != nullptr) bind_buffer(encoder, *q4_input_sums, 4U);
         [encoder dispatchThreadgroups:MTLSizeMake(
@@ -885,7 +857,7 @@ void MetalCommandContext::encode_verifier_matmul(
         [encoder setComputePipelineState:pipeline];
         bind_buffer(encoder, input, 0);
         bind_buffer(encoder, weight, 1);
-        bind_buffer(encoder, output, 2);
+        bind_output_buffer(encoder, output, 2);
         [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
         [encoder dispatchThreadgroups:dispatch.threadgroups
                   threadsPerThreadgroup:dispatch.threads_per_threadgroup];
@@ -925,7 +897,7 @@ void MetalCommandContext::encode_target_head_rows(
     [encoder setComputePipelineState:dispatch.pipeline];
     bind_buffer(encoder, input, 0, static_cast<std::uint64_t>(input_row_start) * shared * sizeof(float));
     bind_buffer(encoder, weight, 1);
-    bind_buffer(encoder, logits_tile, 2);
+    bind_output_buffer(encoder, logits_tile, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((columns + dispatch.columns_per_group - 1U) / dispatch.columns_per_group),
                                       (row_count + dispatch.rows_per_group - 1U) / dispatch.rows_per_group, 1U)
@@ -968,7 +940,7 @@ void MetalCommandContext::encode_target_head_q8_rows(
     bind_buffer(encoder, input, 0,
         static_cast<std::uint64_t>(input_row_start) * shared * sizeof(float));
     bind_buffer(encoder, weight, 1);
-    bind_buffer(encoder, logits_tile, 2);
+    bind_output_buffer(encoder, logits_tile, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((columns + 3U) / 4U),
@@ -1004,7 +976,7 @@ void MetalCommandContext::encode_head_rms_norm(
     [encoder setComputePipelineState:impl_->state->head_rms_norm_pipeline];
     bind_buffer(encoder, input, 0);
     bind_buffer(encoder, weight, 1);
-    bind_buffer(encoder, output, 2);
+    bind_output_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(head_count, row_count, 1U)
               threadsPerThreadgroup:MTLSizeMake(32U, 1U, 1U)];
@@ -1060,9 +1032,9 @@ void MetalCommandContext::encode_rms_norm(
         ? impl_->state->rms_norm_q4_sums_pipeline : impl_->state->rms_norm_pipeline];
     bind_buffer(encoder, input, 0);
     bind_buffer(encoder, weight, 1);
-    bind_buffer(encoder, output, 2);
+    bind_output_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
-    if (q4_input_sums != nullptr) bind_buffer(encoder, *q4_input_sums, 4U);
+    if (q4_input_sums != nullptr) bind_output_buffer(encoder, *q4_input_sums, 4U);
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(rows), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     ++impl_->stats.compute_dispatch_count;
@@ -1096,7 +1068,7 @@ void MetalCommandContext::encode_rms_norm_add(
     bind_buffer(encoder, input, 0);
     bind_buffer(encoder, weight, 1);
     bind_buffer(encoder, residual, 2);
-    bind_buffer(encoder, output, 3);
+    bind_output_buffer(encoder, output, 3);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>(rows), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -1132,7 +1104,7 @@ void MetalCommandContext::encode_rope(
     auto encoder = impl_->compute_encoder("Gemma2 RoPE");
     [encoder setComputePipelineState:impl_->state->rope_neox_by_heads_pipeline];
     bind_buffer(encoder, input, 0);
-    bind_buffer(encoder, output, 1, output_byte_offset);
+    bind_output_buffer(encoder, output, 1, output_byte_offset);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((columns + 15U) / 16U),
@@ -1201,8 +1173,8 @@ void MetalCommandContext::encode_gemma2_kv_cache_store(
     const auto source_byte_offset = static_cast<std::uint64_t>(source_row_start) * width * sizeof(float);
     bind_buffer(encoder, raw_key, 0, source_byte_offset);
     bind_buffer(encoder, raw_value, 1, source_byte_offset);
-    bind_buffer(encoder, cache_key, 2);
-    bind_buffer(encoder, cache_value, 3);
+    bind_output_buffer(encoder, cache_key, 2);
+    bind_output_buffer(encoder, cache_value, 3);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((width + 255U) / 256U),
@@ -1252,8 +1224,8 @@ void MetalCommandContext::encode_gemma2_kv_cache_copy(
         ? impl_->state->kv_cache_copy_f32_pipeline : impl_->state->gemma2_kv_cache_copy_pipeline];
     bind_buffer(encoder, source_key, 0);
     bind_buffer(encoder, source_value, 1);
-    bind_buffer(encoder, destination_key, 2);
-    bind_buffer(encoder, destination_value, 3);
+    bind_output_buffer(encoder, destination_key, 2);
+    bind_output_buffer(encoder, destination_value, 3);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(
                                       static_cast<NSUInteger>((row_width + 255U) / 256U),
@@ -1264,270 +1236,137 @@ void MetalCommandContext::encode_gemma2_kv_cache_copy(
     ++impl_->stats.compute_dispatch_count;
 }
 
-void MetalCommandContext::encode_attention_scores(
+void MetalCommandContext::encode_f16_prefill_attention(
     const BackendBuffer& query,
     const BackendBuffer& key_cache,
-    const BackendBuffer& output,
-    std::uint32_t query_position_start,
-    std::uint32_t head_count,
-    std::uint32_t kv_head_count,
-    std::uint32_t key_length,
-    std::uint32_t attention_token_count,
-    float scale,
-    float logit_softcap,
-    std::uint32_t cache_row_mask,
-    std::uint32_t query_row_count
-) {
-    const auto query_rows =
-        query_row_count == 0U ? query.descriptor().shape.dimension(0) : query_row_count;
-    const auto key_rows = key_cache.descriptor().shape.dimension(0);
-    if (key_cache.descriptor().dtype != DType::f16
-        || key_cache.descriptor().shape.rank() != 3U
-        || key_rows != static_cast<std::uint64_t>(cache_row_mask) + 1U) {
-        throw std::invalid_argument("Metal Gemma 2 attention key-cache layout is invalid");
-    }
-    (void)storage(key_cache);
-    const auto output_elements = query_rows * head_count * attention_token_count;
-    require_capacity(output, output_elements * sizeof(float), "attention score output");
-    const GroupedAttentionScoreDimensions dims {
-        .query_rows = u32(query_rows, "attention query rows"),
-        .key_rows = u32(key_rows, "attention key rows"),
-        .head_count = head_count,
-        .kv_head_count = kv_head_count,
-        .key_length = key_length,
-        .attention_token_count = attention_token_count,
-        .query_position_start = query_position_start,
-        .cache_row_mask = cache_row_mask,
-        .scale = scale,
-        .logit_softcap = logit_softcap,
-    };
-    auto encoder = impl_->compute_encoder("Gemma2 attention scores");
-    [encoder setComputePipelineState:impl_->state->gemma2_prefill_attention_scores_pipeline];
-    bind_buffer(encoder, query, 0);
-    bind_buffer(encoder, key_cache, 1);
-    bind_buffer(encoder, output, 2);
-    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
-    [encoder dispatchThreadgroups:MTLSizeMake(
-                                      static_cast<NSUInteger>((attention_token_count + 7U) / 8U),
-                                      static_cast<NSUInteger>((head_count + 7U) / 8U),
-                                      static_cast<NSUInteger>((query_rows + 1U) / 2U)
-                                  )
-              threadsPerThreadgroup:MTLSizeMake(8, 8, 2)];
-    ++impl_->stats.compute_dispatch_count;
-}
-
-void MetalCommandContext::encode_wrapped_prefill_attention_scores(
-    const BackendBuffer& query,
-    const BackendBuffer& key_cache,
+    const BackendBuffer& value_cache,
     const BackendBuffer& current_chunk_key,
-    const BackendBuffer& output,
-    std::uint32_t query_position_start,
-    std::uint32_t head_count,
-    std::uint32_t kv_head_count,
-    std::uint32_t key_length,
-    std::uint32_t attention_token_count,
-    float scale,
-    float logit_softcap,
-    std::uint32_t cache_row_mask,
-    std::uint32_t query_row_count
-) {
-    const auto query_rows = query_row_count == 0U
-        ? query.descriptor().shape.dimension(0) : query_row_count;
-    const auto& cache = key_cache.descriptor();
-    const auto& current = current_chunk_key.descriptor();
-    if (cache.dtype != DType::f16 || current.dtype != DType::f16
-        || cache.shape.rank() != 3U || current.shape.rank() != 3U
-        || cache.shape.dimension(0) != static_cast<std::uint64_t>(cache_row_mask) + 1U
-        || current.shape.dimension(0) != engine::gemma2_metal_prefill_chunk_size
-        || current.shape.dimension(1) != kv_head_count
-        || current.shape.dimension(2) != key_length
-        || cache.shape.dimension(1) != current.shape.dimension(1)
-        || cache.shape.dimension(2) != current.shape.dimension(2)
-        || query_rows == 0U || query_rows > current.shape.dimension(0)
-        || kv_head_count == 0U || head_count == 0U || head_count % kv_head_count != 0U
-        || attention_token_count == 0U) {
-        throw std::invalid_argument(
-            "Metal Gemma 2 wrapped-prefill attention key layout is invalid"
-        );
-    }
-    (void)storage(key_cache);
-    (void)storage(current_chunk_key);
-    require_capacity(
-        query,
-        query_rows * head_count * key_length * sizeof(float),
-        "wrapped-prefill attention query"
-    );
-    require_capacity(
-        output,
-        query_rows * head_count * attention_token_count * sizeof(float),
-        "wrapped-prefill attention score output"
-    );
-    const Gemma2WrappedPrefillAttentionScoreDimensions dims {
-        .query_rows = u32(query_rows, "wrapped-prefill attention query rows"),
-        .head_count = head_count,
-        .kv_head_count = kv_head_count,
-        .key_length = key_length,
-        .attention_token_count = attention_token_count,
-        .query_position_start = query_position_start,
-        .cache_row_mask = cache_row_mask,
-        .current_chunk_row_mask = engine::gemma2_metal_prefill_chunk_size - 1U,
-        .scale = scale,
-        .logit_softcap = logit_softcap,
-    };
-    auto encoder = impl_->compute_encoder("Gemma2 wrapped prefill attention scores");
-    [encoder setComputePipelineState:impl_->state->gemma2_wrapped_prefill_attention_scores_pipeline];
-    bind_buffer(encoder, query, 0);
-    bind_buffer(encoder, key_cache, 1);
-    bind_buffer(encoder, current_chunk_key, 2);
-    bind_buffer(encoder, output, 3);
-    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
-    [encoder dispatchThreadgroups:MTLSizeMake(
-                                      static_cast<NSUInteger>((attention_token_count + 7U) / 8U),
-                                      static_cast<NSUInteger>((head_count + 7U) / 8U),
-                                      static_cast<NSUInteger>((query_rows + 1U) / 2U)
-                                  )
-              threadsPerThreadgroup:MTLSizeMake(8, 8, 2)];
-    ++impl_->stats.compute_dispatch_count;
-}
-
-void MetalCommandContext::encode_softmax(
-    const BackendBuffer& input,
-    const BackendBuffer& output,
-    std::uint32_t rows,
-    std::uint32_t columns
-) {
-    require_capacity(input, static_cast<std::uint64_t>(rows) * columns * sizeof(float), "softmax input");
-    require_capacity(output, static_cast<std::uint64_t>(rows) * columns * sizeof(float), "softmax output");
-    const SoftmaxDimensions dims {.rows = rows, .columns = columns};
-    auto encoder = impl_->compute_encoder("Gemma2 softmax");
-    [encoder setComputePipelineState:impl_->state->softmax_pipeline];
-    bind_buffer(encoder, input, 0);
-    bind_buffer(encoder, output, 1);
-    [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
-    [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((rows + 63U) / 64U), 1, 1)
-              threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-    ++impl_->stats.compute_dispatch_count;
-}
-
-void MetalCommandContext::encode_attention_values(
-    const BackendBuffer& probabilities,
-    const BackendBuffer& value_cache,
-    const BackendBuffer& output,
-    std::uint32_t query_position_start,
-    std::uint32_t head_count,
-    std::uint32_t kv_head_count,
-    std::uint32_t value_length,
-    std::uint32_t attention_token_count,
-    std::uint32_t cache_row_mask,
-    std::uint32_t query_row_count
-) {
-    const auto query_rows = query_row_count == 0U
-        ? probabilities.descriptor().shape.dimension(0)
-        : query_row_count;
-    const auto value_rows = value_cache.descriptor().shape.dimension(0);
-    if (value_cache.descriptor().dtype != DType::f16
-        || value_cache.descriptor().shape.rank() != 3U
-        || value_rows != static_cast<std::uint64_t>(cache_row_mask) + 1U) {
-        throw std::invalid_argument("Metal Gemma 2 attention value-cache layout is invalid");
-    }
-    (void)storage(value_cache);
-    require_capacity(
-        output,
-        static_cast<std::uint64_t>(query_rows) * head_count * value_length * sizeof(float),
-        "attention value output"
-    );
-    const GroupedAttentionValueDimensions dims {
-        .query_rows = u32(query_rows, "attention query rows"),
-        .value_rows = u32(value_rows, "attention value rows"),
-        .head_count = head_count,
-        .kv_head_count = kv_head_count,
-        .value_length = value_length,
-        .attention_token_count = attention_token_count,
-        .query_position_start = query_position_start,
-        .cache_row_mask = cache_row_mask,
-    };
-    auto encoder = impl_->compute_encoder("Gemma2 attention values");
-    [encoder setComputePipelineState:impl_->state->gemma2_prefill_attention_values_pipeline];
-    bind_buffer(encoder, probabilities, 0);
-    bind_buffer(encoder, value_cache, 1);
-    bind_buffer(encoder, output, 2);
-    [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
-    [encoder dispatchThreadgroups:MTLSizeMake(
-                                      static_cast<NSUInteger>((value_length + 7U) / 8U),
-                                      static_cast<NSUInteger>((head_count + 7U) / 8U),
-                                      static_cast<NSUInteger>((query_rows + 1U) / 2U)
-                                  )
-              threadsPerThreadgroup:MTLSizeMake(8, 8, 2)];
-    ++impl_->stats.compute_dispatch_count;
-}
-
-void MetalCommandContext::encode_wrapped_prefill_attention_values(
-    const BackendBuffer& probabilities,
-    const BackendBuffer& value_cache,
     const BackendBuffer& current_chunk_value,
     const BackendBuffer& output,
     std::uint32_t query_position_start,
     std::uint32_t head_count,
     std::uint32_t kv_head_count,
+    std::uint32_t key_length,
     std::uint32_t value_length,
     std::uint32_t attention_token_count,
+    float scale,
+    float logit_softcap,
     std::uint32_t cache_row_mask,
-    std::uint32_t query_row_count
+    std::uint32_t query_row_count,
+    bool uses_staged_chunk,
+    std::uint32_t current_chunk_position_origin
 ) {
-    const auto query_rows = query_row_count == 0U
-        ? probabilities.descriptor().shape.dimension(0) : query_row_count;
-    const auto& cache = value_cache.descriptor();
-    const auto& current = current_chunk_value.descriptor();
-    if (cache.dtype != DType::f16 || current.dtype != DType::f16
-        || cache.shape.rank() != 3U || current.shape.rank() != 3U
-        || cache.shape.dimension(0) != static_cast<std::uint64_t>(cache_row_mask) + 1U
-        || current.shape.dimension(0) != engine::gemma2_metal_prefill_chunk_size
-        || current.shape.dimension(1) != kv_head_count
-        || current.shape.dimension(2) != value_length
-        || cache.shape.dimension(1) != current.shape.dimension(1)
-        || cache.shape.dimension(2) != current.shape.dimension(2)
-        || query_rows == 0U || query_rows > current.shape.dimension(0)
-        || kv_head_count == 0U || head_count == 0U || head_count % kv_head_count != 0U
-        || attention_token_count == 0U) {
-        throw std::invalid_argument(
-            "Metal Gemma 2 wrapped-prefill attention value layout is invalid"
-        );
+    const auto position_end = static_cast<std::uint64_t>(query_position_start) + query_row_count;
+    if (query_row_count == 0U || head_count == 0U || kv_head_count == 0U
+        || head_count % kv_head_count != 0U || key_length == 0U || value_length == 0U
+        || attention_token_count == 0U || attention_token_count > position_end
+        || position_end > std::numeric_limits<std::uint32_t>::max()
+        || !std::isfinite(scale) || scale <= 0.0F
+        || !std::isfinite(logit_softcap) || logit_softcap < 0.0F
+        || current_chunk_position_origin > query_position_start
+        || (!uses_staged_chunk && current_chunk_position_origin != 0U)) {
+        throw std::invalid_argument("Metal F16 prefill attention dimensions or range are invalid");
     }
-    (void)storage(value_cache);
-    (void)storage(current_chunk_value);
-    require_capacity(
-        probabilities,
-        query_rows * head_count * attention_token_count * sizeof(float),
-        "wrapped-prefill attention probabilities"
-    );
-    require_capacity(
-        output,
-        query_rows * head_count * value_length * sizeof(float),
-        "wrapped-prefill attention value output"
-    );
-    const Gemma2WrappedPrefillAttentionValueDimensions dims {
-        .query_rows = u32(query_rows, "wrapped-prefill attention query rows"),
-        .head_count = head_count,
-        .kv_head_count = kv_head_count,
-        .value_length = value_length,
-        .attention_token_count = attention_token_count,
-        .query_position_start = query_position_start,
-        .cache_row_mask = cache_row_mask,
-        .current_chunk_row_mask = engine::gemma2_metal_prefill_chunk_size - 1U,
+    const auto cache_rows = static_cast<std::uint64_t>(cache_row_mask) + 1U;
+    const auto stage_rank = current_chunk_key.descriptor().shape.rank();
+    const auto stage_rows = stage_rank == 2U || stage_rank == 3U
+        ? current_chunk_key.descriptor().shape.dimension(0U) : 0U;
+    if ((cache_rows & (cache_rows - 1U)) != 0U || attention_token_count > cache_rows
+        || stage_rows == 0U || (stage_rows & (stage_rows - 1U)) != 0U
+        || query_row_count > stage_rows) {
+        throw std::invalid_argument("Metal F16 prefill attention cache capacity is invalid");
+    }
+    // A resident ring can hold the union of all query windows only when that
+    // union fits its physical capacity. Otherwise the old prefix must stay
+    // separate from the current chunk until every query has consumed it.
+    const auto required_union_rows = std::min(static_cast<std::uint64_t>(query_position_start) + 1U,
+        static_cast<std::uint64_t>(attention_token_count)) + query_row_count - 1U;
+    if (!uses_staged_chunk && required_union_rows > cache_rows)
+        throw std::invalid_argument("Metal F16 prefill attention requires staged rows for a wrapped query block");
+    const auto require_cache = [&](const BackendBuffer& buffer,
+                                   std::uint64_t rows, std::uint32_t width) {
+        const auto& descriptor = buffer.descriptor();
+        const auto row_elements = u32(static_cast<std::uint64_t>(kv_head_count) * width,
+            "prefill attention cache row addressing");
+        const auto& shape = descriptor.shape;
+        const bool matching_rows = (shape.rank() == 3U && shape.dimension(0U) == rows
+            && shape.dimension(1U) == kv_head_count && shape.dimension(2U) == width)
+            || (shape.rank() == 2U && shape.dimension(0U) == rows
+                && shape.dimension(1U) == row_elements);
+        if (descriptor.dtype != DType::f16 || descriptor.packing != TensorPacking::canonical
+            || !matching_rows) {
+            throw std::invalid_argument("Metal F16 prefill attention requires canonical F16 KV storage");
+        }
+        if (rows > std::numeric_limits<std::uint32_t>::max() / row_elements)
+            throw std::invalid_argument("Metal F16 prefill attention cache exceeds uint32 addressing");
+        const auto elements = rows * row_elements;
+        require_capacity(buffer, elements * sizeof(std::uint16_t), "prefill attention cache");
+        (void)storage(buffer);
     };
-    auto encoder = impl_->compute_encoder("Gemma2 wrapped prefill attention values");
-    [encoder setComputePipelineState:impl_->state->gemma2_wrapped_prefill_attention_values_pipeline];
-    bind_buffer(encoder, probabilities, 0);
-    bind_buffer(encoder, value_cache, 1);
-    bind_buffer(encoder, current_chunk_value, 2);
-    bind_buffer(encoder, output, 3);
-    [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
-    [encoder dispatchThreadgroups:MTLSizeMake(
-                                      static_cast<NSUInteger>((value_length + 7U) / 8U),
-                                      static_cast<NSUInteger>((head_count + 7U) / 8U),
-                                      static_cast<NSUInteger>((query_rows + 1U) / 2U)
-                                  )
-              threadsPerThreadgroup:MTLSizeMake(8, 8, 2)];
+    require_cache(key_cache, cache_rows, key_length);
+    require_cache(value_cache, cache_rows, value_length);
+    require_cache(current_chunk_key, stage_rows, key_length);
+    require_cache(current_chunk_value, stage_rows, value_length);
+    if (uses_staged_chunk) {
+        for (const auto* staged : {&current_chunk_key, &current_chunk_value}) {
+            for (const auto* resident : {&key_cache, &value_cache}) {
+                require_disjoint_ranges(*staged, staged->descriptor().byte_count,
+                    *resident, resident->descriptor().byte_count, "prefill attention staged/resident KV");
+            }
+        }
+    }
+    const auto require_rows = [&](const BackendBuffer& buffer, std::uint32_t width) {
+        const auto& descriptor = buffer.descriptor();
+        const auto row_width = u32(static_cast<std::uint64_t>(head_count) * width,
+            "prefill attention row width");
+        if (descriptor.dtype != DType::f32 || descriptor.packing != TensorPacking::canonical
+            || descriptor.shape.rank() != 2U
+            || descriptor.shape.dimension(0U) < query_row_count
+            || descriptor.shape.dimension(1U) != row_width) {
+            throw std::invalid_argument("Metal F16 prefill attention query/output layout is invalid");
+        }
+        const auto elements = static_cast<std::uint64_t>(query_row_count) * row_width;
+        static_cast<void>(u32(elements, "prefill attention row addressing"));
+        require_capacity(buffer, elements * sizeof(float), "prefill attention rows");
+        (void)storage(buffer);
+    };
+    require_rows(query, key_length);
+    require_rows(output, value_length);
+    const auto output_bytes = static_cast<std::uint64_t>(query_row_count)
+        * head_count * value_length * sizeof(float);
+    for (const auto* source : {&query, &key_cache, &value_cache,
+                              &current_chunk_key, &current_chunk_value}) {
+        require_disjoint_ranges(*source, source->descriptor().byte_count,
+            output, output_bytes, "prefill attention source/output");
+    }
+    const bool use_matrix = key_length == 256U && value_length == 256U;
+    const auto generic_scratch_bytes = (static_cast<std::uint64_t>(key_length)
+        + value_length) * sizeof(float);
+    const auto aligned_scratch_bytes = (generic_scratch_bytes + 15U) & ~std::uint64_t {15U};
+    if (!use_matrix && aligned_scratch_bytes > impl_->state->device.maxThreadgroupMemoryLength)
+        throw std::invalid_argument("Metal F16 prefill attention head widths exceed device threadgroup capacity");
+    const F16PrefillAttentionDimensions dims {
+        query_row_count, head_count, kv_head_count, key_length, value_length,
+        attention_token_count, query_position_start, cache_row_mask,
+        u32(stage_rows - 1U, "prefill attention stage mask"),
+        uses_staged_chunk ? 1U : 0U, current_chunk_position_origin, scale, logit_softcap,
+    };
+    auto encoder = impl_->compute_encoder("Gemma fused prefill attention");
+    [encoder setComputePipelineState:use_matrix
+        ? impl_->state->gemma2_prefill_attention_pipeline
+        : impl_->state->gemma2_prefill_attention_generic_pipeline];
+    bind_buffer(encoder, query, 0U);
+    bind_buffer(encoder, key_cache, 1U);
+    bind_buffer(encoder, value_cache, 2U);
+    bind_buffer(encoder, current_chunk_key, 3U);
+    bind_buffer(encoder, current_chunk_value, 4U);
+    bind_output_buffer(encoder, output, 5U);
+    [encoder setBytes:&dims length:sizeof(dims) atIndex:6U];
+    if (!use_matrix)
+        [encoder setThreadgroupMemoryLength:static_cast<NSUInteger>(aligned_scratch_bytes) atIndex:0U];
+    [encoder dispatchThreadgroups:MTLSizeMake(use_matrix
+        ? (query_row_count + 7U) / 8U : query_row_count, head_count, 1U)
+        threadsPerThreadgroup:MTLSizeMake(use_matrix ? 128U : 32U, 1U, 1U)];
     ++impl_->stats.compute_dispatch_count;
 }
 
@@ -1647,10 +1486,10 @@ void MetalCommandContext::encode_gemma2_decode_attention(
     bind_buffer(encoder, query, 0, static_cast<std::uint64_t>(query_row) * row_bytes);
     bind_buffer(encoder, key_cache, 1);
     bind_buffer(encoder, value_cache, 2);
-    bind_buffer(encoder, output, 3, static_cast<std::uint64_t>(output_row) * row_bytes);
-    bind_buffer(encoder, partial_output, 4);
-    bind_buffer(encoder, partial_maxima, 5);
-    bind_buffer(encoder, partial_denominators, 6);
+    bind_output_buffer(encoder, output, 3, static_cast<std::uint64_t>(output_row) * row_bytes);
+    bind_output_buffer(encoder, partial_output, 4);
+    bind_output_buffer(encoder, partial_maxima, 5);
+    bind_output_buffer(encoder, partial_denominators, 6);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:7];
     [encoder dispatchThreadgroups:MTLSizeMake(kv_heads, partitions, 1)
               threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
@@ -1663,7 +1502,7 @@ void MetalCommandContext::encode_gemma2_decode_attention(
         bind_buffer(encoder, partial_output, 0);
         bind_buffer(encoder, partial_maxima, 1);
         bind_buffer(encoder, partial_denominators, 2);
-        bind_buffer(encoder, output, 3, static_cast<std::uint64_t>(output_row) * row_bytes);
+        bind_output_buffer(encoder, output, 3, static_cast<std::uint64_t>(output_row) * row_bytes);
         [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
         [encoder dispatchThreadgroups:MTLSizeMake(kv_heads, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -1694,7 +1533,7 @@ void MetalCommandContext::encode_verifier_input_validation(
     [encoder setComputePipelineState:impl_->state->verifier_input_validate_pipeline];
     bind_buffer(encoder, actual_token_ids, 0, actual_byte_offset);
     bind_buffer(encoder, expected_token_ids, 1);
-    bind_buffer(encoder, status, 2);
+    bind_output_buffer(encoder, status, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreads:MTLSizeMake(row_count, 1U, 1U)
           threadsPerThreadgroup:MTLSizeMake(std::min<std::uint32_t>(row_count, 256U), 1U, 1U)];
@@ -1737,9 +1576,9 @@ void MetalCommandContext::encode_verifier_selection_requests(
     auto encoder = impl_->compute_encoder("Gemma2 verifier request resolve");
     [encoder setComputePipelineState:impl_->state->verifier_request_resolve_pipeline];
     bind_buffer(encoder, raw_requests, 0, raw_byte_offset);
-    bind_buffer(encoder, resolved_requests, 1);
-    bind_buffer(encoder, histories, 2);
-    bind_buffer(encoder, status, 3);
+    bind_output_buffer(encoder, resolved_requests, 1);
+    bind_output_buffer(encoder, histories, 2);
+    bind_output_buffer(encoder, status, 3);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreads:MTLSizeMake(row_count, 1U, 1U)
           threadsPerThreadgroup:MTLSizeMake(std::min<std::uint32_t>(row_count, 256U), 1U, 1U)];
@@ -1777,7 +1616,7 @@ void MetalCommandContext::encode_verifier_rope(
     [encoder setComputePipelineState:impl_->state->verifier_rope_pipeline];
     bind_buffer(encoder, input, 0);
     bind_buffer(encoder, positions, 1);
-    bind_buffer(encoder, output, 2);
+    bind_output_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(row_width), row_count, 1U)
           threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
@@ -1840,10 +1679,10 @@ void MetalCommandContext::encode_verifier_kv_store(
     bind_buffer(encoder, raw_key, 0);
     bind_buffer(encoder, raw_value, 1);
     bind_buffer(encoder, positions, 2);
-    bind_buffer(encoder, private_key, 3);
-    bind_buffer(encoder, private_value, 4);
+    bind_output_buffer(encoder, private_key, 3);
+    bind_output_buffer(encoder, private_value, 4);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
-    if (numerical_status != nullptr) bind_buffer(encoder, *numerical_status, 6U);
+    if (numerical_status != nullptr) bind_output_buffer(encoder, *numerical_status, 6U);
     [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(row_width), row_count, 1U)
           threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
     ++impl_->stats.compute_dispatch_count;
@@ -1949,12 +1788,12 @@ void MetalCommandContext::encode_verifier_attention(
     bind_buffer(encoder, private_value, 4);
     bind_buffer(encoder, schedules, 5, schedule_byte_offset);
     bind_buffer(encoder, ancestors, 6);
-    bind_buffer(encoder, output, 7);
-    bind_buffer(encoder, partial_output, 8);
-    bind_buffer(encoder, partial_maxima, 9);
-    bind_buffer(encoder, partial_denominators, 10);
+    bind_output_buffer(encoder, output, 7);
+    bind_output_buffer(encoder, partial_output, 8);
+    bind_output_buffer(encoder, partial_maxima, 9);
+    bind_output_buffer(encoder, partial_denominators, 10);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:11];
-    if (q4_input_sums != nullptr) bind_buffer(encoder, *q4_input_sums, 12U);
+    if (q4_input_sums != nullptr) bind_output_buffer(encoder, *q4_input_sums, 12U);
     [encoder dispatchThreadgroups:MTLSizeMake(kv_head_count,
                                       maximum_partitions,
                                       row_count)
@@ -1971,9 +1810,9 @@ void MetalCommandContext::encode_verifier_attention(
     bind_buffer(encoder, partial_maxima, 1);
     bind_buffer(encoder, partial_denominators, 2);
     bind_buffer(encoder, schedules, 3, schedule_byte_offset);
-    bind_buffer(encoder, output, 4);
+    bind_output_buffer(encoder, output, 4);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
-    if (q4_input_sums != nullptr) bind_buffer(encoder, *q4_input_sums, 6U);
+    if (q4_input_sums != nullptr) bind_output_buffer(encoder, *q4_input_sums, 6U);
     [encoder dispatchThreadgroups:MTLSizeMake(kv_head_count, row_count, 1U)
               threadsPerThreadgroup:MTLSizeMake(32U, 1U, 1U)];
     ++impl_->stats.compute_dispatch_count;
@@ -2010,8 +1849,8 @@ void MetalCommandContext::encode_verifier_kv_scatter(
     bind_buffer(encoder, private_key, 0);
     bind_buffer(encoder, private_value, 1);
     bind_buffer(encoder, selected_nodes, 2);
-    bind_buffer(encoder, resident_key, 3);
-    bind_buffer(encoder, resident_value, 4);
+    bind_output_buffer(encoder, resident_key, 3);
+    bind_output_buffer(encoder, resident_value, 4);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
     [encoder dispatchThreads:MTLSizeMake(row_width, row_count, 1U)
           threadsPerThreadgroup:MTLSizeMake(256U, 1U, 1U)];
@@ -2032,7 +1871,7 @@ void MetalCommandContext::encode_add(
     [encoder setComputePipelineState:impl_->state->add_pipeline];
     bind_buffer(encoder, left, 0);
     bind_buffer(encoder, right, 1);
-    bind_buffer(encoder, output, 2);
+    bind_output_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -2053,7 +1892,7 @@ void MetalCommandContext::encode_silu_multiply(
     [encoder setComputePipelineState:impl_->state->silu_multiply_pipeline];
     bind_buffer(encoder, gate, 0);
     bind_buffer(encoder, up, 1);
-    bind_buffer(encoder, output, 2);
+    bind_output_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -2096,9 +1935,9 @@ void MetalCommandContext::encode_gelu_tanh_multiply(
         ? impl_->state->gelu_tanh_multiply_q4_sums_pipeline : impl_->state->gelu_tanh_multiply_pipeline];
     bind_buffer(encoder, gate, 0);
     bind_buffer(encoder, up, 1);
-    bind_buffer(encoder, output, 2);
+    bind_output_buffer(encoder, output, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
-    if (q4_input_sums != nullptr) bind_buffer(encoder, *q4_input_sums, 4U);
+    if (q4_input_sums != nullptr) bind_output_buffer(encoder, *q4_input_sums, 4U);
     const auto threads = q4_input_sums != nullptr ? elements / 8U : elements;
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((threads + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -2117,7 +1956,7 @@ void MetalCommandContext::encode_softcap(
     auto encoder = impl_->compute_encoder("Gemma2 final softcap");
     [encoder setComputePipelineState:impl_->state->softcap_pipeline];
     bind_buffer(encoder, input, 0);
-    bind_buffer(encoder, output, 1);
+    bind_output_buffer(encoder, output, 1);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
     [encoder dispatchThreadgroups:MTLSizeMake(static_cast<NSUInteger>((elements + 255U) / 256U), 1, 1)
               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -2164,7 +2003,7 @@ std::uint32_t MetalCommandContext::encode_token_candidates(
         auto encoder = impl_->compute_encoder("Gemma2 compact token top-1");
         [encoder setComputePipelineState:impl_->state->token_candidate_top1_pipeline];
         bind_buffer(encoder, logits, 0);
-        bind_buffer(encoder, workspace.compact_result, 1);
+        bind_output_buffer(encoder, workspace.compact_result, 1);
         [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
         [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
         ++impl_->stats.compute_dispatch_count;
@@ -2174,8 +2013,8 @@ std::uint32_t MetalCommandContext::encode_token_candidates(
     auto encoder = impl_->compute_encoder("Gemma2 compact token candidates");
     [encoder setComputePipelineState:impl_->state->token_candidate_tile_pipeline];
     bind_buffer(encoder, logits, 0);
-    bind_buffer(encoder, workspace.candidate_runs_a, 1);
-    bind_buffer(encoder, workspace.compact_result, 2);
+    bind_output_buffer(encoder, workspace.candidate_runs_a, 1);
+    bind_output_buffer(encoder, workspace.compact_result, 2);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(run_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
     ++impl_->stats.compute_dispatch_count;
@@ -2193,7 +2032,7 @@ std::uint32_t MetalCommandContext::encode_token_candidates(
         encoder = impl_->compute_encoder("Gemma2 compact token merge");
         [encoder setComputePipelineState:impl_->state->token_candidate_merge_pipeline];
         bind_buffer(encoder, input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 0);
-        bind_buffer(encoder, input_is_a ? workspace.candidate_runs_b : workspace.candidate_runs_a, 1);
+        bind_output_buffer(encoder, input_is_a ? workspace.candidate_runs_b : workspace.candidate_runs_a, 1);
         [encoder setBytes:&merge_dims length:sizeof(merge_dims) atIndex:2];
         [encoder dispatchThreadgroups:MTLSizeMake(output_run_count, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
@@ -2209,7 +2048,7 @@ std::uint32_t MetalCommandContext::encode_token_candidates(
     bind_buffer(encoder, logits, 0);
     bind_buffer(encoder, input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 1);
     bind_buffer(encoder, workspace.history_token_staging, 2);
-    bind_buffer(encoder, workspace.compact_result, 3);
+    bind_output_buffer(encoder, workspace.compact_result, 3);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(retain_count + request.history_token_count, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
@@ -2273,7 +2112,7 @@ std::uint32_t MetalCommandContext::encode_token_candidates_width_two(
         auto encoder = impl_->compute_encoder("Gemma2 batched compact token top-1");
         [encoder setComputePipelineState:impl_->state->token_candidate_batch_top1_pipeline];
         bind_buffer(encoder, logits, 0);
-        bind_buffer(encoder, workspace.compact_result, 1);
+        bind_output_buffer(encoder, workspace.compact_result, 1);
         [encoder setBytes:&batch length:sizeof(batch) atIndex:2];
         [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
         ++impl_->stats.compute_dispatch_count;
@@ -2283,8 +2122,8 @@ std::uint32_t MetalCommandContext::encode_token_candidates_width_two(
     auto encoder = impl_->compute_encoder("Gemma2 batched compact token candidates");
     [encoder setComputePipelineState:impl_->state->token_candidate_batch_tile_pipeline];
     bind_buffer(encoder, logits, 0);
-    bind_buffer(encoder, workspace.candidate_runs_a, 1);
-    bind_buffer(encoder, workspace.compact_result, 2);
+    bind_output_buffer(encoder, workspace.candidate_runs_a, 1);
+    bind_output_buffer(encoder, workspace.compact_result, 2);
     [encoder setBytes:&batch length:sizeof(batch) atIndex:3];
     [encoder dispatchThreadgroups:MTLSizeMake(run_count, 2, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
     ++impl_->stats.compute_dispatch_count;
@@ -2302,7 +2141,7 @@ std::uint32_t MetalCommandContext::encode_token_candidates_width_two(
         encoder = impl_->compute_encoder("Gemma2 batched compact token merge");
         [encoder setComputePipelineState:impl_->state->token_candidate_batch_merge_pipeline];
         bind_buffer(encoder, input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 0);
-        bind_buffer(encoder, input_is_a ? workspace.candidate_runs_b : workspace.candidate_runs_a, 1);
+        bind_output_buffer(encoder, input_is_a ? workspace.candidate_runs_b : workspace.candidate_runs_a, 1);
         [encoder setBytes:&merge length:sizeof(merge) atIndex:2];
         [encoder dispatchThreadgroups:MTLSizeMake(output_run_count, 2, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
         ++impl_->stats.compute_dispatch_count;
@@ -2320,7 +2159,7 @@ std::uint32_t MetalCommandContext::encode_token_candidates_width_two(
     bind_buffer(encoder, logits, 0);
     bind_buffer(encoder, input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 1);
     bind_buffer(encoder, workspace.history_token_staging, 2);
-    bind_buffer(encoder, workspace.compact_result, 3);
+    bind_output_buffer(encoder, workspace.compact_result, 3);
     [encoder setBytes:&batch length:sizeof(batch) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(finalize_count, 2, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
     ++impl_->stats.compute_dispatch_count;
@@ -2371,7 +2210,7 @@ std::uint32_t MetalCommandContext::encode_target_token_candidates(
         auto encoder = impl_->compute_encoder("Gemma2 target-candidate top-1");
         [encoder setComputePipelineState:impl_->state->target_candidate_batch_top1_pipeline];
         bind_buffer(encoder, logits_tile, 0);
-        bind_buffer(encoder, workspace.compact_results, 1, result_offset);
+        bind_output_buffer(encoder, workspace.compact_results, 1, result_offset);
         [encoder setBytes:&dims length:sizeof(dims) atIndex:2];
         [encoder dispatchThreadgroups:MTLSizeMake(row_count, 1U, 1U)
                   threadsPerThreadgroup:MTLSizeMake(512U, 1U, 1U)];
@@ -2383,8 +2222,8 @@ std::uint32_t MetalCommandContext::encode_target_token_candidates(
     [encoder setComputePipelineState:impl_->state->target_candidate_batch_tile_pipeline];
     bind_buffer(encoder, logits_tile, 0);
     bind_buffer(encoder, workspace.resolved_request_staging, 1, request_offset);
-    bind_buffer(encoder, workspace.candidate_runs_a, 2);
-    bind_buffer(encoder, workspace.compact_results, 3, result_offset);
+    bind_output_buffer(encoder, workspace.candidate_runs_a, 2);
+    bind_output_buffer(encoder, workspace.compact_results, 3, result_offset);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:4];
     [encoder dispatchThreadgroups:MTLSizeMake(run_count, row_count, 1U)
               threadsPerThreadgroup:MTLSizeMake(512U, 1U, 1U)];
@@ -2400,7 +2239,7 @@ std::uint32_t MetalCommandContext::encode_target_token_candidates(
         bind_buffer(encoder,
             input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 0);
         bind_buffer(encoder, workspace.resolved_request_staging, 1, request_offset);
-        bind_buffer(encoder,
+        bind_output_buffer(encoder,
             input_is_a ? workspace.candidate_runs_b : workspace.candidate_runs_a, 2);
         [encoder setBytes:&dims length:sizeof(dims) atIndex:3];
         [encoder setBytes:&input_runs length:sizeof(input_runs) atIndex:4];
@@ -2419,7 +2258,7 @@ std::uint32_t MetalCommandContext::encode_target_token_candidates(
         input_is_a ? workspace.candidate_runs_a : workspace.candidate_runs_b, 1);
     bind_buffer(encoder, workspace.resolved_request_staging, 2, request_offset);
     bind_buffer(encoder, workspace.history_token_staging, 3, history_offset);
-    bind_buffer(encoder, workspace.compact_results, 4, result_offset);
+    bind_output_buffer(encoder, workspace.compact_results, 4, result_offset);
     [encoder setBytes:&dims length:sizeof(dims) atIndex:5];
     [encoder dispatchThreadgroups:MTLSizeMake(engine::token_sampler_max_candidates, row_count, 1U)
               threadsPerThreadgroup:MTLSizeMake(1U, 1U, 1U)];

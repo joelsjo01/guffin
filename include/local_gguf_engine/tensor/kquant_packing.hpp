@@ -16,6 +16,9 @@ inline constexpr std::size_t kquant_q6_columns8_tile_bytes = 1680U;
 // Q6: ushort low[64][8], uchar high[64][8], char scales[16][8], half d[8].
 // Each Q6 low/high entry describes four consecutive values in a 16-value group.
 [[nodiscard]] TensorStorage repack_kquant_weight_columns8(TensorView source);
+void repack_kquant_weight_columns8_into(
+    TensorView source, const TensorDescriptor& destination, std::span<std::uint8_t> bytes
+);
 [[nodiscard]] TensorStorage restore_native_kquant_weight(TensorView source);
 
 }  // namespace local_gguf_engine::tensor

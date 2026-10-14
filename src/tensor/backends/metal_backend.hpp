@@ -2,6 +2,10 @@
 
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
+#include "local_gguf_engine/runtime/owned_read_only_bytes.hpp"
+
+#include <functional>
+#include <span>
 
 #include <string>
 #include <cstdint>
@@ -9,6 +13,23 @@
 
 namespace local_gguf_engine::tensor::backends::metal {
 
+// Construction-only initialization publishes the final owned buffer after the
+// callback completes. Its mutable span must not escape the callback.
+[[nodiscard]] BackendBuffer initialize_metal_backend_buffer(
+    const TensorDescriptor& descriptor,
+    const std::function<void(std::span<std::uint8_t>)>& initializer
+);
+// Native immutable matrix registration is explicit and retains the allocation.
+// Borrowed views and authenticated resident payloads continue to use copies.
+[[nodiscard]] BackendBuffer map_immutable_tensor_view_to_metal_backend(
+    const TensorView& view, const runtime::OwnedReadOnlyBytes& backing
+);
+[[nodiscard]] std::size_t mapped_immutable_tensor_byte_count(
+    const TensorView& view, const runtime::OwnedReadOnlyBytes& backing
+);
+[[nodiscard]] std::size_t metal_backend_buffer_allocation_byte_count(const BackendBuffer& buffer);
+
+[[nodiscard]] bool supports_immutable_metal_mappings() noexcept;
 [[nodiscard]] bool is_available() noexcept;
 [[nodiscard]] std::string unavailable_reason();
 struct MetalMemoryInfo {

@@ -7,6 +7,8 @@
 #include "local_gguf_engine/tensor/shape.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <initializer_list>
 #include <span>
@@ -22,6 +24,7 @@ using local_gguf_engine::engine::EngineModelErrorCode;
 using local_gguf_engine::engine::GemmaModelConfig;
 using local_gguf_engine::engine::bind_gemma_model_weights;
 using local_gguf_engine::engine::load_engine_model_from_gguf;
+using local_gguf_engine::engine::load_verified_engine_model_from_gguf;
 using local_gguf_engine::engine::ModelArchitecture;
 using local_gguf_engine::engine::model_architecture_name;
 using local_gguf_engine::model_format::GGUFHeader;
@@ -256,6 +259,46 @@ void test_binds_gemma2_model_weights_with_mixed_k_quant_tensors() {
     );
 }
 
+void test_verified_model_receipts_match_independent_golden_and_canonical_order() {
+    auto payload_store = tiny_gemma2_payload_store();
+    payload_store.bytes[0][0] = 0xA5U;
+    auto view = tiny_model_view(tiny_gemma2_metadata(), std::move(payload_store.payloads));
+    const std::array<std::uint8_t, 8U> whole_bytes {'G', 'G', 'U', 'F', 3U, 2U, 1U, 0U};
+    const auto model = load_verified_engine_model_from_gguf(view, whole_bytes);
+    expect(model.payload_receipt().has_value(), "verified model has no payload receipt");
+    const auto receipt = *model.payload_receipt();
+    expect(receipt.version == 1U && receipt.whole_gguf_byte_count == whole_bytes.size()
+        && receipt.source_tensor_count == 13U, "verified receipt framing changed");
+    // Frozen Python hashlib/struct goldens independently frame each v1 domain
+    // in little-endian order, including the nonzero embedding byte above.
+    expect(receipt.whole_gguf.hex()
+        == "d489ee2125769e952260b347dba268ce14f03eed08ec2f48057a6c0f488d90c0",
+        "whole-GGUF receipt differs from independent golden");
+    expect(receipt.canonical_consumed_metadata.hex()
+        == "44a9103030ded9db122b2798ce2df67d2c0bab728238b2595db006fbed2c8706",
+        "consumed metadata receipt differs from independent golden");
+    expect(receipt.source_tensors.hex()
+        == "53a1c0f741fa9e99c8e8658acd183e72f364b8605df6deca4df01856486d12ad",
+        "source tensor receipt differs from independent golden");
+    std::reverse(view.tensor_payloads.begin(), view.tensor_payloads.end());
+    expect(load_verified_engine_model_from_gguf(view, whole_bytes).payload_receipt() == receipt,
+        "source tensor receipt depends on GGUF directory order");
+    payload_store.bytes[0][1] = 0x5AU;
+    const auto changed = load_verified_engine_model_from_gguf(view, whole_bytes);
+    expect(changed.payload_receipt()->source_tensors != receipt.source_tensors
+        && changed.payload_receipt()->whole_gguf == receipt.whole_gguf
+        && changed.payload_receipt()->canonical_consumed_metadata == receipt.canonical_consumed_metadata,
+        "tensor mutation was not isolated to its source receipt domain");
+    try {
+        (void)load_verified_engine_model_from_gguf(view, {});
+        throw TestFailure("verified model accepted an empty whole-GGUF receipt input");
+    } catch (const EngineModelError& error) {
+        expect(error.code() == EngineModelErrorCode::invalid_tensor
+            && error.detail() == "empty whole-GGUF receipt input",
+            "empty whole-GGUF receipt input returned the wrong error");
+    }
+}
+
 void test_rejects_engine_model_without_architecture_metadata() {
     auto metadata = tiny_gemma2_metadata();
     metadata.erase(metadata.begin());
@@ -395,6 +438,10 @@ void test_rejects_gemma2_weight_binding_missing_tensor() {
 }
 
 const local_gguf_engine::tests::TestCase kEngineModelTests[] = {
+    {
+        "verified model receipts match independent goldens and canonical tensor order",
+        test_verified_model_receipts_match_independent_golden_and_canonical_order,
+    },
     {
         "loads engine model from Gemma2 GGUF view without eager owned tensor copies",
         test_loads_engine_model_from_gemma2_gguf_view,

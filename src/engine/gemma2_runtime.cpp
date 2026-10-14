@@ -1005,84 +1005,39 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
                 gemma2_rope_frequency_base,
                 chunk_token_count
             );
-            if (wraps_sliding_ring) {
-                command.encode_gemma2_kv_cache_store(
-                    scratch.raw_key,
-                    scratch.value,
-                    scratch.current_chunk_key,
-                    scratch.current_chunk_value,
-                    chunk_cache_position,
-                    config.attention_head_count_kv,
-                    head_dimension,
-                    head_dimension,
-                    gemma2_rope_frequency_base,
-                    gemma2_metal_prefill_chunk_size - 1U,
-                    chunk_token_count
-                );
-                command.encode_wrapped_prefill_attention_scores(
-                    scratch.query,
-                    cache.key,
-                    scratch.current_chunk_key,
-                    scratch.attention_scores,
-                    chunk_cache_position,
-                    config.attention_head_count,
-                    config.attention_head_count_kv,
-                    head_dimension,
-                    scheduled_layer.attention_token_count,
-                    attention_scale,
-                    config.attention_logit_softcap,
-                    cache.row_mask,
-                    chunk_token_count
-                );
-            } else {
-                command.encode_gemma2_kv_cache_store(
-                    scratch.raw_key,
-                    scratch.value,
-                    cache.key,
-                    cache.value,
-                    chunk_cache_position,
-                    config.attention_head_count_kv,
-                    head_dimension,
-                    head_dimension,
-                    gemma2_rope_frequency_base,
-                    cache.row_mask,
-                    chunk_token_count
-                );
-                command.encode_attention_scores(
-                    scratch.query,
-                    cache.key,
-                    scratch.attention_scores,
-                    chunk_cache_position,
-                    config.attention_head_count,
-                    config.attention_head_count_kv,
-                    head_dimension,
-                    scheduled_layer.attention_token_count,
-                    attention_scale,
-                    config.attention_logit_softcap,
-                    cache.row_mask,
-                    chunk_token_count
-                );
-            }
-            command.encode_softmax(
-                scratch.attention_scores,
-                scratch.attention_probabilities,
-                chunk_token_count * config.attention_head_count,
-                scheduled_layer.attention_token_count
+            command.encode_gemma2_kv_cache_store(
+                scratch.raw_key,
+                scratch.value,
+                wraps_sliding_ring ? scratch.current_chunk_key : cache.key,
+                wraps_sliding_ring ? scratch.current_chunk_value : cache.value,
+                chunk_cache_position,
+                config.attention_head_count_kv,
+                head_dimension,
+                head_dimension,
+                gemma2_rope_frequency_base,
+                wraps_sliding_ring ? gemma2_metal_prefill_chunk_size - 1U : cache.row_mask,
+                chunk_token_count
+            );
+            command.encode_f16_prefill_attention(
+                scratch.query,
+                cache.key,
+                cache.value,
+                scratch.current_chunk_key,
+                scratch.current_chunk_value,
+                scratch.attention_output,
+                chunk_cache_position,
+                config.attention_head_count,
+                config.attention_head_count_kv,
+                head_dimension,
+                config.attention_value_length,
+                scheduled_layer.attention_token_count,
+                attention_scale,
+                config.attention_logit_softcap,
+                cache.row_mask,
+                chunk_token_count,
+                wraps_sliding_ring
             );
             if (wraps_sliding_ring) {
-                command.encode_wrapped_prefill_attention_values(
-                    scratch.attention_probabilities,
-                    cache.value,
-                    scratch.current_chunk_value,
-                    scratch.attention_output,
-                    chunk_cache_position,
-                    config.attention_head_count,
-                    config.attention_head_count_kv,
-                    config.attention_value_length,
-                    scheduled_layer.attention_token_count,
-                    cache.row_mask,
-                    chunk_token_count
-                );
                 // Tiny test rings may be narrower than a prefill chunk. Only
                 // its final live window can be copied without duplicate
                 // physical destinations in one dispatch.
@@ -1107,19 +1062,6 @@ Gemma2MetalResidentPrefillResult run_gemma2_metal_resident_prefill(
                     * config.attention_head_count_kv
                     * (config.attention_key_length + config.attention_value_length)
                     * sizeof(std::uint16_t) * 2U;
-            } else {
-                command.encode_attention_values(
-                    scratch.attention_probabilities,
-                    cache.value,
-                    scratch.attention_output,
-                    chunk_cache_position,
-                    config.attention_head_count,
-                    config.attention_head_count_kv,
-                    config.attention_value_length,
-                    scheduled_layer.attention_token_count,
-                    cache.row_mask,
-                    chunk_token_count
-                );
             }
             command.encode_matmul(
                 scratch.attention_output,

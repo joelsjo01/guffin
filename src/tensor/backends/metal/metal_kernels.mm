@@ -1023,10 +1023,13 @@ inline void dequantize_columns8_16(
     }
 }
 
-// Prompt rows share decoded weights while each 8x8 accumulator retains the
-// same K8 sequence and F32 operands as the M8 tile. Decode/verifier rows use
-// the canonical packed arithmetic above, independently of these prompt tiles.
-template <uint rows_per_tile>
+// M32 keeps decoded B shared and loads native F32 A directly into fragments,
+// avoiding an activation staging pass. M8 keeps its original shared operands.
+// Both preserve each output's increasing K8 sequence; compact decode/verifier
+// rows retain their independent packed arithmetic.
+// Host dispatch and the staging layout use four 32-lane SIMDgroups.
+template <uint rows_per_tile, uint columns_per_tile, uint inner_per_tile>
+[[max_total_threads_per_threadgroup(128)]]
 kernel void gemma3_matmul_f32_kquant_matrix_impl(
     const device float* left [[buffer(0)]],
     const device uchar* right [[buffer(1)]],
@@ -1037,9 +1040,21 @@ kernel void gemma3_matmul_f32_kquant_matrix_impl(
     ushort simd_group [[simdgroup_index_in_threadgroup]]
 ) {
     constexpr uint row_groups = rows_per_tile / 8;
-    constexpr uint columns_per_tile = 32;
-    constexpr uint inner_per_tile = 64;
-    threadgroup float scratch[(columns_per_tile + rows_per_tile) * inner_per_tile];
+    constexpr uint column_groups = columns_per_tile / 8;
+    // M8 distributes columns across four groups. M32 assigns each group
+    // 8 rows and 64 columns, reusing one activation fragment across all N.
+    constexpr uint simd_rows = row_groups == 1 ? 1 : 4;
+    constexpr uint simd_columns = 4 / simd_rows;
+    constexpr uint simd_row_groups = row_groups / simd_rows;
+    constexpr uint simd_column_groups = column_groups / simd_columns;
+    // M32 loads one A fragment and streams B across its N products. Shared
+    // storage holds decoded B and then the complete tail C tile; only M8
+    // stages A alongside B. These lifetimes keep M32 scratch at 8 KiB.
+    constexpr uint scratch_elements = (rows_per_tile == 32U
+        ? columns_per_tile : rows_per_tile + columns_per_tile) * inner_per_tile;
+    static_assert(columns_per_tile * inner_per_tile / 16 == 128);
+    static_assert(rows_per_tile * columns_per_tile <= scratch_elements);
+    threadgroup float scratch[scratch_elements];
     threadgroup float* weights = scratch;
     threadgroup float* activations = scratch + columns_per_tile * inner_per_tile;
     const uint first_row = group.y * rows_per_tile;
@@ -1047,90 +1062,139 @@ kernel void gemma3_matmul_f32_kquant_matrix_impl(
     const uint valid_rows = min(rows_per_tile, dims.rows - first_row);
     const uint valid_columns = min(columns_per_tile, dims.columns - first_column);
     const uint blocks_per_column = dims.shared / 256;
-    simdgroup_float8x8 accumulators[row_groups];
+    const uint simd_row = uint(simd_group / simd_columns) * simd_row_groups;
+    const uint simd_column = uint(simd_group % simd_columns) * simd_column_groups;
+    simdgroup_float8x8 accumulated[simd_row_groups][simd_column_groups];
 #pragma clang loop unroll(full)
-    for (ushort m = 0; m < row_groups; ++m)
-        accumulators[m] = make_filled_simdgroup_matrix<float, 8>(0.0f);
-
+    for (ushort m = 0; m < simd_row_groups; ++m)
+#pragma clang loop unroll(full)
+        for (ushort n = 0; n < simd_column_groups; ++n)
+            accumulated[m][n] = make_filled_simdgroup_matrix<float, 8>(0.0f);
     for (uint inner = 0; inner < dims.shared; inner += inner_per_tile) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        const uint column = uint(tid) / 4;
-        const uint weight_fragment = uint(tid) & 3;
-        const uint absolute_fragment = inner / 16 + weight_fragment;
-        float4x4 decoded(0.0f);
-        if (column < valid_columns) {
-            if (kquant_columns8) {
-                dequantize_columns8_16(right, first_column + column,
-                    blocks_per_column, absolute_fragment, decoded);
-            } else if (kquant_tiled_dtype == 0) {
-                const device block_q4_k* blocks = reinterpret_cast<const device block_q4_k*>(right);
-                dequantize_q4_k_16(blocks + (first_column + column) * blocks_per_column
-                    + absolute_fragment / 16, short(absolute_fragment & 15), decoded);
-            } else {
-                const device block_q6_k* blocks = reinterpret_cast<const device block_q6_k*>(right);
-                dequantize_q6_k_16(blocks + (first_column + column) * blocks_per_column
-                    + absolute_fragment / 16, short(absolute_fragment & 15), decoded);
+        {
+            const uint column = uint(tid) / (inner_per_tile / 16);
+            const uint weight_fragment = uint(tid) % (inner_per_tile / 16);
+            const uint absolute_fragment = inner / 16 + weight_fragment;
+            float4x4 decoded(0.0f);
+            if (column < valid_columns) {
+                if (kquant_columns8) {
+                    dequantize_columns8_16(right, first_column + column,
+                        blocks_per_column, absolute_fragment, decoded);
+                } else if (kquant_tiled_dtype == 0) {
+                    const device block_q4_k* blocks = reinterpret_cast<const device block_q4_k*>(right);
+                    dequantize_q4_k_16(blocks + (first_column + column) * blocks_per_column
+                        + absolute_fragment / 16, short(absolute_fragment & 15), decoded);
+                } else {
+                    const device block_q6_k* blocks = reinterpret_cast<const device block_q6_k*>(right);
+                    dequantize_q6_k_16(blocks + (first_column + column) * blocks_per_column
+                        + absolute_fragment / 16, short(absolute_fragment & 15), decoded);
+                }
+            }
+#pragma clang loop unroll(full)
+            for (ushort item = 0; item < 16; ++item) {
+                const uint k = weight_fragment * 16 + uint(item);
+                weights[((k / 8) * column_groups + column / 8) * 64
+                    + (k & 7) * 8 + (column & 7)] = decoded[item / 4][item % 4];
             }
         }
+        if constexpr (rows_per_tile != 32U) {
 #pragma clang loop unroll(full)
-        for (ushort item = 0; item < 16; ++item) {
-            const uint k = weight_fragment * 16 + uint(item);
-            weights[((k / 8) * 4 + column / 8) * 64
-                + (k & 7) * 8 + (column & 7)] = decoded[item / 4][item % 4];
-        }
-#pragma clang loop unroll(full)
-        for (ushort index = 0; index < rows_per_tile / 2; ++index) {
-            const uint flat = uint(tid) + uint(index) * 128;
-            const uint row = flat / inner_per_tile;
-            const uint k = flat % inner_per_tile;
-            activations[((k / 8) * row_groups + row / 8) * 64 + (row & 7) * 8 + (k & 7)] = row < valid_rows
-                ? left[(first_row + row) * dims.shared + inner + k] : 0.0f;
+            for (ushort index = 0; index < rows_per_tile * inner_per_tile / 128; ++index) {
+                const uint flat = uint(tid) + uint(index) * 128;
+                const uint row = flat / inner_per_tile;
+                const uint k = flat % inner_per_tile;
+                activations[((k / 8) * row_groups + row / 8) * 64
+                    + (row & 7) * 8 + (k & 7)] = row < valid_rows
+                    ? left[(first_row + row) * dims.shared + inner + k] : 0.0f;
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 #pragma clang loop unroll(full)
-        for (ushort k = 0; k < 8; ++k) {
-            simdgroup_float8x8 b;
-            simdgroup_load(b, weights + (uint(k) * 4 + uint(simd_group)) * 64, 8, 0, false);
-#pragma clang loop unroll(full)
-            for (ushort m = 0; m < row_groups; ++m) {
+        for (ushort k = 0; k < inner_per_tile / 8; ++k) {
+            if constexpr (rows_per_tile == 32U) {
+                static_assert(simd_row_groups == 1U);
                 simdgroup_float8x8 a;
-                simdgroup_load(a, activations + (uint(k) * row_groups + m) * 64, 8, 0, false);
-                simdgroup_multiply_accumulate(accumulators[m], a, b, accumulators[m]);
+                if (valid_rows == rows_per_tile) {
+                    simdgroup_load(a, left + (first_row + simd_row * 8U) * dims.shared
+                        + inner + uint(k) * 8U, dims.shared, 0, false);
+                } else {
+                    // The independently checked Apple9 F32 fragment map also
+                    // serves native attention. Guard each logical row before
+                    // reading; a partial M32 tile has no readable padded rows.
+                    const uint lane = uint(tid) & 31U;
+                    const uint quad = lane / 4U;
+                    const uint matrix_row = (quad & 4U) + (lane / 2U) % 4U;
+                    const uint matrix_column = (quad & 2U) * 2U + (lane & 1U) * 2U;
+                    const uint row = first_row + simd_row * 8U + matrix_row;
+                    float2 elements(0.0f);
+                    if (row < dims.rows) {
+                        const uint at = row * dims.shared + inner + uint(k) * 8U + matrix_column;
+                        elements = float2(left[at], left[at + 1U]);
+                    }
+                    a.thread_elements()[0] = elements.x;
+                    a.thread_elements()[1] = elements.y;
+                }
+#pragma clang loop unroll(full)
+                for (ushort n = 0; n < simd_column_groups; ++n) {
+                    simdgroup_float8x8 b;
+                    simdgroup_load(b, weights + (uint(k) * column_groups
+                        + simd_column + uint(n)) * 64U, 8, 0, false);
+                    simdgroup_multiply_accumulate(accumulated[0][n], a, b, accumulated[0][n]);
+                }
+            } else {
+                simdgroup_float8x8 b[simd_column_groups];
+#pragma clang loop unroll(full)
+                for (ushort n = 0; n < simd_column_groups; ++n)
+                    simdgroup_load(b[n], weights + (uint(k) * column_groups
+                        + simd_column + uint(n)) * 64, 8, 0, false);
+#pragma clang loop unroll(full)
+                for (ushort m = 0; m < simd_row_groups; ++m) {
+                    simdgroup_float8x8 a;
+                    simdgroup_load(a, activations + (uint(k) * row_groups
+                        + simd_row + uint(m)) * 64, 8, 0, false);
+#pragma clang loop unroll(full)
+                    for (ushort n = 0; n < simd_column_groups; ++n)
+                        simdgroup_multiply_accumulate(accumulated[m][n], a, b[n], accumulated[m][n]);
+                }
             }
         }
     }
     if (valid_rows == rows_per_tile && valid_columns == columns_per_tile) {
 #pragma clang loop unroll(full)
-        for (ushort m = 0; m < row_groups; ++m)
-            simdgroup_store(accumulators[m], output + (first_row + uint(m) * 8) * dims.columns
-                + first_column + uint(simd_group) * 8, dims.columns, 0, false);
+        for (ushort m = 0; m < simd_row_groups; ++m)
+#pragma clang loop unroll(full)
+            for (ushort n = 0; n < simd_column_groups; ++n)
+                simdgroup_store(accumulated[m][n], output
+                    + (first_row + (simd_row + uint(m)) * 8) * dims.columns
+                    + first_column + (simd_column + uint(n)) * 8, dims.columns, 0, false);
         return;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 #pragma clang loop unroll(full)
-    for (ushort m = 0; m < row_groups; ++m)
-        simdgroup_store(accumulators[m], scratch + uint(m) * 8 * columns_per_tile
-            + uint(simd_group) * 8, columns_per_tile, 0, false);
+    for (ushort m = 0; m < simd_row_groups; ++m)
+#pragma clang loop unroll(full)
+        for (ushort n = 0; n < simd_column_groups; ++n)
+            simdgroup_store(accumulated[m][n], scratch
+                + (simd_row + uint(m)) * 8 * columns_per_tile
+                + (simd_column + uint(n)) * 8, columns_per_tile, 0, false);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 #pragma clang loop unroll(full)
-    for (ushort index = 0; index < rows_per_tile / 4; ++index) {
+    for (ushort index = 0; index < rows_per_tile * columns_per_tile / 128; ++index) {
         const uint flat = uint(tid) + uint(index) * 128;
         const uint row = flat / columns_per_tile;
         const uint column = flat % columns_per_tile;
-        if (row < valid_rows && column < valid_columns) {
+        if (row < valid_rows && column < valid_columns)
             output[(first_row + row) * dims.columns + first_column + column] = scratch[flat];
-        }
     }
 }
-
-
 template [[host_name("gemma3_matmul_f32_kquant_matrix_kernel")]]
-kernel void gemma3_matmul_f32_kquant_matrix_impl<8>(
+kernel void gemma3_matmul_f32_kquant_matrix_impl<8, 32, 64>(
     const device float*, const device uchar*, device float*,
     constant MatmulDimensions&, uint2, ushort, ushort);
 
 template [[host_name("gemma3_matmul_f32_kquant_matrix_m32_kernel")]]
-kernel void gemma3_matmul_f32_kquant_matrix_impl<32>(
+kernel void gemma3_matmul_f32_kquant_matrix_impl<32, 64, 32>(
     const device float*, const device uchar*, device float*,
     constant MatmulDimensions&, uint2, ushort, ushort);
 
@@ -1904,32 +1968,6 @@ struct GroupedAttentionScoreDimensions {
     float logit_softcap;
 };
 
-struct Gemma2PrefillAttentionScoreDimensions {
-    uint query_rows;
-    uint key_rows;
-    uint head_count;
-    uint kv_head_count;
-    uint key_length;
-    uint attention_token_count;
-    uint query_position_start;
-    uint cache_row_mask;
-    float scale;
-    float logit_softcap;
-};
-
-struct Gemma2WrappedPrefillAttentionScoreDimensions {
-    uint query_rows;
-    uint head_count;
-    uint kv_head_count;
-    uint key_length;
-    uint attention_token_count;
-    uint query_position_start;
-    uint cache_row_mask;
-    uint current_chunk_row_mask;
-    float scale;
-    float logit_softcap;
-};
-
 struct GroupedAttentionValueDimensions {
     uint query_rows;
     uint value_rows;
@@ -1940,26 +1978,20 @@ struct GroupedAttentionValueDimensions {
     uint query_position_start;
 };
 
-struct Gemma2PrefillAttentionValueDimensions {
-    uint query_rows;
-    uint value_rows;
-    uint head_count;
-    uint kv_head_count;
-    uint value_length;
-    uint attention_token_count;
-    uint query_position_start;
-    uint cache_row_mask;
-};
-
-struct Gemma2WrappedPrefillAttentionValueDimensions {
+struct Gemma2PrefillAttentionDimensions {
     uint query_rows;
     uint head_count;
     uint kv_head_count;
-    uint value_length;
+    uint key_dimension;
+    uint value_dimension;
     uint attention_token_count;
     uint query_position_start;
     uint cache_row_mask;
     uint current_chunk_row_mask;
+    uint uses_staged_chunk;
+    uint current_chunk_position_origin;
+    float scale;
+    float logit_softcap;
 };
 
 // Keep this layout byte-for-byte aligned with Gemma2DecodeAttentionDimensions
@@ -2558,101 +2590,276 @@ kernel void causal_grouped_attention_scores_f32_kernel(
     output[output_index] = precise::tanh(scaled / dims.logit_softcap) * dims.logit_softcap;
 }
 
-kernel void causal_grouped_attention_scores_f16_cache_kernel(
-    const device float* query [[buffer(0)]],
-    const device half* key [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant Gemma2PrefillAttentionScoreDimensions& dims [[buffer(3)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    const uint score_column = gid.x;
-    const uint head = gid.y;
-    const uint query_row = gid.z;
-    if (query_row >= dims.query_rows || head >= dims.head_count || score_column >= dims.attention_token_count) {
-        return;
-    }
-
-    const uint query_position = dims.query_position_start + query_row;
-    const uint first_key_position = query_position + 1 > dims.attention_token_count
-        ? query_position + 1 - dims.attention_token_count
-        : 0;
-    const uint logical_key_row = first_key_position + score_column;
-    const uint output_index =
-        (query_row * dims.head_count + head) * dims.attention_token_count + score_column;
-    if (logical_key_row > query_position) {
-        output[output_index] = -INFINITY;
-        return;
-    }
-
-    const uint key_row = logical_key_row & dims.cache_row_mask;
-    const uint query_width = dims.head_count * dims.key_length;
-    const uint key_width = dims.kv_head_count * dims.key_length;
-    const uint kv_group_size = dims.head_count / dims.kv_head_count;
-    const uint kv_head = head / kv_group_size;
-    const uint query_first_column = head * dims.key_length;
-    const uint key_first_column = kv_head * dims.key_length;
-
-    float dot = 0.0f;
-    for (uint column = 0; column < dims.key_length; ++column) {
-        dot += query[query_row * query_width + query_first_column + column]
-            * float(key[key_row * key_width + key_first_column + column]);
-    }
-
-    const float scaled = dot * dims.scale;
-    output[output_index] = precise::tanh(scaled / dims.logit_softcap) * dims.logit_softcap;
-}
-
-// A wrapped multi-row prefill chunk must read old logical rows from the
-// resident ring while reading rows produced by this chunk from private F16
-// staging. The ring is published only after attention completes.
-kernel void causal_grouped_attention_scores_f16_hybrid_kernel(
+// Bulk attention keeps F32 Q/P/O and promotes F16 K/V directly into matrix
+// fragments. Only the 8x64 score/probability tile lives in threadgroup
+// memory; no full-context scores or additional operand rounding are used.
+kernel void gemma2_prefill_attention_f16_cache_kernel(
     const device float* query [[buffer(0)]],
     const device half* key_cache [[buffer(1)]],
-    const device half* current_chunk_key [[buffer(2)]],
-    device float* output [[buffer(3)]],
-    constant Gemma2WrappedPrefillAttentionScoreDimensions& dims [[buffer(4)]],
-    uint3 gid [[thread_position_in_grid]]
+    const device half* value_cache [[buffer(2)]],
+    const device half* current_chunk_key [[buffer(3)]],
+    const device half* current_chunk_value [[buffer(4)]],
+    device float* output [[buffer(5)]],
+    constant Gemma2PrefillAttentionDimensions& dims [[buffer(6)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    ushort simd_group [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
 ) {
-    const uint score_column = gid.x;
-    const uint head = gid.y;
-    const uint query_row = gid.z;
-    if (query_row >= dims.query_rows || head >= dims.head_count
-        || score_column >= dims.attention_token_count) {
-        return;
+    constexpr uint query_tile = 8U;
+    constexpr uint key_tile = 64U;
+    constexpr ushort score_fragments = key_tile / 32U;
+    constexpr ushort scores_per_lane = key_tile / 32U;
+    constexpr uint head_dimension = 256U;
+    threadgroup float probabilities[query_tile * key_tile];
+    threadgroup float rescale[query_tile];
+    threadgroup float inverse_denominator[query_tile];
+
+    const uint query_begin = group.x * query_tile;
+    const uint head = group.y;
+    const uint kv_head = head / (dims.head_count / dims.kv_head_count);
+    const uint query_width = dims.head_count * head_dimension;
+    const uint cache_width = dims.kv_head_count * head_dimension;
+    const uint query_end = min(query_begin + query_tile, dims.query_rows);
+    const uint first_query_position = dims.query_position_start + query_begin;
+    const uint last_query_position = dims.query_position_start + query_end - 1U;
+    const uint first_key = first_query_position + 1U > dims.attention_token_count
+        ? first_query_position + 1U - dims.attention_token_count : 0U;
+
+    // An 8x8 Metal matrix fragment owns two adjacent columns in one row.
+    // The row/column mapping is shared by QK loading and PV accumulation.
+    const uint quad = uint(lane) / 4U;
+    const uint matrix_row = (quad & 4U) + (uint(lane) / 2U) % 4U;
+    const uint matrix_column = (quad & 2U) * 2U + (uint(lane) & 1U) * 2U;
+    simdgroup_float8x8 accumulated[8];
+#pragma clang loop unroll(full)
+    for (ushort column = 0U; column < 8U; ++column)
+        accumulated[column] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    float maximum[2] = {-INFINITY, -INFINITY};
+    float denominator[2] = {0.0f, 0.0f};
+
+    const uint aligned_key_begin = first_key & ~(key_tile - 1U);
+    const uint key_block_count = (last_query_position - aligned_key_begin) / key_tile + 1U;
+    for (uint key_block = 0U; key_block < key_block_count; ++key_block) {
+        const uint key_begin = aligned_key_begin + key_block * key_tile;
+        simdgroup_float8x8 score[score_fragments];
+        bool first_live[score_fragments];
+        bool second_live[score_fragments];
+        const device half* first_keys[score_fragments];
+        const device half* second_keys[score_fragments];
+        uint first_key_offset[score_fragments];
+        uint second_key_offset[score_fragments];
+#pragma clang loop unroll(full)
+        for (ushort score_fragment = 0U; score_fragment < score_fragments; ++score_fragment) {
+            score[score_fragment] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+            const uint first_key_position = key_begin + uint(simd_group) * (key_tile / 4U)
+                + uint(score_fragment) * 8U + matrix_column;
+            const uint second_key_position = first_key_position + 1U;
+            first_live[score_fragment] = first_key_position >= first_key
+                && first_key_position <= last_query_position;
+            second_live[score_fragment] = second_key_position >= first_key
+                && second_key_position <= last_query_position;
+            const bool first_staged = dims.uses_staged_chunk != 0U
+                && first_key_position >= dims.query_position_start;
+            const bool second_staged = dims.uses_staged_chunk != 0U
+                && second_key_position >= dims.query_position_start;
+            first_keys[score_fragment] = first_staged ? current_chunk_key : key_cache;
+            second_keys[score_fragment] = second_staged ? current_chunk_key : key_cache;
+            first_key_offset[score_fragment] = ((first_key_position - (first_staged
+                ? dims.current_chunk_position_origin : 0U)) & (first_staged
+                ? dims.current_chunk_row_mask : dims.cache_row_mask)) * cache_width
+                + kv_head * head_dimension;
+            second_key_offset[score_fragment] = ((second_key_position - (second_staged
+                ? dims.current_chunk_position_origin : 0U)) & (second_staged
+                ? dims.current_chunk_row_mask : dims.cache_row_mask)) * cache_width
+                + kv_head * head_dimension;
+        }
+        const uint query_row = query_begin + matrix_row;
+        const uint query_offset = query_row * query_width + head * head_dimension;
+#pragma clang loop unroll(disable)
+        for (uint inner = 0U; inner < head_dimension; inner += 8U) {
+            // Reuse each loaded Q fragment for both adjacent K fragments.
+            simdgroup_float8x8 q;
+            q.thread_elements()[0] = query_row < dims.query_rows
+                ? query[query_offset + inner + matrix_column] : 0.0f;
+            q.thread_elements()[1] = query_row < dims.query_rows
+                ? query[query_offset + inner + matrix_column + 1U] : 0.0f;
+#pragma clang loop unroll(full)
+            for (ushort score_fragment = 0U; score_fragment < score_fragments; ++score_fragment) {
+                simdgroup_float8x8 k;
+                k.thread_elements()[0] = first_live[score_fragment]
+                    ? float(first_keys[score_fragment][first_key_offset[score_fragment] + inner + matrix_row]) : 0.0f;
+                k.thread_elements()[1] = second_live[score_fragment]
+                    ? float(second_keys[score_fragment][second_key_offset[score_fragment] + inner + matrix_row]) : 0.0f;
+                simdgroup_multiply_accumulate(score[score_fragment], q, k, score[score_fragment]);
+            }
+        }
+#pragma clang loop unroll(full)
+        for (ushort score_fragment = 0U; score_fragment < score_fragments; ++score_fragment)
+            simdgroup_store(score[score_fragment], probabilities + uint(simd_group) * (key_tile / 4U)
+                + uint(score_fragment) * 8U, key_tile, 0U, false);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+#pragma clang loop unroll(full)
+        for (ushort local_row = 0U; local_row < 2U; ++local_row) {
+            const uint row = uint(simd_group) + uint(local_row) * 4U;
+            const uint absolute_query_row = query_begin + row;
+            const uint position = absolute_query_row < dims.query_rows
+                ? dims.query_position_start + absolute_query_row : 0U;
+            const uint row_first = position + 1U > dims.attention_token_count
+                ? position + 1U - dims.attention_token_count : 0U;
+            float transformed[scores_per_lane];
+            bool live[scores_per_lane];
+            float thread_maximum = maximum[local_row];
+#pragma clang loop unroll(full)
+            for (ushort item = 0U; item < scores_per_lane; ++item) {
+                const uint column = uint(lane) + uint(item) * 32U;
+                const uint key_position = key_begin + column;
+                live[item] = absolute_query_row < dims.query_rows
+                    && key_position >= row_first && key_position <= position;
+                const float scaled = probabilities[row * key_tile + column] * dims.scale;
+                transformed[item] = live[item]
+                    ? (dims.logit_softcap == 0.0f ? scaled
+                        : precise::tanh(scaled / dims.logit_softcap) * dims.logit_softcap)
+                    : -INFINITY;
+                thread_maximum = max(thread_maximum, transformed[item]);
+            }
+            const float next_maximum = simd_max(thread_maximum);
+            const float alpha = denominator[local_row] == 0.0f ? 0.0f
+                : maximum[local_row] == next_maximum ? 1.0f
+                : exp(maximum[local_row] - next_maximum);
+            float thread_denominator = 0.0f;
+#pragma clang loop unroll(full)
+            for (ushort item = 0U; item < scores_per_lane; ++item) {
+                const float weight = live[item] ? exp(transformed[item] - next_maximum) : 0.0f;
+                probabilities[row * key_tile + uint(lane) + uint(item) * 32U] = weight;
+                thread_denominator += weight;
+            }
+            denominator[local_row] = denominator[local_row] * alpha + simd_sum(thread_denominator);
+            maximum[local_row] = next_maximum;
+            if (lane == 0U) {
+                rescale[row] = alpha;
+                inverse_denominator[row] = denominator[local_row] == 0.0f
+                    ? 0.0f : 1.0f / denominator[local_row];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const float alpha = rescale[matrix_row];
+        if (alpha != 1.0f) {
+#pragma clang loop unroll(full)
+            for (ushort column = 0U; column < 8U; ++column) {
+                accumulated[column].thread_elements()[0] *= alpha;
+                accumulated[column].thread_elements()[1] *= alpha;
+            }
+        }
+
+#pragma clang loop unroll(full)
+        for (ushort key_fragment = 0U; key_fragment < key_tile / 8U; ++key_fragment) {
+            simdgroup_float8x8 p;
+            p.thread_elements()[0] = probabilities[matrix_row * key_tile
+                + uint(key_fragment) * 8U + matrix_column];
+            p.thread_elements()[1] = probabilities[matrix_row * key_tile
+                + uint(key_fragment) * 8U + matrix_column + 1U];
+            const uint value_position = key_begin + uint(key_fragment) * 8U + matrix_row;
+            const bool value_live = value_position >= first_key
+                && value_position <= last_query_position;
+            const bool value_staged = dims.uses_staged_chunk != 0U
+                && value_position >= dims.query_position_start;
+            const device half* values = value_staged ? current_chunk_value : value_cache;
+            const uint value_offset = ((value_position - (value_staged
+                ? dims.current_chunk_position_origin : 0U)) & (value_staged
+                ? dims.current_chunk_row_mask : dims.cache_row_mask)) * cache_width
+                + kv_head * head_dimension + uint(simd_group) * 64U + matrix_column;
+#pragma clang loop unroll(full)
+            for (ushort column = 0U; column < 8U; ++column) {
+                simdgroup_float8x8 v;
+                v.thread_elements()[0] = value_live
+                    ? float(values[value_offset + uint(column) * 8U]) : 0.0f;
+                v.thread_elements()[1] = value_live
+                    ? float(values[value_offset + uint(column) * 8U + 1U]) : 0.0f;
+                simdgroup_multiply_accumulate(accumulated[column], p, v, accumulated[column]);
+            }
+        }
+        // The next block overwrites P only after all SIMD groups consume it.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    const uint query_position = dims.query_position_start + query_row;
-    const uint first_key_position = query_position + 1 > dims.attention_token_count
-        ? query_position + 1 - dims.attention_token_count
-        : 0;
-    const uint logical_key_row = first_key_position + score_column;
-    const uint output_index =
-        (query_row * dims.head_count + head) * dims.attention_token_count + score_column;
-    if (logical_key_row > query_position) {
-        output[output_index] = -INFINITY;
-        return;
+    const uint row = query_begin + matrix_row;
+    if (row >= dims.query_rows) return;
+    const uint output_offset = row * query_width + head * head_dimension
+        + uint(simd_group) * 64U + matrix_column;
+    const float normalization = inverse_denominator[matrix_row];
+#pragma clang loop unroll(full)
+    for (ushort column = 0U; column < 8U; ++column) {
+        output[output_offset + uint(column) * 8U] =
+            accumulated[column].thread_elements()[0] * normalization;
+        output[output_offset + uint(column) * 8U + 1U] =
+            accumulated[column].thread_elements()[1] * normalization;
     }
+}
 
-    const bool from_current_chunk = logical_key_row >= dims.query_position_start;
-    const uint key_row = from_current_chunk
-        ? logical_key_row & dims.current_chunk_row_mask
-        : logical_key_row & dims.cache_row_mask;
-    const device half* key = from_current_chunk ? current_chunk_key : key_cache;
-    const uint query_width = dims.head_count * dims.key_length;
-    const uint key_width = dims.kv_head_count * dims.key_length;
-    const uint kv_group_size = dims.head_count / dims.kv_head_count;
-    const uint kv_head = head / kv_group_size;
-    const uint query_first_column = head * dims.key_length;
-    const uint key_first_column = kv_head * dims.key_length;
-
-    float dot = 0.0f;
-    for (uint column = 0; column < dims.key_length; ++column) {
-        dot += query[query_row * query_width + query_first_column + column]
-            * float(key[key_row * key_width + key_first_column + column]);
+// Other head widths retain fused F32 attention without allocating a score
+// matrix. One SIMD group owns a complete query/head and its on-chip Q/O.
+kernel void gemma2_prefill_attention_f16_generic_kernel(
+    const device float* query [[buffer(0)]],
+    const device half* key_cache [[buffer(1)]],
+    const device half* value_cache [[buffer(2)]],
+    const device half* current_chunk_key [[buffer(3)]],
+    const device half* current_chunk_value [[buffer(4)]],
+    device float* output [[buffer(5)]],
+    constant Gemma2PrefillAttentionDimensions& dims [[buffer(6)]],
+    threadgroup float* workspace [[threadgroup(0)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    const uint row = group.x;
+    const uint head = group.y;
+    const uint kv_head = head / (dims.head_count / dims.kv_head_count);
+    const uint query_width = dims.head_count * dims.key_dimension;
+    const uint key_width = dims.kv_head_count * dims.key_dimension;
+    const uint value_width = dims.kv_head_count * dims.value_dimension;
+    const uint output_width = dims.head_count * dims.value_dimension;
+    const uint query_offset = row * query_width + head * dims.key_dimension;
+    const uint output_offset = row * output_width + head * dims.value_dimension;
+    const uint position = dims.query_position_start + row;
+    const uint first_key = position + 1U > dims.attention_token_count
+        ? position + 1U - dims.attention_token_count : 0U;
+    threadgroup float* queries = workspace;
+    threadgroup float* accumulated = workspace + dims.key_dimension;
+    for (uint column = uint(lane); column < dims.key_dimension; column += 32U) {
+        queries[column] = query[query_offset + column];
     }
-
-    const float scaled = dot * dims.scale;
-    output[output_index] = precise::tanh(scaled / dims.logit_softcap) * dims.logit_softcap;
+    for (uint column = uint(lane); column < dims.value_dimension; column += 32U) {
+        accumulated[column] = 0.0f;
+    }
+    float maximum = -INFINITY;
+    float denominator = 0.0f;
+    for (uint token = first_key; token <= position; ++token) {
+        const bool staged = dims.uses_staged_chunk != 0U
+            && token >= dims.query_position_start;
+        const device half* keys = staged ? current_chunk_key : key_cache;
+        const device half* values = staged ? current_chunk_value : value_cache;
+        const uint cache_row = (token - (staged ? dims.current_chunk_position_origin : 0U))
+            & (staged ? dims.current_chunk_row_mask : dims.cache_row_mask);
+        const uint key_offset = cache_row * key_width + kv_head * dims.key_dimension;
+        const uint value_offset = cache_row * value_width + kv_head * dims.value_dimension;
+        float score = 0.0f;
+        for (uint column = uint(lane); column < dims.key_dimension; column += 32U)
+            score += queries[column] * float(keys[key_offset + column]);
+        score = simd_sum(score) * dims.scale;
+        if (dims.logit_softcap != 0.0f)
+            score = precise::tanh(score / dims.logit_softcap) * dims.logit_softcap;
+        const float next_maximum = max(maximum, score);
+        const float alpha = denominator == 0.0f ? 0.0f
+            : maximum == next_maximum ? 1.0f : exp(maximum - next_maximum);
+        const float weight = exp(score - next_maximum);
+        for (uint column = uint(lane); column < dims.value_dimension; column += 32U)
+            accumulated[column] = accumulated[column] * alpha
+                + float(values[value_offset + column]) * weight;
+        denominator = denominator * alpha + weight;
+        maximum = next_maximum;
+    }
+    for (uint column = uint(lane); column < dims.value_dimension; column += 32U)
+        output[output_offset + column] = accumulated[column] / denominator;
 }
 
 // Each workgroup owns one KV head and both query heads that share it. Four
@@ -3203,101 +3410,6 @@ kernel void causal_grouped_attention_values_f32_kernel(
         sum += probabilities[probability_index]
             * value[value_row * value_width + value_first_column + value_column];
     }
-    output[output_index] = sum;
-}
-
-kernel void causal_grouped_attention_values_f16_cache_kernel(
-    const device float* probabilities [[buffer(0)]],
-    const device half* value [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant Gemma2PrefillAttentionValueDimensions& dims [[buffer(3)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    const uint value_column = gid.x;
-    const uint head = gid.y;
-    const uint query_row = gid.z;
-    if (query_row >= dims.query_rows || head >= dims.head_count || value_column >= dims.value_length) {
-        return;
-    }
-
-    const uint query_position = dims.query_position_start + query_row;
-    const uint first_value_position = query_position + 1 > dims.attention_token_count
-        ? query_position + 1 - dims.attention_token_count
-        : 0;
-    const uint value_width = dims.kv_head_count * dims.value_length;
-    const uint kv_group_size = dims.head_count / dims.kv_head_count;
-    const uint kv_head = head / kv_group_size;
-    const uint value_first_column = kv_head * dims.value_length;
-    const uint output_width = dims.head_count * dims.value_length;
-    const uint output_index = query_row * output_width + head * dims.value_length + value_column;
-
-    float sum = 0.0f;
-    for (uint score_column = 0; score_column < dims.attention_token_count; ++score_column) {
-        const uint logical_value_row = first_value_position + score_column;
-        if (logical_value_row > query_position) {
-            continue;
-        }
-        const uint value_row = logical_value_row & dims.cache_row_mask;
-
-        const uint probability_index =
-            (query_row * dims.head_count + head) * dims.attention_token_count + score_column;
-        sum += probabilities[probability_index]
-            * float(value[value_row * value_width + value_first_column + value_column]);
-    }
-
-    output[output_index] = sum;
-}
-
-kernel void causal_grouped_attention_values_f16_hybrid_kernel(
-    const device float* probabilities [[buffer(0)]],
-    const device half* value_cache [[buffer(1)]],
-    const device half* current_chunk_value [[buffer(2)]],
-    device float* output [[buffer(3)]],
-    constant Gemma2WrappedPrefillAttentionValueDimensions& dims [[buffer(4)]],
-    uint3 gid [[thread_position_in_grid]]
-) {
-    const uint value_column = gid.x;
-    const uint head = gid.y;
-    const uint query_row = gid.z;
-    if (query_row >= dims.query_rows || head >= dims.head_count
-        || value_column >= dims.value_length) {
-        return;
-    }
-
-    const uint query_position = dims.query_position_start + query_row;
-    const uint first_value_position = query_position + 1 > dims.attention_token_count
-        ? query_position + 1 - dims.attention_token_count
-        : 0;
-    const uint valid_score_count = query_position - first_value_position + 1;
-    const uint cached_score_count = dims.query_position_start > first_value_position
-        ? min(valid_score_count, dims.query_position_start - first_value_position)
-        : 0;
-    const uint value_width = dims.kv_head_count * dims.value_length;
-    const uint kv_group_size = dims.head_count / dims.kv_head_count;
-    const uint kv_head = head / kv_group_size;
-    const uint value_first_column = kv_head * dims.value_length;
-    const uint output_width = dims.head_count * dims.value_length;
-    const uint output_index = query_row * output_width
-        + head * dims.value_length + value_column;
-    const uint probability_offset =
-        (query_row * dims.head_count + head) * dims.attention_token_count;
-
-    float sum = 0.0f;
-    for (uint score_column = 0; score_column < cached_score_count; ++score_column) {
-        const uint logical_value_row = first_value_position + score_column;
-        const uint value_row = logical_value_row & dims.cache_row_mask;
-        sum += probabilities[probability_offset + score_column]
-            * float(value_cache[value_row * value_width + value_first_column + value_column]);
-    }
-    for (uint score_column = cached_score_count; score_column < valid_score_count; ++score_column) {
-        const uint logical_value_row = first_value_position + score_column;
-        const uint value_row = logical_value_row & dims.current_chunk_row_mask;
-        sum += probabilities[probability_offset + score_column]
-            * float(current_chunk_value[
-                value_row * value_width + value_first_column + value_column
-            ]);
-    }
-
     output[output_index] = sum;
 }
 

@@ -162,8 +162,6 @@ struct Gemma2MetalPrefillScratch {
     // consumed the old ring, then one device copy publishes the live rows.
     tensor::BackendBuffer current_chunk_key;
     tensor::BackendBuffer current_chunk_value;
-    tensor::BackendBuffer attention_scores;
-    tensor::BackendBuffer attention_probabilities;
     tensor::BackendBuffer attention_output;
     tensor::BackendBuffer projected_attention_output;
     tensor::BackendBuffer post_attention_residual;

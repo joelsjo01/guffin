@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -32,6 +33,7 @@ using local_gguf_engine::tokenizer::format_generate_prompt_from_gguf_metadata;
 using local_gguf_engine::tokenizer::load_tokenizer_from_gguf_metadata;
 using local_gguf_engine::tokenizer::TokenizerDecodeOptions;
 using local_gguf_engine::tokenizer::TokenizerEncodeOptions;
+using local_gguf_engine::tokenizer::TokenizerEncodeWorkspace;
 using local_gguf_engine::tokenizer::TokenizerError;
 using local_gguf_engine::tokenizer::TokenizerErrorCode;
 using local_gguf_engine::tokenizer::TokenizerModel;
@@ -126,6 +128,48 @@ std::vector<GGUFMetadataEntry> tiny_gemma2_tokenizer_metadata() {
         metadata_bool("tokenizer.ggml.add_eos_token", false),
         metadata_bool("tokenizer.ggml.add_space_prefix", false),
         metadata_string("tokenizer.chat_template", gemma2_chat_template_fixture()),
+    };
+}
+
+constexpr std::uint32_t gemma2_added_byte_base = 27;
+
+std::vector<GGUFMetadataEntry> gemma2_added_piece_metadata() {
+    // Raw GGUF user-defined pieces are indivisible before space escaping. The
+    // high-score ordinary pieces make crossing one of these boundaries tempting.
+    std::vector<std::string> tokens {
+        "<pad>", "<eos>", "<bos>", "<unk>", "A", "B", "▁", "▁B",
+        "  ", "   ", "    ", "\n", "\n\n", "<code>", "</code>",
+        "<start_of_turn>", "<end_of_turn>",
+        "A▁", "A▁▁", "A▁▁▁", "A▁▁▁▁", "A▁▁▁▁B",
+        "A\n", "A\n\n", "\n\nB", "A<code>", "</s>",
+    };
+    std::vector<std::int32_t> types(tokens.size(), 1);
+    types[0] = types[1] = types[2] = types[15] = types[16] = 3;
+    types[3] = 2;
+    for (std::size_t id = 8; id <= 14; ++id) types[id] = 4;
+    types[26] = 4;
+    std::vector<float> scores(tokens.size(), 100.0F);
+    for (std::size_t byte = 0; byte < 256; ++byte) {
+        constexpr char hex[] = "0123456789ABCDEF";
+        std::string piece = "<0x00>";
+        piece[3] = hex[byte >> 4];
+        piece[4] = hex[byte & 15];
+        tokens.push_back(std::move(piece));
+        types.push_back(6);
+        scores.push_back(0.0F);
+    }
+    return {
+        metadata_string("general.architecture", "gemma2"),
+        metadata_string("tokenizer.ggml.model", "llama"),
+        metadata_string_array("tokenizer.ggml.tokens", std::move(tokens)),
+        metadata_f32_array("tokenizer.ggml.scores", std::move(scores)),
+        metadata_i32_array("tokenizer.ggml.token_type", std::move(types)),
+        metadata_u32("tokenizer.ggml.bos_token_id", 2),
+        metadata_u32("tokenizer.ggml.eos_token_id", 1),
+        metadata_u32("tokenizer.ggml.unknown_token_id", 3),
+        metadata_bool("tokenizer.ggml.add_bos_token", true),
+        metadata_bool("tokenizer.ggml.add_eos_token", false),
+        metadata_bool("tokenizer.ggml.add_space_prefix", false),
     };
 }
 
@@ -272,6 +316,156 @@ void test_encodes_gemma2_tokenizer_known_ids_with_special_tokens() {
     expect(eos_ids[0] == 16, "Gemma2 tokenizer explicit first token mismatch");
     expect(eos_ids[1] == 15, "Gemma2 tokenizer explicit punctuation mismatch");
     expect(eos_ids[2] == 1, "Gemma2 tokenizer explicit EOS id mismatch");
+}
+
+void test_gemma2_freezes_raw_user_defined_pieces_with_either_special_option() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(gemma2_added_piece_metadata()));
+    for (const bool parse_special : {false, true}) {
+        const TokenizerEncodeOptions options {.encode_special_tokens = parse_special};
+        expect(tokenizer.encode("A    B", options) == std::vector<std::uint32_t> {4, 10, 5},
+            "Gemma2 must freeze the longest raw space piece before normalization");
+        expect(tokenizer.encode("A         B", options) == std::vector<std::uint32_t> {4, 10, 10, 7},
+            "Gemma2 must partition long runs greedily and normalize their ordinary remainder");
+        expect(tokenizer.encode("A\n\n\n\n\nB", options) == std::vector<std::uint32_t> {4, 12, 12, 11, 5},
+            "Gemma2 ordinary merges must not cross a frozen newline piece");
+        expect(tokenizer.encode("A<code>B</code>", options) == std::vector<std::uint32_t> {4, 13, 5, 14},
+            "Gemma2 HTML user-defined pieces must remain atomic next to ordinary text");
+        expect(tokenizer.encode("A</s>B", options) == std::vector<std::uint32_t> {4, 26, 5},
+            "Gemma2 must obey user-defined metadata without inferring EOS from token text");
+    }
+    const std::array<std::uint32_t, 6> ids {2, 4, 10, 13, 5, 1};
+    expect(tokenizer.decode(ids, {.skip_special_tokens = true}) == "A    <code>B",
+        "Gemma2 skip-special decoding must preserve user-defined spaces and HTML");
+}
+
+void test_gemma2_distinguishes_raw_spaces_from_literal_sentencepiece_markers() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(gemma2_added_piece_metadata()));
+    expect(tokenizer.encode("A▁▁▁▁B", {}) == std::vector<std::uint32_t> {21},
+        "literal SentencePiece markers must remain ordinary merge input, not raw-space aliases");
+    expect(tokenizer.encode("A    B", {}) == std::vector<std::uint32_t> {4, 10, 5},
+        "raw spaces must use the declared user-defined piece instead of the marker merge");
+    expect(tokenizer.encode("    A    ", {}) == std::vector<std::uint32_t> {10, 4, 10},
+        "Gemma2 must preserve leading and trailing raw-space pieces without a dummy prefix");
+}
+
+void test_gemma2_control_and_unknown_literals_follow_explicit_special_option() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(gemma2_added_piece_metadata()));
+    constexpr TokenizerEncodeOptions parse {.encode_special_tokens = true};
+    expect(tokenizer.encode("A<unk>B", parse) == std::vector<std::uint32_t> {4, 3, 5},
+        "unknown token text must be recognized when special parsing is requested");
+    expect(tokenizer.encode("A<start_of_turn>B", parse) == std::vector<std::uint32_t> {4, 15, 5},
+        "control token text must be recognized when special parsing is requested");
+    const auto ordinary = tokenizer.encode("A<unk>B", {});
+    const std::vector<std::uint32_t> expected {
+        4, gemma2_added_byte_base + '<', gemma2_added_byte_base + 'u',
+        gemma2_added_byte_base + 'n', gemma2_added_byte_base + 'k', gemma2_added_byte_base + '>', 5,
+    };
+    expect(ordinary == expected, "disabled special parsing must encode unknown-token text as literal bytes");
+    expect(tokenizer.encode("", {.add_bos = true, .add_eos = true}) == std::vector<std::uint32_t> {2, 1},
+        "Gemma2 explicit BOS and EOS must remain defined for empty input");
+    expect(tokenizer.encode("A    B") == std::vector<std::uint32_t> {2, 4, 10, 5},
+        "Gemma2 default BOS must coexist with raw user-defined pieces");
+}
+
+void test_gemma2_bounded_encoder_reuses_workspace_after_capacity_errors() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(gemma2_added_piece_metadata()));
+    TokenizerEncodeWorkspace workspace(16);
+    const auto owned_bytes = workspace.owned_bytes();
+    std::array<std::uint32_t, 32> output {};
+    const auto verify = [&](std::string_view text, const std::vector<std::uint32_t>& expected) {
+        const auto written = tokenizer.encode_into(text, output, workspace);
+        expect(std::vector<std::uint32_t>(output.begin(), output.begin() + written) == expected,
+            "bounded Gemma2 encoding mismatch after workspace reuse");
+        expect(workspace.owned_bytes() == owned_bytes, "bounded encoding must not grow prepared storage");
+    };
+    verify("A    B", {4, 10, 5});
+    verify("A▁▁▁▁B", {21});
+    try {
+        (void)tokenizer.encode_into("A    B", std::span(output).first(2), workspace);
+        throw TestFailure("bounded Gemma2 encoder should reject insufficient output capacity");
+    } catch (const std::length_error&) {}
+    verify("A\n\nB", {4, 12, 5});
+    try {
+        (void)tokenizer.encode_into(std::string(17, 'A'), output, workspace);
+        throw TestFailure("bounded Gemma2 encoder should reject its input byte bound");
+    } catch (const std::length_error&) {}
+    verify("A<code>B", {4, 13, 5});
+    expect(tokenizer.encode_into("", output, workspace) == 0, "empty bounded input must clear prior workspace state");
+}
+
+void test_gemma2_preserves_original_bytes_for_invalid_utf8_fallback() {
+    const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(gemma2_added_piece_metadata()));
+    for (const std::string& text : {std::string("A\xFF" "B"), std::string("A\xC0\xAF" "B"), std::string("A\xE2\x82")}) {
+        std::vector<std::uint32_t> expected {4};
+        for (std::size_t index = 1; index < text.size(); ++index) {
+            const auto byte = static_cast<unsigned char>(text[index]);
+            expected.push_back(byte == 'B' ? 5 : gemma2_added_byte_base + byte);
+        }
+        const auto ids = tokenizer.encode(text, {});
+        expect(ids == expected, "Gemma2 fallback must preserve malformed input bytes without inventing replacement characters");
+        expect(tokenizer.decode(ids) == text, "Gemma2 raw byte fallback must round-trip malformed input");
+    }
+}
+
+void test_gemma2_template_trims_python_unicode_whitespace() {
+    const auto metadata = metadata_section(tiny_gemma2_tokenizer_metadata());
+    const auto formatted = format_generate_prompt_from_gguf_metadata(metadata, "\u00A0\u3000Hello\u0085\u2003");
+    expect(formatted.text == "<bos><start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\n",
+        "Gemma2 template trim must match Python/Jinja for non-ASCII whitespace");
+    const auto empty = format_generate_prompt_from_gguf_metadata(metadata, "\u00A0\u3000\n\u0085\u2003");
+    expect(empty.text == "<bos><start_of_turn>user\n<end_of_turn>\n<start_of_turn>model\n",
+        "Gemma2 template must trim a Unicode-whitespace-only message to empty");
+}
+
+void test_gemma2_rejects_unsupported_normalization_metadata() {
+    const std::vector<GGUFMetadataEntry> incompatible {
+        metadata_bool("tokenizer.ggml.add_space_prefix", true),
+        metadata_string("tokenizer.ggml.pre", "llama3"),
+        metadata_string("tokenizer.ggml.normalizer", "nmt_nfkc"),
+        metadata_bool("tokenizer.ggml.remove_extra_whitespaces", true),
+        metadata_bool("tokenizer.ggml.escape_whitespaces", false),
+    };
+    for (const auto& replacement : incompatible) {
+        auto metadata = tiny_gemma2_tokenizer_metadata();
+        const auto prior = std::find_if(metadata.begin(), metadata.end(), [&](const auto& entry) {
+            return entry.key == replacement.key;
+        });
+        if (prior == metadata.end()) metadata.push_back(replacement);
+        else *prior = replacement;
+        try {
+            (void)load_tokenizer_from_gguf_metadata(metadata_section(std::move(metadata)));
+            throw TestFailure("Gemma2 must reject normalization metadata the engine does not implement");
+        } catch (const TokenizerError& error) {
+            expect(error.code() == TokenizerErrorCode::invalid_vocabulary,
+                "Gemma2 unsupported normalization error code mismatch");
+            expect(error.detail() == "unsupported Gemma2 normalization",
+                "Gemma2 unsupported normalization error detail mismatch");
+        }
+    }
+}
+
+void test_rejects_nonfinite_tokenizer_scores() {
+    for (const float invalid : {std::numeric_limits<float>::quiet_NaN(),
+            std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()}) {
+        auto metadata = tiny_gemma2_tokenizer_metadata();
+        for (auto& entry : metadata) {
+            if (entry.key == "tokenizer.ggml.scores") {
+                auto scores = std::vector<float>(110, 0.0F);
+                scores[5] = invalid;
+                entry = metadata_f32_array(entry.key, std::move(scores));
+                break;
+            }
+        }
+        try {
+            (void)load_tokenizer_from_gguf_metadata(metadata_section(std::move(metadata)));
+            throw TestFailure("tokenizer must reject scores without a well-defined merge ordering");
+        } catch (const TokenizerError& error) {
+            expect(error.code() == TokenizerErrorCode::invalid_vocabulary,
+                "nonfinite tokenizer score error code mismatch");
+            expect(error.detail() == "nonfinite tokenizer.ggml.scores",
+                "nonfinite tokenizer score error detail mismatch");
+        }
+    }
 }
 
 void test_encodes_tokenizer_special_tokens_when_enabled() {
@@ -491,17 +685,29 @@ void test_sentencepiece_byte_fallback_round_trips_unknown_text() {
 
 void test_incremental_decode_matches_batch_across_token_boundaries() {
     const auto tokenizer = load_tokenizer_from_gguf_metadata(metadata_section(tiny_gemma2_tokenizer_metadata()));
-    const std::array<std::uint32_t, 10> ids {2, 5, 12, 42, 43, 44, 45, 46, 47, 1};
+    const std::array<std::uint32_t, 11> ids {2, 5, 3, 12, 42, 43, 44, 45, 46, 47, 1};
     constexpr TokenizerDecodeOptions options {.skip_special_tokens = true};
 
     std::string incremental;
     for (const auto token_id : ids) {
         tokenizer.append_decoded_token(incremental, token_id, options);
     }
-    expect(
-        incremental == tokenizer.decode(std::span<const std::uint32_t>(ids), options),
-        "incremental decode must match batch SentencePiece, byte, and special-token semantics"
-    );
+    constexpr std::string_view expected = "Hello seems\xC3\xA9\xF0\x9F\x98\x80";
+    expect(incremental == expected
+        && tokenizer.decode(std::span<const std::uint32_t>(ids), options) == expected,
+        "incremental and batch decoding must skip controls and unknown tokens");
+    std::array<char, 64> output {};
+    const auto written = tokenizer.decode_into(ids, output, options);
+    expect(std::string_view(output.data(), written) == expected,
+        "bounded decoding must match incremental and batch skip-special semantics");
+
+    const std::array<std::uint32_t, 1> unknown {3};
+    std::string literal_unknown;
+    tokenizer.append_decoded_token(literal_unknown, unknown.front());
+    const auto unknown_written = tokenizer.decode_into(unknown, output);
+    expect(literal_unknown == "<unk>" && tokenizer.decode(unknown) == "<unk>"
+        && std::string_view(output.data(), unknown_written) == "<unk>",
+        "all decode APIs must preserve unknown text when special skipping is disabled");
 
     try {
         tokenizer.append_decoded_token(incremental, 110U, options);
@@ -605,6 +811,15 @@ std::span<const TestCase> tokenizer_test_cases() {
         {"Gemma3 template Unicode trim and literal controls", test_gemma3_template_unicode_trim_and_literal_controls},
         {"Gemma3 template rejects invalid roles and template", test_gemma3_template_rejects_invalid_roles_and_template},
         {"loads Gemma2 Llama tokenizer from metadata", test_loads_gemma2_llama_tokenizer_from_metadata},
+        {"Gemma2 freezes raw user-defined pieces with either special option", test_gemma2_freezes_raw_user_defined_pieces_with_either_special_option},
+        {"Gemma2 distinguishes raw spaces from literal SentencePiece markers", test_gemma2_distinguishes_raw_spaces_from_literal_sentencepiece_markers},
+        {"Gemma2 control and unknown literals follow explicit special option", test_gemma2_control_and_unknown_literals_follow_explicit_special_option},
+        {"Gemma2 bounded encoder reuses workspace after capacity errors", test_gemma2_bounded_encoder_reuses_workspace_after_capacity_errors},
+        {"Gemma2 preserves original bytes for invalid UTF-8 fallback", test_gemma2_preserves_original_bytes_for_invalid_utf8_fallback},
+        {"Gemma2 template trims Python Unicode whitespace", test_gemma2_template_trims_python_unicode_whitespace},
+        {"Gemma2 rejects unsupported normalization metadata", test_gemma2_rejects_unsupported_normalization_metadata},
+        {"rejects nonfinite tokenizer scores", test_rejects_nonfinite_tokenizer_scores},
+
         {
             "encodes Gemma2 tokenizer known IDs with special tokens",
             test_encodes_gemma2_tokenizer_known_ids_with_special_tokens,

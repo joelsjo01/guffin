@@ -29,8 +29,9 @@ Gemma 3 270M drafter. Preserve the working Gemma 2 path.
 - Runtime inference must work locally without network access.
 - Production dependencies must not provide inference execution or tensor
   framework semantics. Development and infrastructure tooling is acceptable.
-- Never commit model weights, generated binaries, local environment files, or
-  benchmark result output.
+- Never commit model weights, generated binaries or local environment files.
+  Benchmark output is ignored except the three approved final release campaigns
+  listed in `docs/PERFORMANCE.md`; preserve their raw evidence unchanged.
 - Preserve user changes. Never revert or rewrite unrelated work.
 
 ## Read Path

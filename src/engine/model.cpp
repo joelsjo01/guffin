@@ -10,6 +10,8 @@
 #include <bit>
 #include <cstring>
 #include <cmath>
+#include <exception>
+#include <future>
 #include <limits>
 #include <optional>
 #include <string>
@@ -486,6 +488,10 @@ const std::optional<runtime::Sha256Digest>& EngineModel::tokenizer_identity() co
     return tokenizer_identity_;
 }
 
+const std::optional<runtime::OwnedReadOnlyBytes>& EngineModel::source_backing() const noexcept {
+    return source_backing_;
+}
+
 const EngineTensorView* EngineModel::find_tensor_view(std::string_view name) const noexcept {
     const auto found = std::find_if(
         tensor_views_.begin(),
@@ -511,6 +517,18 @@ std::string_view model_architecture_name(ModelArchitecture architecture) noexcep
     }
 
     return "unknown";
+}
+
+EngineModel load_engine_model_from_gguf(const model_format::GGUFFileBackedModel& file) {
+    auto model = load_engine_model_from_gguf(file.view());
+    model.source_backing_ = file.source_backing();
+    return model;
+}
+
+EngineModel load_verified_engine_model_from_gguf(const model_format::GGUFFileBackedModel& file) {
+    auto model = load_verified_engine_model_from_gguf(file.view(), file.bytes());
+    model.source_backing_ = file.source_backing();
+    return model;
 }
 
 EngineModel load_engine_model_from_gguf(const model_format::GGUFModelView& model) {
@@ -542,14 +560,28 @@ EngineModel load_verified_engine_model_from_gguf(
     if (tensor_views.size() > std::numeric_limits<std::uint32_t>::max()) {
         throw EngineModelError(EngineModelErrorCode::invalid_tensor, "source tensor receipt count");
     }
+    auto whole_gguf_hash = std::async(std::launch::async, [whole_gguf_bytes] {
+        return runtime::sha256(whole_gguf_bytes);
+    });
+    runtime::Sha256Digest consumed_metadata;
+    runtime::Sha256Digest source_tensors;
+    std::exception_ptr receipt_error;
+    try {
+        consumed_metadata = hash_consumed_metadata(architecture, name, gemma_config);
+        source_tensors = hash_source_tensors(tensor_views);
+    } catch (...) {
+        receipt_error = std::current_exception();
+    }
+    // Join before releasing the source bytes. Preserve the original whole-file,
+    // metadata, then source-tensor error order even when both streams fail.
+    const auto whole_gguf = whole_gguf_hash.get();
+    if (receipt_error) std::rethrow_exception(receipt_error);
     EngineModelPayloadReceipt receipt {
         .whole_gguf_byte_count = whole_gguf_bytes.size(),
         .source_tensor_count = static_cast<std::uint32_t>(tensor_views.size()),
-        .whole_gguf = runtime::sha256(whole_gguf_bytes),
-        .canonical_consumed_metadata = hash_consumed_metadata(
-            architecture, name, gemma_config
-        ),
-        .source_tensors = hash_source_tensors(tensor_views),
+        .whole_gguf = whole_gguf,
+        .canonical_consumed_metadata = consumed_metadata,
+        .source_tensors = source_tensors,
     };
     // Numeric fixtures and weight-only inspection may have no tokenizer. Such
     // models remain valid here, but cannot prepare standalone TLI chat plans.

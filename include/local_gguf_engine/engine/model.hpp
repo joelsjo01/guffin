@@ -2,6 +2,7 @@
 
 #include "local_gguf_engine/model_format/gguf_tensor.hpp"
 #include "local_gguf_engine/runtime/sha256.hpp"
+#include "local_gguf_engine/runtime/owned_read_only_bytes.hpp"
 #include "local_gguf_engine/tensor/tensor.hpp"
 
 #include <cstdint>
@@ -10,6 +11,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace local_gguf_engine::model_format { class GGUFFileBackedModel; }
 
 namespace local_gguf_engine::engine {
 
@@ -142,9 +145,14 @@ public:
     [[nodiscard]] const std::vector<EngineTensorView>& tensor_views() const noexcept;
     [[nodiscard]] const std::optional<EngineModelPayloadReceipt>& payload_receipt() const noexcept;
     [[nodiscard]] const std::optional<runtime::Sha256Digest>& tokenizer_identity() const noexcept;
+    [[nodiscard]] const std::optional<runtime::OwnedReadOnlyBytes>& source_backing() const noexcept;
     [[nodiscard]] const EngineTensorView* find_tensor_view(std::string_view name) const noexcept;
 
 private:
+    friend EngineModel load_engine_model_from_gguf(const model_format::GGUFFileBackedModel&);
+    friend EngineModel load_verified_engine_model_from_gguf(const model_format::GGUFFileBackedModel&);
+
+    std::optional<runtime::OwnedReadOnlyBytes> source_backing_;
     ModelArchitecture architecture_;
     std::optional<std::string> name_;
     GemmaModelConfig gemma_config_;
@@ -156,6 +164,10 @@ private:
 };
 
 [[nodiscard]] std::string_view model_architecture_name(ModelArchitecture architecture) noexcept;
+// File-owned loading retains backing independently of the GGUF facade. Ordinary
+// native plans may register immutable matrix pages; borrowed views always copy.
+[[nodiscard]] EngineModel load_engine_model_from_gguf(const model_format::GGUFFileBackedModel& model);
+[[nodiscard]] EngineModel load_verified_engine_model_from_gguf(const model_format::GGUFFileBackedModel& model);
 [[nodiscard]] EngineModel load_engine_model_from_gguf(const model_format::GGUFModelView& model);
 [[nodiscard]] EngineModel load_verified_engine_model_from_gguf(
     const model_format::GGUFModelView& model,

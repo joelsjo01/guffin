@@ -20,6 +20,7 @@
 #include "local_gguf_engine/tensor/typed_access.hpp"
 
 #include "../../src/tensor/backends/metal/metal_command_context.hpp"
+#include "../../src/tensor/backends/metal_backend.hpp"
 #include "metal_test_hooks.hpp"
 
 #include <algorithm>
@@ -27,6 +28,11 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <memory>
+#include <optional>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <limits>
 #include <span>
 #include <string>
@@ -2164,6 +2170,212 @@ void test_runs_residual_gated_silu_projection_to_metal_backend_buffer_when_avail
     expect_f32_matrix_close(output, expected, 1.0e-3F, "Metal backend-buffer residual gated SiLU output");
 }
 
+local_gguf_engine::runtime::OwnedReadOnlyBytes owned_mapped_test_tensor(const TensorStorage& tensor) {
+    const auto page_result = ::sysconf(_SC_PAGESIZE);
+    expect(page_result > 0, "mapped test requires a VM page size");
+    const auto page = static_cast<std::size_t>(page_result);
+    const auto extent = page * 2U;
+    void* bytes = ::mmap(nullptr, extent, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    expect(bytes != MAP_FAILED, "mapped test allocation failed");
+    std::shared_ptr<const void> owner(bytes, [extent](const void* pointer) {
+        static_cast<void>(::munmap(const_cast<void*>(pointer), extent));
+    });
+    std::memset(bytes, 0xA5, extent);
+    // The matrix straddles two pages. Neither registration nor binding may
+    // assume that its borrowed GGUF-style bytes begin at the parent's base.
+    expect(tensor.bytes().size() <= page, "mapped test payload must fit one page");
+    const auto before_boundary = (tensor.bytes().size() / 2U + 3U) / 4U * 4U;
+    const auto offset = page - before_boundary;
+    std::memcpy(static_cast<std::uint8_t*>(bytes) + offset, tensor.bytes().data(), tensor.bytes().size());
+    expect(::mprotect(bytes, extent, PROT_READ) == 0, "mapped test read-only protection failed");
+    return {std::move(owner),
+        {static_cast<const std::uint8_t*>(bytes), offset + tensor.bytes().size()}, extent};
+}
+
+local_gguf_engine::runtime::OwnedReadOnlyBytes owned_mapped_test_matrix() {
+    return owned_mapped_test_tensor(tensor_f32_matrix(2U, 2U,
+        std::array<float, 4>{1.0F, 2.0F, 3.0F, 4.0F}));
+}
+
+local_gguf_engine::tensor::TensorView mapped_test_matrix_view(
+    const local_gguf_engine::runtime::OwnedReadOnlyBytes& backing) {
+    return local_gguf_engine::tensor::TensorView::from_bytes(
+        TensorDescriptor::from(Shape::from({2U, 2U}), DType::f32),
+        backing.bytes().last(4U * sizeof(float)));
+}
+
+void test_maps_immutable_matrix_offsets_and_rejects_writes_when_available() {
+    if (!local_gguf_engine::tensor::backends::metal::supports_immutable_metal_mappings()) return;
+    namespace metal = local_gguf_engine::tensor::backends::metal;
+    const auto backing = owned_mapped_test_matrix();
+    const auto view = mapped_test_matrix_view(backing);
+    const auto mapped = metal::map_immutable_tensor_view_to_metal_backend(view, backing);
+    expect(metal::metal_backend_buffer_allocation_byte_count(mapped) == backing.accessible_byte_count(),
+        "mapped matrix must register exactly its covering pages");
+    expect(metal::mapped_immutable_tensor_byte_count(view, backing) == backing.accessible_byte_count(),
+        "mapped pre-admission extent must match its real parent");
+    const auto copied = copy_tensor_from_backend(mapped);
+    expect(std::equal(view.bytes().begin(), view.bytes().end(), copied.bytes().begin()),
+        "mapped tensor readback must apply its offset and preserve every byte");
+    const auto expected = tensor_f32_matrix(2U, 2U, std::array<float, 4>{2.0F, 4.0F, 6.0F, 8.0F});
+    expect_f32_matrix_close(copy_tensor_from_backend(add_f32_to_backend(mapped, mapped)), expected, 0.0F,
+        "generic Metal inputs must honor mapped tensor offsets");
+    const auto child = metal::shared_metal_buffer_view_for_testing(mapped,
+        TensorDescriptor::from(Shape::from({1U, 2U}), DType::f32), 2U * sizeof(float));
+    for (const auto* destination : {&mapped, &child}) {
+        try {
+            fill_shared_metal_buffer_u32(*destination, 0U);
+            throw TestFailure("mapped matrix CPU fill must reject writes");
+        } catch (const std::invalid_argument&) {}
+        MetalCommandContext command("immutable matrix write rejection");
+        try {
+            command.write_u32(*destination, 0U);
+            throw TestFailure("mapped matrix CPU staging must reject writes");
+        } catch (const std::invalid_argument&) {}
+        try {
+            command.encode_softcap(*destination, *destination, 1.0F);
+            throw TestFailure("mapped matrix GPU destination must reject writes");
+        } catch (const std::invalid_argument&) {}
+    }
+    const auto unchanged = copy_tensor_from_backend(mapped);
+    expect(std::equal(view.bytes().begin(), view.bytes().end(), unchanged.bytes().begin()),
+        "rejected writes must leave mapped source bytes intact");
+    const auto borrowed = tensor_f32_matrix(2U, 2U, std::array<float, 4>{1.0F, 2.0F, 3.0F, 4.0F});
+    try {
+        static_cast<void>(metal::mapped_immutable_tensor_byte_count(borrowed.view(), backing));
+        throw TestFailure("borrowed data outside the owned mapping must not become a no-copy tensor");
+    } catch (const std::invalid_argument&) {}
+    const auto padding = local_gguf_engine::tensor::TensorView::from_bytes(view.descriptor(),
+        {backing.bytes().data() + backing.bytes().size(), view.bytes().size()});
+    try {
+        static_cast<void>(metal::mapped_immutable_tensor_byte_count(padding, backing));
+        throw TestFailure("readable VM padding must not count as logical tensor source bytes");
+    } catch (const std::invalid_argument&) {}
+}
+
+void test_generic_composed_metal_operators_preserve_mapped_inputs_when_available() {
+    namespace metal = local_gguf_engine::tensor::backends::metal;
+    if (!metal::supports_immutable_metal_mappings()) return;
+    const auto input = tensor_f32_matrix(2U, 2U, std::array<float, 4>{0.25F, -0.5F, 0.75F, 0.125F});
+    const auto weight = tensor_f16_gguf_matrix(2U, 2U,
+        std::array<float, 4>{0.5F, 0.25F, -0.25F, 0.5F});
+    const auto input_backing = owned_mapped_test_tensor(input);
+    const auto weight_backing = owned_mapped_test_tensor(weight);
+    const auto mapped_input = metal::map_immutable_tensor_view_to_metal_backend(
+        local_gguf_engine::tensor::TensorView::from_bytes(input.descriptor(),
+            input_backing.bytes().last(input.bytes().size())), input_backing);
+    const auto mapped_weight = metal::map_immutable_tensor_view_to_metal_backend(
+        local_gguf_engine::tensor::TensorView::from_bytes(weight.descriptor(),
+            weight_backing.bytes().last(weight.bytes().size())), weight_backing);
+    const auto expected_product = matmul_f32_f16_gguf_weight(input, weight, BackendKind::cpu);
+    const auto triple = matmul_f32_f16_gguf_weight_triple_to_backend(
+        mapped_input, mapped_weight, mapped_weight, mapped_weight);
+    for (const auto* result : {&triple.first, &triple.second, &triple.third})
+        expect_f32_matrix_close(copy_tensor_from_backend(*result), expected_product, 1.0e-3F,
+            "generic triple Metal projection must retain all mapped source offsets");
+    const auto expected_gated = matmul_f32_f16_gguf_weight(
+        multiply_f32(silu_f32(expected_product), expected_product), weight, BackendKind::cpu);
+    const auto gated = gated_silu_projection_f32_f16_gguf_weight_to_backend(
+        mapped_input, mapped_weight, mapped_weight, mapped_weight);
+    expect_f32_matrix_close(copy_tensor_from_backend(gated), expected_gated, 1.0e-3F,
+        "generic gated Metal projections must retain both mapped inputs and weights");
+    const auto norm = tensor_f32_vector(std::array<float, 2>{0.25F, -0.5F});
+    const auto mapped_norm = metal::shared_metal_buffer_view_for_testing(mapped_input, norm.descriptor(), 0U);
+    const auto residual = add_f32(input, expected_product);
+    const auto normalized = rms_norm_f32(residual, norm, 0.25F);
+    const auto gate = matmul_f32_f16_gguf_weight(normalized, weight, BackendKind::cpu);
+    const auto projected = matmul_f32_f16_gguf_weight(
+        multiply_f32(silu_f32(gate), gate), weight, BackendKind::cpu);
+    const auto expected_residual = add_f32(residual, projected);
+    const auto actual_residual = residual_gated_silu_projection_f32_f16_gguf_weight_to_backend(
+        mapped_input, mapped_input, mapped_weight, mapped_norm,
+        mapped_weight, mapped_weight, mapped_weight, 0.25F);
+    expect_f32_matrix_close(copy_tensor_from_backend(actual_residual), expected_residual, 1.0e-3F,
+        "generic residual Metal projections must retain original input/norm/weight offsets");
+}
+
+void test_pending_metal_commands_retain_mapped_matrix_backing_when_available() {
+    if (!local_gguf_engine::tensor::backends::metal::supports_immutable_metal_mappings()) return;
+    namespace metal = local_gguf_engine::tensor::backends::metal;
+    std::weak_ptr<const void> lifetime;
+    const auto descriptor = TensorDescriptor::from(Shape::from({1U, 2U}), DType::f32);
+    const auto output = allocate_backend_buffer(descriptor, BackendKind::metal);
+    {
+        MetalCommandContext command("mapped owner after all C++ facades are gone");
+        {
+            const auto backing = owned_mapped_test_matrix();
+            lifetime = backing.owner();
+            const auto mapped = metal::map_immutable_tensor_view_to_metal_backend(
+                mapped_test_matrix_view(backing), backing);
+            const auto child = metal::shared_metal_buffer_view_for_testing(mapped,
+                descriptor, 2U * sizeof(float));
+            command.encode_add(child, child, output);
+        }
+        expect(!lifetime.expired(), "encoded Metal resource must retain mapping independently of C++ buffers");
+        static_cast<void>(command.commit_and_wait());
+        const auto expected = tensor_f32_matrix(1U, 2U, std::array<float, 2>{6.0F, 8.0F});
+        expect_f32_matrix_close(copy_tensor_from_backend(output), expected, 0.0F,
+            "pending mapped command must remain valid after source/view destruction");
+    }
+    expect(lifetime.expired(), "completed destroyed commands must release the final mapped owner");
+}
+
+void test_initializes_final_metal_storage_and_cleans_up_failure_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    namespace metal = local_gguf_engine::tensor::backends::metal;
+    const auto source = tensor_f32_matrix(2U, 2U, std::array<float, 4>{1.0F, 2.0F, 3.0F, 4.0F});
+    bool initialized = false;
+    const auto buffer = metal::initialize_metal_backend_buffer(source.descriptor(),
+        [&](std::span<std::uint8_t> destination) {
+            expect(destination.size() == source.bytes().size(), "final initializer extent mismatch");
+            std::copy(source.bytes().begin(), source.bytes().end(), destination.begin());
+            initialized = true;
+        });
+    expect(initialized, "final buffer initializer must run before publication");
+    const auto copied = copy_tensor_from_backend(buffer);
+    expect(std::equal(source.bytes().begin(), source.bytes().end(), copied.bytes().begin()),
+        "final initialized storage must preserve source bytes");
+    const auto before = metal::current_allocated_size_bytes();
+    try {
+        static_cast<void>(metal::initialize_metal_backend_buffer(source.descriptor(),
+            [](std::span<std::uint8_t> destination) {
+                destination[0] = 0xA5U;
+                throw std::runtime_error("intentional initializer failure");
+            }));
+        throw TestFailure("failed initializer must propagate its error");
+    } catch (const std::runtime_error& error) {
+        expect(std::string_view(error.what()) == "intentional initializer failure", "initializer error was changed");
+    }
+    expect(metal::current_allocated_size_bytes() == before, "failed final initializer must release its allocation");
+}
+
+void test_metal_construction_and_mapping_report_unavailable_device() {
+    namespace metal = local_gguf_engine::tensor::backends::metal;
+    struct RestoreDevice {
+        ~RestoreDevice() { set_metal_device_unavailable_for_testing(false); }
+    } restore;
+    const auto backing = owned_mapped_test_matrix();
+    const auto view = mapped_test_matrix_view(backing);
+    set_metal_device_unavailable_for_testing(true);
+    expect(!metal::supports_immutable_metal_mappings(), "unavailable Metal device must not admit mappings");
+    bool callback_ran = false;
+    for (const auto operation : {0U, 1U}) {
+        try {
+            if (operation == 0U) {
+                static_cast<void>(metal::initialize_metal_backend_buffer(view.descriptor(),
+                    [&](std::span<std::uint8_t>) { callback_ran = true; }));
+            } else {
+                static_cast<void>(metal::map_immutable_tensor_view_to_metal_backend(view, backing));
+            }
+            throw TestFailure("new Metal factories must reject unavailable devices");
+        } catch (const BackendError& error) {
+            expect(error.code() == BackendErrorCode::unavailable_metal_device,
+                "new Metal factory unavailable-device error mismatch");
+        }
+    }
+    expect(!callback_ran, "failed device admission must happen before final-buffer initialization");
+}
+
 void test_reports_unavailable_metal_backend_operations_when_missing() {
     if (tensor_backend_is_available(BackendKind::metal)) {
         return;
@@ -2250,6 +2462,16 @@ void test_reports_unavailable_metal_backend_operations_when_missing() {
 }
 
 const TestCase tensor_backend_tests[] {
+    {"generic composed Metal operators preserve mapped input offsets when available",
+        test_generic_composed_metal_operators_preserve_mapped_inputs_when_available},
+    {"Metal construction and mapping report unavailable devices",
+        test_metal_construction_and_mapping_report_unavailable_device},
+    {"mapped immutable matrices preserve offsets and reject writes when available",
+        test_maps_immutable_matrix_offsets_and_rejects_writes_when_available},
+    {"pending Metal commands retain mapped backing after facade destruction when available",
+        test_pending_metal_commands_retain_mapped_matrix_backing_when_available},
+    {"final Metal initialization is byte exact and cleans up failure when available",
+        test_initializes_final_metal_storage_and_cleans_up_failure_when_available},
     {"Metal buffer views validate descriptors when available", test_metal_buffer_views_validate_descriptors_when_available},
     {
         "multiplies F32 by F16 GGUF weight matrix on CPU backend",

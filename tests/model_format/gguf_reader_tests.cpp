@@ -6,6 +6,10 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <limits>
+#include <stdexcept>
+#include <optional>
 #include <fstream>
 #include <span>
 #include <string>
@@ -13,6 +17,8 @@
 #include <system_error>
 #include <variant>
 #include <vector>
+
+#include <fcntl.h>
 
 namespace {
 
@@ -568,6 +574,86 @@ void test_reads_file_backed_tensor_payload_views_with_owner_lifetime() {
     expect(view.tensor_payloads[0].bytes[7] == 0x40, "file-backed payload byte 7 mismatch after unlink");
 }
 
+void test_retains_shared_file_mapping_after_move_and_facade_destruction() {
+    const auto bytes = fixture("valid-tensor-payload-view");
+    TempBinaryFile file("shared-file-mapping", bytes);
+    std::optional<local_gguf_engine::runtime::OwnedReadOnlyBytes> backing;
+    std::weak_ptr<const void> lifetime;
+    {
+        auto original = read_file_backed_gguf_model(file.path());
+        lifetime = original.source_backing().owner();
+        backing = original.source_backing();
+        auto moved = std::move(original);
+        expect(original.bytes().empty(), "moved-from GGUF owner must expose no bytes");
+        expect(moved.bytes().data() == backing->bytes().data(), "moving GGUF must preserve mapped allocation");
+        expect(backing->accessible_byte_count() >= bytes.size(), "owned mapping must contain its logical bytes");
+        file.remove_now();
+    }
+    expect(!lifetime.expired(), "shared backing must retain a destroyed GGUF facade's allocation");
+    expect(std::equal(bytes.begin(), bytes.end(), backing->bytes().begin()),
+        "shared backing must remain readable after facade destruction and unlink");
+    backing.reset();
+    expect(lifetime.expired(), "last shared mapping owner must release the allocation");
+}
+
+void test_read_ahead_is_optional_and_validates_logical_extents() {
+    using local_gguf_engine::runtime::OwnedReadOnlyBytes;
+    auto owner = std::make_shared<std::array<std::uint8_t, 8>>();
+    const OwnedReadOnlyBytes unsupported(owner, *owner, owner->size());
+    expect(!unsupported.request_read_ahead(0U, owner->size()),
+        "owned heap bytes should have no implicit file advice");
+    expect(!OwnedReadOnlyBytes{}.request_read_ahead(0U, 1U),
+        "empty backing should reject read-ahead without throwing");
+    std::size_t calls = 0U;
+    std::size_t requested_offset = 0U;
+    std::size_t requested_length = 0U;
+    OwnedReadOnlyBytes hinted(owner, *owner, owner->size() * 2U,
+        [&](std::size_t offset, std::size_t length) {
+            ++calls; requested_offset = offset; requested_length = length; return true;
+        });
+    expect(hinted.request_read_ahead(3U, 5U) && calls == 1U
+        && requested_offset == 3U && requested_length == 5U,
+        "valid read-ahead must forward the exact logical range");
+    expect(!hinted.request_read_ahead(owner->size(), 1U)
+        && !hinted.request_read_ahead(0U, owner->size() + 1U)
+        && !hinted.request_read_ahead(std::numeric_limits<std::size_t>::max(), 1U)
+        && !hinted.request_read_ahead(owner->size(), 0U) && calls == 1U,
+        "read-ahead must exclude padding, overflowing ranges and empty requests");
+    OwnedReadOnlyBytes failing(owner, *owner, owner->size(),
+        [](std::size_t, std::size_t) -> bool { throw std::runtime_error("unavailable advice"); });
+    expect(!failing.request_read_ahead(0U, 1U), "failed advice must remain a harmless failure");
+    auto moved = std::move(hinted);
+    expect(!hinted.request_read_ahead(0U, 1U) && moved.request_read_ahead(7U, 1U)
+        && calls == 2U, "moving backing must preserve advice only on the retained owner");
+}
+
+void test_retains_file_read_ahead_after_unlink_and_facade_destruction() {
+    const auto bytes = fixture("valid-tensor-payload-view");
+    TempBinaryFile file("shared-file-read-ahead", bytes);
+    std::optional<local_gguf_engine::runtime::OwnedReadOnlyBytes> backing;
+    std::weak_ptr<const void> lifetime;
+    {
+        const auto model = read_file_backed_gguf_model(file.path());
+        backing = model.source_backing();
+        lifetime = backing->owner();
+        file.remove_now();
+    }
+    expect(!lifetime.expired(), "read-ahead backing must retain the mapped file owner");
+#if defined(F_RDADVISE)
+    expect(backing->request_read_ahead(0U, bytes.size()),
+        "read-only file advice must remain usable after unlink and facade destruction");
+#else
+    expect(!backing->request_read_ahead(0U, bytes.size()),
+        "platforms without file advice must retain readable mapped bytes");
+#endif
+    expect(std::equal(bytes.begin(), bytes.end(), backing->bytes().begin()),
+        "read-ahead must preserve every mapped byte");
+    expect(!backing->request_read_ahead(bytes.size(), 1U),
+        "file read-ahead must not include accessible page padding");
+    backing.reset();
+    expect(lifetime.expired(), "last advice/mapping owner must release the mapped file");
+}
+
 void test_reads_q8_0_tensor_payload_view() {
     const auto bytes = fixture("valid-q8-0-tensor-payload-view");
     const auto model = read_gguf_model_view(std::span<const std::uint8_t>(bytes));
@@ -728,6 +814,12 @@ std::span<const TestCase> gguf_reader_test_cases() {
             "reads file-backed GGUF tensor payload views with owner lifetime",
             test_reads_file_backed_tensor_payload_views_with_owner_lifetime,
         },
+        {"retains shared GGUF mapping after moves and facade destruction",
+            test_retains_shared_file_mapping_after_move_and_facade_destruction},
+        {"read-ahead is optional and validates logical byte extents",
+            test_read_ahead_is_optional_and_validates_logical_extents},
+        {"retains file read-ahead after unlink and facade destruction",
+            test_retains_file_read_ahead_after_unlink_and_facade_destruction},
         {"reads Q8_0 GGUF tensor payload view", test_reads_q8_0_tensor_payload_view},
         {"reads Q4_K GGUF tensor payload view", test_reads_q4_k_tensor_payload_view},
         {"reads Q6_K GGUF tensor payload view", test_reads_q6_k_tensor_payload_view},

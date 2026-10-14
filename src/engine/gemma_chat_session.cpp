@@ -204,8 +204,8 @@ GemmaChatSessionState GemmaChatSessionState::prepare(
             static_cast<std::uint32_t>(standalone->tokenizer().vocabulary().size())));
     }
     auto model = standalone || authenticate_target
-        ? load_verified_engine_model_from_gguf(file.view(), file.bytes())
-        : load_engine_model_from_gguf(file.view());
+        ? load_verified_engine_model_from_gguf(file)
+        : load_engine_model_from_gguf(file);
     auto tokenizer = tokenizer::load_tokenizer_from_gguf_metadata(file.view().directory.metadata);
     auto prepared = standalone
         ? prepare_gemma_standalone_plan(model, tokenizer, standalone, options.standalone_execution,

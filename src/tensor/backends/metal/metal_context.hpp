@@ -17,7 +17,7 @@ struct MatmulPipelineState {
     // Packed Gemma 2 retains its half-operand prompt tiles and F32 accumulation.
     // [M32/M16] for Q4; separate from Gemma 3's F32 prompt contract.
     id<MTLComputePipelineState> columns8_gemma2_prompt[2] = {};
-    // [canonical/columns8][Q4/Q6][M8/M32], precise prompt arithmetic.
+    // [canonical/columns8][Q4/Q6][M8/N32/K64, M32/N64/K32], F32 prompt arithmetic.
     std::array<std::array<std::array<id<MTLComputePipelineState>, 2>, 2>, 2>
         gemma3_prompt_matrix = {};
     id<MTLComputePipelineState> gemma3_q4_shared_two_pipeline = nil;
@@ -76,10 +76,8 @@ struct MatmulPipelineState {
     id<MTLComputePipelineState> gemma2_kv_cache_copy_pipeline = nil;
     id<MTLComputePipelineState> causal_grouped_attention_scores_pipeline = nil;
     id<MTLComputePipelineState> causal_grouped_attention_values_pipeline = nil;
-    id<MTLComputePipelineState> gemma2_prefill_attention_scores_pipeline = nil;
-    id<MTLComputePipelineState> gemma2_prefill_attention_values_pipeline = nil;
-    id<MTLComputePipelineState> gemma2_wrapped_prefill_attention_scores_pipeline = nil;
-    id<MTLComputePipelineState> gemma2_wrapped_prefill_attention_values_pipeline = nil;
+    id<MTLComputePipelineState> gemma2_prefill_attention_pipeline = nil;
+    id<MTLComputePipelineState> gemma2_prefill_attention_generic_pipeline = nil;
     id<MTLComputePipelineState> gemma2_decode_attention_pipeline = nil;
     id<MTLComputePipelineState> gemma2_decode_attention_reduce_pipeline = nil;
     id<MTLComputePipelineState> verifier_rope_pipeline = nil;
@@ -128,6 +126,9 @@ struct F16MatmulDispatch {
 // MTLDevice objects can flood the IOKit termination queue during large suites.
 [[nodiscard]] id<MTLDevice> system_metal_device() noexcept;
 [[nodiscard]] id<MTLDevice> metal_device_or_throw();
+// The default target and standalone drafter share a queue independently of
+// target pipeline preparation. Precise targets retain their separate queue.
+[[nodiscard]] id<MTLCommandQueue> shared_metal_command_queue();
 [[nodiscard]] MatmulPipelineState& shared_matmul_pipeline_state();
 [[nodiscard]] MatmulPipelineState& shared_precise_matmul_pipeline_state();
 [[nodiscard]] F16MatmulDispatch select_f16_matmul_dispatch(

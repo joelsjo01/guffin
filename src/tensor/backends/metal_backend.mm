@@ -11,6 +11,11 @@
 namespace local_gguf_engine::tensor::backends::metal {
 
 
+bool supports_immutable_metal_mappings() noexcept {
+    id<MTLDevice> device = system_metal_device();
+    return device != nil && device.hasUnifiedMemory;
+}
+
 bool is_available() noexcept {
     return system_metal_device() != nil;
 }

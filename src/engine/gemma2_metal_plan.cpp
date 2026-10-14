@@ -208,17 +208,6 @@ void checked_add_decode_bytes(std::uint64_t& total, std::size_t byte_count) {
     return bytes;
 }
 
-[[nodiscard]] tensor::BackendBuffer upload_weight(
-    tensor::TensorView view,
-    std::size_t& uploaded_byte_count,
-    ResidentPayloadHasher& hasher,
-    std::string_view label
-) {
-    checked_add_bytes(uploaded_byte_count, view.bytes().size());
-    hasher.add(label, view);
-    return tensor::copy_tensor_view_to_backend(view, gemma_backend);
-}
-
 [[nodiscard]] TensorDescriptor gemma3_projection_descriptor(tensor::TensorView view) {
     const auto& descriptor = view.descriptor();
     if (descriptor.dtype == DType::q4_k || descriptor.dtype == DType::q6_k) {
@@ -226,6 +215,17 @@ void checked_add_decode_bytes(std::uint64_t& total, std::size_t byte_count) {
             descriptor.shape, descriptor.dtype);
     }
     return descriptor;
+}
+
+[[nodiscard]] std::size_t mapped_native_weight_bytes(tensor::TensorView view,
+    const runtime::OwnedReadOnlyBytes* backing, std::uint64_t maximum_buffer_bytes) {
+    if (!backing || view.descriptor().packing != tensor::TensorPacking::canonical
+        || view.descriptor().shape.rank() != 2U) return 0U;
+    // Validate ownership even when a valid Metal offset or covering-parent
+    // limit requires a copied allocation for this particular native tensor.
+    const auto bytes = tensor::backends::metal::mapped_immutable_tensor_byte_count(view, *backing);
+    return reinterpret_cast<std::uintptr_t>(view.bytes().data()) % 4U == 0U
+        && bytes <= maximum_buffer_bytes ? bytes : 0U;
 }
 
 [[nodiscard]] std::size_t gemma3_resident_weight_bytes(
@@ -244,9 +244,7 @@ void checked_add_decode_bytes(std::uint64_t& total, std::size_t byte_count) {
                  &block.attention.value_weight, &block.attention.output_weight,
                  &block.feed_forward.gate_weight, &block.feed_forward.up_weight,
                  &block.feed_forward.down_weight,
-             }) {
-            checked_add_bytes(bytes, gemma3_projection_descriptor(*projection).byte_count);
-        }
+             }) checked_add_bytes(bytes, gemma3_projection_descriptor(*projection).byte_count);
         for (const auto* norm : {
                  &block.attention.attention_norm_weight,
                  &block.attention.post_attention_norm_weight,
@@ -260,20 +258,82 @@ void checked_add_decode_bytes(std::uint64_t& total, std::size_t byte_count) {
 }
 
 enum class ProjectionPacking { canonical, q4_columns8, kquant_columns8 };
+enum class PreparedWeightStorage { direct_metal, cpu_staged };
 
-[[nodiscard]] tensor::BackendBuffer upload_projection_weight(
-    tensor::TensorView view, std::size_t& uploaded_byte_count,
-    ResidentPayloadHasher& hasher, std::string_view label, ProjectionPacking packing
-) {
-    if ((packing != ProjectionPacking::canonical && view.descriptor().dtype == DType::q4_k)
-        || (packing == ProjectionPacking::kquant_columns8 && view.descriptor().dtype == DType::q6_k)) {
-        // Only this tensor's packed staging storage is live during upload;
-        // the resident allocation replaces its GGUF representation.
-        const auto packed = tensor::repack_kquant_weight_columns8(view);
-        return upload_weight(packed.view(), uploaded_byte_count, hasher, label);
+// Materialize each final execution payload once. Native immutable matrices can
+// retain their mapped file owner. Gemma 3 retains source-contiguous CPU
+// staging; Gemma 2 transforms directly into its final Metal destinations.
+class WeightMaterializer final {
+public:
+    WeightMaterializer(std::size_t& bytes, ResidentPayloadHasher& hasher,
+        ProjectionPacking packing, PreparedWeightStorage projection_storage,
+        const runtime::OwnedReadOnlyBytes* backing, std::uint64_t maximum_buffer_bytes)
+        : bytes_(bytes), hasher_(hasher), packing_(packing), projection_storage_(projection_storage),
+          backing_(backing), maximum_buffer_bytes_(maximum_buffer_bytes) {}
+
+    [[nodiscard]] tensor::BackendBuffer native(tensor::TensorView view, std::string_view label) {
+        const auto mapped_bytes = mapped_native_weight_bytes(view, backing_, maximum_buffer_bytes_);
+        // Factories allocate exactly these requested extents. Mapped parents
+        // include covering pages; copied tensors retain the original accounting.
+        checked_add_bytes(bytes_, mapped_bytes != 0U ? mapped_bytes : view.bytes().size());
+        hasher_.add(label, view);
+        return mapped_bytes != 0U
+            ? tensor::backends::metal::map_immutable_tensor_view_to_metal_backend(view, *backing_)
+            : tensor::copy_tensor_view_to_backend(view, gemma_backend);
     }
-    return upload_weight(view, uploaded_byte_count, hasher, label);
-}
+
+    [[nodiscard]] tensor::BackendBuffer projection(tensor::TensorView view, std::string_view label) {
+        if ((packing_ != ProjectionPacking::canonical && view.descriptor().dtype == DType::q4_k)
+            || (packing_ == ProjectionPacking::kquant_columns8 && view.descriptor().dtype == DType::q6_k)) {
+            if (projection_storage_ == PreparedWeightStorage::cpu_staged) {
+                const auto packed = tensor::repack_kquant_weight_columns8(view);
+                return native(packed.view(), label);
+            }
+            const auto descriptor = TensorDescriptor::from_interleaved_kquant_weight_matrix(
+                view.descriptor().shape, view.descriptor().dtype);
+            return generated(descriptor, label, [&](std::span<std::uint8_t> bytes) {
+                tensor::repack_kquant_weight_columns8_into(view, descriptor, bytes);
+            });
+        }
+        return native(view, label);
+    }
+
+    [[nodiscard]] tensor::BackendBuffer requantized_down(tensor::TensorView view, std::string_view label) {
+        const auto descriptor = packing_ == ProjectionPacking::canonical
+            ? TensorDescriptor::from_quantized_gguf_weight_matrix(view.descriptor().shape, DType::q4_k)
+            : TensorDescriptor::from_interleaved_kquant_weight_matrix(view.descriptor().shape, DType::q4_k);
+        return generated(descriptor, label, [&](std::span<std::uint8_t> bytes) {
+            tensor::requantize_q6_k_gguf_weight_q4_k_into(view, descriptor, bytes);
+        });
+    }
+
+    [[nodiscard]] tensor::BackendBuffer q8_head(tensor::TensorView view) {
+        const auto descriptor = TensorDescriptor::from_quantized_gguf_weight_matrix(
+            view.descriptor().shape, DType::q8_0);
+        return generated(descriptor, "output.weight:f16->q8_0", [&](std::span<std::uint8_t> bytes) {
+            tensor::quantize_f16_gguf_weight_q8_0_into(view, descriptor, bytes);
+        });
+    }
+
+private:
+    template <typename Initialize>
+    [[nodiscard]] tensor::BackendBuffer generated(const TensorDescriptor& descriptor,
+        std::string_view label, Initialize&& initialize) {
+        checked_add_bytes(bytes_, descriptor.byte_count);
+        return tensor::backends::metal::initialize_metal_backend_buffer(descriptor,
+            [&](std::span<std::uint8_t> bytes) {
+                initialize(bytes);
+                hasher_.add(label, tensor::TensorView::from_bytes(descriptor, bytes));
+            });
+    }
+
+    std::size_t& bytes_;
+    ResidentPayloadHasher& hasher_;
+    ProjectionPacking packing_;
+    PreparedWeightStorage projection_storage_;
+    const runtime::OwnedReadOnlyBytes* backing_;
+    std::uint64_t maximum_buffer_bytes_;
+};
 
 [[nodiscard]] tensor::BackendBuffer allocate_buffer(
     const TensorDescriptor& descriptor,
@@ -327,118 +387,108 @@ void require_power_of_two_cache_layout(const GemmaModelConfig& config) {
 );
 
 [[nodiscard]] Gemma2MetalAttentionWeightBuffers upload_attention_weights(
-    const GemmaAttentionWeights& weights,
-    std::size_t& uploaded_byte_count,
-    ResidentPayloadHasher& hasher,
-    std::uint32_t block_index,
-    ProjectionPacking packing
+    const GemmaAttentionWeights& weights, WeightMaterializer& materializer,
+    std::uint32_t block_index
 ) {
     const auto prefix = "blk." + std::to_string(block_index) + ".";
     return Gemma2MetalAttentionWeightBuffers {
-        .attention_norm_weight = upload_weight(weights.attention_norm_weight, uploaded_byte_count, hasher, prefix + "attn_norm.weight"),
-        .post_attention_norm_weight = upload_weight(weights.post_attention_norm_weight, uploaded_byte_count, hasher, prefix + "post_attention_norm.weight"),
-        .query_weight = upload_projection_weight(weights.query_weight, uploaded_byte_count, hasher, prefix + "attn_q.weight", packing),
-        .key_weight = upload_projection_weight(weights.key_weight, uploaded_byte_count, hasher, prefix + "attn_k.weight", packing),
-        .value_weight = upload_projection_weight(weights.value_weight, uploaded_byte_count, hasher, prefix + "attn_v.weight", packing),
-        .output_weight = upload_projection_weight(weights.output_weight, uploaded_byte_count, hasher, prefix + "attn_output.weight", packing),
+        .attention_norm_weight = materializer.native(weights.attention_norm_weight, prefix + "attn_norm.weight"),
+        .post_attention_norm_weight = materializer.native(weights.post_attention_norm_weight, prefix + "post_attention_norm.weight"),
+        .query_weight = materializer.projection(weights.query_weight, prefix + "attn_q.weight"),
+        .key_weight = materializer.projection(weights.key_weight, prefix + "attn_k.weight"),
+        .value_weight = materializer.projection(weights.value_weight, prefix + "attn_v.weight"),
+        .output_weight = materializer.projection(weights.output_weight, prefix + "attn_output.weight"),
         .query_norm_weight = weights.query_norm_weight
-            ? std::optional(upload_weight(*weights.query_norm_weight, uploaded_byte_count, hasher, prefix + "attn_q_norm.weight"))
+            ? std::optional(materializer.native(*weights.query_norm_weight, prefix + "attn_q_norm.weight"))
             : std::nullopt,
         .key_norm_weight = weights.key_norm_weight
-            ? std::optional(upload_weight(*weights.key_norm_weight, uploaded_byte_count, hasher, prefix + "attn_k_norm.weight"))
+            ? std::optional(materializer.native(*weights.key_norm_weight, prefix + "attn_k_norm.weight"))
             : std::nullopt,
     };
 }
 
 [[nodiscard]] Gemma2MetalFeedForwardWeightBuffers upload_feed_forward_weights(
-    const GemmaFeedForwardWeights& weights,
-    std::size_t& uploaded_byte_count,
-    bool requantize_q6_down,
-    ResidentPayloadHasher& hasher,
-    std::uint32_t block_index,
-    ProjectionPacking packing
+    const GemmaFeedForwardWeights& weights, WeightMaterializer& materializer,
+    bool requantize_q6_down, std::uint32_t block_index
 ) {
     const auto prefix = "blk." + std::to_string(block_index) + ".";
-    auto down_weight = [&]() {
-        if (requantize_q6_down && weights.down_weight.descriptor().dtype == DType::q6_k) {
-            auto quantized = tensor::requantize_q6_k_gguf_weight_q4_k(weights.down_weight);
-            return upload_projection_weight(quantized.view(), uploaded_byte_count,
-                hasher, prefix + "ffn_down.weight:q6_k->q4_k", packing);
-        }
-        return upload_projection_weight(
-            weights.down_weight, uploaded_byte_count, hasher, prefix + "ffn_down.weight", packing
-        );
-    }();
+    auto down_weight = requantize_q6_down && weights.down_weight.descriptor().dtype == DType::q6_k
+        ? materializer.requantized_down(weights.down_weight, prefix + "ffn_down.weight:q6_k->q4_k")
+        : materializer.projection(weights.down_weight, prefix + "ffn_down.weight");
     return Gemma2MetalFeedForwardWeightBuffers {
-        .feed_forward_norm_weight = upload_weight(weights.feed_forward_norm_weight, uploaded_byte_count, hasher, prefix + "ffn_norm.weight"),
-        .post_feed_forward_norm_weight = upload_weight(weights.post_feed_forward_norm_weight, uploaded_byte_count, hasher, prefix + "post_ffw_norm.weight"),
-        .gate_weight = upload_projection_weight(weights.gate_weight, uploaded_byte_count, hasher, prefix + "ffn_gate.weight", packing),
-        .up_weight = upload_projection_weight(weights.up_weight, uploaded_byte_count, hasher, prefix + "ffn_up.weight", packing),
+        .feed_forward_norm_weight = materializer.native(weights.feed_forward_norm_weight, prefix + "ffn_norm.weight"),
+        .post_feed_forward_norm_weight = materializer.native(weights.post_feed_forward_norm_weight, prefix + "post_ffw_norm.weight"),
+        .gate_weight = materializer.projection(weights.gate_weight, prefix + "ffn_gate.weight"),
+        .up_weight = materializer.projection(weights.up_weight, prefix + "ffn_up.weight"),
         .down_weight = std::move(down_weight),
     };
 }
 
-[[nodiscard]] std::vector<Gemma2MetalBlockWeightBuffers> upload_block_weights(
-    const GemmaModelWeights& weights,
-    std::size_t& uploaded_byte_count,
-    bool requantize_q6_down,
-    ResidentPayloadHasher& hasher,
-    ProjectionPacking packing
-) {
-    std::vector<Gemma2MetalBlockWeightBuffers> blocks;
-    blocks.reserve(weights.blocks.size());
-
-    for (std::size_t block_index = 0U; block_index < weights.blocks.size(); ++block_index) {
-        const auto& block = weights.blocks[block_index];
-        blocks.push_back(Gemma2MetalBlockWeightBuffers {
-            .attention = upload_attention_weights(
-                block.attention, uploaded_byte_count, hasher,
-                static_cast<std::uint32_t>(block_index), packing
-            ),
-            .feed_forward = upload_feed_forward_weights(
-                block.feed_forward, uploaded_byte_count, requantize_q6_down,
-                hasher, static_cast<std::uint32_t>(block_index), packing
-            ),
-        });
-    }
-
-    return blocks;
+// Overlap source I/O for the next block with current-block packing. A hint
+// covers at most one ordinary layer; unusual file layouts simply skip it.
+void read_ahead_block(const GemmaBlockWeights& block,
+    const runtime::OwnedReadOnlyBytes* source) noexcept {
+    if (!source) return;
+    const auto bytes = source->bytes();
+    const auto base = reinterpret_cast<std::uintptr_t>(bytes.data());
+    std::size_t begin = bytes.size();
+    std::size_t end = 0U;
+    const auto include = [&](const tensor::TensorView& view) {
+        const auto payload = view.bytes();
+        const auto address = reinterpret_cast<std::uintptr_t>(payload.data());
+        if (address < base || address - base > bytes.size()
+            || payload.size() > bytes.size() - (address - base)) return false;
+        const auto offset = static_cast<std::size_t>(address - base);
+        begin = std::min(begin, offset);
+        end = std::max(end, offset + payload.size());
+        return true;
+    };
+    const auto& attention = block.attention;
+    const auto& feed_forward = block.feed_forward;
+    const std::array views {
+        attention.attention_norm_weight, attention.post_attention_norm_weight,
+        attention.query_weight, attention.key_weight, attention.value_weight,
+        attention.output_weight, feed_forward.feed_forward_norm_weight,
+        feed_forward.post_feed_forward_norm_weight, feed_forward.gate_weight,
+        feed_forward.up_weight, feed_forward.down_weight,
+    };
+    for (const auto& view : views) if (!include(view)) return;
+    if (attention.query_norm_weight && !include(*attention.query_norm_weight)) return;
+    if (attention.key_norm_weight && !include(*attention.key_norm_weight)) return;
+    constexpr std::size_t maximum_hint_bytes = 256U * 1024U * 1024U;
+    if (end > begin && end - begin <= maximum_hint_bytes)
+        static_cast<void>(source->request_read_ahead(begin, end - begin));
 }
 
 [[nodiscard]] Gemma2MetalModelWeightBuffers upload_model_weights(
-    const GemmaModelWeights& weights,
-    std::size_t& uploaded_byte_count,
-    GemmaOutputHeadPolicy output_head_policy,
-    bool retained_target,
-    ResidentPayloadHasher& hasher,
-    ProjectionPacking packing
+    const GemmaModelWeights& weights, WeightMaterializer& materializer,
+    GemmaOutputHeadPolicy output_head_policy, bool retained_target,
+    const runtime::OwnedReadOnlyBytes* read_ahead_source
 ) {
-    auto token_embedding_weight = upload_weight(
-        weights.token_embedding_weight, uploaded_byte_count, hasher, "token_embd.weight"
-    );
-    auto output_weight = [&]() {
-        if (output_head_policy == GemmaOutputHeadPolicy::q8_0) {
-            auto quantized = tensor::quantize_f16_gguf_weight_q8_0(weights.output_weight);
-            checked_add_bytes(uploaded_byte_count, quantized.descriptor().byte_count);
-            hasher.add("output.weight:f16->q8_0", quantized.view());
-            return tensor::copy_tensor_to_backend(quantized, gemma_backend);
-        }
-        return weights.output_weight.bytes().data() == weights.token_embedding_weight.bytes().data()
-            ? token_embedding_weight
-            : upload_weight(
-                weights.output_weight, uploaded_byte_count, hasher, "output.weight"
-            );
-    }();
-
+    if (!weights.blocks.empty()) read_ahead_block(weights.blocks.front(), read_ahead_source);
+    auto token_embedding_weight = materializer.native(weights.token_embedding_weight, "token_embd.weight");
+    auto output_weight = output_head_policy == GemmaOutputHeadPolicy::q8_0
+        ? materializer.q8_head(weights.output_weight)
+        : weights.output_weight.bytes().data() == weights.token_embedding_weight.bytes().data()
+            ? token_embedding_weight : materializer.native(weights.output_weight, "output.weight");
+    auto output_norm_weight = materializer.native(weights.output_norm_weight, "output_norm.weight");
+    std::vector<Gemma2MetalBlockWeightBuffers> blocks;
+    blocks.reserve(weights.blocks.size());
+    for (std::size_t block_index = 0U; block_index < weights.blocks.size(); ++block_index) {
+        if (block_index + 1U < weights.blocks.size())
+            read_ahead_block(weights.blocks[block_index + 1U], read_ahead_source);
+        const auto& block = weights.blocks[block_index];
+        blocks.push_back(Gemma2MetalBlockWeightBuffers {
+            .attention = upload_attention_weights(block.attention, materializer, static_cast<std::uint32_t>(block_index)),
+            .feed_forward = upload_feed_forward_weights(block.feed_forward, materializer,
+                retained_target, static_cast<std::uint32_t>(block_index)),
+        });
+    }
     return Gemma2MetalModelWeightBuffers {
-        .token_embedding_weight = token_embedding_weight,
-        .output_norm_weight = upload_weight(
-            weights.output_norm_weight, uploaded_byte_count, hasher, "output_norm.weight"
-        ),
+        .token_embedding_weight = std::move(token_embedding_weight),
+        .output_norm_weight = std::move(output_norm_weight),
         .output_weight = std::move(output_weight),
-        .blocks = upload_block_weights(
-            weights, uploaded_byte_count, retained_target, hasher, packing
-        ),
+        .blocks = std::move(blocks),
     };
 }
 
@@ -595,16 +645,11 @@ void require_power_of_two_cache_layout(const GemmaModelConfig& config) {
 ) {
     const auto tokens = gemma2_metal_prefill_chunk_size;
     // Prefill is encoded serially. These aliases follow producer/last-consumer
-    // boundaries: scores become probabilities in place; the hidden workspace
-    // advances from attention norm through both residual branches; and GELU
-    // replaces its dead gate input. All aliases retain identical descriptors.
+    // boundaries: the hidden workspace advances from attention norm through
+    // both residual branches, and GELU replaces its dead gate input. All aliases
+    // retain identical descriptors. Attention needs no score/probability storage.
     const auto hidden_workspace = allocate_buffer(
         f32_descriptor({tokens, config.embedding_length}), allocated_byte_count
-    );
-    const auto attention_score_workspace = config.architecture == ModelArchitecture::gemma3
-        ? hidden_workspace : allocate_buffer(
-        f32_descriptor({tokens, config.attention_head_count, config.context_length}),
-        allocated_byte_count
     );
     const auto feed_forward_gate_workspace = allocate_buffer(
         f32_descriptor({tokens, config.feed_forward_length}), allocated_byte_count
@@ -622,8 +667,6 @@ void require_power_of_two_cache_layout(const GemmaModelConfig& config) {
         .current_chunk_value = allocate_buffer(kv_descriptor(config, {
             tokens, config.attention_head_count_kv, config.attention_value_length,
         }), allocated_byte_count),
-        .attention_scores = attention_score_workspace,
-        .attention_probabilities = attention_score_workspace,
         .attention_output = allocate_buffer(
             f32_descriptor({tokens, attention_output_width(config)}),
             allocated_byte_count
@@ -1037,7 +1080,8 @@ namespace {
     GemmaModelConfig config,
     const GemmaModelWeights& weights,
     GemmaOutputHeadPolicy policy,
-    ResidentTargetPayloadReceipt* receipt
+    ResidentTargetPayloadReceipt* receipt,
+    const runtime::OwnedReadOnlyBytes* backing = nullptr
 ) {
     config.kv_precision = resolve_gemma_kv_precision(config.architecture, config.kv_precision);
     if (config.architecture == ModelArchitecture::gemma3) {
@@ -1048,6 +1092,11 @@ namespace {
         throw std::invalid_argument("Gemma runtime context exceeds model context length");
     }
     require_metal_available();
+    const auto* read_ahead_source = config.architecture == ModelArchitecture::gemma3 ? backing : nullptr;
+    if (backing && (config.architecture != ModelArchitecture::gemma2
+        || !tensor::backends::metal::supports_immutable_metal_mappings())) backing = nullptr;
+    const auto memory = tensor::backends::metal::memory_info();
+    const auto maximum_buffer_bytes = memory ? memory->max_buffer_bytes : 0U;
 
     if (config.architecture == ModelArchitecture::gemma3) {
         // Fail before uploading weights when even immutable weights and durable
@@ -1062,7 +1111,7 @@ namespace {
             checked_add_bytes(minimum_bytes, cache.byte_count);
             checked_add_bytes(minimum_bytes, cache.byte_count);
         }
-        if (const auto memory = tensor::backends::metal::memory_info()) {
+        if (memory) {
             const auto budget = std::min(memory->recommended_working_set_bytes,
                 memory->physical_memory_bytes);
             if (minimum_bytes > budget || memory->current_allocated_bytes > budget - minimum_bytes) {
@@ -1087,13 +1136,18 @@ namespace {
     // Gemma 2's Q6 V projections retain their original worker/reduction order.
     // Packing only Q4 preserves that target while sharing its dominant body
     // projections across R1/R2; each tensor still has one resident payload.
-    auto resident_weights = upload_model_weights(
-        weights, uploaded_weight_byte_count, resolved_policy, retained_target,
-        resident_hasher, config.architecture == ModelArchitecture::gemma3
-            ? ProjectionPacking::kquant_columns8
-            : retained_target && resolved_policy == GemmaOutputHeadPolicy::q8_0
-                ? ProjectionPacking::q4_columns8 : ProjectionPacking::canonical
-    );
+    const auto packing = config.architecture == ModelArchitecture::gemma3
+        ? ProjectionPacking::kquant_columns8
+        : retained_target && resolved_policy == GemmaOutputHeadPolicy::q8_0
+            ? ProjectionPacking::q4_columns8 : ProjectionPacking::canonical;
+    // Gemma 3 retains copied native weights and staged projections: their
+    // joint direct/mapped replacement regressed cooled chat. Gemma 2 keeps
+    // mapped native matrices and direct transformed payloads.
+    const auto projection_storage = config.architecture == ModelArchitecture::gemma3
+        ? PreparedWeightStorage::cpu_staged : PreparedWeightStorage::direct_metal;
+    WeightMaterializer materializer(uploaded_weight_byte_count, resident_hasher, packing,
+        projection_storage, backing, maximum_buffer_bytes);
+    auto resident_weights = upload_model_weights(weights, materializer, resolved_policy, retained_target, read_ahead_source);
     auto kv_cache = allocate_kv_cache(config, kv_cache_byte_count);
     auto prefill_scratch = allocate_prefill_scratch(config, scratch_byte_count);
     auto decode_scratch = allocate_decode_scratch(config, scratch_byte_count);
@@ -1198,7 +1252,8 @@ Gemma2MetalModelPlan create_gemma2_metal_model_plan(
         config.context_length = context_length;
     }
     return create_gemma2_metal_model_plan_impl(
-        config, weights, policy, nullptr
+        config, weights, policy, nullptr,
+        !model.payload_receipt() && model.source_backing() ? &*model.source_backing() : nullptr
     );
 }
 

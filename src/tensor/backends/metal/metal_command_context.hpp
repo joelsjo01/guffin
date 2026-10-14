@@ -177,65 +177,30 @@ public:
         std::uint32_t source_row_mask,
         std::uint32_t destination_row_mask
     );
-    void encode_attention_scores(
+    // Shared prefill uses F16 K/V with F32 queries and output.
+    // Prefill reads the old sliding ring and, when staged, this chunk's private
+    // F16 rows. Publication remains the caller's responsibility after attention.
+    // Staged row slots use (absolute position - current_chunk_position_origin)
+    // modulo their capacity: Gemma 2 stores absolute slots; Gemma 3 starts at zero.
+    void encode_f16_prefill_attention(
         const BackendBuffer& query,
         const BackendBuffer& key_cache,
-        const BackendBuffer& output,
-        std::uint32_t query_position_start,
-        std::uint32_t head_count,
-        std::uint32_t kv_head_count,
-        std::uint32_t key_length,
-        std::uint32_t attention_token_count,
-        float scale,
-        float logit_softcap,
-        std::uint32_t cache_row_mask,
-        std::uint32_t query_row_count = 0
-    );
-    void encode_wrapped_prefill_attention_scores(
-        const BackendBuffer& query,
-        const BackendBuffer& key_cache,
+        const BackendBuffer& value_cache,
         const BackendBuffer& current_chunk_key,
-        const BackendBuffer& output,
-        std::uint32_t query_position_start,
-        std::uint32_t head_count,
-        std::uint32_t kv_head_count,
-        std::uint32_t key_length,
-        std::uint32_t attention_token_count,
-        float scale,
-        float logit_softcap,
-        std::uint32_t cache_row_mask,
-        std::uint32_t query_row_count = 0
-    );
-    void encode_softmax(
-        const BackendBuffer& input,
-        const BackendBuffer& output,
-        std::uint32_t rows,
-        std::uint32_t columns
-    );
-    void encode_attention_values(
-        const BackendBuffer& probabilities,
-        const BackendBuffer& value_cache,
-        const BackendBuffer& output,
-        std::uint32_t query_position_start,
-        std::uint32_t head_count,
-        std::uint32_t kv_head_count,
-        std::uint32_t value_length,
-        std::uint32_t attention_token_count,
-        std::uint32_t cache_row_mask,
-        std::uint32_t query_row_count = 0
-    );
-    void encode_wrapped_prefill_attention_values(
-        const BackendBuffer& probabilities,
-        const BackendBuffer& value_cache,
         const BackendBuffer& current_chunk_value,
         const BackendBuffer& output,
         std::uint32_t query_position_start,
         std::uint32_t head_count,
         std::uint32_t kv_head_count,
+        std::uint32_t key_length,
         std::uint32_t value_length,
         std::uint32_t attention_token_count,
+        float scale,
+        float logit_softcap,
         std::uint32_t cache_row_mask,
-        std::uint32_t query_row_count = 0
+        std::uint32_t query_row_count,
+        bool uses_staged_chunk,
+        std::uint32_t current_chunk_position_origin = 0U
     );
     void encode_gemma2_decode_attention(
         const BackendBuffer& query,

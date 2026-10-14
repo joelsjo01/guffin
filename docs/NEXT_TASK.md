@@ -1,86 +1,97 @@
 # Current state and next work
 
-*Updated October 5, 2026. This is the current handoff; completed research lives
-in the linked records.*
+*Updated October 14, 2026. This file owns the current handoff; completed
+experiments belong in the [retrospective](SPECULATIVE_DECODING_RETROSPECTIVE.md)
+and [performance record](PERFORMANCE.md).*
 
-## Production state
+## Verified production state
 
-Guffin is an engine-owned, local C++20/Metal GGUF engine validated on a 16 GiB
-MacBook Air M4. Gemma 3 12B is the primary target; Gemma 2 9B remains supported.
-Gemma 4 is future work. Installed chat starts with `guffin -m MODEL`.
+Guffin is an engine-owned, local C++20/Metal GGUF engine for a 16 GiB MacBook
+Air M4. Gemma 3 12B is the primary target; Gemma 2 9B remains supported.
+Installed chat starts with `guffin -m MODEL`. Gemma 4 remains future work.
 
-- Gemma 3: native Q4/Q6 target execution, F16 target KV with F32 attention,
-  16K default capacity, and retained M32 prompt tiles for at least 32 useful rows.
-  Larger capacities must satisfy model/device limits.
+- Gemma 3 uses native Q4/Q6 weights, F16 target KV with F32 attention and a
+  16K default context allocation. Bulk prompt execution shares quantized
+  weights across rows while preserving F32 projection arithmetic.
 - `--draft-model FILE` enables the authenticated native Gemma 3 270M Q8_0
-  drafter, H1, full verification and lossless sampling. The drafter uses F32 KV
-  and caps paired context at 32K. Lossless preserves the configured target law;
-  identical seeded text is unnecessary. Larger horizons remain diagnostics
-  without an established retained chat advantage.
-- Gemma 2: F16 KV and bounded suffix retrieval enabled by default. Its existing
-  Q6-down → Q4 and F16-head → Q8 conversions remain explicit numerical policy.
-  The target kernel port stayed; the October Arm R integration was removed.
-- Chat metrics show prompt tokens/s, generation tokens/s and internal TTFT.
-  `--stats` requests one-shot/piped timings; `--decode-diagnostics` opts into raw
-  attribution. `make install` installs an optimized, self-contained executable;
-  `PREFIX`/`DESTDIR` support custom/staged installation.
+  drafter, H1, full verification and lossless sampling. Its F32 KV caps paired
+  context at 32K. Lossless preserves the configured target law; it does not
+  require identical seeded text. Larger horizons have no retained chat gain.
+- Gemma 2 uses F16 KV, bounded suffix retrieval by default and fused bulk
+  attention. Its Q6-down → Q4 and F16-head → Q8 conversions remain explicit
+  numerical policy. The transferred target improvements stayed; learned
+  recurrent drafting did not.
+- Shared session, model and preparation APIs retain explicit family behavior.
+  Move-only target/verifier facades and storage-retaining tickets protect
+  transactions; tensor admission checks descriptor and backing contracts.
+  Numerical references, fault helpers and benchmark drivers stay outside
+  shipping objects.
+- `make install` builds an optimized, self-contained executable, with
+  `PREFIX`/`DESTDIR` support. Chat shows prompt/generation rates and internal
+  TTFT; one-shot timings use `--stats`, attribution uses `--decode-diagnostics`.
 
-## Cleanup and verification completed
+## Release evidence and review
 
-Shared session, model and preparation APIs use Gemma names, while original
-family runtime schedules and authentication domains remain explicit. CLI
-parsing, interaction and metrics are separate. Numerical references, fault
-helpers and diagnostic verifier drivers are excluded from shipping objects.
-Abandoned feature banks, hidden-state taps, training capture and auxiliary
-research caches are removed.
+The three retained release campaigns are complete: **38 conversations / 80
+turns per engine**, with no failed, interrupted or unattempted cases. They use
+the same frozen user messages, fresh processes, 300-second launch cooldowns,
+120-second inter-turn pauses and each CLI's inference defaults.
 
-Target/verifier facades are move-only, with stable setup-owned storage and
-owner-retaining tickets. Tensor admission validates descriptor and backing
-contracts before allocation. Drafter/chain resource names and control flow are
-clearer without another runtime layer. Retained shader bytes, numerical
-encoding, submission order, sampler operations and cache algorithms are
-unchanged; no new token-loop allocation was added.
+| Campaign | Core generation, Guffin / llama.cpp |
+| --- | ---: |
+| Gemma 2 default | 16.76 / 13.63 t/s |
+| Gemma 3 ordinary | 12.57 / 12.40 t/s |
+| Gemma 3 speculative | 18.43 / 8.43 t/s |
 
-The last source-validation pass completed 504 registered native cases without
-failure and 64 Python cases with 15 skips. Some native checkpoint/reference
-cases also return when artifacts are absent. Debug/release builds had no
-compiler warnings. Installed Gemma 3 ordinary/H1 two-turn chats and Gemma 2
-ordinary generation passed; saved text and non-timing summaries matched.
-H1 diagnostics matched 83/84 non-timing fields on both turns; the remaining
-field records a 16-byte verifier host facade. Clean source-export, dependency,
-install/uninstall and shipping-symbol checks passed. These were correctness
-and lifecycle checks, not new performance benchmarks.
+[Performance evidence](PERFORMANCE.md) links the committed manifests, receipts,
+logs and reports, and records TTFT, memory and interpretation limits. These are
+single-pass performance observations, not answer-quality or numerical
+correctness evaluations. Gemma 2 retains its distinct executed-weight policy;
+the speculative comparison retains each engine's own algorithm and defaults.
 
-## Documentation completed
+The October 14 Metal/runtime review found no blocking defect. The resulting
+source fixes preserve shader arithmetic, schedules and precision while aligning
+unknown-token decoding and hardening benchmark resource/receipt handling.
+Offline validation checked all **76 receipts / 160 turns per campaign**, answer
+hashes and log references; regenerated JSON/CSV/Markdown/SVG reports were
+byte-identical. Final CI passes **537 registered native cases and 132 Python
+cases**, with 15 existing Python skips and no compiler warnings. Artifact-dependent native
+reference cases retain their availability gates.
+No performance campaign was rerun. The README is unchanged in this
+pass; the next baton below owns its deferred refresh.
 
-The [README](../README.md) explains the engineering question, architecture,
-useful work shared by H1, ownership/correctness contracts and experimental
-lessons. Release performance fields are explicitly pending. The
-[retrospective](SPECULATIVE_DECODING_RETROSPECTIVE.md) preserves successful and
-rejected designs; [performance evidence](PERFORMANCE.md) separates the planned
-release measurements from historical calculations and their limits. Its older
-figure is historical evidence, rather than a current README headline. The
-pinned llama.cpp reference and archive are unchanged. No engine source, models
-or benchmarks changed during this documentation pass.
+## Remaining numerical boundary
 
-The planned next phase is thorough actual-chat testing and matched external
-comparisons. It has not started; this task ends with the documentation revision.
+The retained Gemma 3 F16 target exceeds the original independent full-model
+bounds on a reproduced natural 128-token prompt. Its F32 control passes. The
+investigation found amplified rounding feedback without establishing an
+incorrect model equation, cache index or half conversion. Later exact prompt
+optimizations preserve the original logits and caches; neither the release
+campaigns nor those parity checks resolve this independent boundary.
 
-## Remaining boundaries and release decisions
+Half-operand prompt candidates also failed their unchanged matching-policy
+logit/cache gates and were removed. No tolerance was relaxed. Wider-context
+and answer-quality fidelity remain unestablished; lossless H1 preserves the
+configured native target law. See [numerical limits](PERFORMANCE.md#numerical-limits).
 
-An independent 128-token natural-prompt CPU comparison exceeds existing
-numerical bounds for the baseline and a removed attention candidate. The cause
-is unresolved; top-1 agreement does not waive it. Retained M32 projections are
-bit-identical and did not introduce the discrepancy. See the
-[numerical boundary](SPECULATIVE_DECODING_RETROSPECTIVE.md#numerical-validation-has-a-boundary).
+## Next baton: refresh the README
 
-The older llama.cpp baseline differs in OS, timing, response history and Gemma 2
-executed-weight policy. Manual Gemma 3 comparisons are not frozen controlled
-results. Do not present a current percentage competitor lead from those data.
-A fresh matched comparison would be separate, explicitly requested work.
+**Objective:** at the next user prompt, refresh the README using the three
+final campaigns and the current architecture. The user explicitly deferred
+that edit during the present pass; this review and cleanup are complete.
 
-Release identity and licensing remain maintainer decisions; no license, tag or
-release was created. Confirm hosted CI for the eventual release revision.
-Use [the code map](GRAPH.md) and [principles](ENGINE_PRINCIPLES.md) for future
-implementation, and [development history](archive/DEVELOPMENT_HISTORY.md) for
-historical experiments and commands.
+**Constraints:** preserve its explanatory structure; attach every headline to
+its model, mode, suite and measurement boundary. Keep ordinary and speculative
+comparisons distinct, disclose Gemma 2's numerical policy, slower large-prompt
+TTFT and higher reported physical footprint with mapped-weight accounting
+limits, and retain the F16 fidelity limit.
+Do not infer quality correctness from successful conversations. Use the
+retrospective for the longer development story and GRAPH only to locate code.
+
+**Verification:** check figures and links against the retained manifests,
+receipts and reports without rerunning inference. Check Markdown/diagram
+rendering and ensure no headline depends on removed development artifacts.
+
+**Stop condition:** the README accurately presents the released engine,
+measured benefits and limitations. New inference optimization, precision
+qualification or model coverage is a separate task.

@@ -46,7 +46,7 @@ enum class TokenizerModel {
 };
 
 // The GGUF tokenizer model name alone does not identify normalization or
-// user-defined-piece behavior. Keep historical target/Vicuna semantics frozen.
+// user-defined-piece behavior. Gemma profiles retain their distinct contracts.
 enum class TokenizerProfile { gemma2, llama_legacy, gemma3 };
 
 struct TokenizerToken {
@@ -168,14 +168,6 @@ private:
         TokenizerProfile profile = TokenizerProfile::gemma2
     );
 
-    void append_exact_token_ids(std::vector<std::uint32_t>& token_ids, std::string_view text) const;
-    void append_piece_token_ids(
-        std::vector<std::uint32_t>& token_ids,
-        std::string_view text,
-        bool encode_special_tokens
-    ) const;
-    void append_token_id_for_text(std::vector<std::uint32_t>& token_ids, std::string_view token_text) const;
-
     [[nodiscard]] bool token_id_is_control(std::uint32_t token_id) const noexcept;
     [[nodiscard]] bool token_id_can_encode_text(std::uint32_t token_id) const noexcept;
     [[nodiscard]] bool token_id_can_encode_special(std::uint32_t token_id) const noexcept;
@@ -200,7 +192,6 @@ private:
     };
     std::vector<AddedTokenNode> added_token_trie_;
     runtime::Sha256Digest identity_;
-    std::vector<std::uint32_t> encode_candidate_token_ids_;
     std::vector<std::uint32_t> special_encode_candidate_token_ids_;
     std::unordered_map<std::string, std::uint32_t, TokenTextHash, std::equal_to<>> token_text_to_id_;
     std::array<std::optional<std::uint32_t>, 256> byte_token_ids_;

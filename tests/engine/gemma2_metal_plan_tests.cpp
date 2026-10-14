@@ -17,6 +17,7 @@
 #include "local_gguf_engine/tensor/backend_buffer.hpp"
 #include "local_gguf_engine/tensor/f16.hpp"
 #include "local_gguf_engine/tensor/kquant_packing.hpp"
+#include "local_gguf_engine/tensor/quantization.hpp"
 #include "local_gguf_engine/tensor/ops/attention.hpp"
 #include "local_gguf_engine/tensor/ops/elementwise.hpp"
 #include "local_gguf_engine/tensor/ops/embedding.hpp"
@@ -42,6 +43,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <span>
 #include <string>
@@ -1354,8 +1356,6 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
         + backend_buffer_byte_count(prefill.value)
         + backend_buffer_byte_count(prefill.current_chunk_key)
         + backend_buffer_byte_count(prefill.current_chunk_value)
-        + backend_buffer_byte_count(prefill.attention_scores)
-        + backend_buffer_byte_count(prefill.attention_probabilities)
         + backend_buffer_byte_count(prefill.attention_output)
         + backend_buffer_byte_count(prefill.projected_attention_output)
         + backend_buffer_byte_count(prefill.post_attention_residual)
@@ -1415,7 +1415,6 @@ std::size_t expected_scratch_byte_count(const Gemma2MetalModelPlan& plan) {
             + backend_buffer_byte_count(layer.backup_value);
     }
     return logical_bytes + verifier_kv_bytes
-        - backend_buffer_byte_count(prefill.attention_probabilities)
         - backend_buffer_byte_count(prefill.projected_attention_output)
         - backend_buffer_byte_count(prefill.normalized_feed_forward_input)
         - backend_buffer_byte_count(prefill.projected_feed_forward_output)
@@ -1453,8 +1452,6 @@ void test_creates_gemma2_metal_plan_from_borrowed_weight_views_when_available() 
     const auto same_storage = [](const auto& left, const auto& right) {
         return &backend_buffer_storage(left) == &backend_buffer_storage(right);
     };
-    expect(same_storage(prefill.attention_scores, prefill.attention_probabilities),
-        "prefill scores and probabilities must share storage");
     expect(same_storage(prefill.normalized_hidden, prefill.projected_attention_output)
             && same_storage(prefill.normalized_hidden, prefill.normalized_feed_forward_input)
             && same_storage(prefill.normalized_hidden, prefill.projected_feed_forward_output),
@@ -2007,6 +2004,339 @@ void test_target_verifier_q8_head_is_stage4_exact_for_simultaneous_rows_when_ava
                 target_storage.bytes().data() + static_cast<std::size_t>(row) * row_bytes
             ),
             "simultaneous target-head row changed Stage-4 Q8 arithmetic");
+    }
+}
+
+// The oracle uses materialized, double-precision softmax rather than the GPU's
+// online state or matrix fragments. Cache narrowing is applied before either
+// evaluator, so the comparison isolates attention arithmetic and logical masks.
+void expect_gemma2_prefill_attention_cpu_parity(
+    std::uint32_t rows, std::uint32_t position_start,
+    std::uint32_t query_heads, std::uint32_t kv_heads,
+    std::uint32_t key_dimension, std::uint32_t value_dimension,
+    std::uint32_t cache_rows, std::uint32_t attention_tokens,
+    bool staged, bool large_scores = false, bool wide_values = false,
+    bool precision_sensitive = false
+) {
+    constexpr auto stage_rows = gemma2_metal_prefill_chunk_size;
+    constexpr auto poison = std::numeric_limits<float>::quiet_NaN();
+    constexpr auto guard = -12345.5F;
+    constexpr auto softcap = 50.0F;
+    const auto scale = 1.0F / std::sqrt(static_cast<float>(key_dimension));
+    const auto token_count = position_start + rows;
+    const auto key_width = kv_heads * key_dimension;
+    const auto value_width = kv_heads * value_dimension;
+    const auto query_width = query_heads * key_dimension;
+    const auto output_width = query_heads * value_dimension;
+    const auto label = std::string("prefill attention rows=") + std::to_string(rows)
+        + " prefix=" + std::to_string(position_start)
+        + " window=" + std::to_string(attention_tokens)
+        + (staged ? " staged" : " resident");
+
+    std::vector<float> logical_key(static_cast<std::size_t>(token_count) * key_width);
+    std::vector<float> logical_value(static_cast<std::size_t>(token_count) * value_width);
+    for (std::uint32_t position = 0U; position < token_count; ++position) {
+        for (std::uint32_t head = 0U; head < kv_heads; ++head) {
+            for (std::uint32_t column = 0U; column < key_dimension; ++column) {
+                const auto pattern = static_cast<int>(
+                    (position * 97U + head * 19U + column * 37U) % 251U) - 125;
+                const auto value = precision_sensitive ? (position == 0U ? 1.0F : -1.0F)
+                    : static_cast<float>(pattern) * 0.015625F;
+                logical_key[static_cast<std::size_t>(position) * key_width
+                    + head * key_dimension + column] = f16_bits_to_f32(f32_to_f16_bits(value));
+            }
+            for (std::uint32_t column = 0U; column < value_dimension; ++column) {
+                const auto pattern = static_cast<int>(
+                    (position * 41U + head * 29U + column * 11U) % 127U) - 63;
+                const auto magnitude = head % 3U == 0U ? 64.0F
+                    : head % 3U == 1U ? 1.0F : 0.0009765625F;
+                const auto sign = (position + column) % 2U == 0U ? 1.0F : -1.0F;
+                const auto value = precision_sensitive ? (position == 0U ? 1.0F : -1.0F)
+                    : wide_values ? magnitude * (sign + static_cast<float>(pattern) * 0.00390625F)
+                    : static_cast<float>(pattern) * 0.015625F;
+                logical_value[static_cast<std::size_t>(position) * value_width
+                    + head * value_dimension + column] = f16_bits_to_f32(f32_to_f16_bits(value));
+            }
+        }
+    }
+    std::vector<float> query_values(static_cast<std::size_t>(rows) * query_width);
+    for (std::uint32_t row = 0U; row < rows; ++row) {
+        for (std::uint32_t head = 0U; head < query_heads; ++head) {
+            for (std::uint32_t column = 0U; column < key_dimension; ++column) {
+                const auto pattern = static_cast<int>(
+                    (row * 43U + head * 23U + column * 17U) % 257U) - 128;
+                query_values[static_cast<std::size_t>(row) * query_width
+                    + head * key_dimension + column] = precision_sensitive
+                    ? (column < 128U ? 1.0002F : -1.0F)
+                    : static_cast<float>(pattern) * (large_scores ? 1.000173F : 0.0078173F)
+                        + static_cast<float>(head % 3U) * 0.000173F;
+            }
+        }
+    }
+
+    std::vector<float> resident_keys(static_cast<std::size_t>(cache_rows) * key_width, poison);
+    std::vector<float> resident_values(static_cast<std::size_t>(cache_rows) * value_width, poison);
+    std::vector<float> stage_keys(static_cast<std::size_t>(stage_rows) * key_width, poison);
+    std::vector<float> stage_values(static_cast<std::size_t>(stage_rows) * value_width, poison);
+    for (std::uint32_t position = 0U; position < token_count; ++position) {
+        auto& key_destination = staged && position >= position_start ? stage_keys : resident_keys;
+        auto& value_destination = staged && position >= position_start ? stage_values : resident_values;
+        const auto physical_row = position & ((staged && position >= position_start
+            ? stage_rows : cache_rows) - 1U);
+        std::copy_n(logical_key.data() + static_cast<std::size_t>(position) * key_width,
+            key_width, key_destination.data() + static_cast<std::size_t>(physical_row) * key_width);
+        std::copy_n(logical_value.data() + static_cast<std::size_t>(position) * value_width,
+            value_width, value_destination.data() + static_cast<std::size_t>(physical_row) * value_width);
+    }
+    const auto upload_cache = [](std::span<const float> values,
+        std::uint32_t capacity, std::uint32_t heads, std::uint32_t dimension) {
+        const auto source = tensor_f16_matrix(capacity, heads * dimension, values);
+        return copy_tensor_to_backend(TensorStorage::from_bytes(
+            TensorDescriptor::from(Shape::from({capacity, heads, dimension}), DType::f16),
+            source.bytes()), BackendKind::metal);
+    };
+    const auto query = copy_tensor_to_backend(
+        tensor_f32_matrix(rows, query_width, query_values), BackendKind::metal);
+    const auto key = upload_cache(resident_keys, cache_rows, kv_heads, key_dimension);
+    const auto value = upload_cache(resident_values, cache_rows, kv_heads, value_dimension);
+    const auto current_key = upload_cache(stage_keys, stage_rows, kv_heads, key_dimension);
+    const auto current_value = upload_cache(stage_values, stage_rows, kv_heads, value_dimension);
+    const auto output = copy_tensor_to_backend(tensor_f32_matrix(rows + 1U, output_width,
+        std::vector<float>(static_cast<std::size_t>(rows + 1U) * output_width, guard)), BackendKind::metal);
+
+    MetalCommandContext command("Gemma2 fused prefill independent parity");
+    command.encode_f16_prefill_attention(query, key, value, current_key, current_value,
+        output, position_start, query_heads, kv_heads, key_dimension, value_dimension,
+        attention_tokens, scale, softcap, cache_rows - 1U, rows, staged);
+    const auto stats = command.commit_and_wait();
+    expect(stats.compute_dispatch_count == 1U && stats.transient_buffer_allocation_count == 0U,
+        label + " must use one resident dispatch");
+    const auto actual = copy_tensor_from_backend(output);
+    for (std::uint32_t row = 0U; row < rows; ++row) {
+        const auto position = position_start + row;
+        const auto first_position = position + 1U > attention_tokens
+            ? position + 1U - attention_tokens : 0U;
+        const auto count = position + 1U - first_position;
+        for (std::uint32_t head = 0U; head < query_heads; ++head) {
+            const auto kv_head = head / (query_heads / kv_heads);
+            std::vector<double> probabilities(count);
+            auto maximum = -std::numeric_limits<double>::infinity();
+            for (std::uint32_t token = 0U; token < count; ++token) {
+                const auto key_position = first_position + token;
+                auto dot = 0.0;
+                for (std::uint32_t column = 0U; column < key_dimension; ++column) {
+                    dot += static_cast<double>(query_values[static_cast<std::size_t>(row)
+                            * query_width + head * key_dimension + column])
+                        * static_cast<double>(logical_key[static_cast<std::size_t>(key_position)
+                            * key_width + kv_head * key_dimension + column]);
+                }
+                probabilities[token] = std::tanh(dot * static_cast<double>(scale) / softcap) * softcap;
+                maximum = std::max(maximum, probabilities[token]);
+            }
+            auto denominator = 0.0;
+            for (auto& probability : probabilities) {
+                probability = std::exp(probability - maximum);
+                denominator += probability;
+            }
+            for (std::uint32_t column = 0U; column < value_dimension; ++column) {
+                auto expected = 0.0;
+                for (std::uint32_t token = 0U; token < count; ++token) {
+                    expected += probabilities[token] / denominator
+                        * static_cast<double>(logical_value[
+                            static_cast<std::size_t>(first_position + token) * value_width
+                            + kv_head * value_dimension + column]);
+                }
+                expect_close(read_f32(actual, std::array<std::uint64_t, 2> {
+                        row, head * value_dimension + column}), static_cast<float>(expected),
+                    4.0e-4F, label);
+            }
+        }
+    }
+    for (std::uint32_t column = 0U; column < output_width; ++column) {
+        expect_close(read_f32(actual, std::array<std::uint64_t, 2> {rows, column}),
+            guard, 0.0F, label + " output guard row");
+    }
+}
+
+void test_gemma2_fused_prefill_attention_masks_tails_and_staged_windows_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    constexpr std::array<std::uint32_t, 8U> row_counts {1U, 7U, 8U, 9U, 31U, 32U, 127U, 128U};
+    for (const auto rows : row_counts) {
+        expect_gemma2_prefill_attention_cpu_parity(rows, 0U, 4U, 2U, 256U, 256U,
+            256U, rows, false);
+        expect_gemma2_prefill_attention_cpu_parity(rows, 141U, 4U, 2U, 256U, 256U,
+            32U, 32U, true);
+    }
+    // A window narrower than K32/Q8 creates real query rows with entirely
+    // masked leading tiles before their first live key block.
+    expect_gemma2_prefill_attention_cpu_parity(127U, 0U, 4U, 2U, 256U, 256U,
+        8U, 8U, true);
+    expect_gemma2_prefill_attention_cpu_parity(9U, 11U, 4U, 2U, 256U, 256U,
+        64U, 20U, false);
+    expect_gemma2_prefill_attention_cpu_parity(31U, 37U, 4U, 2U, 66U, 34U,
+        16U, 8U, true);
+    // F16-rounded Q would cancel both scores to zero and return zero at row 1;
+    // F32 Q gives approximately 0.0016, above the fixed numerical bound.
+    expect_gemma2_prefill_attention_cpu_parity(2U, 0U, 4U, 2U, 256U, 256U,
+        4U, 2U, false, false, false, true);
+}
+
+void test_gemma2_fused_prefill_attention_preserves_target_geometry_and_softcap_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    expect_gemma2_prefill_attention_cpu_parity(2U, 4094U, 16U, 8U, 256U, 256U,
+        8192U, 4096U, false);
+    expect_gemma2_prefill_attention_cpu_parity(9U, 4093U, 16U, 8U, 256U, 256U,
+        4096U, 4096U, true);
+    expect_gemma2_prefill_attention_cpu_parity(9U, 141U, 16U, 8U, 256U, 256U,
+        32U, 32U, true, true);
+    // Nonuniform probabilities weight alternating values whose head RMS spans
+    // sixteen powers of two; this exposes long P×V cancellation and rounding.
+    expect_gemma2_prefill_attention_cpu_parity(2U, 8190U, 16U, 8U, 256U, 256U,
+        8192U, 8192U, false, false, true);
+}
+
+void test_gemma2_fused_prefill_attention_rejects_invalid_storage_and_ranges_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    const auto query = allocate_backend_buffer(TensorDescriptor::from(
+        Shape::from({8U, 4U * 256U}), DType::f32), BackendKind::metal);
+    const auto key = allocate_backend_buffer(TensorDescriptor::from(
+        Shape::from({64U, 2U, 256U}), DType::f16), BackendKind::metal);
+    const auto value = allocate_backend_buffer(key.descriptor(), BackendKind::metal);
+    const auto stage_key = allocate_backend_buffer(TensorDescriptor::from(
+        Shape::from({128U, 2U, 256U}), DType::f16), BackendKind::metal);
+    const auto stage_value = allocate_backend_buffer(stage_key.descriptor(), BackendKind::metal);
+    const auto output = allocate_backend_buffer(query.descriptor(), BackendKind::metal);
+    const auto small_output = allocate_backend_buffer(TensorDescriptor::from(
+        Shape::from({1U}), DType::f32), BackendKind::metal);
+    const auto f32_cache = allocate_backend_buffer(TensorDescriptor::from(
+        Shape::from({64U, 2U, 256U}), DType::f32), BackendKind::metal);
+    const auto invalid_flat_stage = allocate_backend_buffer(TensorDescriptor::from(
+        Shape::from({128U, 2U * 256U + 1U}), DType::f16), BackendKind::metal);
+    for (auto invalid = 0U; invalid < 16U; ++invalid) {
+        auto rows = 8U;
+        auto heads = 4U;
+        auto tokens = 19U;
+        auto mask = 63U;
+        auto position = 11U;
+        auto scale = 0.0625F;
+        auto softcap = 50.0F;
+        auto staged = true;
+        auto origin = 0U;
+        const auto* selected_key = &key;
+        const auto* selected_stage_key = &stage_key;
+        const auto* selected_stage_value = &stage_value;
+        const auto* selected_output = &output;
+        switch (invalid) {
+            case 0U: rows = 0U; break;
+            case 1U: rows = 9U; break;
+            case 2U: tokens = 0U; break;
+            case 3U: mask = 64U; break;
+            case 4U: selected_key = &f32_cache; break;
+            case 5U: selected_output = &small_output; break;
+            case 6U: selected_output = &query; break;
+            case 7U: heads = 3U; break;
+            case 8U: position = 63U; tokens = 64U; staged = false; break;
+            case 9U: selected_stage_key = &key; selected_stage_value = &value; break;
+            case 10U: scale = 0.0F; break;
+            case 11U: softcap = std::numeric_limits<float>::infinity(); break;
+            case 12U: origin = position + 1U; break;
+            case 13U: origin = position; staged = false; break;
+            case 14U: selected_stage_key = &invalid_flat_stage; break;
+            case 15U: softcap = -1.0F; break;
+        }
+        bool rejected = false;
+        try {
+            MetalCommandContext command("Gemma2 fused prefill invalid contract");
+            command.encode_f16_prefill_attention(query, *selected_key, value,
+                *selected_stage_key, *selected_stage_value, *selected_output,
+                position, heads, 2U, 256U, 256U, tokens, scale, softcap, mask, rows, staged, origin);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        expect(rejected, "fused prefill accepted invalid storage/range case " + std::to_string(invalid));
+    }
+}
+
+void test_gemma2_bulk_prefill_preserves_cache_across_chunk_partitions_when_available() {
+    if (!tensor_backend_is_available(BackendKind::metal)) return;
+    auto payload_store = nonzero_tiny_gemma2_payload_store(2U);
+    // General quantization fixtures have Q4 weights up to 75 and Q6 weights
+    // up to 22.5. Those create unrealistic activations, including gate products
+    // beyond the existing prompt GEMM's half-operand range. Scale each matrix
+    // uniformly into a representable range, preserving all codes and seeds;
+    // the independent attention tests above retain their extreme inputs.
+    for (std::size_t tensor = 0U; tensor < payload_store.payloads.size(); ++tensor) {
+        const auto type = payload_store.payloads[tensor].tensor.type_id;
+        const auto q4 = type == gguf_type_id_for_dtype(DType::q4_k);
+        const auto q6 = type == gguf_type_id_for_dtype(DType::q6_k);
+        if (!q4 && !q6) continue;
+        auto& bytes = payload_store.bytes[tensor];
+        const auto block_bytes = q4 ? local_gguf_engine::tensor::Q4_KBlockView::byte_count
+            : local_gguf_engine::tensor::Q6_KBlockView::byte_count;
+        for (std::size_t offset = 0U; offset < bytes.size(); offset += block_bytes) {
+            for (auto scale = 0U; scale < (q4 ? 2U : 1U); ++scale) {
+                const auto index = offset + (q4 ? scale * 2U : block_bytes - 2U);
+                const auto bits = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(bytes[index])
+                    | (static_cast<std::uint16_t>(bytes[index + 1U]) << 8U));
+                const auto scaled = f32_to_f16_bits(f16_bits_to_f32(bits) / 64.0F);
+                bytes[index] = static_cast<std::uint8_t>(scaled & 0xffU);
+                bytes[index + 1U] = static_cast<std::uint8_t>(scaled >> 8U);
+            }
+        }
+    }
+    const auto view = tiny_model_view(
+        tiny_gemma2_metadata(2U, 2U, 1U, 256U, 512U, 8U), std::move(payload_store.payloads));
+    const auto model = load_engine_model_from_gguf(view);
+    constexpr auto cache_pattern = std::uint32_t {0x35553555U};
+    std::array<std::uint32_t, 257U> tokens {};
+    for (std::size_t index = 0U; index < tokens.size(); ++index)
+        tokens[index] = static_cast<std::uint32_t>((index * 3U + 1U) % 4U);
+    constexpr std::array<std::uint32_t, 4U> boundaries {127U, 128U, 129U, 257U};
+    for (const auto count : boundaries) {
+        auto candidate = create_gemma2_metal_model_plan(model);
+        auto reference = create_gemma2_metal_model_plan(model);
+        for (const auto* plan : {&candidate, &reference}) {
+            for (const auto& cache : plan->kv_cache()) {
+                fill_shared_metal_buffer_u32(cache.key, cache_pattern);
+                fill_shared_metal_buffer_u32(cache.value, cache_pattern);
+            }
+        }
+        const auto embedding_scale = std::sqrt(static_cast<float>(candidate.config().embedding_length));
+        const auto candidate_result = run_gemma2_metal_resident_prefill(candidate,
+            std::span<const std::uint32_t>(tokens).first(count), 0U, embedding_scale);
+        // Bulk projections use half operands; scalar projections use F32.
+        // Preserve that arithmetic contract while changing chunk partitions:
+        // 32-row calls exercise nonzero prefixes and repeated sliding-cache
+        // wraps, with the same final one-row route at counts 129 and 257.
+        // Independent CPU attention oracles above verify masks and arithmetic.
+        constexpr auto reference_rows = 32U;
+        auto reference_start = 0U;
+        while (count - reference_start > reference_rows) {
+            (void)run_gemma2_metal_resident_prefill(reference,
+                std::span<const std::uint32_t>(tokens).subspan(reference_start, reference_rows),
+                reference_start, embedding_scale);
+            reference_start += reference_rows;
+        }
+        const auto reference_result = run_gemma2_metal_resident_prefill(reference,
+            std::span<const std::uint32_t>(tokens).subspan(reference_start, count - reference_start),
+            reference_start, embedding_scale);
+        const auto label = std::string("bulk prefill boundary ") + std::to_string(count);
+        expect(candidate_result.execution.chunk_count
+                == (count + gemma2_metal_prefill_chunk_size - 1U) / gemma2_metal_prefill_chunk_size,
+            label + " chunk accounting mismatch");
+        expect_f32_matrix_close(copy_tensor_from_backend(candidate_result.logits),
+            copy_tensor_from_backend(reference_result.logits), 3.0e-2F, label + " logits");
+        for (std::size_t layer = 0U; layer < candidate.kv_cache().size(); ++layer) {
+            expect_f16_storage_close_absolute_relative(
+                copy_tensor_from_backend(candidate.kv_cache()[layer].key),
+                copy_tensor_from_backend(reference.kv_cache()[layer].key),
+                3.0e-2F, 2.0e-3F, label + " key cache layer " + std::to_string(layer));
+            expect_f16_storage_close_absolute_relative(
+                copy_tensor_from_backend(candidate.kv_cache()[layer].value),
+                copy_tensor_from_backend(reference.kv_cache()[layer].value),
+                3.0e-2F, 2.0e-3F, label + " value cache layer " + std::to_string(layer));
+        }
     }
 }
 
@@ -5232,6 +5562,22 @@ const TestCase kGemma2MetalPlanTests[] = {
     {
         "target verifier Q8 head is Stage 4 exact for simultaneous rows when available",
         test_target_verifier_q8_head_is_stage4_exact_for_simultaneous_rows_when_available,
+    },
+    {
+        "Gemma2 fused prefill attention masks tails and staged windows when available",
+        test_gemma2_fused_prefill_attention_masks_tails_and_staged_windows_when_available,
+    },
+    {
+        "Gemma2 fused prefill attention preserves target geometry and softcap when available",
+        test_gemma2_fused_prefill_attention_preserves_target_geometry_and_softcap_when_available,
+    },
+    {
+        "Gemma2 fused prefill attention rejects invalid storage and ranges when available",
+        test_gemma2_fused_prefill_attention_rejects_invalid_storage_and_ranges_when_available,
+    },
+    {
+        "Gemma2 bulk prefill preserves cache across chunk partitions when available",
+        test_gemma2_bulk_prefill_preserves_cache_across_chunk_partitions_when_available,
     },
     {
         "Gemma2 fused decode attention matches exact-shape CPU reference when available",

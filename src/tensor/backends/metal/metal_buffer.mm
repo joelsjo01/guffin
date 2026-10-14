@@ -1,10 +1,15 @@
 #include "metal_buffer.hpp"
 
 #include "metal_context.hpp"
+#include "../metal_backend.hpp"
 
 #include "local_gguf_engine/runtime/backend_error.hpp"
 
 #include <cstring>
+#include <bit>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <unistd.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -190,11 +195,13 @@ MetalBackendBufferStorage::MetalBackendBufferStorage(
 MetalBackendBufferStorage::MetalBackendBufferStorage(
     TensorDescriptor descriptor,
     id<MTLBuffer> buffer,
-    std::size_t base_byte_offset
+    std::size_t base_byte_offset,
+    bool read_only
 )
     : descriptor_(std::move(descriptor)),
       buffer_(buffer),
-      base_byte_offset_(base_byte_offset) {
+      base_byte_offset_(base_byte_offset),
+      read_only_(read_only) {
     validate_tensor_descriptor(descriptor_);
     if (buffer_ == nil) throw std::invalid_argument("Metal backend buffer must not be nil");
     if (base_byte_offset_ % alignof(std::uint32_t) != 0U) {
@@ -227,6 +234,8 @@ std::size_t MetalBackendBufferStorage::base_byte_offset() const noexcept {
     return base_byte_offset_;
 }
 
+bool MetalBackendBufferStorage::read_only() const noexcept { return read_only_; }
+
 std::size_t MetalBackendBufferStorage::parent_byte_count() const noexcept {
     return buffer_.length;
 }
@@ -258,10 +267,11 @@ BackendBuffer make_metal_backend_buffer(TensorDescriptor descriptor, id<MTLBuffe
 BackendBuffer make_metal_backend_buffer_view(
     TensorDescriptor descriptor,
     id<MTLBuffer> parent_buffer,
-    std::size_t base_byte_offset
+    std::size_t base_byte_offset,
+    bool read_only
 ) {
     return detail::make_backend_buffer(std::make_shared<MetalBackendBufferStorage>(
-        std::move(descriptor), parent_buffer, base_byte_offset
+        std::move(descriptor), parent_buffer, base_byte_offset, read_only
     ));
 }
 
@@ -283,7 +293,7 @@ NSUInteger metal_buffer_binding_offset(
     return static_cast<NSUInteger>(combined);
 }
 
-void* metal_buffer_contents(
+const void* metal_buffer_contents(
     const MetalBackendBufferStorage& storage,
     std::uint64_t operation_byte_offset
 ) {
@@ -295,7 +305,129 @@ void* metal_buffer_contents(
     if (contents == nullptr) {
         throw std::logic_error("Metal private buffer contents are not CPU-accessible");
     }
-    return static_cast<std::byte*>(contents) + metal_buffer_binding_offset(storage, operation_byte_offset);
+    return static_cast<const std::byte*>(contents) + metal_buffer_binding_offset(storage, operation_byte_offset);
+}
+
+void require_writable_metal_buffer(const MetalBackendBufferStorage& storage) {
+    if (storage.read_only()) throw std::invalid_argument("immutable Metal weights cannot be written");
+}
+
+void* mutable_metal_buffer_contents(const MetalBackendBufferStorage& storage,
+    std::uint64_t operation_byte_offset) {
+    require_writable_metal_buffer(storage);
+    return const_cast<void*>(metal_buffer_contents(storage, operation_byte_offset));
+}
+
+namespace {
+
+struct MappedTensorWindow {
+    const std::uint8_t* begin;
+    std::size_t byte_count;
+    std::size_t tensor_offset;
+};
+
+MappedTensorWindow mapped_tensor_window(const TensorView& view,
+    const runtime::OwnedReadOnlyBytes& backing) {
+    const auto source = backing.bytes();
+    if (!backing.owner() || source.empty() || view.bytes().empty()
+        || view.descriptor().shape.rank() != 2U
+        || view.descriptor().packing != TensorPacking::canonical) {
+        throw std::invalid_argument("immutable Metal mapping requires an owned canonical matrix");
+    }
+    const auto page_result = ::sysconf(_SC_PAGESIZE);
+    if (page_result <= 0) throw std::runtime_error("could not determine immutable Metal mapping page size");
+    const auto page = static_cast<std::size_t>(page_result);
+    const auto address = reinterpret_cast<std::uintptr_t>(source.data());
+    const auto tensor_address = reinterpret_cast<std::uintptr_t>(view.bytes().data());
+    if (!std::has_single_bit(page) || address % page != 0U
+        || backing.accessible_byte_count() % page != 0U
+        || backing.accessible_byte_count() > std::numeric_limits<std::uintptr_t>::max() - address) {
+        throw std::invalid_argument("immutable Metal backing must own an aligned page extent");
+    }
+    if (tensor_address < address || tensor_address - address > source.size()
+        || view.bytes().size() > source.size() - (tensor_address - address)) {
+        throw std::invalid_argument("immutable Metal tensor is outside its logical source allocation");
+    }
+    const auto offset = static_cast<std::size_t>(tensor_address - address);
+    const auto end = offset + view.bytes().size();
+    if (end > std::numeric_limits<std::size_t>::max() - (page - 1U))
+        throw std::overflow_error("immutable Metal tensor page extent overflows");
+    const auto first_page = offset / page * page;
+    const auto end_page = (end + page - 1U) / page * page;
+    if (end_page > backing.accessible_byte_count())
+        throw std::out_of_range("immutable Metal tensor page extent exceeds its owned allocation");
+    return {source.data() + first_page, end_page - first_page, offset - first_page};
+}
+
+bool is_readable_vm_region(const MappedTensorWindow& window) {
+    mach_vm_address_t address = reinterpret_cast<mach_vm_address_t>(window.begin);
+    mach_vm_size_t byte_count = 0;
+    vm_region_basic_info_data_64_t info {};
+    mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    const auto result = mach_vm_region(mach_task_self(), &address, &byte_count,
+        VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &info_count, &object);
+    if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+    if (result != KERN_SUCCESS || (info.protection & VM_PROT_READ) == 0) return false;
+    const auto target = reinterpret_cast<mach_vm_address_t>(window.begin);
+    return address <= target && target - address <= byte_count
+        && window.byte_count <= byte_count - (target - address);
+}
+
+}  // namespace
+
+std::size_t mapped_immutable_tensor_byte_count(const TensorView& view,
+    const runtime::OwnedReadOnlyBytes& backing) {
+    return mapped_tensor_window(view, backing).byte_count;
+}
+
+std::size_t metal_backend_buffer_allocation_byte_count(const BackendBuffer& buffer) {
+    return require_metal_backend_buffer(backend_buffer_storage(buffer)).parent_byte_count();
+}
+
+BackendBuffer map_immutable_tensor_view_to_metal_backend(const TensorView& view,
+    const runtime::OwnedReadOnlyBytes& backing) {
+    const auto window = mapped_tensor_window(view, backing);
+    if (window.tensor_offset % alignof(std::uint32_t) != 0U)
+        throw std::invalid_argument("immutable Metal tensor offset must be four-byte aligned");
+    if (!is_readable_vm_region(window))
+        throw std::invalid_argument("immutable Metal tensor must occupy one readable VM region");
+    @autoreleasepool {
+        id<MTLDevice> device = metal_device_or_throw();
+        if (!device.hasUnifiedMemory)
+            throw metal_error(runtime::BackendErrorCode::unsupported_backend,
+                "immutable Metal mappings require unified memory");
+        if (window.byte_count > device.maxBufferLength)
+            throw std::invalid_argument("immutable Metal tensor page extent exceeds maxBufferLength");
+        // Retain the mmap in Metal's deallocator, so submitted command buffers
+        // and child views remain valid after every C++ model facade is gone.
+        const auto owner = backing.owner();
+        id<MTLBuffer> buffer = [device newBufferWithBytesNoCopy:const_cast<std::uint8_t*>(window.begin)
+            length:static_cast<NSUInteger>(window.byte_count) options:MTLResourceStorageModeShared
+            deallocator:^(void*, NSUInteger) { static_cast<void>(owner); }];
+        if (buffer == nil)
+            throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                "immutable Metal tensor registration failed");
+        return make_metal_backend_buffer_view(view.descriptor(), buffer, window.tensor_offset, true);
+    }
+}
+
+BackendBuffer initialize_metal_backend_buffer(const TensorDescriptor& descriptor,
+    const std::function<void(std::span<std::uint8_t>)>& initializer) {
+    validate_tensor_descriptor(descriptor);
+    if (!initializer) throw std::invalid_argument("Metal buffer initializer must not be empty");
+    @autoreleasepool {
+        id<MTLDevice> device = metal_device_or_throw();
+        if (descriptor.byte_count > device.maxBufferLength)
+            throw std::invalid_argument("Metal tensor initialization exceeds maxBufferLength");
+        id<MTLBuffer> buffer = [device newBufferWithLength:static_cast<NSUInteger>(descriptor.byte_count)
+            options:MTLResourceStorageModeShared];
+        if (buffer == nil)
+            throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                "Metal initialized buffer allocation failed");
+        initializer({static_cast<std::uint8_t*>(buffer.contents), static_cast<std::size_t>(descriptor.byte_count)});
+        return make_metal_backend_buffer(descriptor, buffer);
+    }
 }
 
 BackendBuffer copy_tensor_to_metal_backend(const TensorStorage& storage) {

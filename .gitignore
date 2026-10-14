@@ -39,3 +39,11 @@ training/outputs/*
 traces/learned_speculation/*
 
 *.log
+
+# Approved final release evidence, including its raw CLI logs.
+!benchmarks/results/gemma2-release-v2/
+!benchmarks/results/gemma2-release-v2/**
+!benchmarks/results/gemma3-normal-release-v2/
+!benchmarks/results/gemma3-normal-release-v2/**
+!benchmarks/results/gemma3-speculative-release/
+!benchmarks/results/gemma3-speculative-release/**

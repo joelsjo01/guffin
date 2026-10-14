@@ -1,9 +1,10 @@
-> **Rerun notice:** Rerun llama.cpp only if the model, llama.cpp commit, macOS, hardware, benchmark prompts, sampling settings, or timing definitions change.
+# Pinned llama.cpp reference baseline
 
-# Pinned llama.cpp Reference Baseline
-
-This is the stored external reference for the standard local benchmark. It is
-not run during ordinary local optimization work.
+This is the historical August planning reference for the two-turn development
+benchmark. Its identity, protocol and recorded result are preserved below; old
+local output bundles are no longer retained. The October
+[final release campaigns](PERFORMANCE.md#final-release-results) use a different
+llama.cpp executable and protocol.
 
 ## Reference identity
 
@@ -44,5 +45,11 @@ make reference-benchmark
 scripts/llama_reference_benchmark.py --model models/gemma-2-9b-Q4.gguf
 ```
 
-This stored run is a stable planning reference. Re-run it alongside local when
-making a claim smaller than ordinary system or thermal variation.
+The driver verifies the pinned commit and its Homebrew installation receipt;
+it rejects the newer llama-cli used by the release campaigns. Use `--reference`
+with the pinned installation if it is available.
+
+The stored result is invalid as a direct comparator if the model, llama.cpp
+commit, macOS, hardware, prompts, sampling settings or timing definition changes.
+A replacement requires its own matched comparison and record. Small claimed
+gains also require a contemporaneous comparison rather than this August result.

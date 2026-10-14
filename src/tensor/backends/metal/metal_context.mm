@@ -14,6 +14,7 @@ namespace {
 
 #if defined(LOCAL_GGUF_ENGINE_TESTING)
 std::atomic_bool metal_device_unavailable_for_testing {false};
+std::atomic_bool default_metal_pipelines_forbidden_for_testing {false};
 #endif
 
 }  // namespace
@@ -57,6 +58,10 @@ id<MTLDevice> system_metal_device() noexcept {
 void set_metal_device_unavailable_for_testing(bool unavailable) noexcept {
     metal_device_unavailable_for_testing.store(unavailable, std::memory_order_release);
 }
+
+void set_default_metal_pipelines_forbidden_for_testing(bool forbidden) noexcept {
+    default_metal_pipelines_forbidden_for_testing.store(forbidden, std::memory_order_release);
+}
 #endif
 
 id<MTLDevice> metal_device_or_throw() {
@@ -69,6 +74,19 @@ id<MTLDevice> metal_device_or_throw() {
     }
 
     return device;
+}
+
+id<MTLCommandQueue> shared_metal_command_queue() {
+    const auto device = metal_device_or_throw();
+    static id<MTLCommandQueue> queue = [device] {
+        auto result = [device newCommandQueue];
+        if (result == nil) {
+            throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                "Metal shared command queue creation failed");
+        }
+        return result;
+    }();
+    return queue;
 }
 
 MatmulPipelineState::MatmulPipelineState(bool precise_math) {
@@ -635,22 +653,17 @@ MatmulPipelineState::MatmulPipelineState(bool precise_math) {
         );
     }
 
-    gemma2_prefill_attention_scores_pipeline = make_pipeline(
-        @"causal_grouped_attention_scores_f16_cache_kernel",
-        "Gemma 2 F16-cache prefill attention scores"
-    );
-    gemma2_prefill_attention_values_pipeline = make_pipeline(
-        @"causal_grouped_attention_values_f16_cache_kernel",
-        "Gemma 2 F16-cache prefill attention values"
-    );
-    gemma2_wrapped_prefill_attention_scores_pipeline = make_pipeline(
-        @"causal_grouped_attention_scores_f16_hybrid_kernel",
-        "Gemma 2 F16-cache wrapped prefill attention scores"
-    );
-    gemma2_wrapped_prefill_attention_values_pipeline = make_pipeline(
-        @"causal_grouped_attention_values_f16_hybrid_kernel",
-        "Gemma 2 F16-cache wrapped prefill attention values"
-    );
+    gemma2_prefill_attention_pipeline = make_pipeline(
+        @"gemma2_prefill_attention_f16_cache_kernel", "Gemma 2 fused F32 prefill attention");
+    gemma2_prefill_attention_generic_pipeline = make_pipeline(
+        @"gemma2_prefill_attention_f16_generic_kernel", "Gemma 2 fused generic prefill attention");
+    if (gemma2_prefill_attention_pipeline.threadExecutionWidth != 32U
+        || gemma2_prefill_attention_pipeline.maxTotalThreadsPerThreadgroup < 128U
+        || gemma2_prefill_attention_generic_pipeline.threadExecutionWidth != 32U
+        || gemma2_prefill_attention_generic_pipeline.maxTotalThreadsPerThreadgroup < 32U) {
+        throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+            "Metal Gemma 2 fused prefill attention requires 32-lane SIMD groups");
+    }
 
     id<MTLFunction> gemma2_decode_attention_function =
         [library newFunctionWithName:@"gemma2_decode_attention_f16_cache_kernel"];
@@ -819,7 +832,7 @@ MatmulPipelineState::MatmulPipelineState(bool precise_math) {
         );
     }
 
-    queue = [device newCommandQueue];
+    queue = precise_math ? [device newCommandQueue] : shared_metal_command_queue();
     if (queue == nil) {
         throw metal_error(
             runtime::BackendErrorCode::metal_execution_failed,
@@ -830,6 +843,9 @@ MatmulPipelineState::MatmulPipelineState(bool precise_math) {
 
 MatmulPipelineState& shared_matmul_pipeline_state() {
 #if defined(LOCAL_GGUF_ENGINE_TESTING)
+    if (default_metal_pipelines_forbidden_for_testing.load(std::memory_order_acquire)) {
+        throw std::logic_error("default Metal target pipelines are forbidden by this test");
+    }
     // A previously initialized process-lifetime state must not bypass the
     // injected unavailable-device boundary.
     if (metal_device_unavailable_for_testing.load(std::memory_order_acquire)) {

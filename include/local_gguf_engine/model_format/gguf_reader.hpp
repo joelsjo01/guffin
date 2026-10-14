@@ -3,6 +3,7 @@
 #include "local_gguf_engine/model_format/gguf_header.hpp"
 #include "local_gguf_engine/model_format/gguf_metadata.hpp"
 #include "local_gguf_engine/model_format/gguf_tensor.hpp"
+#include "local_gguf_engine/runtime/owned_read_only_bytes.hpp"
 
 #include <array>
 #include <cstddef>
@@ -62,15 +63,14 @@ public:
 
     [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept;
     [[nodiscard]] const GGUFModelView& view() const noexcept;
+    [[nodiscard]] const runtime::OwnedReadOnlyBytes& source_backing() const noexcept;
 
 private:
     friend GGUFFileBackedModel read_file_backed_gguf_model(const std::filesystem::path& path);
 
-    GGUFFileBackedModel(void* data, std::size_t byte_count, GGUFModelView model);
-    void reset() noexcept;
+    GGUFFileBackedModel(runtime::OwnedReadOnlyBytes backing, GGUFModelView model);
 
-    void* data_ = nullptr;
-    std::size_t byte_count_ = 0;
+    runtime::OwnedReadOnlyBytes backing_;
     GGUFModelView model_;
 };
 

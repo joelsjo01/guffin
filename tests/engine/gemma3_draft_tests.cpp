@@ -161,7 +161,15 @@ void cache_close(std::span<const float> actual,std::span<const float> expected,c
     }
 }
 void synthetic_forward(){
-    if(!have_metal())return;const auto& f=fixture();Gemma3DraftPlan plan(f.views,f.map,vocab,23);
+    if(!have_metal())return;
+    using tensor::backends::metal::set_default_metal_pipelines_forbidden_for_testing;
+    struct RestoreDefaultPipelines {
+        ~RestoreDefaultPipelines() { set_default_metal_pipelines_forbidden_for_testing(false); }
+    } restore;
+    // Construct and execute without target pipelines, even when earlier tests
+    // already initialized them. The drafter owns its complete pipeline set.
+    set_default_metal_pipelines_forbidden_for_testing(true);
+    const auto& f=fixture();Gemma3DraftPlan plan(f.views,f.map,vocab,23);
     constexpr std::array<std::uint32_t,4> tokens={2,9259,12074,108};Reference reference;
     (void)plan.append(std::span(tokens).first(3));for(auto token:std::span(tokens).first(3))reference.step(token);
     std::vector<float> actual(vocab),replayed(vocab);(void)plan.read_logits(actual);
@@ -562,7 +570,7 @@ void checkpoint_goldens(){
 } // namespace
 std::span<const TestCase> gemma3_draft_test_cases(){
     static const std::array<TestCase,8> cases={{
-        {"Gemma3 complete Q8 transformer matches independent CPU equations and exact replay",synthetic_forward},
+        {"Gemma3 standalone Q8 transformer needs no default target pipelines and matches independent equations",synthetic_forward},
         {"Gemma3 private K/V transactions preserve wrap, rejection, correction and pending-token replay",transaction_lifecycle},
         {"Gemma3 full262k probability law preserves ties, nucleus and native-history semantics",probability_law},
         {"Gemma3 compact top-k receipts match independent sampling and preserve cutoff tie fallback",compact_probability_law},

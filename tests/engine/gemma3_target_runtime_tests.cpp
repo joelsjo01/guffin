@@ -385,6 +385,133 @@ void test_complete_synthetic_reference_and_wrapped_batch(GemmaKVPrecision precis
     exact_cache(replay, batch, 13U);
 }
 
+void test_bulk_prefill_cache_across_chunk_partitions(GemmaKVPrecision precision) {
+    if (!have_metal()) return;
+    NumericalFixture fixture;
+    constexpr auto capacity = 512U;
+    std::array<std::uint32_t, 258U> tokens {};
+    for (std::size_t index = 0U; index < tokens.size(); ++index)
+        tokens[index] = static_cast<std::uint32_t>((index * 19U + index / 7U + 2U) % 32U);
+    for (const auto count : {127U, 128U, 129U, 257U}) {
+        auto batch = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, capacity, precision);
+        auto segmented = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, capacity, precision);
+        const auto poison = precision == GemmaKVPrecision::f16 ? 0x7e007e00U : 0x7fc00000U;
+        for (const auto* plan : {&batch, &segmented}) {
+            for (const auto& cache : plan->kv_cache()) {
+                tensor::backends::metal::fill_shared_metal_buffer_u32(cache.key, poison);
+                tensor::backends::metal::fill_shared_metal_buffer_u32(cache.value, poison);
+            }
+        }
+        const auto whole = run_gemma2_metal_resident_prefill(batch,
+            std::span<const std::uint32_t>(tokens).first(count), 0U, 16.0F);
+        Floats segmented_logits;
+        for (std::uint32_t first = 0U; first < count;) {
+            const auto rows = std::min(32U, count - first);
+            const auto result = run_gemma2_metal_resident_prefill(segmented,
+                std::span<const std::uint32_t>(tokens).subspan(first, rows), first, 16.0F);
+            if (first + rows == count) segmented_logits = read(result.logits);
+            first += rows;
+        }
+        close(read(whole.logits), segmented_logits, "bulk Gemma3 chunk partition logits");
+        expect(whole.execution.chunk_count == (count + gemma2_metal_prefill_chunk_size - 1U)
+                / gemma2_metal_prefill_chunk_size, "bulk Gemma3 chunk accounting differs");
+        const auto check_partition_cache = [&](std::uint32_t committed) {
+            const auto rounding = precision == GemmaKVPrecision::f16 ? std::ldexp(1.0F, -10) : 0.0F;
+            for (std::size_t layer = 0U; layer < batch.kv_cache().size(); ++layer) {
+                const auto& actual_cache = batch.kv_cache()[layer];
+                const auto& expected_cache = segmented.kv_cache()[layer];
+                const auto first = committed > actual_cache.row_capacity ? committed - actual_cache.row_capacity : 0U;
+                for (const bool is_value : {false, true}) {
+                    const auto& actual_buffer = is_value ? actual_cache.value : actual_cache.key;
+                    const auto& expected_buffer = is_value ? expected_cache.value : expected_cache.key;
+                    const auto actual = read(actual_buffer), expected = read(expected_buffer);
+                    for (std::uint32_t position = first; position < committed; ++position) {
+                        const auto offset = static_cast<std::size_t>(position & actual_cache.row_mask) * 256U;
+                        // Retain the independent synthetic transformer's
+                        // existing arithmetic budget and one F16 rounding ULP.
+                        close(std::span(actual).subspan(offset, 256U), std::span(expected).subspan(offset, 256U),
+                            "bulk Gemma3 committed cache partition", 3.0e-4F, 3.0e-4F + rounding);
+                    }
+                    if (committed < actual_cache.row_capacity) {
+                        const auto bytes_per_row = actual_buffer.descriptor().byte_count / actual_cache.row_capacity;
+                        const auto offset = static_cast<std::size_t>(committed) * bytes_per_row;
+                        const auto bytes = tensor::copy_backend_buffer_bytes(actual_buffer, offset,
+                            actual_buffer.descriptor().byte_count - offset);
+                        expect(bytes == tensor::copy_backend_buffer_bytes(expected_buffer, offset,
+                                expected_buffer.descriptor().byte_count - offset),
+                            "bulk Gemma3 changed an untouched cache slot");
+                        std::array<std::uint8_t, sizeof(poison)> pattern {};
+                        std::memcpy(pattern.data(), &poison, sizeof(poison));
+                        for (std::size_t index = 0U; index < bytes.size(); ++index)
+                            expect(bytes[index] == pattern[index % pattern.size()],
+                                "bulk Gemma3 admitted or overwrote future poisoned cache rows");
+                    }
+                }
+            }
+        };
+        check_partition_cache(count);
+        // Both plans continue through the retained ordinary one-row route;
+        // prefill publication must preserve the exact durable frontier it uses.
+        const auto ordinary = run_gemma2_metal_resident_decode_step(batch,
+            create_gemma2_metal_decode_schedule(batch, count), tokens[count], 16.0F);
+        const auto continued = run_gemma2_metal_resident_decode_step(segmented,
+            create_gemma2_metal_decode_schedule(segmented, count), tokens[count], 16.0F);
+        close(read(ordinary.logits), read(continued.logits), "ordinary decode after bulk Gemma3 partition");
+        check_partition_cache(count + 1U);
+    }
+}
+
+void test_nonfinal_prompt_chunks_preserve_terminal_cache(GemmaKVPrecision precision) {
+    if (!have_metal()) return;
+    NumericalFixture fixture;
+    constexpr auto prefix = 7U;
+    constexpr auto count = 2U * gemma2_metal_prefill_chunk_size + 1U;
+    std::array<std::uint32_t, prefix + count + 1U> tokens {};
+    for (std::size_t index = 0U; index < tokens.size(); ++index)
+        tokens[index] = static_cast<std::uint32_t>((index * 13U + index / 11U + 3U) % 32U);
+    auto bulk = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 512U, precision);
+    auto complete = create_gemma2_metal_model_plan(fixture.model(), GemmaOutputHeadPolicy::automatic, 512U, precision);
+    const auto input = std::span<const std::uint32_t>(tokens);
+    for (auto* plan : {&bulk, &complete})
+        (void)run_gemma2_metal_resident_prefill(*plan, input.first(prefix), 0U, 16.0F);
+
+    // Separate public calls produce a final hidden row for every segment, so
+    // this control completes the terminal block that intermediate bulk chunks
+    // can omit. Identical row partitions isolate that omission from batching.
+    const auto whole = run_gemma2_metal_resident_prefill(bulk,
+        input.subspan(prefix, count), prefix, 16.0F);
+    const auto whole_logits = read(whole.logits);
+    Floats complete_logits;
+    auto complete_matrix_projections = 0U;
+    auto complete_attention_queries = 0U;
+    for (std::uint32_t first = 0U; first < count;) {
+        const auto rows = std::min(gemma2_metal_prefill_chunk_size, count - first);
+        const auto part = run_gemma2_metal_resident_prefill(complete,
+            input.subspan(prefix + first, rows), prefix + first, 16.0F);
+        complete_matrix_projections += part.execution.q4_generic_tiled_projection_count
+            + part.execution.q6_generic_tiled_projection_count;
+        complete_attention_queries += part.execution.decode_attention_dispatch_count;
+        if (first + rows == count) complete_logits = read(part.logits);
+        first += rows;
+    }
+    expect(whole_logits == complete_logits, "non-final prompt chunks changed final logits");
+    exact_cache(bulk, complete, prefix + count);
+    expect(whole.execution.q4_generic_tiled_projection_count
+            + whole.execution.q6_generic_tiled_projection_count < complete_matrix_projections,
+        "non-final prompt chunks still compute every terminal projection");
+    expect(whole.execution.decode_attention_dispatch_count < complete_attention_queries,
+        "non-final prompt chunks still report omitted terminal queries");
+
+    const auto position = prefix + count;
+    const auto ordinary = run_gemma2_metal_resident_decode_step(bulk,
+        create_gemma2_metal_decode_schedule(bulk, position), tokens[position], 16.0F);
+    const auto continued = run_gemma2_metal_resident_decode_step(complete,
+        create_gemma2_metal_decode_schedule(complete, position), tokens[position], 16.0F);
+    expect(read(ordinary.logits) == read(continued.logits),
+        "scalar continuation depends on omitted terminal prompt outputs");
+    exact_cache(bulk, complete, position + 1U);
+}
+
 void test_width_two_prefix_publication_and_rollback(GemmaKVPrecision precision) {
     if (!have_metal()) return;
     NumericalFixture fixture;
@@ -941,10 +1068,10 @@ void test_actual_checkpoint_independent_goldens_when_requested(GemmaKVPrecision 
     report_checkpoint_probabilities("packed_vs_cpu_position3", scalar_last, expected_last, tokens);
     report_checkpoint_probabilities("matrix_prefill_vs_cpu_position3", batch_last, expected_last, tokens);
     report_checkpoint_probabilities("matrix_prefill_vs_packed_position3", batch_last, scalar_last, tokens);
-    // The first four rows of a 32-row prompt have the same causal input as
+    // The first four rows of a 128-row prompt have the same causal input as
     // the short golden. Check their KV and row-3 head to cover M32 projections
-    // with an authenticated full-transformer oracle.
-    std::array<std::uint32_t, 32> long_prompt {};
+    // and the bulk attention route with an authenticated full-transformer oracle.
+    std::array<std::uint32_t, 128> long_prompt {};
     for (std::size_t i = 0U; i < long_prompt.size(); ++i) long_prompt[i] = tokens[i % tokens.size()];
     (void)run_gemma2_metal_resident_prefill(plan, long_prompt, 0U, embedding_scale);
     const auto& prompt_scratch = plan.target_execution_workspace()->scratch();
@@ -953,8 +1080,8 @@ void test_actual_checkpoint_independent_goldens_when_requested(GemmaKVPrecision 
         plan.weights().output_weight, batched.logits, 1U);
     (void)prompt_head.commit_and_wait();
     const auto causal_prefix_logits = read(batched.logits);
-    close(causal_prefix_logits, expected_last, "12B first four rows of 32-row prompt", 2.0e-3F, 3.0e-4F);
-    check_checkpoint_cache(4U, "32-row causal prompt prefix ");
+    close(causal_prefix_logits, expected_last, "12B first four rows of 128-row prompt", 2.0e-3F, 3.0e-4F);
+    check_checkpoint_cache(4U, "128-row causal prompt prefix ");
     report_checkpoint_probabilities("causal_prompt_prefix_vs_cpu_position3", causal_prefix_logits, expected_last, tokens);
     // Truncate the logical prompt to three tokens, retaining its MMA-produced
     // KV. The fourth cached row is causally invisible and is overwritten by
@@ -1015,6 +1142,10 @@ const tests::TestCase cases[] {
     {"Gemma3 F16 invalid requests preserve rounded target state", [] { test_actual_plan_bounds_and_invalid_scales_preserve_state(GemmaKVPrecision::f16); }},
     {"Gemma3 F16 full and conditional verification preserves callback and stop receipts", [] { test_scripted_chain_callbacks_stops_full_and_conditional(GemmaKVPrecision::f16); }},
     {"Gemma3 complete native transformer matches independent equations across local wrap", [] { test_complete_synthetic_reference_and_wrapped_batch(GemmaKVPrecision::f32); }},
+    {"Gemma3 F16 bulk prefill preserves all cache rows across chunk partitions", [] { test_bulk_prefill_cache_across_chunk_partitions(GemmaKVPrecision::f16); }},
+    {"Gemma3 F32 bulk prefill preserves all cache rows across chunk partitions", [] { test_bulk_prefill_cache_across_chunk_partitions(GemmaKVPrecision::f32); }},
+    {"Gemma3 F16 non-final prompt chunks preserve terminal KV and scalar continuation", [] { test_nonfinal_prompt_chunks_preserve_terminal_cache(GemmaKVPrecision::f16); }},
+    {"Gemma3 F32 non-final prompt chunks preserve terminal KV and scalar continuation", [] { test_nonfinal_prompt_chunks_preserve_terminal_cache(GemmaKVPrecision::f32); }},
     {"Gemma3 width-two verification publishes and restores accepted cache prefixes", [] { test_width_two_prefix_publication_and_rollback(GemmaKVPrecision::f32); }},
     {"Gemma3 actual-plan bounds and invalid scales preserve target state", [] { test_actual_plan_bounds_and_invalid_scales_preserve_state(GemmaKVPrecision::f32); }},
     {"Gemma3 scripted full and conditional target verification preserves callback and stop receipts", [] { test_scripted_chain_callbacks_stops_full_and_conditional(GemmaKVPrecision::f32); }},

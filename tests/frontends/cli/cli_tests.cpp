@@ -18,6 +18,7 @@
 #include "target_verifier_test_hooks.hpp"
 #include "metal_test_hooks.hpp"
 
+#include <array>
 #include <algorithm>
 #include <bit>
 #include <cstdint>
@@ -209,6 +210,19 @@ void test_formats_and_validates_chat_decode_attribution() {
     const auto line = format_chat_decode_attribution_line(metrics);
     expect(line.starts_with("[ Decode: {\"schema_version\":6"),
         "decode attribution prefix mismatch");
+    for (const auto& [reason, name] : std::array {
+             std::pair {Gemma2GenerationStopReason::token_limit, "token_limit"},
+             std::pair {Gemma2GenerationStopReason::stop_token, "stop_token"},
+             std::pair {Gemma2GenerationStopReason::callback_stop, "callback_stop"},
+             std::pair {Gemma2GenerationStopReason::reverse_stop, "reverse_stop"},
+             std::pair {Gemma2GenerationStopReason::interrupted, "interrupted"},
+         }) {
+        auto stopped_metrics = metrics;
+        stopped_metrics.generation.stop_reason = reason;
+        expect(format_chat_decode_attribution_line(stopped_metrics).find(
+                   std::string("\"stop_reason\":\"") + name + "\"") != std::string::npos,
+               "decode diagnostics must distinguish generation termination reasons");
+    }
     expect(line.find("\"standalone_effective_sampler\":null") != std::string::npos,
         "target-only diagnostics invent a draft sampler");
     expect(line.find("\"selected_token_hash\":\"0000000000001234\"") != std::string::npos,
