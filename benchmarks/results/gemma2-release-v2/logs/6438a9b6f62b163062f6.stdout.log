@@ -1,0 +1,126 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ... ... ## The Opium Wars: A Dramatic Encounter (3-Day Lesson Plan)
+
+**Grade Level:** 9-10
+
+**Subject:** History
+
+**Topic:** The Opium Wars between China and Britain
+
+**Time:** 3 days x 45 minutes per day
+
+**Learning Objectives:**
+
+* Students will understand the historical context of the Opium Wars, including the economic and political motivations of both sides.
+* Students will analyze primary and secondary sources to develop empathy for the perspectives of both the Chinese and British people.
+* Students will creatively express their understanding of the Opium Wars through drama, mime, and theatre techniques.
+* Students will develop critical thinking skills by analyzing the consequences of the Opium Wars and their lasting impact.
+
+**Materials:**
+
+* Access to the internet for research
+* Primary sources (excerpts from treaties, letters, diaries)
+* Secondary sources (textbooks, articles)
+* Costumes or props (optional)
+
+**Day 1: Setting the Stage**
+
+**Activities:**
+
+* **Warm-up (5 minutes):** Brainstorm: What do you know about China and Britain in the 19th century? 
+* **Introduction (15 minutes):** Teacher presents a brief overview of the Opium Wars, highlighting the economic factors (tea trade imbalance) and political tensions.
+* **Primary Source Exploration (15 minutes):** Divide students into groups and provide each group with different primary sources (e.g., excerpts from treaties, letters from British merchants, Chinese official documents). 
+* **Group Discussion (10 minutes):** Groups share their findings and discuss the perspectives presented in the primary sources. What are the different viewpoints?
+
+**Day 2: Stepping into the Story**
+
+**Activities:**
+
+* **Warm-up (5 minutes):**  Role-play: Students choose a side (British or Chinese) and act out a scenario depicting their perspective on the growing opium trade.
+* **Mime & Movement (15 minutes):** Introduce mime techniques to represent the emotional impact of the war on civilians. Students individually or in small groups create short mime scenes depicting different aspects of the war (e.g., fear, loss, desperation, resistance). 
+* **Character Development (15 minutes):** Students choose a historical figure from the Opium War period (e.g., Queen Victoria, Lin Zexu, a British merchant, a Chinese peasant) and write a short monologue from their perspective.
+* **Sharing & Reflection (10 minutes):** Students share their monologues and discuss how acting and embodying a historical figure helped them understand their motivations and experiences.
+
+**Day 3: The Legacy of Conflict**
+
+**Activities:**
+
+* **Warm-up (5 minutes):** Class discussion: What were the consequences of the Opium Wars for both China and Britain?
+* **Drama & Debate (20 minutes):** Divide students into two groups representing China and Britain. Each group prepares a short dramatic scene depicting the consequences of the Opium Wars from their perspective (e.g., territorial losses, economic hardship, social changes).
+* **Reflection & Presentation (15 minutes):** Each group presents their scene and discusses the lasting impact of the Opium Wars on both countries.
+
+**Assessment:**
+
+* **Participation in class discussions and activities.**
+* **Analysis and interpretation of primary and secondary sources.**
+* **Creative expression through drama, mime, and monologue writing.**
+* **Reflection and presentation on the consequences of the Opium Wars.**
+
+**Extension Activities:**
+
+* Research and present on specific aspects of the Opium Wars, such as the role of individual figures, the impact on Chinese society, or the legal and political ramifications.
+* Create a timeline of the Opium Wars and its consequences.
+* Write a fictional story or poem inspired by the events of the Opium Wars.
+
+**Differentiation:**
+
+* Provide differentiated reading materials and primary sources based on student reading levels.
+* Allow students to choose from a variety of creative expression methods (e.g., writing, drawing, music, dance) to demonstrate their understanding.
+* Offer support and scaffolding for students who need additional assistance with writing or performing.
+
+This lesson plan allows for a dynamic and engaging exploration of the Opium Wars, empowering students to delve into history through creative and empathetic lenses.
+
+
+
+[ Prompt: 153.2 t/s | Generation: 17.0 t/s | TTFT: 0.411325 s ]
+[ Detail: Evaluated: 63 | Cached: 0 | Decoded: 885 | Prompt: 0.411325 s | Generation: 52.205189 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":885,"stop_reason":"stop_token","selected_token_hash":"d70f86d06a0a4f30","decoded_tokens":885,"initial_cache_position":0,"final_cache_position":948,"evaluated_prompt_tokens":63,"reused_cache_tokens":0,"decode_wall_ns":52235144925,"gpu_ns":51720490586,"selection_ns":3226302,"proposer_ns":9970246,"generation_completion_ns":52256778750,"full_turn_ns":52671949084,"first_text_ns":476889084,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":71,"speculative_matches":60,"speculative_misses":11,"speculative_fallbacks":753,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":3,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":14,"matches":13},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":2,"matches":1},{"match_length":"2","support":"3","confidence":"1","cycles":9,"matches":8},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":9,"matches":7},{"match_length":"2","support":"4+","confidence":"1","cycles":15,"matches":12},{"match_length":"3-4","support":"2","confidence":"1","cycles":7,"matches":7},{"match_length":"3-4","support":"3","confidence":"1","cycles":5,"matches":4},{"match_length":"3-4","support":"4+","confidence":"1","cycles":2,"matches":2},{"match_length":"5-8","support":"2","confidence":"1","cycles":2,"matches":2},{"match_length":"9-16","support":"2","confidence":"1","cycles":3,"matches":3}],"wall_minus_gpu_ns":514654339,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":836,"commits":836,"waits":836,"compute_encoders":836,"compute_dispatches":564425,"blit_encoders":0,"barriers":418575,"transient_allocations":0,"selector_dispatches":9064,"max_candidates":40,"compact_readback_bytes":286400,"q4_decode":205842,"q8_decode":824,"q8_width_two":0,"q4_small_batch":19383,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":15834,"q6_small_batch":1491,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":37632,"attention_partitions":104076,"attention_tokens":19032468,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":5155644017664} ]
+> ## Day 1: Setting the Stage - The Opium Trade: A Tangled Web
+
+**Objectives:**
+
+* Students will understand the basic context of the Opium Wars, including the economic and political motivations of both sides.
+* Students will identify key players and events leading up to the conflict.
+* Students will begin to analyze primary sources to understand different perspectives on the growing opium trade.
+
+**Activities:**
+
+* **Warm-up (5 minutes):** Brainstorm: What do you know about China and Britain in the 19th century? Encourage students to share any prior knowledge about these countries, their cultures, or their interactions. 
+* **Introduction (15 minutes):** 
+    * Teacher presents a brief overview of the Opium Wars (1839-1842 & 1856-1860). 
+    * Focus on the economic backdrop: Britain's tea trade imbalance with China.  
+    * Explain how Britain sought solutions through opium, leading to a dependence in China.
+    * Introduce key figures: Queen Victoria, Lin Zexu, Lord Palmerston.
+    * Briefly mention the Qing Dynasty and its challenges.
+* **Mapping the Trade (10 minutes):** 
+    * Divide students into pairs. Provide each pair with a world map and markers.
+    * Instruct them to trace the flow of tea from China to Britain and opium from India to China. 
+    * Encourage discussion about the geographical implications of this trade.
+* **Primary Source Exploration (15 minutes):** 
+    * Divide students into groups of 3-4. Provide each group with different primary sources related to the Opium Trade (examples below).
+    * **Examples:** 
+        * **British Merchant's Letter:**  A letter detailing the lucrative opium trade and the challenges faced in China.
+        * **Chinese Official Document:** A proclamation by Lin Zexu condemning the opium trade and calling for its eradication.
+        * **Diary Entry from a Chinese Farmer:** Describing the impact of opium addiction on his family and community.
+* **Group Discussion (10 minutes):** 
+    * Groups share their findings and discuss the perspectives presented in their primary sources.
+    * Guide the discussion towards identifying:
+        * Motives of British merchants
+        * Concerns of the Chinese government
+        * Experiences of ordinary people
+
+**Homework:**
+
+1. **Choose one primary source you read today and write a short paragraph summarizing its main points and the perspective it presents.**
+2. **Imagine you are a British merchant in the 1830s. Write a letter to a friend in England explaining why you believe the opium trade is profitable and justifiable.**
+3. **Research and write a brief biography of a key figure from the period, such as Queen Victoria, Lin Zexu, or Lord Palmerston. Explain their role in the events leading to the Opium Wars.**
+
+
+
+
+[ Prompt: 86.1 t/s | Generation: 16.6 t/s | TTFT: 0.255405 s ]
+[ Detail: Evaluated: 22 | Cached: 948 | Decoded: 610 | Prompt: 0.255405 s | Generation: 36.838588 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":610,"stop_reason":"stop_token","selected_token_hash":"5a9950323e74c3a0","decoded_tokens":610,"initial_cache_position":948,"final_cache_position":1580,"evaluated_prompt_tokens":22,"reused_cache_tokens":948,"decode_wall_ns":36872782856,"gpu_ns":36527016080,"selection_ns":2190578,"proposer_ns":13713985,"generation_completion_ns":36893558542,"full_turn_ns":37159169083,"first_text_ns":329027416,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":81,"speculative_matches":55,"speculative_misses":26,"speculative_fallbacks":473,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":5,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":12,"matches":8},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"2","support":"3","confidence":"1","cycles":5,"matches":4},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":18,"matches":8},{"match_length":"2","support":"4+","confidence":"1","cycles":12,"matches":9},{"match_length":"3-4","support":"2","confidence":"1","cycles":7,"matches":5},{"match_length":"3-4","support":"3","confidence":"1","cycles":6,"matches":6},{"match_length":"3-4","support":"4+","confidence":"1","cycles":3,"matches":3},{"match_length":"5-8","support":"2","confidence":"1","cycles":3,"matches":3},{"match_length":"5-8","support":"3","confidence":"1","cycles":4,"matches":4},{"match_length":"5-8","support":"4+","confidence":"1","cycles":1,"matches":1},{"match_length":"9-16","support":"3","confidence":"1","cycles":3,"matches":3}],"wall_minus_gpu_ns":345766776,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":581,"commits":581,"waits":581,"compute_encoders":581,"compute_dispatches":388613,"blit_encoders":0,"barriers":286923,"transient_allocations":0,"selector_dispatches":6094,"max_candidates":40,"compact_readback_bytes":203200,"q4_decode":129402,"q8_decode":554,"q8_width_two":0,"q4_small_batch":22113,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":9954,"q6_small_batch":1701,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":26712,"attention_partitions":204456,"attention_tokens":34120002,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":3553304817664} ]
+> 

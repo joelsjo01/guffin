@@ -1,0 +1,60 @@
+
+
+Loading model... |-\|/-\|/-\| 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> One morning after sunrise, Suresh was standing facing a pole. The shadow of the pole fell exactly to his right. Can you tell me the direction towards which the shadow was pointing - east, south, west, or north? Explain your reasoning steps.
+[0mHere's the reasoning to determine the direction the shadow was pointing:
+
+*   **Sunrise:** Sunrise is in the east.
+*   **Suresh Facing the Pole:** Suresh is facing the pole.
+*   **Shadow to Suresh's Right:** The shadow of the pole is to Suresh's right. This means the sun is shining from Suresh's left.
+*   **Sun's Position:** Since the sun is shining from Suresh's left, it must be somewhere in the east (as that's where it rose).
+*   **Shadow Direction:**  Shadows are cast *away* from the light source. Therefore, the shadow is pointing in the direction *opposite* to where the sun is.
+
+**Therefore, the shadow was pointing towards the North.**
+
+
+
+[35m
+[ Prompt: 73.4 t/s | Generation: 12.9 t/s ]
+[0m[1m[32m
+> To which direction was Suresh facing? How do you solve this?
+[0mHere's how we can determine the direction Suresh was facing:
+
+*   **Shadow to the Right:** We know the shadow of the pole fell to Suresh's right.
+*   **Sun's Position:** We've already established that the sun was shining from Suresh's left (because the shadow was to his right).
+*   **Facing the Pole:** Suresh was standing facing the pole.
+*   **Relationship:** For the shadow of the pole to be on Suresh's right, Suresh must be facing the pole in a direction that allows the sun (rising in the east) to be on his left.
+
+**Therefore, Suresh was facing towards the West.**
+
+**Explanation:** If Suresh were facing North, South, or East, the sun wouldn't be on his left. Only by facing West can the sun be to the left and cast the shadow to his right.
+[35m
+[ Prompt: 97.2 t/s | Generation: 12.8 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

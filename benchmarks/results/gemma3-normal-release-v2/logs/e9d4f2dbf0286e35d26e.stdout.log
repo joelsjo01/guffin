@@ -1,0 +1,91 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... Okay, let's break down the `options.hpp` and `options.cpp` files, focusing on defaults, validation, and behavior.
+
+**Defaults:**
+
+The `CommandOptions` struct defines numerous options with default values. Key defaults include:
+
+*   `model_path`:  `std::optional<std::filesystem::path>` - Not set, meaning a positional argument (the first non-option argument) is expected.
+*   `prompt`: `std::optional<std::string>` - Not set, indicating interactive mode.
+*   `interactive`: `false` (default is non-interactive)
+*   `sampler.temperature`: `0.8F` (float)
+*   `sampler.top_k`: `40U` (unsigned integer)
+*   `sampler.top_p`: `0.95F` (float)
+*   `sampler.min_p`: `0.05F` (float)
+*   `sampler.repetition_penalty`: `1.0F` (float)
+*   `sampler.seed`: `engine::TokenSamplerOptions::random_seed` (uses a random seed by default)
+*   `sampler.repetition_window`: `64U` (unsigned integer)
+
+**Numeric Validation:**
+
+The `options.cpp` file defines several helper functions for validating numeric input:
+
+*   `parse_positive_size`: Checks if a string represents a positive, non-negative size. It rejects non-numeric characters and checks for potential overflow during parsing.
+*   `parse_u64`: Parses a string into an unsigned 64-bit integer (`std::uint64_t`).  Uses `std::from_chars` which is considered safe.
+*   `parse_float`: Parses a string into a float (`float`). Uses `std::from_chars` and also checks that the result is `std::isfinite` (not infinity or NaN).
+*   `parse_backend_kind`:  Validates a string against a limited set of acceptable backend kinds ("cpu" or "metal").
+
+**Boundary Case Examples:**
+
+Let's consider two boundary cases.
+
+**Case 1:  `--temperature 0`**
+
+*   **Helper Called:** `parse_float`
+*   **Input:** The string "0"
+*   **Return Value:** `true` (because "0" is a valid float, and it's finite)
+*   **Output Argument:**  The `session.sampler.temperature` member of the `CommandOptions` struct is set to `0.0f`.
+
+**Case 2: `--top_k 0`**
+
+*   **Helper Called:** (implicitly through parsing from the command line argument)
+*   **Input:** The string "0"
+*   **Return Value:** `true` (because 0 is a valid `unsigned int` value)
+*   **Output Argument:** The `session.sampler.top_k` member of the `CommandOptions` struct is set to `0U`.
+
+
+
+The parsing functions provide basic validation (positive size, valid float, finite float, valid backend kind) and use modern C++ features for safer parsing.  The numeric validation attempts to prevent overflows.
+
+[ Prompt: 99.4 t/s | Generation: 12.5 t/s | TTFT: 20.725807 s ]
+[ Detail: Evaluated: 2060 | Cached: 0 | Decoded: 701 | Prompt: 20.725807 s | Generation: 55.869779 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":701,"stop_reason":"stop_token","selected_token_hash":"b955c37f55b2d093","decoded_tokens":701,"initial_cache_position":0,"final_cache_position":2761,"evaluated_prompt_tokens":2060,"reused_cache_tokens":0,"decode_wall_ns":55931821251,"gpu_ns":55401878893,"selection_ns":2594403,"proposer_ns":0,"generation_completion_ns":55941735667,"full_turn_ns":76672885292,"first_text_ns":20810648250,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":529942358,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":701,"commits":701,"waits":701,"compute_encoders":701,"compute_dispatches":649113,"blit_encoders":0,"barriers":446525,"transient_allocations":0,"selector_dispatches":7700,"max_candidates":40,"compact_readback_bytes":224000,"q4_decode":201888,"q8_decode":0,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":33648,"q6_small_batch":700,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":33648,"attention_partitions":201888,"attention_tokens":42233848,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":5212553413014} ]
+> Okay, here's a test plan for the numeric helpers, focusing on boundary conditions and adhering to the provided code. I'll assume a testing framework like Google Test.
+
+**Test Plan**
+
+We'll test `parse_positive_size`, `parse_u64`, and `parse_float`.
+
+**1. `parse_positive_size`**
+
+*   **Empty Input:** "" - Expected: `false`, `value` unchanged.
+*   **Sign:** "+123" - Expected: `false`, `value` unchanged.
+*   **Whitespace:** "  123" - Expected: `false`, `value` unchanged.
+*   **Partial Numeric:** "123a" - Expected: `false`, `value` unchanged.
+*   **Overflow:**  A string that, when parsed, exceeds `std::numeric_limits<std::size_t>::max()` - Expected: `false`, `value` unchanged.
+*   **Valid:** "123" - Expected: `true`, `value` set to `123`.
+
+**2. `parse_u64`**
+
+*   **Empty Input:** "" - Expected: `false`, `value` unchanged.
+*   **Sign:** "-123" - Expected: `false`, `value` unchanged.
+*   **Whitespace:** "  123" - Expected: `false`, `value` unchanged.
+*   **Overflow:** A string that exceeds `std::uint64_t::max()` - Expected: `false`, `value` unchanged.
+*   **Valid:** "123" - Expected: `true`, `value` set to `123`.
+
+**3. `parse_float`**
+
+*   **Empty Input:** "" - Expected: `false`, `value` unchanged.
+*   **Sign:** "-123" - Expected: `true`, `value` set to -123.0f
+*   **Whitespace:** "  123" - Expected: `false`, `value` unchanged.
+*   **Non-Finite:** "inf" - Expected: `false`, `value` unchanged.
+*   **Non-Finite:** "nan" - Expected: `false`, `value` unchanged.
+*   **Valid:** "123" - Expected: `true`, `value` set to 123.0f
+
+Each test will assert the return value and verify the state of the output argument (`value`). This covers the key validation behaviors.
+[ Prompt: 72.0 t/s | Generation: 12.5 t/s | TTFT: 0.986552 s ]
+[ Detail: Evaluated: 71 | Cached: 2761 | Decoded: 549 | Prompt: 0.986552 s | Generation: 43.948668 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":549,"stop_reason":"stop_token","selected_token_hash":"3e60b16697d5a629","decoded_tokens":549,"initial_cache_position":2761,"final_cache_position":3381,"evaluated_prompt_tokens":71,"reused_cache_tokens":2761,"decode_wall_ns":44013080158,"gpu_ns":43596548799,"selection_ns":1970828,"proposer_ns":0,"generation_completion_ns":44020609750,"full_turn_ns":45016640500,"first_text_ns":1076965084,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":416531359,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":549,"commits":549,"waits":549,"compute_encoders":549,"compute_dispatches":508361,"blit_encoders":0,"barriers":349701,"transient_allocations":0,"selector_dispatches":6028,"max_candidates":40,"compact_readback_bytes":175360,"q4_decode":158112,"q8_decode":0,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":26352,"q6_small_batch":548,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":26352,"attention_partitions":158112,"attention_tokens":36132984,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":4082120266566} ]
+> 

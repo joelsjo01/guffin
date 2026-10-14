@@ -1,0 +1,80 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... The provided code snippet defines a `CommandOptions` struct to store command-line arguments and helper functions for parsing and utilizing these arguments. 
+
+**Defaults:**
+
+* **Sampling:** The sampler uses a temperature of `0.8`, a top-k of `40`, a top-p of `0.95`, a minimum probability of `0.05`, a repetition penalty of `1.0`, a random seed, and a repetition window of `64`.
+* **Other:** The `model_path` and `prompt` are optional, interactive mode is off, statistics are off, help is off, and the `metal_capture_path` is optional.
+
+**Numeric Validation:**
+
+* `parse_positive_size`: Parses a string into a size_t, ensuring it's a positive integer.
+* `parse_u64`: Parses a string into a uint64_t.
+* `parse_float`: Parses a string into a float, ensuring it's a finite number.
+* `parse_backend_kind`: Parses a string into a `BackendKind` enum value.
+
+**Boundary Cases:**
+
+1. **Empty `prompt`:**
+    * `return_value`: `true`
+    * `output`: `prompt` will remain `nullopt` (empty).
+
+2. **`model_path` is empty:**
+    * `return_value`: `false`
+    * `output`:  An error message would be printed indicating a missing model path.
+
+
+The code snippet demonstrates common practices for argument parsing, type validation, and default values, ensuring robustness and user-friendliness.
+[ Prompt: 150.1 t/s | Generation: 15.1 t/s | TTFT: 13.682924 s ]
+[ Detail: Evaluated: 2054 | Cached: 0 | Decoded: 353 | Prompt: 13.682924 s | Generation: 23.329557 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":353,"stop_reason":"stop_token","selected_token_hash":"75e2957f1ce3419e","decoded_tokens":353,"initial_cache_position":0,"final_cache_position":2407,"evaluated_prompt_tokens":2054,"reused_cache_tokens":0,"decode_wall_ns":23373508094,"gpu_ns":23158461782,"selection_ns":1277499,"proposer_ns":9486652,"generation_completion_ns":23387548917,"full_turn_ns":37075589875,"first_text_ns":13758111291,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":29,"speculative_matches":16,"speculative_misses":13,"speculative_fallbacks":307,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":4,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":10,"matches":5},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"2","support":"3","confidence":"1","cycles":2,"matches":1},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"2","support":"4+","confidence":"1","cycles":1,"matches":0},{"match_length":"3-4","support":"2","confidence":"1","cycles":5,"matches":5},{"match_length":"3-4","support":"3","confidence":"1","cycles":2,"matches":2},{"match_length":"5-8","support":"2","confidence":"1","cycles":1,"matches":1},{"match_length":"5-8","support":"3","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":215046312,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":350,"commits":350,"waits":350,"compute_encoders":350,"compute_dispatches":234151,"blit_encoders":0,"barriers":174217,"transient_allocations":0,"selector_dispatches":3696,"max_candidates":40,"compact_readback_bytes":116800,"q4_decode":84084,"q8_decode":336,"q8_width_two":0,"q4_small_batch":7917,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":6468,"q6_small_batch":609,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":15372,"attention_partitions":245952,"attention_tokens":34283802,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":2055846001664} ]
+> ```cpp
+#include "options.hpp" 
+#include <gtest/gtest.h>
+
+TEST(ParsePositiveSize, Empty) {
+  std::size_t value;
+  EXPECT_FALSE(parse_positive_size("", value));
+  EXPECT_EQ(value, 0);
+}
+
+TEST(ParsePositiveSize, Signs) {
+  EXPECT_FALSE(parse_positive_size("-1", value)); 
+  EXPECT_FALSE(parse_positive_size("1-", value));
+  EXPECT_FALSE(parse_positive_size("-123", value));
+}
+
+// ... similar tests for whitespace, partial strings, overflow
+
+TEST(ParseFloat, NonFinite) {
+  float value;
+  EXPECT_FALSE(parse_float("inf", value));
+  EXPECT_FALSE(parse_float("-inf", value));
+  EXPECT_FALSE(parse_float("nan", value));
+}
+
+TEST(ParseFloat, Overflow) {
+  float value;
+  EXPECT_TRUE(parse_float("1.0e+300", value));
+  EXPECT_TRUE(parse_float("1.0e+308", value));
+  EXPECT_FALSE(parse_float("1.0e+309", value));
+}
+```
+
+**Explanation:**
+
+* Each test case focuses on a specific edge case.
+* The `parse_*` functions are tested with various inputs, including empty strings, signs, whitespace, partial strings, overflow values, and non-finite floats.
+* `EXPECT_FALSE` is used for expected failures, and `EXPECT_TRUE` for expected successes.
+* The output argument (`value`) is checked to ensure it's set correctly or remains unchanged.
+
+This test plan aims to cover the core functionality of the numeric parsing helpers and ensure they handle edge cases gracefully.
+
+
+
+[ Prompt: 99.7 t/s | Generation: 16.3 t/s | TTFT: 0.712435 s ]
+[ Detail: Evaluated: 71 | Cached: 2407 | Decoded: 401 | Prompt: 0.712435 s | Generation: 24.589307 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":401,"stop_reason":"stop_token","selected_token_hash":"7666196126ef1d3e","decoded_tokens":401,"initial_cache_position":2407,"final_cache_position":2879,"evaluated_prompt_tokens":71,"reused_cache_tokens":2407,"decode_wall_ns":24634009365,"gpu_ns":24419711698,"selection_ns":1438874,"proposer_ns":10577723,"generation_completion_ns":24648890833,"full_turn_ns":25370492167,"first_text_ns":790610250,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":91,"speculative_matches":67,"speculative_misses":24,"speculative_fallbacks":242,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":8,"matches":4},{"match_length":"2","support":"2","confidence":"1","cycles":7,"matches":6},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":2,"matches":2},{"match_length":"2","support":"3","confidence":"1","cycles":3,"matches":3},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":15,"matches":9},{"match_length":"2","support":"4+","confidence":"1","cycles":13,"matches":12},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":6,"matches":3},{"match_length":"3-4","support":"2","confidence":"1","cycles":5,"matches":2},{"match_length":"3-4","support":"3","confidence":"2/3-1","cycles":3,"matches":3},{"match_length":"3-4","support":"3","confidence":"1","cycles":2,"matches":1},{"match_length":"3-4","support":"4+","confidence":"2/3-1","cycles":2,"matches":1},{"match_length":"5-8","support":"2","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"5-8","support":"2","confidence":"1","cycles":10,"matches":7},{"match_length":"5-8","support":"3","confidence":"1","cycles":4,"matches":4},{"match_length":"5-8","support":"4+","confidence":"1","cycles":4,"matches":3},{"match_length":"9-16","support":"2","confidence":"1","cycles":5,"matches":5},{"match_length":"9-16","support":"3","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":214297667,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":358,"commits":358,"waits":358,"compute_encoders":358,"compute_dispatches":237763,"blit_encoders":0,"barriers":172666,"transient_allocations":0,"selector_dispatches":3663,"max_candidates":40,"compact_readback_bytes":135680,"q4_decode":66339,"q8_decode":333,"q8_width_two":0,"q4_small_batch":24843,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":5103,"q6_small_batch":1911,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":17850,"attention_partitions":285600,"attention_tokens":47826324,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":2335527025664} ]
+> 

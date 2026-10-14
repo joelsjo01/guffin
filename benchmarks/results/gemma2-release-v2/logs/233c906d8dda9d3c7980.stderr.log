@@ -1,0 +1,280 @@
+[34m0.00.098.528[0m [32mI [0mcmn  common_param: common_params_print_info: build 11146 (7fe450e19) with AppleClang 21.0.0.21000334 for Darwin arm64
+[34m0.00.098.529[0m [32mI [0mcmn  common_param: common_params_print_info: verbosity = 4 (adjust with the `-lv N` CLI arg)
+[34m0.00.098.530[0m [32mI [0mcmn  common_param: device_info:
+[34m0.00.098.531[0m [32mI [0mcmn  common_param:   - BLAS    : Accelerate (0 MiB, 0 MiB free)
+[34m0.00.098.533[0m [32mI [0mcmn  common_param:   - MTL0    : Apple M4 (12124 MiB, 12123 MiB free)
+[34m0.00.098.537[0m [32mI [0mcmn  common_param:   - CPU     : Apple M4 (16384 MiB, 16384 MiB free)
+[34m0.00.098.563[0m [32mI [0mcmn  common_param: system_info: n_threads = 4 (n_threads_batch = 4) / 10 | MTL : EMBED_LIBRARY = 1 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | SME = 1 | ACCELERATE = 1 | OPENMP = 1 | REPACK = 1 | 
+[34m0.00.099.303[0m [32mI [0msrv  init_listene: running without SSL
+[34m0.00.099.700[0m [32mI [0msrv          init: using 9 threads for HTTP server
+[34m0.00.099.874[0m [35mW srv  llama_server: security: no API key is set and CORS allows all origins (see https://github.com/ggml-org/llama.cpp/pull/25655)
+[0m[34m0.00.101.839[0m [32mI [0msrv    load_model: loading model '/Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf'
+[34m0.00.101.840[0m [32mI [0msrv    load_model: local path '/Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf'
+[34m0.00.102.053[0m [32mI [0mcmn  common_init_: fitting params to device memory ...
+[34m0.00.102.054[0m [32mI [0mcmn  common_init_: (for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)
+[34m0.00.102.058[0m [32mI [0mcommon_params_fit_impl: getting device memory data for initial parameters:
+[34m0.00.247.976[0m [32mI [0mcommon_memory_breakdown_print: | memory breakdown [MiB] | total    free    self   model   context   compute    unaccounted |
+[34m0.00.247.979[0m [32mI [0mcommon_memory_breakdown_print: |   - MTL0 (Apple M4)    | 12124 = 12123 + (8763 =  6520 +    2100 +     142) +       -8762 |
+[34m0.00.247.979[0m [32mI [0mcommon_memory_breakdown_print: |   - Host               |                  1803 =  1750 +       0 +      53                |
+[34m0.00.252.798[0m [32mI [0mcommon_params_fit_impl: projected to use 8763 MiB of device memory vs. 12123 MiB of free device memory
+[34m0.00.252.801[0m [32mI [0mcommon_params_fit_impl: will leave 3360 >= 1024 MiB of free device memory, no changes needed
+[34m0.00.252.802[0m [32mI [0mcommon_fit_params: successfully fit params to free device memory
+[34m0.00.252.803[0m [32mI [0mcommon_fit_params: fitting params to free memory took 0.15 seconds
+[34m0.00.275.852[0m [32mI [0mllama_model_loader: loaded meta data with 33 key-value pairs and 464 tensors from /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf (version GGUF V3 (latest))
+[34m0.00.275.861[0m [32mI [0mllama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+[34m0.00.275.862[0m [32mI [0mllama_model_loader: - kv   0:                       general.architecture str              = gemma2
+[34m0.00.275.863[0m [32mI [0mllama_model_loader: - kv   1:                               general.name str              = gemma-2-9b-it
+[34m0.00.275.864[0m [32mI [0mllama_model_loader: - kv   2:                      gemma2.context_length u32              = 8192
+[34m0.00.275.864[0m [32mI [0mllama_model_loader: - kv   3:                    gemma2.embedding_length u32              = 3584
+[34m0.00.275.865[0m [32mI [0mllama_model_loader: - kv   4:                         gemma2.block_count u32              = 42
+[34m0.00.275.865[0m [32mI [0mllama_model_loader: - kv   5:                 gemma2.feed_forward_length u32              = 14336
+[34m0.00.275.865[0m [32mI [0mllama_model_loader: - kv   6:                gemma2.attention.head_count u32              = 16
+[34m0.00.275.866[0m [32mI [0mllama_model_loader: - kv   7:             gemma2.attention.head_count_kv u32              = 8
+[34m0.00.275.867[0m [32mI [0mllama_model_loader: - kv   8:    gemma2.attention.layer_norm_rms_epsilon f32              = 0.000001
+[34m0.00.275.868[0m [32mI [0mllama_model_loader: - kv   9:                gemma2.attention.key_length u32              = 256
+[34m0.00.275.868[0m [32mI [0mllama_model_loader: - kv  10:              gemma2.attention.value_length u32              = 256
+[34m0.00.275.868[0m [32mI [0mllama_model_loader: - kv  11:                          general.file_type u32              = 15
+[34m0.00.275.869[0m [32mI [0mllama_model_loader: - kv  12:              gemma2.attn_logit_softcapping f32              = 50.000000
+[34m0.00.275.869[0m [32mI [0mllama_model_loader: - kv  13:             gemma2.final_logit_softcapping f32              = 30.000000
+[34m0.00.275.870[0m [32mI [0mllama_model_loader: - kv  14:            gemma2.attention.sliding_window u32              = 4096
+[34m0.00.275.870[0m [32mI [0mllama_model_loader: - kv  15:                       tokenizer.ggml.model str              = llama
+[34m0.00.275.871[0m [32mI [0mllama_model_loader: - kv  16:                         tokenizer.ggml.pre str              = default
+[34m0.00.298.138[0m [32mI [0mllama_model_loader: - kv  17:                      tokenizer.ggml.tokens arr[str,256000]  = ["<pad>", "<eos>", "<bos>", "<unk>", ...
+[34m0.00.333.359[0m [32mI [0mllama_model_loader: - kv  18:                      tokenizer.ggml.scores arr[f32,256000]  = [-1000.000000, -1000.000000, -1000.00...
+[34m0.00.338.539[0m [32mI [0mllama_model_loader: - kv  19:                  tokenizer.ggml.token_type arr[i32,256000]  = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, ...
+[34m0.00.338.545[0m [32mI [0mllama_model_loader: - kv  20:                tokenizer.ggml.bos_token_id u32              = 2
+[34m0.00.338.545[0m [32mI [0mllama_model_loader: - kv  21:                tokenizer.ggml.eos_token_id u32              = 1
+[34m0.00.338.545[0m [32mI [0mllama_model_loader: - kv  22:            tokenizer.ggml.unknown_token_id u32              = 3
+[34m0.00.338.546[0m [32mI [0mllama_model_loader: - kv  23:            tokenizer.ggml.padding_token_id u32              = 0
+[34m0.00.338.546[0m [32mI [0mllama_model_loader: - kv  24:               tokenizer.ggml.add_bos_token bool             = true
+[34m0.00.338.546[0m [32mI [0mllama_model_loader: - kv  25:               tokenizer.ggml.add_eos_token bool             = false
+[34m0.00.338.547[0m [32mI [0mllama_model_loader: - kv  26:                    tokenizer.chat_template str              = {{ bos_token }}{% if messages[0]['rol...
+[34m0.00.338.547[0m [32mI [0mllama_model_loader: - kv  27:            tokenizer.ggml.add_space_prefix bool             = false
+[34m0.00.338.548[0m [32mI [0mllama_model_loader: - kv  28:               general.quantization_version u32              = 2
+[34m0.00.338.548[0m [32mI [0mllama_model_loader: - kv  29:                      quantize.imatrix.file str              = /models/gemma-2-9b-it-GGUF/gemma-2-9b...
+[34m0.00.338.549[0m [32mI [0mllama_model_loader: - kv  30:                   quantize.imatrix.dataset str              = /training_dir/calibration_datav3.txt
+[34m0.00.338.549[0m [32mI [0mllama_model_loader: - kv  31:             quantize.imatrix.entries_count i32              = 294
+[34m0.00.338.549[0m [32mI [0mllama_model_loader: - kv  32:              quantize.imatrix.chunks_count i32              = 128
+[34m0.00.338.551[0m [32mI [0mllama_model_loader: - type  f32:  169 tensors
+[34m0.00.338.551[0m [32mI [0mllama_model_loader: - type  f16:    1 tensors
+[34m0.00.338.552[0m [32mI [0mllama_model_loader: - type q4_K:  252 tensors
+[34m0.00.338.552[0m [32mI [0mllama_model_loader: - type q6_K:   42 tensors
+[34m0.00.338.552[0m [32mI [0mprint_info: file format = GGUF V3 (latest)
+[34m0.00.338.553[0m [32mI [0mprint_info: file type   = Q4_K - Medium
+[34m0.00.338.553[0m [32mI [0mprint_info: file size   = 6.37 GiB (5.92 BPW) 
+[34m0.00.338.559[0m [32mI [0mllama_prepare_model_devices: using device MTL0 (Apple M4) (unknown id) - 12123 MiB free
+[34m0.00.361.622[0m [32mI [0mload: 99 unused tokens
+[34m0.00.369.768[0m [35mW load: control-looking token:    213 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+[0m[34m0.00.374.284[0m [32mI [0mload: printing all EOG tokens:
+[34m0.00.374.285[0m [32mI [0mload:   - 1 ('<eos>')
+[34m0.00.374.285[0m [32mI [0mload:   - 107 ('<end_of_turn>')
+[34m0.00.374.286[0m [32mI [0mload:   - 213 ('</s>')
+[34m0.00.374.483[0m [32mI [0mload: special tokens cache size = 217
+[34m0.00.385.211[0m [32mI [0mload: token to piece cache size = 1.6014 MB
+[34m0.00.385.218[0m [32mI [0mprint_info: arch                  = gemma2
+[34m0.00.385.218[0m [32mI [0mprint_info: vocab_only            = 0
+[34m0.00.385.218[0m [32mI [0mprint_info: no_alloc              = 0
+[34m0.00.385.219[0m [32mI [0mprint_info: n_ctx_train           = 8192
+[34m0.00.385.219[0m [32mI [0mprint_info: n_embd_inp            = 3584
+[34m0.00.385.219[0m [32mI [0mprint_info: n_embd                = 3584
+[34m0.00.385.219[0m [32mI [0mprint_info: n_embd_out            = 3584
+[34m0.00.385.219[0m [32mI [0mprint_info: n_layer               = 42
+[34m0.00.385.219[0m [32mI [0mprint_info: n_layer_all           = 42
+[34m0.00.385.223[0m [32mI [0mprint_info: n_head                = 16
+[34m0.00.385.224[0m [32mI [0mprint_info: n_head_kv             = 8
+[34m0.00.385.225[0m [32mI [0mprint_info: n_rot                 = 256
+[34m0.00.385.225[0m [32mI [0mprint_info: n_swa                 = 4096
+[34m0.00.385.225[0m [32mI [0mprint_info: is_swa_any            = 1
+[34m0.00.385.225[0m [32mI [0mprint_info: non_causal_type       = 0
+[34m0.00.385.225[0m [32mI [0mprint_info: n_embd_head_k         = 256
+[34m0.00.385.226[0m [32mI [0mprint_info: n_embd_head_v         = 256
+[34m0.00.385.226[0m [32mI [0mprint_info: n_gqa                 = 2
+[34m0.00.385.227[0m [32mI [0mprint_info: n_embd_k_gqa          = 2048
+[34m0.00.385.228[0m [32mI [0mprint_info: n_embd_v_gqa          = 2048
+[34m0.00.385.229[0m [32mI [0mprint_info: f_norm_eps            = 0.0e+00
+[34m0.00.385.229[0m [32mI [0mprint_info: f_norm_rms_eps        = 1.0e-06
+[34m0.00.385.229[0m [32mI [0mprint_info: f_clamp_kqv           = 0.0e+00
+[34m0.00.385.229[0m [32mI [0mprint_info: f_max_alibi_bias      = 0.0e+00
+[34m0.00.385.230[0m [32mI [0mprint_info: f_logit_scale         = 0.0e+00
+[34m0.00.385.230[0m [32mI [0mprint_info: f_attn_scale          = 6.2e-02
+[34m0.00.385.231[0m [32mI [0mprint_info: f_attn_value_scale    = 0.0000
+[34m0.00.385.232[0m [32mI [0mprint_info: n_ff                  = 14336
+[34m0.00.385.232[0m [32mI [0mprint_info: n_expert              = 0
+[34m0.00.385.232[0m [32mI [0mprint_info: n_expert_used         = 0
+[34m0.00.385.232[0m [32mI [0mprint_info: n_expert_groups       = 0
+[34m0.00.385.232[0m [32mI [0mprint_info: n_group_used          = 0
+[34m0.00.385.233[0m [32mI [0mprint_info: causal attn           = 1
+[34m0.00.385.233[0m [32mI [0mprint_info: pooling type          = -1
+[34m0.00.385.233[0m [32mI [0mprint_info: rope type             = 2
+[34m0.00.385.233[0m [32mI [0mprint_info: rope scaling          = linear
+[34m0.00.385.233[0m [32mI [0mprint_info: freq_base_train       = 10000.0
+[34m0.00.385.234[0m [32mI [0mprint_info: freq_scale_train      = 1
+[34m0.00.385.234[0m [32mI [0mprint_info: freq_base_swa         = 10000.0
+[34m0.00.385.234[0m [32mI [0mprint_info: freq_scale_swa        = 1
+[34m0.00.385.234[0m [32mI [0mprint_info: n_embd_head_k_swa     = 256
+[34m0.00.385.234[0m [32mI [0mprint_info: n_embd_head_v_swa     = 256
+[34m0.00.385.234[0m [32mI [0mprint_info: n_rot_swa             = 256
+[34m0.00.385.235[0m [32mI [0mprint_info: n_ctx_orig_yarn       = 8192
+[34m0.00.385.235[0m [32mI [0mprint_info: rope_yarn_log_mul     = 0.0000
+[34m0.00.385.235[0m [32mI [0mprint_info: rope_finetuned        = unknown
+[34m0.00.385.236[0m [32mI [0mprint_info: model type            = 9B
+[34m0.00.385.236[0m [32mI [0mprint_info: model params          = 9.24 B
+[34m0.00.385.236[0m [32mI [0mprint_info: general.name          = gemma-2-9b-it
+[34m0.00.385.237[0m [32mI [0mprint_info: vocab type            = SPM
+[34m0.00.385.237[0m [32mI [0mprint_info: n_vocab               = 256000
+[34m0.00.385.237[0m [32mI [0mprint_info: n_merges              = 0
+[34m0.00.385.238[0m [32mI [0mprint_info: BOS token             = 2 '<bos>'
+[34m0.00.385.238[0m [32mI [0mprint_info: EOS token             = 1 '<eos>'
+[34m0.00.385.238[0m [32mI [0mprint_info: EOT token             = 107 '<end_of_turn>'
+[34m0.00.385.239[0m [32mI [0mprint_info: UNK token             = 3 '<unk>'
+[34m0.00.385.239[0m [32mI [0mprint_info: PAD token             = 0 '<pad>'
+[34m0.00.385.239[0m [32mI [0mprint_info: LF token              = 227 '<0x0A>'
+[34m0.00.385.239[0m [32mI [0mprint_info: EOG token             = 1 '<eos>'
+[34m0.00.385.240[0m [32mI [0mprint_info: EOG token             = 107 '<end_of_turn>'
+[34m0.00.385.240[0m [32mI [0mprint_info: EOG token             = 213 '</s>'
+[34m0.00.385.240[0m [32mI [0mprint_info: max token length      = 48
+[34m0.00.385.242[0m [32mI [0mload_tensors: loading model tensors, this can take a while... (load_mode = mmap)
+[34m0.03.155.133[0m [32mI [0mload_tensors: offloading output layer to GPU
+[34m0.03.155.136[0m [32mI [0mload_tensors: offloading 41 repeating layers to GPU
+[34m0.03.155.136[0m [32mI [0mload_tensors: offloaded 43/43 layers to GPU
+[34m0.03.155.138[0m [32mI [0mload_tensors:   CPU_Mapped model buffer size =  1750.00 MiB
+[34m0.03.155.138[0m [32mI [0mload_tensors:  MTL0_Mapped model buffer size =  6520.62 MiB
+[34m0.03.155.922[0m [32mI [0mcmn  common_init_: added <eos> logit bias = -inf
+[34m0.03.155.924[0m [32mI [0mcmn  common_init_: added <end_of_turn> logit bias = -inf
+[34m0.03.155.924[0m [32mI [0mcmn  common_init_: added </s> logit bias = -inf
+[34m0.03.156.493[0m [32mI [0mllama_context: constructing llama_context
+[34m0.03.156.495[0m [32mI [0mllama_context: n_seq_max             = 1
+[34m0.03.156.495[0m [32mI [0mllama_context: n_ctx                 = 8192
+[34m0.03.156.495[0m [32mI [0mllama_context: n_ctx_seq             = 8192
+[34m0.03.156.496[0m [32mI [0mllama_context: n_batch               = 2048
+[34m0.03.156.496[0m [32mI [0mllama_context: n_ubatch              = 512
+[34m0.03.156.496[0m [32mI [0mllama_context: causal_attn           = 1
+[34m0.03.156.496[0m [32mI [0mllama_context: flash_attn            = auto
+[34m0.03.156.497[0m [32mI [0mllama_context: kv_unified            = false
+[34m0.03.156.497[0m [32mI [0mllama_context: freq_base             = 10000.0
+[34m0.03.156.498[0m [32mI [0mllama_context: freq_scale            = 1
+[34m0.03.156.498[0m [32mI [0mllama_context: n_rs_seq              = 0
+[34m0.03.156.498[0m [32mI [0mllama_context: n_outputs_max         = 1
+[34m0.03.156.498[0m [32mI [0mllama_context: n_outputs_max_per_seq = 1
+[34m0.03.156.499[0m [32mI [0mggml_metal_init: allocating
+[34m0.03.156.526[0m [32mI [0mggml_metal_init: found device: Apple M4
+[34m0.03.156.530[0m [32mI [0mggml_metal_init: picking default device: Apple M4
+[34m0.03.156.553[0m [32mI [0mggml_metal_init: use fusion         = true
+[34m0.03.156.553[0m [32mI [0mggml_metal_init: use concurrency    = true
+[34m0.03.156.554[0m [32mI [0mggml_metal_init: use graph optimize = true
+[34m0.03.156.620[0m [32mI [0mllama_context:        CPU  output buffer size =     0.98 MiB
+[34m0.03.156.622[0m [32mI [0mllama_kv_cache_iswa: creating non-SWA KV cache, size = 8192 cells
+[34m0.03.179.796[0m [32mI [0mllama_kv_cache:       MTL0 KV buffer size =  1344.00 MiB
+[34m0.03.215.933[0m [32mI [0mllama_kv_cache: size = 1344.00 MiB (  8192 cells,  21 layers,  1/1 seqs), K (f16):  672.00 MiB, V (f16):  672.00 MiB
+[34m0.03.215.935[0m [32mI [0mllama_kv_cache: attn_rot_k = 0, n_embd_head_k_all = 256
+[34m0.03.215.935[0m [32mI [0mllama_kv_cache: attn_rot_v = 0, n_embd_head_k_all = 256
+[34m0.03.215.936[0m [32mI [0mllama_kv_cache_iswa: creating     SWA KV cache, size = 4608 cells
+[34m0.03.229.173[0m [32mI [0mllama_kv_cache:       MTL0 KV buffer size =   756.00 MiB
+[34m0.03.249.249[0m [32mI [0mllama_kv_cache: size =  756.00 MiB (  4608 cells,  21 layers,  1/1 seqs), K (f16):  378.00 MiB, V (f16):  378.00 MiB
+[34m0.03.249.251[0m [32mI [0mllama_kv_cache: attn_rot_k = 0, n_embd_head_k_all = 256
+[34m0.03.249.251[0m [32mI [0mllama_kv_cache: attn_rot_v = 0, n_embd_head_k_all = 256
+[34m0.03.249.256[0m [32mI [0msched_reserve: reserving ...
+[34m0.03.250.577[0m [32mI [0mresolve_fused_ops: Flash Attention enabled
+[34m0.03.250.578[0m [32mI [0mresolve_fused_ops: resolving fused DeepSeek V4 HC support:
+[34m0.03.251.701[0m [32mI [0mresolve_fused_ops: fused DeepSeek V4 HC pre enabled
+[34m0.03.252.790[0m [32mI [0mresolve_fused_ops: fused DeepSeek V4 HC comb enabled
+[34m0.03.253.879[0m [32mI [0mresolve_fused_ops: fused DeepSeek V4 HC post enabled
+[34m0.03.260.064[0m [32mI [0msched_reserve:       MTL0 compute buffer size =   142.71 MiB
+[34m0.03.260.068[0m [32mI [0msched_reserve:        CPU compute buffer size =    26.52 MiB
+[34m0.03.260.070[0m [32mI [0msched_reserve: graph: nodes = 1522, splits = 2, input objects = 4, input tensors = 9
+[34m0.03.260.070[0m [32mI [0msched_reserve: reserve took 10.81 ms, sched copies = 1
+[34m0.03.260.180[0m [32mI [0mcmn          init: llama threadpool init, n_threads = 4
+[34m0.03.260.188[0m [32mI [0mcmn  common_init_: warming up the model with an empty run - please wait ... (--no-warmup to disable)
+[34m0.03.511.893[0m [32mI [0msrv    load_model: initializing, n_slots = 1, n_ctx_slot = 8192, kv_unified = 'false'
+[34m0.03.511.917[0m [32mI [0mspec common_specu: no implementations specified for speculative decoding
+[34m0.03.511.920[0m [32mI [0mslot   load_model: id  0 | task -1 | new slot, n_ctx = 8192
+[34m0.03.511.958[0m [32mI [0msrv    load_model: prompt cache is enabled, size limit: 8192 MiB
+[34m0.03.511.959[0m [32mI [0msrv    load_model: use `--cache-ram 0` to disable the prompt cache
+[34m0.03.511.960[0m [32mI [0msrv    load_model: for more info see https://github.com/ggml-org/llama.cpp/pull/16391
+[34m0.03.511.960[0m [32mI [0msrv    load_model: context checkpoints enabled, max = 32, min spacing = 8192
+[34m0.03.512.721[0m [32mI [0msrv          init: idle slots will be saved to prompt cache upon starting a new task
+[34m0.03.517.455[0m [32mI [0msrv          init: init: chat template, example_format: '<start_of_turn>user
+You are a helpful assistant
+Hello<end_of_turn>
+<start_of_turn>model
+Hi there<end_of_turn>
+<start_of_turn>user
+How are you?<end_of_turn>
+<start_of_turn>model
+'
+[34m0.03.518.580[0m [32mI [0msrv          init: init: chat template, thinking = 0
+[34m0.03.518.586[0m [32mI [0msrv          init: preserve_reasoning kwarg: not supported by template
+[34m0.03.518.592[0m [32mI [0msrv  llama_server: model loaded
+[34m0.03.518.593[0m [32mI [0msrv  llama_server: listening on http://127.0.0.1:50265
+[34m0.03.518.629[0m [32mI [0msrv  update_slots: all slots are idle
+[34m0.03.643.936[0m [32mI [0msrv  server_strea: conv_id= (empty=1)
+[34m0.03.645.301[0m [32mI [0msrv    operator(): chat format: peg-native
+[34m0.03.645.405[0m [32mI [0mslot get_availabl: id  0 | task -1 |  - skipping, slot is empty
+[34m0.03.645.408[0m [32mI [0mslot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+[34m0.03.645.409[0m [32mI [0msrv  get_availabl: updating prompt cache
+[34m0.03.645.414[0m [32mI [0msrv          load:  - looking for better prompt, base f_keep = -1.000, f_sim = 0.000
+[34m0.03.645.416[0m [32mI [0msrv        update:  - cache state: 0 prompts, 0.000 MiB (limits: 8192.000 MiB, 8192 tokens, 8589934592 est)
+[34m0.03.645.417[0m [32mI [0msrv  get_availabl: prompt cache update took 0.01 ms
+[34m0.03.645.785[0m [32mI [0mslot launch_slot_: id  0 | task -1 | sampler chain: logits -> ?penalties -> ?dry -> ?top-n-sigma -> top-k -> ?typical -> top-p -> min-p -> ?xtc -> temp-ext -> dist 
+[34m0.03.645.819[0m [32mI [0mslot launch_slot_: id  0 | task -1 | sampler params: 
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	dry_multiplier = 0.000, dry_base = 1.750, dry_allowed_length = 2, dry_penalty_last_n = 64
+	top_k = 40, top_p = 0.950, min_p = 0.050, xtc_probability = 0.000, xtc_threshold = 0.100, typical_p = 1.000, top_n_sigma = -1.000, temp = 0.800
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000, adaptive_target = -1.000, adaptive_decay = 0.900
+[34m0.03.645.822[0m [32mI [0mslot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+[34m0.03.645.849[0m [32mI [0mslot   operator(): id  0 | task 0 | new prompt, n_ctx_slot = 8192, n_keep = 0, task.n_tokens = 63
+[34m0.03.645.859[0m [32mI [0mslot   operator(): id  0 | task 0 | cached n_tokens = 0, memory_seq_rm [0, end)
+[34m0.03.651.597[0m [32mI [0mslot   operator(): id  0 | task 0 | cached n_tokens = 1, memory_seq_rm [1, end)
+[34m0.03.702.115[0m [32mI [0mslot create_check: id  0 | task 0 | created context checkpoint 1 of 32 (pos_min = 0, pos_max = 0, n_tokens = 1, size = 0.165 MiB)
+[34m0.03.712.121[0m [32mI [0mslot   operator(): id  0 | task 0 | cached n_tokens = 59, memory_seq_rm [59, end)
+[34m0.03.712.162[0m [32mI [0mslot init_sampler: id  0 | task 0 | init sampler, took 0.01 ms, tokens: text = 63, total = 63
+[34m0.04.099.418[0m [32mI [0mslot create_check: id  0 | task 0 | created context checkpoint 2 of 32 (pos_min = 0, pos_max = 58, n_tokens = 59, size = 9.681 MiB)
+[34m0.11.518.980[0m [32mI [0mslot print_timing: id  0 | task 0 | n_gen =    100, tg =  13.72 t/s, tg_3s =  13.86 t/s
+[34m0.14.526.152[0m [32mI [0mslot print_timing: id  0 | task 0 | n_gen =    141, tg =  13.70 t/s, tg_3s =  13.63 t/s
+[34m0.17.540.027[0m [32mI [0mslot print_timing: id  0 | task 0 | n_gen =    182, tg =  13.68 t/s, tg_3s =  13.60 t/s
+[34m0.20.554.269[0m [32mI [0mslot print_timing: id  0 | task 0 | n_gen =    223, tg =  13.66 t/s, tg_3s =  13.60 t/s
+[34m0.23.571.033[0m [32mI [0mslot print_timing: id  0 | task 0 | n_gen =    264, tg =  13.65 t/s, tg_3s =  13.59 t/s
+[34m0.26.590.301[0m [32mI [0mslot print_timing: id  0 | task 0 | n_gen =    305, tg =  13.64 t/s, tg_3s =  13.58 t/s
+[34m0.28.434.069[0m [32mI [0mslot print_timing: id  0 | task 0 | prompt eval time =     658.99 ms /    63 tokens (   10.46 ms per token,    95.60 tokens per second)
+[34m0.28.434.076[0m [32mI [0mslot print_timing: id  0 | task 0 |        eval time =   24129.21 ms /   330 tokens (   73.34 ms per token,    13.63 tokens per second)
+[34m0.28.434.077[0m [32mI [0mslot print_timing: id  0 | task 0 |       total time =   24788.20 ms /   393 tokens
+[34m0.28.434.079[0m [32mI [0mslot print_timing: id  0 | task 0 |    graphs reused =        328
+[34m0.28.434.112[0m [32mI [0mslot      release: id  0 | task 0 | stop processing: n_tokens = 392, truncated = 0
+[34m0.28.434.124[0m [32mI [0msrv  update_slots: all slots are idle
+[34m2.28.450.811[0m [32mI [0msrv  server_strea: conv_id= (empty=1)
+[34m2.28.454.661[0m [32mI [0msrv    operator(): chat format: peg-native
+[34m2.28.454.746[0m [32mI [0mslot get_availabl: id  0 | task -1 |  - checking sim = 0.958 (392/409) > 0.100
+[34m2.28.454.749[0m [32mI [0mslot get_availabl: id  0 | task -1 | selected slot by LCP similarity, f_sim_best = 0.958 (> 0.100 thold), f_keep = 1.000
+[34m2.28.454.802[0m [32mI [0mslot launch_slot_: id  0 | task -1 | sampler chain: logits -> ?penalties -> ?dry -> ?top-n-sigma -> top-k -> ?typical -> top-p -> min-p -> ?xtc -> temp-ext -> dist 
+[34m2.28.454.811[0m [32mI [0mslot launch_slot_: id  0 | task -1 | sampler params: 
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	dry_multiplier = 0.000, dry_base = 1.750, dry_allowed_length = 2, dry_penalty_last_n = 64
+	top_k = 40, top_p = 0.950, min_p = 0.050, xtc_probability = 0.000, xtc_threshold = 0.100, typical_p = 1.000, top_n_sigma = -1.000, temp = 0.800
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000, adaptive_target = -1.000, adaptive_decay = 0.900
+[34m2.28.454.814[0m [32mI [0mslot launch_slot_: id  0 | task 333 | processing task, is_child = 0
+[34m2.28.454.822[0m [32mI [0mslot   operator(): id  0 | task 333 | new prompt, n_ctx_slot = 8192, n_keep = 0, task.n_tokens = 409
+[34m2.28.454.832[0m [32mI [0mslot   operator(): id  0 | task 333 | checking checkpoint with [0, 58] against 0...
+[34m2.28.457.071[0m [32mI [0mslot   operator(): id  0 | task 333 | restored context checkpoint (pos_min = 0, pos_max = 58, n_tokens = 59, n_past = 58, size = 9.681 MiB)
+[34m2.28.457.085[0m [32mI [0mslot   operator(): id  0 | task 333 | cached n_tokens = 58, memory_seq_rm [58, end)
+[34m2.28.459.423[0m [32mI [0mslot create_check: id  0 | task 333 | created context checkpoint 3 of 32 (pos_min = 0, pos_max = 57, n_tokens = 58, size = 9.517 MiB)
+[34m2.28.469.078[0m [32mI [0mslot   operator(): id  0 | task 333 | cached n_tokens = 394, memory_seq_rm [394, end)
+[34m2.30.555.423[0m [32mI [0mslot create_check: id  0 | task 333 | created context checkpoint 4 of 32 (pos_min = 0, pos_max = 393, n_tokens = 394, size = 64.646 MiB)
+[34m2.30.561.069[0m [32mI [0mslot   operator(): id  0 | task 333 | cached n_tokens = 405, memory_seq_rm [405, end)
+[34m2.30.561.154[0m [32mI [0mslot init_sampler: id  0 | task 333 | init sampler, took 0.06 ms, tokens: text = 409, total = 409
+[34m2.30.778.358[0m [32mI [0mslot create_check: id  0 | task 333 | created context checkpoint 5 of 32 (pos_min = 0, pos_max = 404, n_tokens = 405, size = 66.450 MiB)
+[34m2.38.262.048[0m [32mI [0mslot print_timing: id  0 | task 333 | n_gen =    100, tg =  13.60 t/s, tg_3s =  13.74 t/s
+[34m2.41.301.662[0m [32mI [0mslot print_timing: id  0 | task 333 | n_gen =    141, tg =  13.57 t/s, tg_3s =  13.49 t/s
+[34m2.44.337.432[0m [32mI [0mslot print_timing: id  0 | task 333 | n_gen =    182, tg =  13.55 t/s, tg_3s =  13.51 t/s
+[34m2.47.374.678[0m [32mI [0mslot print_timing: id  0 | task 333 | n_gen =    223, tg =  13.54 t/s, tg_3s =  13.50 t/s
+[34m2.50.412.933[0m [32mI [0mslot print_timing: id  0 | task 333 | n_gen =    264, tg =  13.54 t/s, tg_3s =  13.49 t/s
+[34m2.51.303.685[0m [32mI [0mslot print_timing: id  0 | task 333 | prompt eval time =    2527.61 ms /   351 tokens (    7.20 ms per token,   138.87 tokens per second)
+[34m2.51.303.697[0m [32mI [0mslot print_timing: id  0 | task 333 |        eval time =   20321.22 ms /   276 tokens (   73.90 ms per token,    13.53 tokens per second)
+[34m2.51.303.699[0m [32mI [0mslot print_timing: id  0 | task 333 |       total time =   22848.84 ms /   627 tokens
+[34m2.51.303.700[0m [32mI [0mslot print_timing: id  0 | task 333 |    graphs reused =        601
+[34m2.51.303.765[0m [32mI [0mslot      release: id  0 | task 333 | stop processing: n_tokens = 684, truncated = 0
+[34m2.51.303.784[0m [32mI [0msrv  update_slots: all slots are idle
+[34m2.51.308.025[0m [32mI [0msrv    operator(): operator(): cleaning up before exit...
+[34m2.51.308.314[0m [32mI [0mcommon_memory_breakdown_print: | memory breakdown [MiB] | total   free    self   model   context   compute    unaccounted |
+[34m2.51.308.316[0m [32mI [0mcommon_memory_breakdown_print: |   - MTL0 (Apple M4)    | 12124 = 3360 + (8763 =  6520 +    2100 +     142) +           0 |
+[34m2.51.308.317[0m [32mI [0mcommon_memory_breakdown_print: |   - Host               |                 1776 =  1750 +       0 +      26                |
+[34m2.51.308.553[0m [32mI [0mggml_metal_free: deallocating

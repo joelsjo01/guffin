@@ -1,0 +1,188 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> Okay, here's a design for a simple offline note search app in Python using the standard library:
+
+**Architecture:**
+
+1. **`NoteImporter`:** Scans a designated folder for `.md` files, reading and decoding them from UTF-8.  It parses each note into plain text using a basic Markdown parser (e.g., stripping headers, lists - a minimal implementation is sufficient).
+
+2. **`Index`:**  A dictionary where keys are words (lowercase) and values are lists of note file paths containing that word. The `NoteImporter` populates this index by iterating through the text of each note, splitting into words, and updating the index.
+
+3. **`SearchEngine`:** Takes a search query, splits it into words, finds matching notes in the `Index`, and returns a sorted list of relevant file paths.
+
+**Code Snippets (Illustrative):**
+
+```python
+import os
+import re
+
+class NoteImporter:
+  def __init__(self, folder):
+    self.folder = folder
+
+  def import_notes(self):
+    # ... (file scanning, reading, basic Markdown stripping)
+
+class Index:
+  def __init__(self):
+    self.index = {}
+
+  def add_note(self, filepath, words):
+    for word in words:
+      word = word.lower()
+      self.index.setdefault(word, []).append(filepath)
+
+class SearchEngine:
+  def __init__(self, index):
+    self.index = index
+
+  def search(self, query):
+    # ... (split query, find matching files, sort by relevance)
+```
+
+This structure separates concerns, making the code more maintainable.  The index is the core data structure for efficient searching.  Minimal Markdown parsing is key to keeping things simple.
+
+[ Prompt: 101.1 t/s | Generation: 18.3 t/s | TTFT: 0.613358 s ]
+[ Detail: Evaluated: 62 | Cached: 0 | Decoded: 391 | Prompt: 0.613358 s | Generation: 21.333287 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":391,"stop_reason":"stop_token","selected_token_hash":"8f513f756aa5d3b1","decoded_tokens":391,"initial_cache_position":0,"final_cache_position":453,"evaluated_prompt_tokens":62,"reused_cache_tokens":0,"decode_wall_ns":21411426262,"gpu_ns":20358281894,"selection_ns":714666,"proposer_ns":0,"generation_completion_ns":21415730208,"full_turn_ns":22029770708,"first_text_ns":692852542,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":238,"learned_accepted_edges":151,"learned_proposed_edges":238,"learned_numeric_refusals":0,"learned_draft_ns":1991146603,"learned_draft_gpu_ns":1756926012,"learned_target_gpu_ns":18367216509,"learned_cycle_ns":21168536665,"standalone_prefill_ns":84806750,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":95120,"standalone_draft_readback_bytes":56768,"standalone_draft_wall_ns":2085075575,"standalone_draft_gpu_ns":1849139135,"standalone_draft_command_buffer_count":478,"standalone_draft_compute_dispatch_count":91237,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,238,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[238,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[87,151,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[87,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":151,"learned_horizon_limited_cycle_count":151,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":1053144368,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":956,"commits":956,"waits":956,"compute_encoders":956,"compute_dispatches":319364,"blit_encoders":0,"barriers":217367,"transient_allocations":0,"selector_dispatches":2629,"max_candidates":40,"compact_readback_bytes":152640,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":68544,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":11663,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":22944,"attention_partitions":33936,"attention_tokens":5803776,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":2907064759074} ]
+> Okay, let's handle changes and deletions efficiently.
+
+**Change Tracking:**
+
+Each note will have a modification timestamp stored alongside its path (e.g., `(filepath, timestamp)`).  On startup, compare these timestamps against the current file modification times.
+
+**Update Strategy:**
+
+1. **New Notes:** Add them to the index like before.
+2. **Modified Notes:** Re-import the note's content.  Compare the new word list with the old.
+   *   Words *added*: Add to the index.
+   *   Words *removed*: Remove from the index.
+3. **Deleted Notes:** Remove all entries associated with the deleted file path from the index.
+
+**Implementation Considerations:**
+
+*   Use `os.path.getmtime()` to get modification timestamps.
+*   Store timestamps in a separate data structure alongside the notes' filepaths.
+*   Incremental updates are faster than rebuilding the entire index.  This avoids re-indexing all notes on every run.
+
+
+
+This approach avoids full re-indexing, significantly improving performance when changes are relatively infrequent.
+[ Prompt: 65.7 t/s | Generation: 16.6 t/s | TTFT: 0.639683 s ]
+[ Detail: Evaluated: 42 | Cached: 453 | Decoded: 230 | Prompt: 0.639683 s | Generation: 13.871834 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":230,"stop_reason":"stop_token","selected_token_hash":"e167f5eb8e4b0c7b","decoded_tokens":230,"initial_cache_position":453,"final_cache_position":725,"evaluated_prompt_tokens":42,"reused_cache_tokens":453,"decode_wall_ns":13949154743,"gpu_ns":13257920116,"selection_ns":367665,"proposer_ns":0,"generation_completion_ns":13950703625,"full_turn_ns":14592542958,"first_text_ns":718436208,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":152,"learned_accepted_edges":76,"learned_proposed_edges":152,"learned_numeric_refusals":0,"learned_draft_ns":1300220743,"learned_draft_gpu_ns":1146397688,"learned_target_gpu_ns":11898997762,"learned_cycle_ns":13732380543,"standalone_prefill_ns":62215375,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":60684,"standalone_draft_readback_bytes":36200,"standalone_draft_wall_ns":1371283651,"standalone_draft_gpu_ns":1216235188,"standalone_draft_command_buffer_count":306,"standalone_draft_compute_dispatch_count":59072,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,152,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[152,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[76,76,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[76,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":76,"learned_horizon_limited_cycle_count":76,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":691234627,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":612,"commits":612,"waits":612,"compute_encoders":612,"compute_dispatches":209263,"blit_encoders":0,"barriers":143816,"transient_allocations":0,"selector_dispatches":1683,"max_candidates":40,"compact_readback_bytes":97600,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":43776,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":7449,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":14688,"attention_partitions":56640,"attention_tokens":8972016,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":1709698071060} ]
+> To handle failed imports/cancellations, we'll adopt a "transactional" approach.
+
+**Commit Strategy:**
+
+1.  **Temporary Index:** During import/update, work on a *copy* of the index.
+2.  **Checkpointing:** Periodically (e.g., every 10 notes) write the *current* temporary index to a persistent "checkpoint" file (e.g., JSON). Include a timestamp of the checkpoint.
+3.  **Rollback:** If a failure occurs, discard the temporary index.
+
+**Recovery:**
+
+1.  **Load Last Checkpoint:** On startup after a failure, load the latest checkpoint file. This restores the index to a known good state.
+2.  **Resume:** Continue the import/update process from the point indicated by the checkpoint's timestamp. This allows picking up where the previous attempt left off.
+
+**Data Integrity:**
+
+*   Checkpoint files should be small to minimize recovery time.
+*   Consider adding a mechanism to verify checkpoint integrity.
+
+
+
+This design ensures that partial updates don't corrupt the primary index and enables recovery from interruptions.
+[ Prompt: 65.8 t/s | Generation: 17.7 t/s | TTFT: 0.653604 s ]
+[ Detail: Evaluated: 43 | Cached: 725 | Decoded: 237 | Prompt: 0.653604 s | Generation: 13.393127 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":237,"stop_reason":"stop_token","selected_token_hash":"3f1d18e51fd3e0bc","decoded_tokens":237,"initial_cache_position":725,"final_cache_position":1005,"evaluated_prompt_tokens":43,"reused_cache_tokens":725,"decode_wall_ns":13474154420,"gpu_ns":12764973950,"selection_ns":496292,"proposer_ns":0,"generation_completion_ns":13478177625,"full_turn_ns":14134777042,"first_text_ns":735872333,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":144,"learned_accepted_edges":91,"learned_proposed_edges":144,"learned_numeric_refusals":0,"learned_draft_ns":1263187840,"learned_draft_gpu_ns":1108213519,"learned_target_gpu_ns":11437595933,"learned_cycle_ns":13248710127,"standalone_prefill_ns":64362500,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":57580,"standalone_draft_readback_bytes":34120,"standalone_draft_wall_ns":1337201174,"standalone_draft_gpu_ns":1180178518,"standalone_draft_command_buffer_count":290,"standalone_draft_compute_dispatch_count":56052,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,144,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[144,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[53,91,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[53,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":91,"learned_horizon_limited_cycle_count":91,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":709180470,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":580,"commits":580,"waits":580,"compute_encoders":580,"compute_dispatches":198435,"blit_encoders":0,"barriers":136388,"transient_allocations":0,"selector_dispatches":1595,"max_candidates":40,"compact_readback_bytes":92480,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":41472,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":7057,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":13920,"attention_partitions":55680,"attention_tokens":12369984,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":1761757492278} ]
+> ```python
+import re
+import unicodedata
+
+def count_normalized_words(filepath):
+  """Reads a note, normalizes words, and returns the count."""
+  with open(filepath, 'r', encoding='utf-8') as f:
+    text = f.read()
+  text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii') #Handle unicode
+  words = re.findall(r'\b\w+\b', text.lower()) #Extract words, lowercase
+  return len(words)
+```
+
+The function decodes UTF-8. Unicode characters are normalized and converted to ASCII (ignoring non-ASCII). Punctuation is removed by the `\w+` regex, which extracts alphanumeric sequences. Lowercasing ensures case-insensitive counting.
+[ Prompt: 69.2 t/s | Generation: 17.6 t/s | TTFT: 0.664848 s ]
+[ Detail: Evaluated: 46 | Cached: 1005 | Decoded: 179 | Prompt: 0.664848 s | Generation: 10.144785 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":179,"stop_reason":"stop_token","selected_token_hash":"df975a3b617dfd5d","decoded_tokens":179,"initial_cache_position":1005,"final_cache_position":1230,"evaluated_prompt_tokens":46,"reused_cache_tokens":1005,"decode_wall_ns":10224558389,"gpu_ns":9675310620,"selection_ns":399209,"proposer_ns":0,"generation_completion_ns":10226895250,"full_turn_ns":10895960500,"first_text_ns":749746042,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":107,"learned_accepted_edges":70,"learned_proposed_edges":107,"learned_numeric_refusals":0,"learned_draft_ns":941586132,"learned_draft_gpu_ns":823555600,"learned_target_gpu_ns":8629211648,"learned_cycle_ns":9993964674,"standalone_prefill_ns":69526458,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":42856,"standalone_draft_readback_bytes":24556,"standalone_draft_wall_ns":1020116139,"standalone_draft_gpu_ns":900338515,"standalone_draft_command_buffer_count":216,"standalone_draft_compute_dispatch_count":41918,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,107,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[107,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[37,70,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[37,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":70,"learned_horizon_limited_cycle_count":70,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":549247769,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":432,"commits":432,"waits":432,"compute_encoders":432,"compute_dispatches":148189,"blit_encoders":0,"barriers":101867,"transient_allocations":0,"selector_dispatches":1188,"max_candidates":40,"compact_readback_bytes":68800,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":30816,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":5244,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":10368,"attention_partitions":48384,"attention_tokens":10825480,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":1330408002186} ]
+> Okay, let's review and revise the `count_normalized_words` function, addressing edge cases.
+
+```python
+import re
+import unicodedata
+
+def count_normalized_words(filepath):
+  """Reads a note, normalizes words, and returns the count."""
+  try:
+    with open(filepath, 'r', encoding='utf-8') as f:
+      text = f.read()
+  except FileNotFoundError:
+    return 0  # Handle non-existent files
+
+  text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii') #Handle unicode
+  words = re.findall(r'\b\w+\b', text.lower()) #Extract words, lowercase
+
+  return len(set(words)) #Use a set to count unique words
+
+```
+
+**Changes & Explanation:**
+
+*   **FileNotFoundError Handling:** Added a `try...except` block to gracefully handle cases where the file doesn't exist. Returns 0 in this case.
+*   **Unique Word Counting:** Replaced `len(words)` with `len(set(words))` to count *unique* words, removing repeats.
+
+**Input/Output Examples:**
+
+1.  **Input (file 'note1.md'):** "The quick brown fox. The quick fox!"
+    **Output:** 4 (the, quick, brown, fox)
+
+2.  **Input (file 'note2.md'):** "你好世界 Hello World!"  (Contains Chinese characters)
+    **Output:** 3 (hello, world, 你好世界 - after ASCII conversion)
+
+3.  **Input (file 'note3.md'):** "" (Empty File)
+    **Output:** 0
+
+[ Prompt: 62.8 t/s | Generation: 18.9 t/s | TTFT: 0.668795 s ]
+[ Detail: Evaluated: 42 | Cached: 1230 | Decoded: 379 | Prompt: 0.668795 s | Generation: 20.029303 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":379,"stop_reason":"stop_token","selected_token_hash":"36aac7546862ae85","decoded_tokens":379,"initial_cache_position":1230,"final_cache_position":1651,"evaluated_prompt_tokens":42,"reused_cache_tokens":1230,"decode_wall_ns":20108074220,"gpu_ns":19090211009,"selection_ns":822627,"proposer_ns":0,"generation_completion_ns":20112266250,"full_turn_ns":20787584083,"first_text_ns":756101375,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":212,"learned_accepted_edges":165,"learned_proposed_edges":212,"learned_numeric_refusals":0,"learned_draft_ns":1901348589,"learned_draft_gpu_ns":1679269957,"learned_target_gpu_ns":17194672219,"learned_cycle_ns":19883908632,"standalone_prefill_ns":63387125,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":84800,"standalone_draft_readback_bytes":48472,"standalone_draft_wall_ns":1974432010,"standalone_draft_gpu_ns":1750240040,"standalone_draft_command_buffer_count":426,"standalone_draft_compute_dispatch_count":82028,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,212,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[212,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[47,165,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[47,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":165,"learned_horizon_limited_cycle_count":165,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":1017863211,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":852,"commits":852,"waits":852,"compute_encoders":852,"compute_dispatches":290779,"blit_encoders":0,"barriers":199832,"transient_allocations":0,"selector_dispatches":2343,"max_candidates":40,"compact_readback_bytes":136000,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":61056,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":10389,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":20448,"attention_partitions":95424,"attention_tokens":22448144,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":2817820036986} ]
+> ## Note Search App Implementation Checklist:
+
+**I. Core Functionality:**
+
+*   [ ] Implement `NoteImporter`: File scanning, reading, basic Markdown stripping.
+*   [ ] Implement `Index`: Word indexing logic.
+*   [ ] Implement `SearchEngine`: Query processing, note retrieval.
+*   [ ] Implement change tracking (timestamps).
+*   [ ] Implement checkpointing/recovery for index updates.
+
+**II. Error Handling:**
+
+*   [ ] Handle `FileNotFoundError` gracefully.
+*   [ ] Handle invalid UTF-8 encoding during import.
+
+**III. Testing (Critical):**
+
+1.  **Correct Indexing:** Verify indexing of a note with diverse punctuation and casing.
+2.  **Search Accuracy:** Ensure search returns *only* relevant notes for specific queries.
+3.  **Recovery Integrity:** Confirm index integrity after simulated interruption during update.
+
+**IV. Performance:**
+
+*   **Index Build Time:** Measure the time taken to initially index a folder with 100+ notes. (Aim for < 10 seconds).
+
+
+
+This checklist provides a roadmap for building and verifying the note search application. Prioritize correctness tests for a reliable application.
+[ Prompt: 60.8 t/s | Generation: 17.1 t/s | TTFT: 0.674607 s ]
+[ Detail: Evaluated: 41 | Cached: 1651 | Decoded: 252 | Prompt: 0.674607 s | Generation: 14.754921 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":252,"stop_reason":"stop_token","selected_token_hash":"353f8728dc413a89","decoded_tokens":252,"initial_cache_position":1651,"final_cache_position":1944,"evaluated_prompt_tokens":41,"reused_cache_tokens":1651,"decode_wall_ns":14834026699,"gpu_ns":14094267062,"selection_ns":474041,"proposer_ns":0,"generation_completion_ns":14836457042,"full_turn_ns":15516433209,"first_text_ns":762197375,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":156,"learned_accepted_edges":94,"learned_proposed_edges":156,"learned_numeric_refusals":0,"learned_draft_ns":1359866922,"learned_draft_gpu_ns":1201200921,"learned_target_gpu_ns":12676582560,"learned_cycle_ns":14609445826,"standalone_prefill_ns":62502708,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":62336,"standalone_draft_readback_bytes":37048,"standalone_draft_wall_ns":1431741754,"standalone_draft_gpu_ns":1270819337,"standalone_draft_command_buffer_count":314,"standalone_draft_compute_dispatch_count":60636,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,156,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[156,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[62,94,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[62,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":94,"learned_horizon_limited_cycle_count":94,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":739759637,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":628,"commits":628,"waits":628,"compute_encoders":628,"compute_dispatches":214731,"blit_encoders":0,"barriers":147584,"transient_allocations":0,"selector_dispatches":1727,"max_candidates":40,"compact_readback_bytes":100160,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":44928,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":7645,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":15072,"attention_partitions":70336,"attention_tokens":17435048,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":1873313394888} ]
+> 

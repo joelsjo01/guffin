@@ -1,0 +1,62 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> Subject: Quarterly Financial Report - Feedback Request
+
+Dear [Supervisor's Name],
+
+I've completed the Quarterly Financial Report and would greatly appreciate your feedback.
+
+Specifically, I'd welcome your thoughts on the data analysis, presentation style, and clarity of the conclusions drawn.
+
+Please let me know when you might have a chance to review it.
+
+Thank you,
+
+[Your Name]
+
+[ Prompt: 91.6 t/s | Generation: 20.6 t/s | TTFT: 0.611678 s ]
+[ Detail: Evaluated: 56 | Cached: 0 | Decoded: 82 | Prompt: 0.611678 s | Generation: 3.978279 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":82,"stop_reason":"stop_token","selected_token_hash":"0bca8c9179867ffe","decoded_tokens":82,"initial_cache_position":0,"final_cache_position":138,"evaluated_prompt_tokens":56,"reused_cache_tokens":0,"decode_wall_ns":3978415408,"gpu_ns":3908124119,"selection_ns":45250,"proposer_ns":0,"generation_completion_ns":3979435334,"full_turn_ns":4591443250,"first_text_ns":687458125,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":44,"learned_accepted_edges":37,"learned_proposed_edges":44,"learned_numeric_refusals":0,"learned_draft_ns":351817791,"learned_draft_gpu_ns":328429122,"learned_target_gpu_ns":3427081290,"learned_cycle_ns":3824661538,"standalone_prefill_ns":78329416,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":17804,"standalone_draft_readback_bytes":9812,"standalone_draft_wall_ns":430151953,"standalone_draft_gpu_ns":406386121,"standalone_draft_command_buffer_count":89,"standalone_draft_compute_dispatch_count":17021,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,44,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[44,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[7,37,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":37,"learned_horizon_limited_cycle_count":36,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":70291289,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":178,"commits":178,"waits":178,"compute_encoders":178,"compute_dispatches":58731,"blit_encoders":0,"barriers":39652,"transient_allocations":0,"selector_dispatches":495,"max_candidates":40,"compact_readback_bytes":28480,"q4_decode":288,"q8_decode":0,"q8_width_two":0,"q4_small_batch":12672,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":48,"q6_small_batch":2157,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":0,"output_elided_weight_bytes":0,"attention_dispatches":4272,"attention_partitions":4272,"attention_tokens":412080,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":609838934268} ]
+> Okay, let's evaluate and critique my previous response.
+
+**Strengths:**
+
+* **Concise and Direct:** It gets straight to the point, which is what a supervisor likely appreciates. No unnecessary fluff.
+* **Specific Feedback Requests:** Asking for feedback on data analysis, presentation style, and clarity of conclusions is excellent. It guides the supervisor's review and ensures focused feedback. This avoids a vague "Can you review this?" request.
+* **Professional Tone:** The language is polite and respectful.
+* **Clear Subject Line:**  The subject line is informative and easy to understand.
+* **Offers Availability:** Implicitly, by asking when they can review, it shows willingness to accommodate their schedule.
+
+**Areas for Potential Improvement:**
+
+* **Attachment Mention:** It *doesn't* explicitly mention that the report is attached. While it's implied, directly stating "The report is attached for your review" removes any ambiguity.
+* **Slightly More Context (Optional):** Depending on the supervisor's level of involvement and familiarity with the report's scope, a *very brief* sentence about the report's purpose could be helpful. Something like, "This report summarizes our financial performance for Q[Quarter Number]."  However, this is truly optional and depends on the context.  Too much context defeats the purpose of brevity.
+* **Format/Platform:** Consider how the report was shared. If it's a link, instead of "attached," you'd say "You can find the report at [link]."
+
+
+
+**Revised Response (incorporating improvements):**
+
+Subject: Quarterly Financial Report - Feedback Request
+
+Dear [Supervisor's Name],
+
+I've completed the Quarterly Financial Report, which summarizes our financial performance for Q[Quarter Number]. The report is attached for your review.
+
+I would greatly appreciate your feedback, specifically on the data analysis, presentation style, and clarity of the conclusions drawn.
+
+Please let me know when you might have a chance to review it.
+
+Thank you,
+
+[Your Name]
+
+
+
+**Overall:** The original response was good. The revised version just adds a small layer of clarity and completeness. The degree of improvement depends on the specific working relationship and supervisor preferences.
+[ Prompt: 46.8 t/s | Generation: 18.7 t/s | TTFT: 0.427527 s ]
+[ Detail: Evaluated: 20 | Cached: 138 | Decoded: 462 | Prompt: 0.427527 s | Generation: 24.701817 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":462,"stop_reason":"stop_token","selected_token_hash":"bd68cbd3080a4ca7","decoded_tokens":462,"initial_cache_position":138,"final_cache_position":620,"evaluated_prompt_tokens":20,"reused_cache_tokens":138,"decode_wall_ns":24779967545,"gpu_ns":24336694971,"selection_ns":180704,"proposer_ns":0,"generation_completion_ns":24781156375,"full_turn_ns":25210366542,"first_text_ns":505578084,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":279,"learned_accepted_edges":181,"learned_proposed_edges":279,"learned_numeric_refusals":0,"learned_draft_ns":2310913212,"learned_draft_gpu_ns":2163171009,"learned_target_gpu_ns":21987842297,"learned_cycle_ns":24591850710,"standalone_prefill_ns":33363417,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":111312,"standalone_draft_readback_bytes":66060,"standalone_draft_wall_ns":2353033213,"standalone_draft_gpu_ns":2204370758,"standalone_draft_command_buffer_count":560,"standalone_draft_compute_dispatch_count":107304,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,279,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[279,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[98,181,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[98,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":181,"learned_horizon_limited_cycle_count":181,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":443272574,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1120,"commits":1120,"waits":1120,"compute_encoders":1120,"compute_dispatches":378471,"blit_encoders":0,"barriers":258959,"transient_allocations":0,"selector_dispatches":3080,"max_candidates":40,"compact_readback_bytes":178880,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":80352,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":13672,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":26880,"attention_partitions":59328,"attention_tokens":10334880,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":3435096031428} ]
+> 

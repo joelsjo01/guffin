@@ -1,0 +1,90 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Could you write a captivating short story beginning with the sentence: The old abandoned house at the end of the street held a secret that no one had ever discovered.
+[0mThe old abandoned house at the end of the street held a secret that no one had ever discovered. Locals called it Blackwood Manor, whispering tales of a heartbroken heiress, a tragic fire, and a family vanished without a trace a century ago. Kids dared each other to touch the rusting gate, but no one ever ventured closer than the overgrown lawn. I, Elias Thorne, aspiring journalist and resident skeptic, considered it a perfect source for a sensational, albeit likely fabricated, local legend piece.
+
+I’d been watching the house for weeks, sketching its decaying grandeur in my notebook, cataloging the creeping ivy and the shattered windows. Finally, spurred on by a particularly dull assignment at the newspaper, I decided to cross the threshold.
+
+The air inside was thick with the scent of damp earth and something else, something indefinably sweet and melancholic. Dust motes danced in the slivers of light that pierced the boarded-up windows. Cobwebs clung to everything, draping the furniture like spectral shrouds. I expected decay, ruin, emptiness. What I didn’t expect was the music.
+
+Faint, ethereal, it drifted from somewhere deeper within the house. A piano melody, mournful and beautiful, like a forgotten lullaby. My skepticism crumbled. I followed the sound, navigating through collapsed plaster and fallen debris, until I reached a hidden door behind a crumbling tapestry.
+
+The room beyond was a revelation. Unlike the rest of the house, it was impeccably preserved. A grand piano sat in the center, bathed in the soft glow of a single, perpetually lit gas lamp. And sitting at the piano, her fingers dancing across the keys, was a woman.
+
+She was young, impossibly so, with long, raven hair cascading down her shoulders and eyes the color of twilight. She didn’t acknowledge my presence, her focus entirely on the music. I stood frozen, my breath caught in my throat.
+
+"Who... who are you?" I finally managed to stammer.
+
+She stopped playing, her gaze turning towards me, filled with an almost unbearable sadness. "I am Isolde," she whispered, her voice like the chime of distant bells. “I’ve been waiting.”
+
+"Waiting for what?"
+
+"For someone to hear my song," she replied, her fingers hovering over the keys. "The house… it remembers. It holds the echoes of everything that has been lost. The music… it’s the key.”
+
+She explained, in a voice that seemed to drift from another era, that she wasn't a ghost, not exactly. She was a resonance, a lingering echo of the Blackwood family's joy and sorrow, bound to the house by the music. The fire hadn’t destroyed them; it had trapped them, their essence woven into the very fabric of the manor.
+
+“The secret,” she said, her eyes glistening, "is not what happened here, but what continues to happen. The house doesn't want to be forgotten. It wants to be remembered through the music.”
+
+She invited me to sit beside her at the piano. Hesitantly, I obeyed, and she placed my fingers on the keys. As we played together, the room seemed to shimmer, and I saw fleeting images: a laughing family gathered around a Christmas tree, a young man proposing to Isolde beneath a blossoming willow, a devastating fire consuming the house in a terrifying blaze.
+
+When the final note faded, Isolde smiled, a genuine, heartbreakingly beautiful smile. “You’ve helped me,” she said. “You've ensured that we won't be forgotten.”
+
+Then, as suddenly as she appeared, she began to fade, dissolving into the lamplight, her form shimmering like heat haze. The music stopped.
+
+I was alone in the room, the silence deafening. I stumbled out of the house, back into the twilight, the scent of damp earth and that indefinable sweetness clinging to my clothes.
+
+I wrote my story, of course. But I didn't sensationalize it. I wrote about the music, about Isolde, about the echoes of a family lost but not truly gone. The local paper published it, and the legend of Blackwood Manor shifted. No longer was it a place of fear and tragedy, but a place of beauty, a place of memory. 
+
+And sometimes, when the wind is just right, I can still hear it – the faint, ethereal melody drifting from the old abandoned house at the end of the street, a secret finally shared, a song finally remembered.
+[35m
+[ Prompt: 50.5 t/s | Generation: 13.0 t/s ]
+[0m[1m[32m
+> Now, do the same task again but only use four-word sentences.
+[0mThe old house held secrets. No one ever found them. Locals called it Blackwood Manor. Stories whispered of loss and fire. Kids feared the rusting gate. I, Elias Thorne, observed closely. A sensational story seemed possible.
+
+I watched for weeks now. Sketching decay in my book. Ivy crept over windows. The lawn grew wildly. I crossed the threshold then. Dust filled the stale air. A sweet, sad scent lingered. I expected ruin and silence. Music floated from within.
+
+A piano melody drifted softly. It sounded mournful and lost. I followed the haunting sound. Behind tapestry, a hidden door. The room shone unexpectedly bright. A grand piano sat proudly. A woman played gently there. She didn't notice my presence.
+
+"Who are you?" I whispered softly. “I am Isolde,” she replied. "I've waited patiently here.” "Waiting for what?" I questioned her. "For someone to hear song.” The house remembers everything lost. Music holds the vital key. 
+
+She explained a strange truth. The fire didn't destroy them. It trapped their very essence. They’re woven into the house. "The secret is what continues." The house wants to be remembered. Music ensures they won't fade.
+
+She invited me to sit down. Hesitantly, I placed my hands. We played the haunting melody. Visions shimmered all around. A laughing family gathered close. A proposal under a willow. A fire consumed everything.
+
+The final note softly died. “You’ve helped me,” she smiled. “We won't be forgotten now.” She faded into lamplight. Her form shimmered and vanished. Silence filled the empty room.
+
+I stumbled back outside quickly. The scent clung to my clothes. I wrote the story carefully. I focused on the music now. The paper published it widely. Blackwood Manor gained new meaning.
+
+Sometimes I hear the music. It drifts softly on the breeze. A secret finally revealed then. The song remains, beautifully.
+[35m
+[ Prompt: 114.8 t/s | Generation: 12.6 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

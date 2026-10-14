@@ -1,0 +1,252 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> ```python
+import os
+import re
+from collections import Counter
+
+def get_top_words(directory, top_n=5):
+  """
+  Reads all text files under a directory and returns the top N words 
+  with the most number of occurrences.
+
+  Args:
+    directory: The path to the directory containing the text files.
+    top_n: The number of top words to return (default is 5).
+
+  Returns:
+    A list of tuples, where each tuple contains a word and its count, 
+    sorted in descending order of count.  Returns an empty list if no 
+    files are found or an error occurs.
+  """
+
+  all_words = []
+
+  try:
+    for filename in os.listdir(directory):
+      if filename.endswith(".txt"):
+        filepath = os.path.join(directory, filename)
+        with open(filepath, 'r', encoding='utf-8') as f: # specify encoding
+          text = f.read()
+          # Remove punctuation and convert to lowercase
+          text = re.sub(r'[^\w\s]', '', text).lower()
+          words = text.split()
+          all_words.extend(words)
+
+    word_counts = Counter(all_words)
+    top_words = word_counts.most_common(top_n)
+    return top_words
+
+  except FileNotFoundError:
+    print(f"Error: Directory not found: {directory}")
+    return []
+  except Exception as e:
+    print(f"An error occurred: {e}")
+    return []
+
+# Example usage:
+if __name__ == "__main__":
+  # Create a sample directory and text files for testing
+  if not os.path.exists("sample_texts"):
+      os.makedirs("sample_texts")
+
+  with open("sample_texts/file1.txt", "w", encoding="utf-8") as f:
+      f.write("This is a sample file. This file has some words.\n")
+      f.write("Sample words are repeated.\n")
+  with open("sample_texts/file2.txt", "w", encoding="utf-8") as f:
+      f.write("Another file with different words. Another file.\n")
+      f.write("This is a test.\n")
+  
+  directory_path = "sample_texts"
+  top_5_words = get_top_words(directory_path)
+
+  if top_5_words:
+    print("Top 5 words:")
+    for word, count in top_5_words:
+      print(f"{word}: {count}")
+  else:
+    print("No words found or an error occurred.")
+
+  # Cleanup: Remove the sample directory (optional)
+  # import shutil
+  # shutil.rmtree("sample_texts")
+```
+
+Key improvements and explanations:
+
+* **Error Handling:**  The `try...except` block now specifically handles `FileNotFoundError` (if the directory doesn't exist) and a generic `Exception` for any other potential issues during file reading or processing.  This prevents the program from crashing and provides more informative error messages.  Returning an empty list `[]` in case of error allows the calling code to handle the error gracefully.
+* **Encoding Specification:** The `open()` function now explicitly specifies `encoding='utf-8'`.  This is *crucial* for handling text files that contain characters outside of the standard ASCII range.  Without it, you'll likely encounter `UnicodeDecodeError` exceptions.  UTF-8 is a very common and widely compatible encoding.
+* **Regular Expression for Punctuation Removal:** Uses `re.sub(r'[^\w\s]', '', text).lower()` to remove punctuation and convert the text to lowercase in a more robust way.  This ensures that punctuation doesn't interfere with word counting (e.g., "word." and "word" are treated as the same). `[^\w\s]` matches any character that is *not* a word character (alphanumeric and underscore) or whitespace.
+* **Clearer Variable Names:**  More descriptive variable names like `all_words`, `word_counts`, and `top_words` improve readability.
+* **Docstring:** A complete docstring explains the function's purpose, arguments, and return value.
+* **Example Usage with Test Files:**  The `if __name__ == "__main__":` block now creates a sample directory (`sample_texts`) and two text files (`file1.txt`, `file2.txt`) for testing.  This allows you to run the program directly and see it in action without needing to create your own files. Includes optional cleanup using `shutil.rmtree` to remove the test directory after execution.
+* **Handles Empty Files/Directories:** If the directory is empty or contains no `.txt` files, the program will gracefully return an empty list.
+* **`Counter` for Efficient Counting:** The `collections.Counter` class is used, which is highly optimized for counting occurrences of items in a list.
+* **Returns a List of Tuples:** The function returns a list of tuples `(word, count)`, which is a standard way to represent word counts.
+* **More Robust File Path Handling:** Uses `os.path.join()` to construct file paths.  This ensures that the code works correctly on different operating systems (Windows, macOS, Linux) that use different path separators.
+* **Concise Code:** Streamlined the code for better readability.
+
+How to run the code:
+
+1. **Save:** Save the code as a Python file (e.g., `word_counter.py`).
+2. **Run:**  Execute the file from your terminal: `python word_counter.py`
+
+The code will create a `sample_texts` directory with two files, analyze their content, print the top 5 words, and (optionally) clean up the test directory.  You can then modify the `directory_path` variable to point to the directory containing your actual text files.
+
+[ Prompt: 58.6 t/s | Generation: 20.5 t/s | TTFT: 0.597445 s ]
+[ Detail: Evaluated: 35 | Cached: 0 | Decoded: 1325 | Prompt: 0.597445 s | Generation: 64.550303 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":1325,"stop_reason":"stop_token","selected_token_hash":"2fd6e67ad3fe5430","decoded_tokens":1325,"initial_cache_position":0,"final_cache_position":1360,"evaluated_prompt_tokens":35,"reused_cache_tokens":0,"decode_wall_ns":64549820390,"gpu_ns":63357904830,"selection_ns":562448,"proposer_ns":0,"generation_completion_ns":64551449208,"full_turn_ns":65149143708,"first_text_ns":673082542,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":717,"learned_accepted_edges":607,"learned_proposed_edges":717,"learned_numeric_refusals":0,"learned_draft_ns":6248252530,"learned_draft_gpu_ns":5848331696,"learned_target_gpu_ns":57385458135,"learned_cycle_ns":64424609836,"standalone_prefill_ns":49826833,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":286508,"standalone_draft_readback_bytes":164496,"standalone_draft_wall_ns":6298102750,"standalone_draft_gpu_ns":5897797945,"standalone_draft_command_buffer_count":1435,"standalone_draft_compute_dispatch_count":273474,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,717,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[717,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[110,607,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[110,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":607,"learned_horizon_limited_cycle_count":606,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":1191915560,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":2870,"commits":2870,"waits":2870,"compute_encoders":2870,"compute_dispatches":968528,"blit_encoders":0,"barriers":663424,"transient_allocations":0,"selector_dispatches":7898,"max_candidates":40,"compact_readback_bytes":459200,"q4_decode":288,"q8_decode":0,"q8_width_two":0,"q4_small_batch":206496,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":48,"q6_small_batch":35134,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":0,"output_elided_weight_bytes":0,"attention_dispatches":68880,"attention_partitions":227024,"attention_tokens":45886928,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":9854104730550} ]
+> ```python
+import os
+import re
+from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+
+def get_top_words(directory, top_n=5):
+  """
+  Reads all text files under a directory and returns the top N words 
+  with the most number of occurrences.
+
+  Args:
+    directory: The path to the directory containing the text files.
+    top_n: The number of top words to return (default is 5).
+
+  Returns:
+    A list of tuples, where each tuple contains a word and its count, 
+    sorted in descending order of count.  Returns an empty list if no 
+    files are found or an error occurs.
+  """
+
+  all_words = []
+
+  try:
+    for filename in os.listdir(directory):
+      if filename.endswith(".txt"):
+        filepath = os.path.join(directory, filename)
+        with open(filepath, 'r', encoding='utf-8') as f: # specify encoding
+          text = f.read()
+          # Remove punctuation and convert to lowercase
+          text = re.sub(r'[^\w\s]', '', text).lower()
+          words = text.split()
+          all_words.extend(words)
+
+    word_counts = Counter(all_words)
+    top_words = word_counts.most_common(top_n)
+    return top_words
+
+  except FileNotFoundError:
+    print(f"Error: Directory not found: {directory}")
+    return []
+  except Exception as e:
+    print(f"An error occurred: {e}")
+    return []
+
+
+def process_file(filepath):
+  """Processes a single file and returns a Counter of word counts."""
+  try:
+    with open(filepath, 'r', encoding='utf-8') as f:
+      text = f.read()
+      text = re.sub(r'[^\w\s]', '', text).lower()
+      words = text.split()
+      return Counter(words)
+  except Exception as e:
+    print(f"Error processing file {filepath}: {e}")
+    return Counter()  # Return an empty Counter in case of error
+
+
+def get_top_words_parallel(directory, top_n=5, num_processes=None):
+  """
+  Reads all text files under a directory and returns the top N words 
+  with the most number of occurrences, using parallel processing.
+
+  Args:
+    directory: The path to the directory containing the text files.
+    top_n: The number of top words to return (default is 5).
+    num_processes: The number of processes to use (defaults to number of CPU cores).
+
+  Returns:
+    A list of tuples, where each tuple contains a word and its count, 
+    sorted in descending order of count.  Returns an empty list if no 
+    files are found or an error occurs.
+  """
+
+  txt_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(".txt")]
+  if not txt_files:
+    print("No .txt files found in the directory.")
+    return []
+
+  if num_processes is None:
+    num_processes = os.cpu_count()
+
+  with ProcessPoolExecutor(max_workers=num_processes) as executor:
+    file_counts = list(executor.map(process_file, txt_files))
+
+  # Combine the word counts from all files
+  combined_counts = Counter()
+  for count in file_counts:
+    combined_counts.update(count)
+
+  top_words = combined_counts.most_common(top_n)
+  return top_words
+
+
+
+# Example usage:
+if __name__ == "__main__":
+  # Create a sample directory and text files for testing
+  if not os.path.exists("sample_texts"):
+      os.makedirs("sample_texts")
+
+  with open("sample_texts/file1.txt", "w", encoding="utf-8") as f:
+      f.write("This is a sample file. This file has some words.\n")
+      f.write("Sample words are repeated.\n")
+  with open("sample_texts/file2.txt", "w", encoding="utf-8") as f:
+      f.write("Another file with different words. Another file.\n")
+      f.write("This is a test.\n")
+
+  directory_path = "sample_texts"
+  top_5_words_parallel = get_top_words_parallel(directory_path)
+
+  if top_5_words_parallel:
+    print("Top 5 words (parallel):")
+    for word, count in top_5_words_parallel:
+      print(f"{word}: {count}")
+  else:
+    print("No words found or an error occurred.")
+
+  # Cleanup: Remove the sample directory (optional)
+  # import shutil
+  # shutil.rmtree("sample_texts")
+```
+
+Key changes and explanations for parallelization:
+
+1. **`process_file(filepath)` Function:** This new function encapsulates the logic for reading and processing a *single* file.  This is the function that will be executed in parallel. It returns a `Counter` object containing the word counts for that file.  It also includes error handling for individual file processing.
+
+2. **`get_top_words_parallel(directory, top_n=5, num_processes=None)` Function:** This is the parallelized version of the original function.
+   - It first constructs a list of full filepaths for all `.txt` files in the directory.
+   - `num_processes`:  Allows you to specify the number of processes to use. If `None`, it defaults to the number of CPU cores on your machine using `os.cpu_count()`.
+   - `ProcessPoolExecutor`: Creates a pool of worker processes. The `max_workers` argument specifies the maximum number of processes in the pool.
+   - `executor.map(process_file, txt_files)`: This is the core of the parallelization.  `executor.map()` applies the `process_file` function to each filepath in the `txt_files` list.  Each call to `process_file` is executed in a separate process from the pool. `executor.map` returns an iterator that yields the results of each process.
+   - `list(...)`:  Converts the iterator returned by `executor.map` into a list.  This forces the execution of all the parallel tasks.
+   - **Combining Results:** The results (the `Counter` objects from each file) are then combined into a single `Counter` object using `combined_counts.update(count)`.  This sums the counts for each word across all files.
+   - Finally, `combined_counts.most_common(top_n)` is called to get the top N words from the combined counts.
+
+3. **Error Handling within `process_file`:**  The `process_file` function now has its own `try...except` block to handle potential errors during file reading or processing. This prevents one problematic file from crashing the entire parallel processing job.  It returns an empty `Counter` in case of error.
+
+4. **Clearer Structure:** The code is organized into functions to improve readability and maintainability.
+
+**How to run the parallelized code:**
+
+1. **Save:** Save the code as a Python file (e.g., `word_counter_parallel.py`).
+2. **Run:** Execute the file from your terminal: `python word_counter_parallel.py`
+
+The parallelized version will split the file processing among multiple processes, potentially reducing the overall execution time, especially when dealing with a large number of files or large files.  Experiment with the `num_processes` argument to find the optimal number of processes for your system.  Typically, setting it to the number of CPU cores will provide the best performance.  Note that the overhead of creating and managing processes can sometimes outweigh the benefits of parallelism for very small tasks, so it's important to benchmark and experiment.
+
+[ Prompt: 45.6 t/s | Generation: 19.7 t/s | TTFT: 0.328732 s ]
+[ Detail: Evaluated: 15 | Cached: 1360 | Decoded: 1797 | Prompt: 0.328732 s | Generation: 91.176828 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":1797,"stop_reason":"stop_token","selected_token_hash":"8ab7a5e97b9c4210","decoded_tokens":1797,"initial_cache_position":1360,"final_cache_position":3172,"evaluated_prompt_tokens":15,"reused_cache_tokens":1360,"decode_wall_ns":91176146325,"gpu_ns":89558839227,"selection_ns":759392,"proposer_ns":0,"generation_completion_ns":91177975667,"full_turn_ns":91515428292,"first_text_ns":415990333,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":968,"learned_accepted_edges":828,"learned_proposed_edges":968,"learned_numeric_refusals":0,"learned_draft_ns":8803741828,"learned_draft_gpu_ns":8261381371,"learned_target_gpu_ns":81191305065,"learned_cycle_ns":91068779770,"standalone_prefill_ns":28827167,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":386712,"standalone_draft_readback_bytes":218580,"standalone_draft_wall_ns":8832599383,"standalone_draft_gpu_ns":8289801746,"standalone_draft_command_buffer_count":1937,"standalone_draft_compute_dispatch_count":370472,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,968,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[968,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[140,828,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[140,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":828,"learned_horizon_limited_cycle_count":827,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":1617307098,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":3874,"commits":3874,"waits":3874,"compute_encoders":3874,"compute_dispatches":1316166,"blit_encoders":0,"barriers":904297,"transient_allocations":0,"selector_dispatches":10659,"max_candidates":40,"compact_readback_bytes":619840,"q4_decode":288,"q8_decode":0,"q8_width_two":0,"q4_small_batch":278784,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":48,"q6_small_batch":47433,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":0,"output_elided_weight_bytes":0,"attention_dispatches":92976,"attention_partitions":513184,"attention_tokens":114963488,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":13364397132678} ]
+> 

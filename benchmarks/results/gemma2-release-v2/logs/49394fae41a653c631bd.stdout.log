@@ -1,0 +1,47 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ... Here's how to calculate the total cost:
+
+* **Sci-fi novels:** 5 books * $20/book = $100
+* **History books:** 3 books * $30/book = $90
+* **Philosophy books:** 2 books * $45/book = $90
+
+* **Total cost:** $100 + $90 + $90 = $280
+
+
+Benjamin spent a total of **$280** at the bookstore.
+[ Prompt: 133.5 t/s | Generation: 16.9 t/s | TTFT: 0.584402 s ]
+[ Detail: Evaluated: 78 | Cached: 0 | Decoded: 110 | Prompt: 0.584402 s | Generation: 6.523313 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":110,"stop_reason":"stop_token","selected_token_hash":"94591dd76cacead6","decoded_tokens":110,"initial_cache_position":0,"final_cache_position":188,"evaluated_prompt_tokens":78,"reused_cache_tokens":0,"decode_wall_ns":6571757125,"gpu_ns":6507636357,"selection_ns":390923,"proposer_ns":428793,"generation_completion_ns":6573631625,"full_turn_ns":7159040917,"first_text_ns":646535709,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":6,"speculative_matches":4,"speculative_misses":2,"speculative_fallbacks":99,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"2","support":"2","confidence":"1","cycles":4,"matches":3},{"match_length":"2","support":"3","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":64120768,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":108,"commits":108,"waits":108,"compute_encoders":108,"compute_dispatches":68839,"blit_encoders":0,"barriers":50338,"transient_allocations":0,"selector_dispatches":1155,"max_candidates":40,"compact_readback_bytes":35520,"q4_decode":27300,"q8_decode":105,"q8_width_two":0,"q4_small_batch":1638,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":2100,"q6_small_batch":126,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":4704,"attention_partitions":4704,"attention_tokens":631008,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":639960817664} ]
+> Here's how to calculate Benjamin's total revenue:
+
+**1. Calculate the markup amount for each type of book:**
+
+* **Sci-fi novels:** $20 * 0.25 = $5 markup per book
+* **History books:** $30 * 0.25 = $7.50 markup per book
+* **Philosophy books:** $45 * 0.25 = $11.25 markup per book
+
+**2. Calculate the selling price for each type of book:**
+
+* **Sci-fi novels:** $20 + $5 = $25 per book
+* **History books:** $30 + $7.50 = $37.50 per book
+* **Philosophy books:** $45 + $11.25 = $56.25 per book
+
+**3. Calculate the total revenue for each type of book:**
+
+* **Sci-fi novels:** 5 books * $25/book = $125
+* **History books:** 3 books * $37.50/book = $112.50
+* **Philosophy books:** 2 books * $56.25/book = $112.50
+
+**4. Calculate the total revenue:**
+
+* **Total revenue:** $125 + $112.50 + $112.50 = $350
+
+
+
+Benjamin would make a total revenue of **$350** if he sold all the books at a 25% markup.
+[ Prompt: 107.4 t/s | Generation: 18.7 t/s | TTFT: 0.437768 s ]
+[ Detail: Evaluated: 47 | Cached: 188 | Decoded: 338 | Prompt: 0.437768 s | Generation: 18.061936 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":338,"stop_reason":"stop_token","selected_token_hash":"21c2377da6b359c3","decoded_tokens":338,"initial_cache_position":188,"final_cache_position":573,"evaluated_prompt_tokens":47,"reused_cache_tokens":188,"decode_wall_ns":18107131783,"gpu_ns":17930175385,"selection_ns":1162171,"proposer_ns":2765706,"generation_completion_ns":18113556166,"full_turn_ns":18554529250,"first_text_ns":503437292,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":85,"speculative_matches":62,"speculative_misses":23,"speculative_fallbacks":190,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":6,"matches":2},{"match_length":"2","support":"2","confidence":"1","cycles":18,"matches":14},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":2,"matches":2},{"match_length":"2","support":"3","confidence":"1","cycles":12,"matches":12},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":5,"matches":0},{"match_length":"2","support":"4+","confidence":"1","cycles":10,"matches":9},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":4,"matches":0},{"match_length":"3-4","support":"2","confidence":"1","cycles":11,"matches":10},{"match_length":"3-4","support":"3","confidence":"1","cycles":6,"matches":5},{"match_length":"5-8","support":"2","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"5-8","support":"2","confidence":"1","cycles":5,"matches":5},{"match_length":"5-8","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"9-16","support":"2","confidence":"1","cycles":3,"matches":2}],"wall_minus_gpu_ns":176956398,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":299,"commits":299,"waits":299,"compute_encoders":299,"compute_dispatches":196547,"blit_encoders":0,"barriers":141798,"transient_allocations":0,"selector_dispatches":3025,"max_candidates":40,"compact_readback_bytes":115200,"q4_decode":52143,"q8_decode":275,"q8_width_two":0,"q4_small_batch":23205,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":4011,"q6_small_batch":1785,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":15162,"attention_partitions":34776,"attention_tokens":6156948,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":1968445681664} ]
+> 

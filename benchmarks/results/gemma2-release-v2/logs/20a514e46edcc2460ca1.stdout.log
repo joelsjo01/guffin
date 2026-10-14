@@ -1,0 +1,95 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ## Guffin Project Analysis
+
+Based on the provided README.md and ENGINE_PRINCIPLES.md documents, here's a breakdown of Guffin's architecture, boundary between production execution and experimental evidence, and key correctness contracts:
+
+**Architecture:**
+
+- **C++20 and Metal:** Guffin is built on C++20 and leverages Apple's Metal GPU API for native inference on macOS.
+- **Modular Design:** It follows a modular architecture with distinct components for the CLI, session management, prepared plans, target and drafter execution, sampling, and caching.
+- **Native Inference:** Guffin performs inference entirely on the device, eliminating dependencies on external Python environments or network connections.
+- **GGUF Integration:** It utilizes the GGUF (General-Purpose GPU Unified Fusion) format for model loading and tokenization, integrating with existing Gemma models.
+- **Speculation:** Guffin incorporates a speculative decoding mechanism (H1) to potentially speed up inference by preemptively proposing tokens.
+
+**Production Execution vs. Experimental Evidence:**
+
+- **Production Path:** The core of Guffin's design focuses on the "production path" - efficient and reliable inference execution. This path is carefully documented and tested for correctness and performance.
+- **Experimental Evidence:**  The project emphasizes rigorous testing and benchmarking to evaluate the effectiveness of various optimizations and architectural choices. 
+
+    - **Numerical Validation:**  Extensive numerical tests verify the correctness of core calculations, ensuring accuracy and avoiding subtle bugs.
+    - **Microbenchmarks:**  Targeted benchmarks measure specific components and operations to understand performance bottlenecks and guide optimization efforts.
+    - **Release Benchmarks:**  Benchmarks on representative inputs measure the overall inference speed and efficiency of the system.
+
+- **Clear Separation:** The separation is maintained by:
+
+    -  Explicitly documented assumptions and boundaries for each component.
+    -   Independent numerical references and fault injection techniques used for testing, but not integrated into the core execution path.
+    -  A focus on measuring and documenting the impact of changes on the "real" production performance.
+
+**Key Correctness Contracts:**
+
+The README highlights three crucial correctness contracts:
+
+1. **Lossless Probability Correction:**  The speculative decoding mechanism (H1) must preserve the original target probability distribution, ensuring the generated text remains consistent with the model's intended output. This is validated through analytical tests and careful implementation.
+2. **Packed Projections and Fused Sums:**  The engine must correctly handle packed weight projections and fused activation sums, ensuring efficient memory utilization and accurate calculations.  Metal numerical tests verify the correctness of these operations.
+3. **Target Equations and Cache Management:** The core target execution logic must adhere to the Gemma 3 model's equations and manage local caches correctly. Tests ensure that the target calculations are accurate and that cache operations are consistent.
+
+ **Limitations:**
+
+- **macOS Only:** Guffin is currently designed for macOS and M4 chip architecture.
+- **Limited Model Support:** The project primarily supports Gemma 3 and 2 models with limited support for other models.
+- **Benchmarking Still Pending:** While the README outlines performance targets, release benchmarks and comparisons to other inference engines are not yet available.
+
+
+
+**Overall:**
+
+Guffin presents a well-structured and promising approach to native inference on macOS. Its modular design, emphasis on correctness through rigorous testing, and focus on performance optimization make it a valuable contribution to the open-source machine learning community.  
+
+
+
+[ Prompt: 134.2 t/s | Generation: 13.2 t/s | TTFT: 34.349855 s ]
+[ Detail: Evaluated: 4611 | Cached: 0 | Decoded: 718 | Prompt: 34.349855 s | Generation: 54.481417 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":718,"stop_reason":"stop_token","selected_token_hash":"e548dadbe831cdb8","decoded_tokens":718,"initial_cache_position":0,"final_cache_position":5329,"evaluated_prompt_tokens":4611,"reused_cache_tokens":0,"decode_wall_ns":54509405830,"gpu_ns":54072252314,"selection_ns":2636134,"proposer_ns":28941382,"generation_completion_ns":54547930959,"full_turn_ns":88903900209,"first_text_ns":34433597042,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":30,"speculative_matches":16,"speculative_misses":14,"speculative_fallbacks":671,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":4,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":5,"matches":3},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"2","support":"3","confidence":"1","cycles":3,"matches":2},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":13,"matches":7},{"match_length":"3-4","support":"2","confidence":"1","cycles":2,"matches":1},{"match_length":"3-4","support":"3","confidence":"1","cycles":2,"matches":2}],"wall_minus_gpu_ns":437153516,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":716,"commits":716,"waits":716,"compute_encoders":716,"compute_dispatches":484667,"blit_encoders":0,"barriers":362922,"transient_allocations":0,"selector_dispatches":7711,"max_candidates":40,"compact_readback_bytes":233920,"q4_decode":183456,"q8_decode":701,"q8_width_two":0,"q4_small_batch":8190,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":14112,"q6_small_batch":630,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":30744,"attention_partitions":737856,"attention_tokens":139383279,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":4182587121664} ]
+> ##  Guffin Contributor Checklist: Sampling & Cache Changes
+
+**Before Committing:**
+
+**1. Understand the Contract:**
+
+- **Read `ENGINE_PRINCIPLES.md`:**  Focus on ownership, layout, lifetime, synchronization, and correctness invariants for tensors, buffers, and caches.
+- **Review `README.md`:**  Especially the sections on lossless sampling, packed projections, and target equations.
+
+**2. Automated Correctness Checks:**
+
+- **Run Unit Tests:** Ensure your changes pass all existing tests in `tests/engine/` and `tests/tensor/`.
+
+- **Targeted Numerical Tests:**
+
+    - For sampling: `tests/engine/lossless_sampling_tests.cpp` 
+    - For projections & sums: `tests/tensor/gemma3_metal_tests.cpp`
+    - For cache correctness: `tests/engine/gemma2_metal_plan_tests.cpp`
+- **Validate Assumptions:** Use independent references or parity tests to check numerical correctness of your changes.
+
+**3. Actual Chat Performance:**
+
+- **Build Release Version:**  Ensure your build is optimized for production execution.
+- **Consistent Environment:** Control system state (thermals, memory pressure) and use the same model, context, and prompt for all runs.
+- **Warm Up:** Run a few iterations before taking measurements.
+- **Multiple Runs:** Repeat measurements multiple times and report variance.
+- **Compare to Baseline:** Measure the impact of your changes on `generation tok/s` and `internal TTFT` compared to the existing baseline.
+
+**4. Document Your Changes:**
+
+- Explain your design choices in code comments.
+- Clearly state any assumptions made and their impact.
+- Provide a summary of the performance gains (or losses) observed.
+
+
+
+[ Prompt: 89.9 t/s | Generation: 13.8 t/s | TTFT: 0.578579 s ]
+[ Detail: Evaluated: 52 | Cached: 5329 | Decoded: 379 | Prompt: 0.578579 s | Generation: 27.543377 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":379,"stop_reason":"stop_token","selected_token_hash":"884d610e74497e82","decoded_tokens":379,"initial_cache_position":5329,"final_cache_position":5760,"evaluated_prompt_tokens":52,"reused_cache_tokens":5329,"decode_wall_ns":27589978007,"gpu_ns":27378987616,"selection_ns":1391627,"proposer_ns":15665207,"generation_completion_ns":27610455042,"full_turn_ns":28209591167,"first_text_ns":676893334,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":41,"speculative_matches":35,"speculative_misses":6,"speculative_fallbacks":302,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":8,"matches":8},{"match_length":"2","support":"3","confidence":"1","cycles":3,"matches":3},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":8,"matches":7},{"match_length":"2","support":"4+","confidence":"1","cycles":4,"matches":4},{"match_length":"3-4","support":"2","confidence":"1","cycles":4,"matches":4},{"match_length":"3-4","support":"3","confidence":"1","cycles":4,"matches":4},{"match_length":"3-4","support":"4+","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"3-4","support":"4+","confidence":"1","cycles":5,"matches":3},{"match_length":"5-8","support":"2","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"5-8","support":"2","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":210990391,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":350,"commits":350,"waits":350,"compute_encoders":350,"compute_dispatches":239667,"blit_encoders":0,"barriers":177836,"transient_allocations":0,"selector_dispatches":3773,"max_candidates":40,"compact_readback_bytes":122880,"q4_decode":82719,"q8_decode":343,"q8_width_two":0,"q4_small_batch":11193,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":6363,"q6_small_batch":861,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":16170,"attention_partitions":388080,"attention_tokens":78155259,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":2207339889664} ]
+> 

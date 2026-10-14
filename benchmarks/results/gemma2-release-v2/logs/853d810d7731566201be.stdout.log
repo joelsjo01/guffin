@@ -1,0 +1,200 @@
+Guffin
+/help for commands, /exit to quit.
+
+> Here's a basic architecture:
+
+1. **File Import:**
+
+   - Use `os.listdir` to list Markdown files in your notes folder.
+   - Iterate through the files, opening each with `open(file, 'r', encoding='utf-8')`.
+
+2. **Word Indexing:**
+
+   - Read each file's content.
+   - Split the content into words using `re.findall(r'\w+', text)`, handling punctuation.
+   - Create a dictionary where keys are words and values are lists of filenames containing those words.
+
+3. **Searching:**
+
+   - Get the user's search query.
+   - Convert the query to lowercase for case-insensitive matching.
+   - Check the word index:
+     - If the word exists, retrieve the corresponding filenames.
+     - Print the filenames or open the files for display.
+
+**Example Code Snippet (Partial):**
+
+```python
+import os
+import re
+
+notes_folder = 'notes'
+
+word_index = {}
+for filename in os.listdir(notes_folder):
+    if filename.endswith('.md'):
+        with open(os.path.join(notes_folder, filename), 'r', encoding='utf-8') as f:
+            text = f.read()
+            words = re.findall(r'\w+', text)
+            for word in words:
+                if word in word_index:
+                    word_index[word].append(filename)
+                else:
+                    word_index[word] = [filename]
+
+# ... (search functionality)
+```
+
+Remember to handle case-sensitivity, stemming, and more advanced search options as needed.
+[ Prompt: 150.7 t/s | Generation: 16.5 t/s | TTFT: 0.411431 s ]
+[ Detail: Evaluated: 62 | Cached: 0 | Decoded: 361 | Prompt: 0.411431 s | Generation: 21.939526 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":361,"stop_reason":"stop_token","selected_token_hash":"5b8a3cd6d8355c39","decoded_tokens":361,"initial_cache_position":0,"final_cache_position":423,"evaluated_prompt_tokens":62,"reused_cache_tokens":0,"decode_wall_ns":21983060989,"gpu_ns":21764601203,"selection_ns":1320582,"proposer_ns":2352629,"generation_completion_ns":21990289125,"full_turn_ns":22402894500,"first_text_ns":473635875,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":7,"speculative_matches":6,"speculative_misses":1,"speculative_fallbacks":347,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"1","cycles":4,"matches":4},{"match_length":"2","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"2","support":"4+","confidence":"1","cycles":2,"matches":1}],"wall_minus_gpu_ns":218459786,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":356,"commits":356,"waits":356,"compute_encoders":356,"compute_dispatches":236167,"blit_encoders":0,"barriers":175543,"transient_allocations":0,"selector_dispatches":3894,"max_candidates":40,"compact_readback_bytes":115520,"q4_decode":95004,"q8_decode":354,"q8_width_two":0,"q4_small_batch":1911,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":7308,"q6_small_batch":147,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":15204,"attention_partitions":22218,"attention_tokens":3694236,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":2102459505664} ]
+> To handle changes and deletions efficiently, we can use file timestamps:
+
+1. **Track Modification Times:**
+
+   - When initially building the index, store the last modified timestamp for each note file alongside the filename in the `word_index`.
+
+2. **Incremental Updates:**
+
+   - On each use, first check the modification timestamps of all note files.
+   - If a file's timestamp has changed:
+     - Re-index the contents of that file (same as before), updating its entry in `word_index`.
+     - If a file has been deleted, remove its entry from `word_index`.
+
+**Example Code Snippet (Partial):**
+
+```python
+import os
+import time
+
+# ... (previous code for importing files and indexing)
+
+word_index = {}
+for filename in os.listdir(notes_folder):
+    if filename.endswith('.md'):
+        filepath = os.path.join(notes_folder, filename)
+        # ... (read file content, index words)
+        # ... store filename and timestamp in word_index
+
+# ... (search functionality)
+
+# Example on program startup or after a file change:
+for filename in os.listdir(notes_folder):
+    if filename.endswith('.md'):
+        filepath = os.path.join(notes_folder, filename)
+        # ... (compare file modification time with stored timestamp)
+        # ... (update index if necessary)
+```
+
+
+
+
+[ Prompt: 96.0 t/s | Generation: 17.5 t/s | TTFT: 0.437399 s ]
+[ Detail: Evaluated: 42 | Cached: 423 | Decoded: 310 | Prompt: 0.437399 s | Generation: 17.741086 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":310,"stop_reason":"stop_token","selected_token_hash":"276e6c5a92bdbfc4","decoded_tokens":310,"initial_cache_position":423,"final_cache_position":775,"evaluated_prompt_tokens":42,"reused_cache_tokens":423,"decode_wall_ns":17785195078,"gpu_ns":17612302023,"selection_ns":1139539,"proposer_ns":4158959,"generation_completion_ns":17793232500,"full_turn_ns":18237377458,"first_text_ns":506121000,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":40,"speculative_matches":33,"speculative_misses":7,"speculative_fallbacks":236,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"2","support":"2","confidence":"1","cycles":9,"matches":7},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"2","support":"3","confidence":"1","cycles":6,"matches":4},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":2,"matches":2},{"match_length":"2","support":"4+","confidence":"1","cycles":3,"matches":3},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"3-4","support":"2","confidence":"1","cycles":4,"matches":4},{"match_length":"3-4","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"5-8","support":"2","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"5-8","support":"2","confidence":"1","cycles":4,"matches":4},{"match_length":"9-16","support":"2","confidence":"1","cycles":7,"matches":7}],"wall_minus_gpu_ns":172893055,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":284,"commits":284,"waits":284,"compute_encoders":284,"compute_dispatches":193663,"blit_encoders":0,"barriers":143197,"transient_allocations":0,"selector_dispatches":3036,"max_candidates":40,"compact_readback_bytes":101120,"q4_decode":64701,"q8_decode":276,"q8_width_two":0,"q4_small_batch":10920,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":4977,"q6_small_batch":840,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":13314,"attention_partitions":49308,"attention_tokens":8274630,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":1805298417664} ]
+> To handle failures and cancellations, we need persistence:
+
+1. **Partial Committing:**
+
+   - Instead of storing the entire `word_index` in memory, use a file (e.g., `index.json`) to persistently store it.
+
+   - After processing each note file, write the updated `word_index` to the file. This ensures progress is saved even if the program crashes or is cancelled.
+
+2. **Recovery on Restart:**
+
+   - On program startup, first load the `word_index` from the file.
+   - This loaded index represents the last committed state.
+   - Continue processing files from where the last successful commit left off (e.g., using a counter for file processing or timestamps).
+
+   - If a failure occurs during processing, the partially updated `word_index` will still be saved, allowing for recovery on the next run.
+
+
+
+**Note:** Ensure your file I/O operations are robust (e.g., handle potential file errors) and consider using a locking mechanism if multiple processes might access the index file concurrently.
+[ Prompt: 96.0 t/s | Generation: 16.8 t/s | TTFT: 0.448026 s ]
+[ Detail: Evaluated: 43 | Cached: 775 | Decoded: 225 | Prompt: 0.448026 s | Generation: 13.405201 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":225,"stop_reason":"stop_token","selected_token_hash":"f58b6be43d263990","decoded_tokens":225,"initial_cache_position":775,"final_cache_position":1043,"evaluated_prompt_tokens":43,"reused_cache_tokens":775,"decode_wall_ns":13451592459,"gpu_ns":13324737929,"selection_ns":824376,"proposer_ns":4801917,"generation_completion_ns":13459291625,"full_turn_ns":13912892375,"first_text_ns":516609917,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":18,"speculative_matches":16,"speculative_misses":2,"speculative_fallbacks":190,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":3,"matches":3},{"match_length":"2","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":2,"matches":2},{"match_length":"2","support":"4+","confidence":"1","cycles":7,"matches":7},{"match_length":"3-4","support":"2","confidence":"1","cycles":2,"matches":2},{"match_length":"3-4","support":"3","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"3-4","support":"3","confidence":"1","cycles":1,"matches":0}],"wall_minus_gpu_ns":126854530,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":211,"commits":211,"waits":211,"compute_encoders":211,"compute_dispatches":144957,"blit_encoders":0,"barriers":108041,"transient_allocations":0,"selector_dispatches":2288,"max_candidates":40,"compact_readback_bytes":72320,"q4_decode":52143,"q8_decode":208,"q8_width_two":0,"q4_small_batch":4914,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":4011,"q6_small_batch":378,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":9534,"attention_partitions":41328,"attention_tokens":8870862,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":1310029937664} ]
+> ```python
+import re
+
+def word_count(filepath):
+    with open(filepath, 'r', encoding='utf-8') as f:
+        text = f.read()
+    words = re.findall(r'\w+', text.lower())  
+    return len(words)
+
+```
+
+This function reads the file as UTF-8, converts all text to lowercase, and uses regular expressions to extract words, treating alphanumeric characters as words. Punctuation is removed by default, as it's not part of the `\w+` pattern. Unicode characters are handled correctly by UTF-8 encoding.
+[ Prompt: 101.7 t/s | Generation: 16.6 t/s | TTFT: 0.452133 s ]
+[ Detail: Evaluated: 46 | Cached: 1043 | Decoded: 132 | Prompt: 0.452133 s | Generation: 7.975602 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":132,"stop_reason":"stop_token","selected_token_hash":"e82853367d7ec606","decoded_tokens":132,"initial_cache_position":1043,"final_cache_position":1221,"evaluated_prompt_tokens":46,"reused_cache_tokens":1043,"decode_wall_ns":8024968171,"gpu_ns":7951055227,"selection_ns":485419,"proposer_ns":3010883,"generation_completion_ns":8029626417,"full_turn_ns":8487255333,"first_text_ns":522274666,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":19,"speculative_matches":11,"speculative_misses":8,"speculative_fallbacks":101,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"1","cycles":8,"matches":4},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"2","support":"3","confidence":"1","cycles":2,"matches":2},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"3-4","support":"2","confidence":"1","cycles":3,"matches":2},{"match_length":"5-8","support":"2","confidence":"1","cycles":4,"matches":3}],"wall_minus_gpu_ns":73912944,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":129,"commits":129,"waits":129,"compute_encoders":129,"compute_dispatches":84925,"blit_encoders":0,"barriers":62545,"transient_allocations":0,"selector_dispatches":1320,"max_candidates":40,"compact_readback_bytes":44480,"q4_decode":27846,"q8_decode":120,"q8_width_two":0,"q4_small_batch":5187,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":2142,"q6_small_batch":399,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":5880,"attention_partitions":47040,"attention_tokens":6791568,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":768147953664} ]
+> ```python
+import re
+
+def word_count(filepath):
+    with open(filepath, 'r', encoding='utf-8') as f:
+        text = f.read()
+    words = set(re.findall(r'\w+', text.lower()))
+    return len(words)
+```
+
+**Explanation of changes:**
+
+- **`set(words)`:** This converts the list of words into a set, automatically removing duplicates.
+- **Case Insensitivity:** The `.lower()` method ensures that words are counted regardless of their original case.
+
+**Input/Output Examples:**
+
+1. **Input (text.txt):** `This is a test! This is another test.`
+   **Output:** 7
+
+2. **Input (empty.txt):** (empty file)
+   **Output:** 0
+
+3. **Input (mixed_case.txt):** `HeLlO wOrLd!`
+   **Output:** 2 
+
+
+
+Now the function handles:
+
+- **Empty files:** Returns 0 for an empty file.
+- **Repeated words:** Counts each word only once.
+- **Mixed case:** Treats words as the same regardless of capitalization.
+- **Non-ASCII text:** UTF-8 encoding handles various character sets correctly.
+[ Prompt: 91.4 t/s | Generation: 16.4 t/s | TTFT: 0.459423 s ]
+[ Detail: Evaluated: 42 | Cached: 1221 | Decoded: 273 | Prompt: 0.459423 s | Generation: 16.626282 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":273,"stop_reason":"stop_token","selected_token_hash":"81ede90a621f2c68","decoded_tokens":273,"initial_cache_position":1221,"final_cache_position":1536,"evaluated_prompt_tokens":42,"reused_cache_tokens":1221,"decode_wall_ns":16670460834,"gpu_ns":16515051949,"selection_ns":979077,"proposer_ns":6935001,"generation_completion_ns":16680528792,"full_turn_ns":17146364625,"first_text_ns":530512583,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":46,"speculative_matches":25,"speculative_misses":21,"speculative_fallbacks":201,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":4,"matches":0},{"match_length":"2","support":"2","confidence":"1","cycles":8,"matches":4},{"match_length":"2","support":"3","confidence":"1","cycles":6,"matches":4},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":7,"matches":0},{"match_length":"2","support":"4+","confidence":"1","cycles":4,"matches":2},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"3-4","support":"2","confidence":"1","cycles":6,"matches":6},{"match_length":"3-4","support":"3","confidence":"1","cycles":2,"matches":2},{"match_length":"5-8","support":"2","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"5-8","support":"2","confidence":"1","cycles":4,"matches":4},{"match_length":"5-8","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"9-16","support":"2","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"9-16","support":"2","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":155408885,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":269,"commits":269,"waits":269,"compute_encoders":269,"compute_dispatches":174861,"blit_encoders":0,"barriers":128204,"transient_allocations":0,"selector_dispatches":2717,"max_candidates":40,"compact_readback_bytes":93760,"q4_decode":55146,"q8_decode":247,"q8_width_two":0,"q4_small_batch":12558,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":4242,"q6_small_batch":966,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":12348,"attention_partitions":98784,"attention_tokens":17279304,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":1589710961664} ]
+> ## Practical Implementation Checklist: Offline Note Searcher
+
+**Core Functionality:**
+
+- [ ] File Import: Read Markdown files in the notes folder.
+- [ ] Word Indexing: Store words and filenames in a persistent data structure (e.g., JSON).
+- [ ] Search: Retrieve relevant filenames based on user query.
+- [ ] Timestamp Tracking: Store modification times for each note file.
+
+**Robustness:**
+
+- [ ] Partial Committing: Save `word_index` periodically to handle crashes and cancellations.
+- [ ] File Error Handling: Gracefully handle issues reading files (e.g., permissions, non-existent files).
+- [ ] Duplicate Word Handling: Ensure unique word counts.
+
+**User Experience:**
+
+- [ ] Case-Insensitive Search: Treat search terms and words in notes case-insensitively.
+
+**Testing:**
+
+- [ ] **Test 1:** Search for a known word in a known file. Verify correct result.
+- [ ] **Test 2:** Search for a word that doesn't exist. Verify no results.
+- [ ] **Test 3:** Modify a note, then search again. Verify updated index reflects changes.
+- **Performance:** Measure the time taken to index a set of files with varying sizes.
+
+This checklist provides a structured approach to building a reliable and efficient offline note search application.
+[ Prompt: 85.7 t/s | Generation: 15.9 t/s | TTFT: 0.478164 s ]
+[ Detail: Evaluated: 41 | Cached: 1536 | Decoded: 285 | Prompt: 0.478164 s | Generation: 17.973524 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":285,"stop_reason":"stop_token","selected_token_hash":"702b24f6ddeddb5b","decoded_tokens":285,"initial_cache_position":1536,"final_cache_position":1862,"evaluated_prompt_tokens":41,"reused_cache_tokens":1536,"decode_wall_ns":18017879826,"gpu_ns":17854588770,"selection_ns":1028583,"proposer_ns":8074585,"generation_completion_ns":18029435625,"full_turn_ns":18514648500,"first_text_ns":551126667,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":27,"speculative_matches":17,"speculative_misses":10,"speculative_fallbacks":240,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"2","support":"2","confidence":"1","cycles":4,"matches":3},{"match_length":"2","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":4,"matches":0},{"match_length":"2","support":"4+","confidence":"1","cycles":3,"matches":3},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"3-4","support":"2","confidence":"1","cycles":3,"matches":3},{"match_length":"3-4","support":"3","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"3-4","support":"3","confidence":"1","cycles":2,"matches":2},{"match_length":"3-4","support":"4+","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"3-4","support":"4+","confidence":"1","cycles":4,"matches":3}],"wall_minus_gpu_ns":163291056,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":278,"commits":278,"waits":278,"compute_encoders":278,"compute_dispatches":186523,"blit_encoders":0,"barriers":138544,"transient_allocations":0,"selector_dispatches":2937,"max_candidates":40,"compact_readback_bytes":94080,"q4_decode":65793,"q8_decode":267,"q8_width_two":0,"q4_small_batch":7371,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":5061,"q6_small_batch":567,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":12390,"attention_partitions":99120,"attention_tokens":21282996,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":1659631217664} ]
+> 

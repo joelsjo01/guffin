@@ -1,0 +1,105 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ```html
+<!DOCTYPE html>
+<html>
+<head>
+<title>Random Joke Generator</title>
+</head>
+<body>
+
+<h1>Random Joke Generator</h1>
+
+<button onclick="tellJoke()">Tell Me a Joke!</button>
+
+<p id="joke"></p>
+
+<script>
+  const jokes = [
+    "Why don't scientists trust atoms? Because they make up everything!",
+    "What do you call a lazy kangaroo? A pouch potato!",
+    "Why did the scarecrow win an award? Because he was outstanding in his field!",
+    "What do you call a bear with no teeth? A gummy bear!"
+  ];
+
+  function tellJoke() {
+    const randomIndex = Math.floor(Math.random() * jokes.length);
+    document.getElementById("joke").textContent = jokes[randomIndex];
+  }
+</script>
+
+</body>
+</html>
+```
+
+**Explanation:**
+
+1. **Basic HTML Structure:** The code sets up a basic HTML document with a title, heading, button, and a paragraph element (`<p>`) to display the joke.
+2. **Joke Array:**
+   - The `jokes` array stores four different jokes as strings.
+
+3. **Button Event:**
+   - The `onclick="tellJoke()"` attribute in the button tag calls the `tellJoke()` function when the button is clicked.
+
+4. **`tellJoke()` Function:**
+   - **Random Index:** It uses `Math.random()` to generate a random number between 0 and 1 (exclusive).
+     - `Math.floor()` rounds the random number down to the nearest integer, giving you a random index within the bounds of the `jokes` array.
+   - **Display Joke:** It fetches the joke from the `jokes` array using the random index and sets the `textContent` of the paragraph element (`<p id="joke">`) to display the selected joke.
+
+
+
+**How to Use:**
+
+1. Save the code as an HTML file (e.g., `joke.html`).
+2. Open the file in your web browser.
+3. Click the "Tell Me a Joke!" button to see a random joke.
+
+
+
+Let me know if you want to customize the jokes or add more features to the website!
+[ Prompt: 89.5 t/s | Generation: 16.3 t/s | TTFT: 0.402100 s ]
+[ Detail: Evaluated: 36 | Cached: 0 | Decoded: 495 | Prompt: 0.402100 s | Generation: 30.291123 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":495,"stop_reason":"stop_token","selected_token_hash":"f78f002b382c573a","decoded_tokens":495,"initial_cache_position":0,"final_cache_position":531,"evaluated_prompt_tokens":36,"reused_cache_tokens":0,"decode_wall_ns":30331584545,"gpu_ns":30034012294,"selection_ns":1684063,"proposer_ns":3523863,"generation_completion_ns":30341677750,"full_turn_ns":30744459000,"first_text_ns":463858500,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":17,"speculative_matches":7,"speculative_misses":10,"speculative_fallbacks":470,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"2","support":"2","confidence":"1","cycles":6,"matches":5},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"2","support":"3","confidence":"1","cycles":2,"matches":1},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":3,"matches":0},{"match_length":"2","support":"4+","confidence":"1","cycles":1,"matches":0},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"3-4","support":"2","confidence":"1","cycles":1,"matches":0}],"wall_minus_gpu_ns":297572251,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":498,"commits":498,"waits":498,"compute_encoders":498,"compute_dispatches":327531,"blit_encoders":0,"barriers":243212,"transient_allocations":0,"selector_dispatches":5357,"max_candidates":40,"compact_readback_bytes":161280,"q4_decode":128583,"q8_decode":487,"q8_width_two":0,"q4_small_batch":4641,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":9891,"q6_small_batch":357,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":21210,"attention_partitions":34482,"attention_tokens":6004068,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":2883235697664} ]
+> You can use CSS to change the color of the jokes to red. Here's how:
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+<title>Random Joke Generator</title>
+<style>
+  #joke {
+    color: red;
+  }
+</style>
+</head>
+<body>
+
+<h1>Random Joke Generator</h1>
+
+<button onclick="tellJoke()">Tell Me a Joke!</button>
+
+<p id="joke"></p>
+
+<script>
+  // ... (your existing JavaScript code) ...
+</script>
+
+</body>
+</html>
+```
+
+**Explanation:**
+
+1. **CSS within `<style>` Tags:** We've added a `<style>` tag within the `<head>` section of the HTML to contain our CSS rules.
+2. **Selector:** The CSS rule `#joke` targets the HTML element with the ID "joke" (which is our paragraph for displaying the joke).
+3. **Property and Value:** We set the `color` property to `red` for the selected element, changing its text color to red.
+
+
+
+Now when you run this HTML file, the jokes displayed will be in red!
+[ Prompt: 88.6 t/s | Generation: 16.5 t/s | TTFT: 0.248363 s ]
+[ Detail: Evaluated: 22 | Cached: 531 | Decoded: 255 | Prompt: 0.248363 s | Generation: 15.452309 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":255,"stop_reason":"stop_token","selected_token_hash":"ed75b20c765ce83b","decoded_tokens":255,"initial_cache_position":531,"final_cache_position":808,"evaluated_prompt_tokens":22,"reused_cache_tokens":531,"decode_wall_ns":15496714501,"gpu_ns":15348787215,"selection_ns":875967,"proposer_ns":4118878,"generation_completion_ns":15504065958,"full_turn_ns":15758376875,"first_text_ns":317158834,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":20,"speculative_matches":12,"speculative_misses":8,"speculative_fallbacks":222,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":4,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":7,"matches":7},{"match_length":"2","support":"3","confidence":"1","cycles":3,"matches":3},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":3,"matches":0},{"match_length":"3-4","support":"2","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":147927286,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":251,"commits":251,"waits":251,"compute_encoders":251,"compute_dispatches":168701,"blit_encoders":0,"barriers":125619,"transient_allocations":0,"selector_dispatches":2662,"max_candidates":40,"compact_readback_bytes":83840,"q4_decode":60879,"q8_decode":242,"q8_width_two":0,"q4_small_batch":5460,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":4683,"q6_small_batch":420,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":11046,"attention_partitions":44184,"attention_tokens":7509600,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":1484830577664} ]
+> 

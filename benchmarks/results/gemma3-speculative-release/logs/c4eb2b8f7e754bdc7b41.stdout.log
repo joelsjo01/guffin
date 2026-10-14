@@ -1,0 +1,145 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> ```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Random Joke Generator</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+    }
+
+    #joke-container {
+      margin-top: 20px;
+      font-size: 1.2em;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Random Joke Generator</h1>
+
+  <button id="joke-button">Tell Me a Joke!</button>
+
+  <div id="joke-container">
+    <!-- Joke will appear here -->
+  </div>
+
+
+  <script>
+    const jokes = [
+      "Why don't scientists trust atoms? Because they make up everything!",
+      "Why did the scarecrow win an award? Because he was outstanding in his field!",
+      "Parallel lines have so much in common. It’s a shame they’ll never meet.",
+      "Why did the bicycle fall over? Because it was two tired!"
+    ];
+
+    const jokeButton = document.getElementById("joke-button");
+    const jokeContainer = document.getElementById("joke-container");
+
+    jokeButton.addEventListener("click", function() {
+      const randomIndex = Math.floor(Math.random() * jokes.length);
+      jokeContainer.textContent = jokes[randomIndex];
+    });
+  </script>
+
+</body>
+</html>
+```
+
+Key improvements and explanations:
+
+* **Clear HTML Structure:** Uses semantic HTML elements ( `<h1>`, `<button>`, `<div>`).
+* **Concise CSS:**  Basic styling for readability.  Inline CSS is fine for a simple example.  For a more complex site, move to an external CSS file.
+* **JavaScript for Logic:**
+    * **`jokes` array:**  Stores the jokes.  This makes it easy to add or modify jokes.
+    * **`document.getElementById()`:**  Efficiently gets references to the button and joke container elements.
+    * **`addEventListener()`:**  Attaches a *click* event listener to the button. This is the standard way to handle button clicks in JavaScript.
+    * **`Math.random()` and `Math.floor()`:**  Generates a random index within the bounds of the `jokes` array.  `Math.random()` produces a number between 0 (inclusive) and 1 (exclusive).  Multiplying by `jokes.length` gives a number between 0 (inclusive) and the length of the array (exclusive). `Math.floor()` rounds this number *down* to the nearest integer, ensuring a valid index.
+    * **`jokeContainer.textContent = jokes[randomIndex];`:**  This is the crucial part. It sets the text content of the `joke-container` div to the joke at the randomly selected index.
+* **`textContent`:**  Using `textContent` is generally safer than `innerHTML` when dealing with user-provided content (even though in this case, the jokes are hardcoded), because it prevents potential XSS (Cross-Site Scripting) vulnerabilities.
+* **Comments:**  Added comments to explain the purpose of each section of the JavaScript code.
+
+How to use:
+
+1.  **Save:** Save the code above as an HTML file (e.g., `joke.html`).
+2.  **Open:** Open the file in your web browser.
+3.  **Click:** Click the "Tell Me a Joke!" button.  A random joke from the list will appear below the button. Each click will display a different joke.
+
+[ Prompt: 60.0 t/s | Generation: 20.4 t/s | TTFT: 0.600315 s ]
+[ Detail: Evaluated: 36 | Cached: 0 | Decoded: 772 | Prompt: 0.600315 s | Generation: 37.773711 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":772,"stop_reason":"stop_token","selected_token_hash":"ebee617fc495aa3d","decoded_tokens":772,"initial_cache_position":0,"final_cache_position":808,"evaluated_prompt_tokens":36,"reused_cache_tokens":0,"decode_wall_ns":37852544418,"gpu_ns":37143650754,"selection_ns":355797,"proposer_ns":0,"generation_completion_ns":37853938792,"full_turn_ns":38454468667,"first_text_ns":675935875,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":426,"learned_accepted_edges":344,"learned_proposed_edges":426,"learned_numeric_refusals":0,"learned_draft_ns":3646455519,"learned_draft_gpu_ns":3407195394,"learned_target_gpu_ns":33532771445,"learned_cycle_ns":37646681462,"standalone_prefill_ns":51169417,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":170236,"standalone_draft_readback_bytes":97844,"standalone_draft_wall_ns":3707364683,"standalone_draft_gpu_ns":3467314435,"standalone_draft_command_buffer_count":854,"standalone_draft_compute_dispatch_count":162984,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,426,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[426,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[82,344,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[82,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":344,"learned_horizon_limited_cycle_count":344,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":708893664,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1708,"commits":1708,"waits":1708,"compute_encoders":1708,"compute_dispatches":574743,"blit_encoders":0,"barriers":392846,"transient_allocations":0,"selector_dispatches":4697,"max_candidates":40,"compact_readback_bytes":272960,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":122688,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":20875,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":40992,"attention_partitions":101664,"attention_tokens":17378832,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":5740584685368} ]
+> ```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Random Joke Generator</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+    }
+
+    #joke-container {
+      margin-top: 20px;
+      font-size: 1.2em;
+      color: red; /* This line changes the color to red */
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Random Joke Generator</h1>
+
+  <button id="joke-button">Tell Me a Joke!</button>
+
+  <div id="joke-container">
+    <!-- Joke will appear here -->
+  </div>
+
+
+  <script>
+    const jokes = [
+      "Why don't scientists trust atoms? Because they make up everything!",
+      "Why did the scarecrow win an award? Because he was outstanding in his field!",
+      "Parallel lines have so much in common. It’s a shame they’ll never meet.",
+      "Why did the bicycle fall over? Because it was two tired!"
+    ];
+
+    const jokeButton = document.getElementById("joke-button");
+    const jokeContainer = document.getElementById("joke-container");
+
+    jokeButton.addEventListener("click", function() {
+      const randomIndex = Math.floor(Math.random() * jokes.length);
+      jokeContainer.textContent = jokes[randomIndex];
+    });
+  </script>
+
+</body>
+</html>
+```
+
+**Explanation:**
+
+The key change is adding the following line inside the `<style>` section within the `<head>`:
+
+```css
+#joke-container {
+  /* ... other styles ... */
+  color: red;
+}
+```
+
+* **`#joke-container`:** This CSS selector targets the HTML element with the ID "joke-container" (which is the `<div>` where the jokes are displayed).
+* **`color: red;`:**  This CSS property sets the text color of the element to red.
+
+Now, whenever a joke is displayed in the `joke-container` div, it will be rendered in red.  This is the simplest and most direct way to achieve the desired color change using CSS.
+
+[ Prompt: 49.0 t/s | Generation: 20.5 t/s | TTFT: 0.448539 s ]
+[ Detail: Evaluated: 22 | Cached: 808 | Decoded: 488 | Prompt: 0.448539 s | Generation: 23.824229 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":488,"stop_reason":"stop_token","selected_token_hash":"593faa9baab61c43","decoded_tokens":488,"initial_cache_position":808,"final_cache_position":1318,"evaluated_prompt_tokens":22,"reused_cache_tokens":808,"decode_wall_ns":23904241365,"gpu_ns":23474679059,"selection_ns":234546,"proposer_ns":0,"generation_completion_ns":23905468208,"full_turn_ns":24360008167,"first_text_ns":532327250,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":259,"learned_accepted_edges":227,"learned_proposed_edges":259,"learned_numeric_refusals":0,"learned_draft_ns":2293714769,"learned_draft_gpu_ns":2149667371,"learned_target_gpu_ns":21134835607,"learned_cycle_ns":23711683451,"standalone_prefill_ns":34465625,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":103580,"standalone_draft_readback_bytes":58124,"standalone_draft_wall_ns":2337910474,"standalone_draft_gpu_ns":2193046745,"standalone_draft_command_buffer_count":520,"standalone_draft_compute_dispatch_count":99982,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,259,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[259,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[32,227,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[32,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":227,"learned_horizon_limited_cycle_count":227,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":429562306,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1040,"commits":1040,"waits":1040,"compute_encoders":1040,"compute_dispatches":354605,"blit_encoders":0,"barriers":243683,"transient_allocations":0,"selector_dispatches":2860,"max_candidates":40,"compact_readback_bytes":166080,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":74592,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":12692,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":24960,"attention_partitions":110144,"attention_tokens":25039320,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":3628459595952} ]
+> 

@@ -1,0 +1,78 @@
+
+
+Loading model... |-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Picture yourself as a 100-years-old tree in a lush forest, minding your own business, when suddenly, a bunch of deforesters shows up to chop you down. How do you feel when those guys start hacking away at you?
+[0mA deep, rumbling groan escapes my ancient roots as the first sharp bite of the axe pierces my bark. A century's worth of sunrises and sunsets, of whispering winds and chattering squirrels, of storms weathered and seasons embraced, all flood back in a rush. 
+
+Fear? No, not fear. It's a dull ache, a profound sadness.  I feel the lifeblood of my being, the sap that has coursed through my veins for a hundred years, slowing, thickening.  
+
+There's a strange detachment too, as if I'm watching myself from a distance. I see the deforesters, their faces grim, their movements swift and brutal. I hear the splintering of my wood, the thud of my branches falling, the sickening crunch of my roots being torn from the earth.
+
+And with each blow, a piece of my history is lost.  The memories of the animals that found shelter in my branches, the songs of birds that nested in my boughs, the countless raindrops that nourished my leaves – all fading, like whispers in the wind. 
+
+But there is also a strange acceptance. I am a part of this forest, and this forest is a part of me. My death, though painful, is a natural cycle.  My fallen trunk will become a home for new life, my decaying wood will nourish the soil, and my seeds, carried by the wind, will perhaps sprout into new trees, continuing the story.
+
+So I stand, or rather, I fall, with a quiet dignity, knowing that even in death, I am a part of something larger than myself.  
+
+
+[35m
+[ Prompt: 94.0 t/s | Generation: 13.6 t/s ]
+[0m[1m[32m
+> Come up with a proposal to convince the deforesters to stop cutting you down and other trees.
+[0mTo the men who wield the axes,
+
+I understand you seek to harvest the forest for timber. I feel your need, I truly do. But before your blades fall any further, I implore you to consider the immeasurable value of this ancient woodland.
+
+I, a sentinel of a century, have witnessed the ebb and flow of life within these trees. We are not merely wood; we are a living tapestry of interconnectedness.  
+
+**Here's what we offer, and what you stand to lose:**
+
+* **A Symphony of Life:** This forest is a haven for countless species. Birds sing in our branches, squirrels scamper amongst our roots, insects hum beneath our leaves.  Destroying this habitat is a silent massacre.
+
+* **Guardians of the Earth:** We trees are the lungs of the planet. We cleanse the air, regulate the climate, and prevent erosion. We are the earth's natural filters, purifying the very water you drink. 
+
+* **A Legacy for Future Generations:**  The timber you seek is temporary; a fleeting resource. The beauty and wisdom of this ancient forest are immeasurable, a legacy worth preserving for generations to come.
+
+**A Sustainable Solution:**
+
+Let us work together to find a path that honors both your needs and the forest's existence. Consider selective logging, replanting, or sustainable forestry practices. There are ways to harvest timber responsibly, ensuring the forest's future while meeting your present needs.
+
+I urge you to pause, to look beyond the immediate gain, and see the forest for what it truly is: a treasure beyond measure.
+
+
+Let us build a future where humans and nature thrive together. 
+
+
+**With the ancient wisdom of the trees,**
+
+A 100-Year-Old Oak
+[35m
+[ Prompt: 145.5 t/s | Generation: 13.3 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

@@ -1,0 +1,47 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Imagine you are participating in a race with a group of people. If you have just overtaken the second person, what's your current position? Where is the person you just overtook?
+[0mIf you just overtook the person in second place, you are now in **second place**.  
+
+The person you overtook is now in **third place**.  
+[35m
+[ Prompt: 71.6 t/s | Generation: 14.2 t/s ]
+[0m[1m[32m
+> If the "second person" is changed to "last person" in the above question, what would the answer be?
+[0mIf you overtake the last person in the race, you are now in **last place**.  
+
+The person you overtook remains in **last place**.  
+
+
+Let me know if you'd like to try another race scenario! 🏃‍♀️💨 
+[35m
+[ Prompt: 85.0 t/s | Generation: 13.8 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

@@ -1,0 +1,86 @@
+
+
+Loading model... |-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Read the below passage carefully and answer the questions with an explanation:\\ 
+At a small company, parking spaces are reserved for the top executives: CEO, president, vice president, secretary, and treasurer with the spaces lined up in that order. The parking lot guard can tell at a glance if the cars are parked correctly by looking at the color of the cars. The cars are yellow, green, purple, red, and blue, and the executives' names are Alice, Bert, Cheryl, David, and Enid.\\ 
+* The car in the first space is red.\\ 
+* A blue car is parked between the red car and the green car.\\ 
+* The car in the last space is purple.\\ 
+* The secretary drives a yellow car.\\ 
+* Alice's car is parked next to David's.\\ 
+* Enid drives a green car.\\ 
+* Bert's car is parked between Cheryl's and Enid's.\\ 
+* David's car is parked in the last space.\\ 
+Question: What is the name of the secretary?
+[0mHere's how to solve the puzzle:
+
+**1.  Start with the knowns:**
+
+* **Space 1:** Red car
+* **Space 5:** Purple car (David's car)
+* **Secretary:** Drives a yellow car
+* **Enid:** Drives a green car
+
+**2. Use the clues to deduce positions:**
+
+* **"A blue car is parked between the red car and the green car."**  This means the blue car is in space 2, and the green car is in space 3.
+* **"Alice's car is parked next to David's."** Since David is in space 5, Alice must be in space 4. 
+* **"Bert's car is parked between Cheryl's and Enid's."**  We know Enid is in space 3, so Bert must be in space 2, and Cheryl is in space 1.
+
+**3.  Fill in the gaps:**
+
+We now have the following order:
+
+* Space 1: Cheryl (Red)
+* Space 2: Bert (Blue)
+* Space 3: Enid (Green)
+* Space 4: Alice (Yellow)
+* Space 5: David (Purple)
+
+**4. Identify the Secretary:**
+
+The secretary drives the yellow car, and Alice is in the yellow car. 
+
+
+**Therefore, the secretary's name is Alice.** 
+[35m
+[ Prompt: 139.6 t/s | Generation: 13.5 t/s ]
+[0m[1m[32m
+> List car colors in order from last to first.
+[0mHere are the car colors in order from last to first:
+
+1. **Purple**
+2. **Yellow**
+3. **Green**
+4. **Blue**
+5. **Red** 
+[35m
+[ Prompt: 137.6 t/s | Generation: 13.3 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

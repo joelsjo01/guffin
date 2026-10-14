@@ -1,0 +1,62 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> ... ... ... ... Let's break down the statements:
+
+*   **Statement 1:** Oranges > Apples (where ">" means "cost more than")
+*   **Statement 2:** Oranges < Bananas
+
+Combining these two, we know: Bananas > Oranges > Apples.
+
+Now let's look at the third statement:
+
+*   **Statement 3:** Bananas > Apples *and* Bananas > Oranges
+
+We already know from our combined understanding of statements 1 and 2 that Bananas > Oranges.  We also know that Bananas > Apples. Therefore, the third statement is **true**.
+[ Prompt: 93.6 t/s | Generation: 19.1 t/s | TTFT: 0.908355 s ]
+[ Detail: Evaluated: 85 | Cached: 0 | Decoded: 132 | Prompt: 0.908355 s | Generation: 6.898780 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":132,"stop_reason":"stop_token","selected_token_hash":"10b218668fd27bf8","decoded_tokens":132,"initial_cache_position":0,"final_cache_position":217,"evaluated_prompt_tokens":85,"reused_cache_tokens":0,"decode_wall_ns":6975655459,"gpu_ns":6849220378,"selection_ns":61085,"proposer_ns":0,"generation_completion_ns":6976669791,"full_turn_ns":7885344291,"first_text_ns":984710041,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":77,"learned_accepted_edges":53,"learned_proposed_edges":77,"learned_numeric_refusals":0,"learned_draft_ns":620657494,"learned_draft_gpu_ns":578349040,"learned_target_gpu_ns":6001349548,"learned_cycle_ns":6703455709,"standalone_prefill_ns":119204750,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":31068,"standalone_draft_readback_bytes":17784,"standalone_draft_wall_ns":748637869,"standalone_draft_gpu_ns":705117206,"standalone_draft_command_buffer_count":157,"standalone_draft_compute_dispatch_count":30563,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,77,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[77,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[24,53,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":53,"learned_horizon_limited_cycle_count":53,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":126435081,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":313,"commits":313,"waits":313,"compute_encoders":313,"compute_dispatches":103762,"blit_encoders":0,"barriers":70100,"transient_allocations":0,"selector_dispatches":858,"max_candidates":40,"compact_readback_bytes":49600,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":22176,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":3774,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":7488,"attention_partitions":7488,"attention_tokens":1143936,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":980866174008} ]
+> Okay, let's analyze this. We're now assuming statement 3 is true and want to determine if statement 1 (Oranges cost more than apples) is true, false, or uncertain.
+
+Here's statement 3 broken down:
+
+*   **Statement 3:** Bananas > Apples AND Bananas > Oranges
+
+For statement 3 to be true, *both* parts must be true. This means:
+
+1.  Bananas > Apples
+2.  Bananas > Oranges
+
+Now, let's consider what we can deduce about statement 1 (Oranges > Apples) given this information.
+
+We know Bananas > Oranges.  This does *not* automatically mean that Oranges > Apples.  It's possible that:
+
+*   Oranges > Apples (which would make statement 1 true)
+*   Apples > Oranges (which would make statement 1 false)
+
+**Therefore, based on the truth of statement 3, the truth of statement 1 is uncertain.**
+
+**Example to illustrate:**
+
+Let's assign arbitrary prices:
+
+*   Apples: $1
+*   Oranges: $2
+*   Bananas: $3
+
+Here, Bananas > Apples and Bananas > Oranges, so statement 3 is true. Also, Oranges > Apples, so statement 1 is true.
+
+Now let's change the price of oranges:
+
+*   Apples: $1
+*   Oranges: $1.50
+*   Bananas: $3
+
+Here, Bananas > Apples and Bananas > Oranges, so statement 3 is true. But Oranges > Apples is false.
+
+Because we can have scenarios where statement 3 is true and statement 1 is true and scenarios where statement 3 is true and statement 1 is false, statement 1 is uncertain.
+[ Prompt: 52.5 t/s | Generation: 19.7 t/s | TTFT: 0.570932 s ]
+[ Detail: Evaluated: 30 | Cached: 217 | Decoded: 397 | Prompt: 0.570932 s | Generation: 20.124791 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":397,"stop_reason":"stop_token","selected_token_hash":"0e98e578e1441eda","decoded_tokens":397,"initial_cache_position":217,"final_cache_position":644,"evaluated_prompt_tokens":30,"reused_cache_tokens":217,"decode_wall_ns":20203107669,"gpu_ns":19827640101,"selection_ns":166705,"proposer_ns":0,"generation_completion_ns":20204292708,"full_turn_ns":20776834666,"first_text_ns":649150791,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":226,"learned_accepted_edges":169,"learned_proposed_edges":226,"learned_numeric_refusals":0,"learned_draft_ns":1938625722,"learned_draft_gpu_ns":1812614261,"learned_target_gpu_ns":17818044633,"learned_cycle_ns":20003659828,"standalone_prefill_ns":44306250,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":90312,"standalone_draft_readback_bytes":51712,"standalone_draft_wall_ns":1991882395,"standalone_draft_gpu_ns":1865021510,"standalone_draft_command_buffer_count":454,"standalone_draft_compute_dispatch_count":86911,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,226,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[226,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[57,169,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[57,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":169,"learned_horizon_limited_cycle_count":169,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":375467568,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":908,"commits":908,"waits":908,"compute_encoders":908,"compute_dispatches":309086,"blit_encoders":0,"barriers":212189,"transient_allocations":0,"selector_dispatches":2497,"max_candidates":40,"compact_readback_bytes":144960,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":65088,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":11075,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":21792,"attention_partitions":57024,"attention_tokens":9651456,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":2951687120118} ]
+> 

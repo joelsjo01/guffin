@@ -1,0 +1,67 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... Okay, here's a review of the Guffin project based on the provided documents, covering architecture, boundary, correctness contracts, and limitations, all within the 350-word limit:
+
+**Architecture:**
+
+Guffin is a C++20 engine designed for local Gemma AI model inference on Apple Silicon (M4) MacBooks with 16GB of RAM.  It’s a complete stack, handling model loading (GGUF format), tokenization, GPU kernel execution (Metal), conversation management (caches), and sampling. The core is split between a CLI for user interaction, a "session" managing conversation state, and the "engine" which includes the Gemma target and optionally, a smaller "drafter" model (270M) for speculative decoding. The engine leverages Metal for GPU acceleration of both the main Gemma model (target) and the drafter. A CPU target sampler handles final token selection.  The `flowchart` in the README visually depicts this component interaction. The architecture prioritizes explicit ownership and reuse of existing target work (like fused Q4 sums).
+
+**Production Execution vs. Experimental Evidence:**
+
+The boundary between production execution and experimental evidence is clearly defined. Production code forms the core inference pipeline. Experimental changes and rejected ideas are meticulously documented in the `SPECULATIVE_DECODING_RETROSPECTIVE.md` file.  Independent numerical verification tests (`tests/tensor/gemma3_metal_tests.cpp`), lossless sampling tests (`tests/engine/lossless_sampling_tests.cpp`), and runtime tests (`tests/engine/gemma3_target_runtime_tests.cpp`) are used to validate changes *before* integration.  Performance benchmarks are pending release and will be kept separate from core code.
+
+**Correctness Contracts:**
+
+Three important correctness contracts are stated:
+
+1.  **Lossless Probability Correction:** Speculative decoding must preserve the original target sampling distribution.
+2.  **Numerical Integrity:** Packed projections, fused sums, and Metal calculations must be numerically accurate.
+3.  **Ownership and Lifecycle:**  Data structures (caches, buffers, plans) must maintain stable storage and correct lifecycle management.
+
+**Stated Limitations:**
+
+*   **Hardware Specificity:** The project is primarily tested and optimized for a 16 GiB MacBook Air M4.
+*   **Model Support:** While Gemma 3 (12B) is the primary target, Gemma 2 (9B) is supported, and Gemma 4 is future work.
+*   **Performance Data:**  Release-ready benchmarks and comparisons against `llama.cpp` are pending.
+*   **Validation Boundary:** Numerical validation has a defined boundary, meaning some edge cases haven't been fully tested.
+
+
+
+Hopefully, this review is helpful!
+[ Prompt: 96.7 t/s | Generation: 12.2 t/s | TTFT: 47.687072 s ]
+[ Detail: Evaluated: 4611 | Cached: 0 | Decoded: 579 | Prompt: 47.687072 s | Generation: 47.383345 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":579,"stop_reason":"stop_token","selected_token_hash":"f6961b439ca980a1","decoded_tokens":579,"initial_cache_position":0,"final_cache_position":5190,"evaluated_prompt_tokens":4611,"reused_cache_tokens":0,"decode_wall_ns":47449671171,"gpu_ns":47006884715,"selection_ns":2190578,"proposer_ns":0,"generation_completion_ns":47458040500,"full_turn_ns":95153252708,"first_text_ns":47776126666,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":442786456,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":579,"commits":579,"waits":579,"compute_encoders":579,"compute_dispatches":536141,"blit_encoders":0,"barriers":368811,"transient_allocations":0,"selector_dispatches":6358,"max_candidates":40,"compact_readback_bytes":184960,"q4_decode":166752,"q8_decode":0,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":27792,"q6_small_batch":578,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":27792,"attention_partitions":240864,"attention_tokens":46417272,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":4305232071786} ]
+> ## Guffin Sampling/Cache Logic Change Checklist
+
+**Goal:** Ensure correctness & minimal performance impact.
+
+**I. Design & Planning (Before Coding):**
+
+*   [ ] **Problem Definition:** Clearly define the issue & expected improvement.
+*   [ ] **Architecture Impact:** Identify affected modules (Session, Engine, Sampler).
+*   [ ] **Contract Review:** Understand & document changes to ownership, lifetime, & data validity contracts.
+*   [ ] **Performance Estimate:** Estimate potential end-to-end gain – is it worthwhile?
+
+**II. Automated Correctness Checks (Mandatory):**
+
+*   [ ] **Tensor Admission Tests:** `tests/tensor/tensor_tests.cpp` - Validate tensor shapes & properties.
+*   [ ] **Metal Numerical Tests:** `tests/tensor/gemma3_metal_tests.cpp` - Verify numerical accuracy (F16 rounding).
+*   [ ] **Lossless Sampling Tests:** `tests/engine/lossless_sampling_tests.cpp` - Confirm probability distribution preservation.
+*   [ ] **Target Runtime Tests:** `tests/engine/gemma3_target_runtime_tests.cpp` - Validate KV cache wrap & callback handling.
+*   [ ] **Code Style:** Ensure adherence to `ENGINE_PRINCIPLES.md` (explicit ownership, data flow).
+
+**III. Actual-Chat Performance Measurements (Post-Correctness):**
+
+*   [ ] **Representative Prompt:** Use a standard prompt set for benchmarking.
+*   [ ] **Baseline Comparison:** Compare against existing Guffin behavior.
+*   [ ] **Metrics:** Measure tokens/s, TTFT, first text latency, memory footprint.
+*   [ ] **Reproducibility:** Ensure consistent results across runs & hardware.
+
+
+
+**Note:**  Any changes impacting numerical stability or data flow *must* be accompanied by new or updated correctness tests. Document rejected design ideas in the retrospective.
+[ Prompt: 63.5 t/s | Generation: 12.3 t/s | TTFT: 0.818724 s ]
+[ Detail: Evaluated: 52 | Cached: 5190 | Decoded: 409 | Prompt: 0.818724 s | Generation: 33.386472 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":409,"stop_reason":"stop_token","selected_token_hash":"50b14bba8f6bdb06","decoded_tokens":409,"initial_cache_position":5190,"final_cache_position":5651,"evaluated_prompt_tokens":52,"reused_cache_tokens":5190,"decode_wall_ns":33454289541,"gpu_ns":33145653855,"selection_ns":1489210,"proposer_ns":0,"generation_completion_ns":33459938459,"full_turn_ns":34295006250,"first_text_ns":917295000,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":308635686,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":409,"commits":409,"waits":409,"compute_encoders":409,"compute_dispatches":378721,"blit_encoders":0,"barriers":260521,"transient_allocations":0,"selector_dispatches":4488,"max_candidates":40,"compact_readback_bytes":130560,"q4_decode":117792,"q8_decode":0,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":19632,"q6_small_batch":408,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":19632,"attention_partitions":170144,"attention_tokens":34575224,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":3040931842206} ]
+> 

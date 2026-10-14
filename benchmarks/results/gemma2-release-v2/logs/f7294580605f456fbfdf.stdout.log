@@ -1,0 +1,135 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ```python
+import os
+from collections import Counter
+
+def top_words(directory):
+  """
+  Reads all text files under a directory and returns the top 5 most frequent words.
+
+  Args:
+      directory: Path to the directory containing text files.
+
+  Returns:
+      A list of tuples, where each tuple contains a word and its frequency,
+      sorted by frequency in descending order.
+  """
+
+  word_counts = Counter()
+  for filename in os.listdir(directory):
+    if filename.endswith(".txt"):
+      filepath = os.path.join(directory, filename)
+      with open(filepath, 'r') as f:
+        for line in f:
+          words = line.lower().split()  # Convert to lowercase and split into words
+          word_counts.update(words)
+
+  return word_counts.most_common(5)
+
+# Example usage:
+directory_path = '/path/to/your/directory'
+top_words_list = top_words(directory_path)
+print("Top 5 most frequent words:")
+for word, count in top_words_list:
+  print(f"{word}: {count}")
+```
+
+**Explanation:**
+
+1. **Import necessary modules:**
+   - `os`: For interacting with the file system.
+   - `collections.Counter`: For efficiently counting word occurrences.
+
+2. **`top_words(directory)` function:**
+   - Takes the directory path as input.
+   - Initializes an empty `Counter` object called `word_counts` to store word frequencies.
+   - Loops through each file in the directory using `os.listdir()`.
+   - Checks if the file ends with ".txt" to ensure it's a text file.
+   - Opens each text file in read mode (`'r'`).
+   - For each line in the file:
+     - Converts the line to lowercase using `lower()`.
+     - Splits the line into words using `split()`.
+     - Updates the `word_counts` Counter with the words from the line. This automatically counts occurrences.
+   - After processing all files, uses `word_counts.most_common(5)` to get the top 5 most frequent words along with their counts as a list of tuples.
+   - Returns this list of tuples.
+
+3. **Example usage:**
+   - Sets `directory_path` to the actual path of your directory.
+   - Calls `top_words()` to get the top 5 words.
+   - Prints the results in a formatted way.
+
+**To use this program:**
+
+1. Replace `/path/to/your/directory` with the actual path to the directory containing your text files.
+2. Run the Python script.
+
+It will print the top 5 most frequent words found in all the text files within that directory.
+[ Prompt: 87.0 t/s | Generation: 16.7 t/s | TTFT: 0.402176 s ]
+[ Detail: Evaluated: 35 | Cached: 0 | Decoded: 620 | Prompt: 0.402176 s | Generation: 37.186508 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":620,"stop_reason":"stop_token","selected_token_hash":"112c7f0e6d56a136","decoded_tokens":620,"initial_cache_position":0,"final_cache_position":655,"evaluated_prompt_tokens":35,"reused_cache_tokens":0,"decode_wall_ns":37225865403,"gpu_ns":36864245569,"selection_ns":2167447,"proposer_ns":5176018,"generation_completion_ns":37238887584,"full_turn_ns":37641912000,"first_text_ns":463871250,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":39,"speculative_matches":27,"speculative_misses":12,"speculative_fallbacks":553,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":6,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":16,"matches":12},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"2","support":"3","confidence":"1","cycles":3,"matches":3},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":5,"matches":4},{"match_length":"2","support":"4+","confidence":"1","cycles":2,"matches":2},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"3-4","support":"2","confidence":"1","cycles":4,"matches":2},{"match_length":"5-8","support":"2","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":361619834,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":605,"commits":605,"waits":605,"compute_encoders":605,"compute_dispatches":401283,"blit_encoders":0,"barriers":297287,"transient_allocations":0,"selector_dispatches":6512,"max_candidates":40,"compact_readback_bytes":201920,"q4_decode":151242,"q8_decode":592,"q8_width_two":0,"q4_small_batch":10647,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":11634,"q6_small_batch":819,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":26544,"attention_partitions":55944,"attention_tokens":9174900,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":3611571697664} ]
+> ```python
+import os
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+
+def process_file(filepath):
+  """Processes a single file and returns word counts."""
+  word_counts = Counter()
+  with open(filepath, 'r') as f:
+    for line in f:
+      words = line.lower().split()
+      word_counts.update(words)
+  return word_counts
+
+def top_words(directory):
+  """Reads all text files under a directory and returns the top 5 most frequent words using parallelism."""
+
+  word_counts = Counter()
+  with ThreadPoolExecutor(max_workers=4) as executor:  # Use 4 worker threads
+    futures = [executor.submit(process_file, os.path.join(directory, filename))
+               for filename in os.listdir(directory) if filename.endswith(".txt")]
+
+    for future in futures:
+      word_counts.update(future.result())  
+
+  return word_counts.most_common(5)
+
+# Example usage:
+directory_path = '/path/to/your/directory'
+top_words_list = top_words(directory_path)
+print("Top 5 most frequent words:")
+for word, count in top_words_list:
+  print(f"{word}: {count}")
+```
+
+**Explanation of Changes:**
+
+1. **`process_file(filepath)` Function:**
+   - This function now takes a single file path as input.
+   - It reads the file, processes words as before (lowercase, split), and returns a `Counter` object containing word counts for that specific file.
+
+2. **`top_words(directory)` Function:**
+   - **`ThreadPoolExecutor`:** We use `concurrent.futures.ThreadPoolExecutor` to create a pool of worker threads.
+     - `max_workers=4` means we'll use 4 threads for parallel processing. You can adjust this number based on your system's capabilities.
+   - **Parallel File Processing:**
+     - `futures = [...]`: We create a list of `Future` objects using `executor.submit()`. Each `Future` represents the asynchronous processing of a single file.
+     - The list comprehension iterates through files in the directory and submits `process_file()` for each text file.
+   - **Collecting Results:**
+     - We iterate through the `futures` list.
+     - `future.result()`: We use `result()` on each `Future` to retrieve the word counts from the completed file processing.
+     - The word counts from each file are accumulated into the main `word_counts` Counter.
+   - The rest of the function remains the same, finding and returning the top 5 words.
+
+**Benefits of Parallelism:**
+
+- **Faster processing:** Reading and processing multiple files concurrently can significantly reduce the overall execution time, especially for large directories with many files.
+
+
+
+
+[ Prompt: 60.6 t/s | Generation: 16.8 t/s | TTFT: 0.247627 s ]
+[ Detail: Evaluated: 15 | Cached: 655 | Decoded: 633 | Prompt: 0.247627 s | Generation: 37.607468 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":633,"stop_reason":"stop_token","selected_token_hash":"4352f25e15803eb2","decoded_tokens":633,"initial_cache_position":655,"final_cache_position":1303,"evaluated_prompt_tokens":15,"reused_cache_tokens":655,"decode_wall_ns":37640750287,"gpu_ns":37286194519,"selection_ns":2252132,"proposer_ns":12752799,"generation_completion_ns":37661037458,"full_turn_ns":37915988375,"first_text_ns":317714042,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":78,"speculative_matches":58,"speculative_misses":20,"speculative_fallbacks":496,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":6,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":10,"matches":8},{"match_length":"2","support":"3","confidence":"1","cycles":11,"matches":7},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":8,"matches":3},{"match_length":"2","support":"4+","confidence":"1","cycles":14,"matches":13},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":3,"matches":2},{"match_length":"3-4","support":"2","confidence":"1","cycles":10,"matches":10},{"match_length":"3-4","support":"3","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"3-4","support":"3","confidence":"1","cycles":3,"matches":3},{"match_length":"3-4","support":"4+","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"3-4","support":"4+","confidence":"1","cycles":4,"matches":4},{"match_length":"5-8","support":"2","confidence":"1","cycles":6,"matches":5},{"match_length":"5-8","support":"3","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":354555768,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":595,"commits":595,"waits":595,"compute_encoders":595,"compute_dispatches":401829,"blit_encoders":0,"barriers":297263,"transient_allocations":0,"selector_dispatches":6314,"max_candidates":40,"compact_readback_bytes":208640,"q4_decode":135681,"q8_decode":574,"q8_width_two":0,"q4_small_batch":21294,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":10437,"q6_small_batch":1638,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":27426,"attention_partitions":158760,"attention_tokens":27126456,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":3687318641664} ]
+> 

@@ -1,0 +1,247 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="2435" viewBox="0 0 1040 2435" role="img">
+<title>Generation throughput by conversation</title>
+<desc>Single-pass chat measurements. Missing values have no bar. No uncertainty or stability estimate.</desc>
+<rect width="100%" height="100%" fill="#fff"/>
+<g font-family="system-ui, sans-serif" fill="#17212b">
+<text x="24" y="31" font-size="22" font-weight="600">Generation throughput by conversation</text>
+<text x="24" y="56" font-size="13">Single pass · jointly complete conversations · tokens/s; higher is faster · natural outputs can differ</text>
+<line x1="390.0" y1="83" x2="390.0" y2="2387" stroke="#e2e8f0"/>
+<text x="390.0" y="2410" text-anchor="middle" font-size="11">0.00</text>
+<line x1="522.5" y1="83" x2="522.5" y2="2387" stroke="#e2e8f0"/>
+<text x="522.5" y="2410" text-anchor="middle" font-size="11">5.34</text>
+<line x1="655.0" y1="83" x2="655.0" y2="2387" stroke="#e2e8f0"/>
+<text x="655.0" y="2410" text-anchor="middle" font-size="11">10.68</text>
+<line x1="787.5" y1="83" x2="787.5" y2="2387" stroke="#e2e8f0"/>
+<text x="787.5" y="2410" text-anchor="middle" font-size="11">16.02</text>
+<line x1="920.0" y1="83" x2="920.0" y2="2387" stroke="#e2e8f0"/>
+<text x="920.0" y="2410" text-anchor="middle" font-size="11">21.37</text>
+<text x="378" y="108" text-anchor="end" font-size="12">guffin-chinese-chat · guffin-speculative</text>
+<rect x="390" y="95" width="441.45" height="18" rx="3" fill="#087f8c"/>
+<text x="839.45" y="108" font-size="12">17.80</text>
+<text x="378" y="138" text-anchor="end" font-size="12">guffin-chinese-chat · llama-speculative</text>
+<rect x="390" y="125" width="189.05" height="18" rx="3" fill="#ca5d22"/>
+<text x="587.05" y="138" font-size="12">7.62</text>
+<text x="378" y="168" text-anchor="end" font-size="12">guffin-code-review · guffin-speculative</text>
+<rect x="390" y="155" width="413.62" height="18" rx="3" fill="#087f8c"/>
+<text x="811.62" y="168" font-size="12">16.67</text>
+<text x="378" y="198" text-anchor="end" font-size="12">guffin-code-review · llama-speculative</text>
+<rect x="390" y="185" width="217.81" height="18" rx="3" fill="#ca5d22"/>
+<text x="615.81" y="198" font-size="12">8.78</text>
+<text x="378" y="228" text-anchor="end" font-size="12">guffin-document-review · guffin-speculative</text>
+<rect x="390" y="215" width="360.07" height="18" rx="3" fill="#087f8c"/>
+<text x="758.07" y="228" font-size="12">14.52</text>
+<text x="378" y="258" text-anchor="end" font-size="12">guffin-document-review · llama-speculative</text>
+<rect x="390" y="245" width="183.09" height="18" rx="3" fill="#ca5d22"/>
+<text x="581.09" y="258" font-size="12">7.38</text>
+<text x="378" y="288" text-anchor="end" font-size="12">guffin-short-chat · guffin-speculative</text>
+<rect x="390" y="275" width="453.14" height="18" rx="3" fill="#087f8c"/>
+<text x="851.14" y="288" font-size="12">18.27</text>
+<text x="378" y="318" text-anchor="end" font-size="12">guffin-short-chat · llama-speculative</text>
+<rect x="390" y="305" width="229.61" height="18" rx="3" fill="#ca5d22"/>
+<text x="627.61" y="318" font-size="12">9.26</text>
+<text x="378" y="348" text-anchor="end" font-size="12">guffin-sustained-design · guffin-speculative</text>
+<rect x="390" y="335" width="440.79" height="18" rx="3" fill="#087f8c"/>
+<text x="838.79" y="348" font-size="12">17.77</text>
+<text x="378" y="378" text-anchor="end" font-size="12">guffin-sustained-design · llama-speculative</text>
+<rect x="390" y="365" width="191.94" height="18" rx="3" fill="#ca5d22"/>
+<text x="589.94" y="378" font-size="12">7.74</text>
+<text x="378" y="408" text-anchor="end" font-size="12">guffin-swedish-chat · guffin-speculative</text>
+<rect x="390" y="395" width="414.62" height="18" rx="3" fill="#087f8c"/>
+<text x="812.62" y="408" font-size="12">16.72</text>
+<text x="378" y="438" text-anchor="end" font-size="12">guffin-swedish-chat · llama-speculative</text>
+<rect x="390" y="425" width="173.66" height="18" rx="3" fill="#ca5d22"/>
+<text x="571.66" y="438" font-size="12">7.00</text>
+<text x="378" y="468" text-anchor="end" font-size="12">mt-bench-100 · guffin-speculative</text>
+<rect x="390" y="455" width="420.70" height="18" rx="3" fill="#087f8c"/>
+<text x="818.70" y="468" font-size="12">16.96</text>
+<text x="378" y="498" text-anchor="end" font-size="12">mt-bench-100 · llama-speculative</text>
+<rect x="390" y="485" width="166.00" height="18" rx="3" fill="#ca5d22"/>
+<text x="564.00" y="498" font-size="12">6.69</text>
+<text x="378" y="528" text-anchor="end" font-size="12">mt-bench-101 · guffin-speculative</text>
+<rect x="390" y="515" width="432.64" height="18" rx="3" fill="#087f8c"/>
+<text x="830.64" y="528" font-size="12">17.44</text>
+<text x="378" y="558" text-anchor="end" font-size="12">mt-bench-101 · llama-speculative</text>
+<rect x="390" y="545" width="190.07" height="18" rx="3" fill="#ca5d22"/>
+<text x="588.07" y="558" font-size="12">7.66</text>
+<text x="378" y="588" text-anchor="end" font-size="12">mt-bench-105 · guffin-speculative</text>
+<rect x="390" y="575" width="515.32" height="18" rx="3" fill="#087f8c"/>
+<text x="913.32" y="588" font-size="12">20.77</text>
+<text x="378" y="618" text-anchor="end" font-size="12">mt-bench-105 · llama-speculative</text>
+<rect x="390" y="605" width="266.41" height="18" rx="3" fill="#ca5d22"/>
+<text x="664.41" y="618" font-size="12">10.74</text>
+<text x="378" y="648" text-anchor="end" font-size="12">mt-bench-106 · guffin-speculative</text>
+<rect x="390" y="635" width="483.74" height="18" rx="3" fill="#087f8c"/>
+<text x="881.74" y="648" font-size="12">19.50</text>
+<text x="378" y="678" text-anchor="end" font-size="12">mt-bench-106 · llama-speculative</text>
+<rect x="390" y="665" width="226.57" height="18" rx="3" fill="#ca5d22"/>
+<text x="624.57" y="678" font-size="12">9.13</text>
+<text x="378" y="708" text-anchor="end" font-size="12">mt-bench-109 · guffin-speculative</text>
+<rect x="390" y="695" width="456.46" height="18" rx="3" fill="#087f8c"/>
+<text x="854.46" y="708" font-size="12">18.40</text>
+<text x="378" y="738" text-anchor="end" font-size="12">mt-bench-109 · llama-speculative</text>
+<rect x="390" y="725" width="194.77" height="18" rx="3" fill="#ca5d22"/>
+<text x="592.77" y="738" font-size="12">7.85</text>
+<text x="378" y="768" text-anchor="end" font-size="12">mt-bench-111 · guffin-speculative</text>
+<rect x="390" y="755" width="521.53" height="18" rx="3" fill="#087f8c"/>
+<text x="919.53" y="768" font-size="12">21.03</text>
+<text x="378" y="798" text-anchor="end" font-size="12">mt-bench-111 · llama-speculative</text>
+<rect x="390" y="785" width="313.69" height="18" rx="3" fill="#ca5d22"/>
+<text x="711.69" y="798" font-size="12">12.65</text>
+<text x="378" y="828" text-anchor="end" font-size="12">mt-bench-114 · guffin-speculative</text>
+<rect x="390" y="815" width="526.38" height="18" rx="3" fill="#087f8c"/>
+<text x="924.38" y="828" font-size="12">21.22</text>
+<text x="378" y="858" text-anchor="end" font-size="12">mt-bench-114 · llama-speculative</text>
+<rect x="390" y="845" width="274.75" height="18" rx="3" fill="#ca5d22"/>
+<text x="672.75" y="858" font-size="12">11.08</text>
+<text x="378" y="888" text-anchor="end" font-size="12">mt-bench-116 · guffin-speculative</text>
+<rect x="390" y="875" width="522.85" height="18" rx="3" fill="#087f8c"/>
+<text x="920.85" y="888" font-size="12">21.08</text>
+<text x="378" y="918" text-anchor="end" font-size="12">mt-bench-116 · llama-speculative</text>
+<rect x="390" y="905" width="279.43" height="18" rx="3" fill="#ca5d22"/>
+<text x="677.43" y="918" font-size="12">11.27</text>
+<text x="378" y="948" text-anchor="end" font-size="12">mt-bench-119 · guffin-speculative</text>
+<rect x="390" y="935" width="530.00" height="18" rx="3" fill="#087f8c"/>
+<text x="928.00" y="948" font-size="12">21.37</text>
+<text x="378" y="978" text-anchor="end" font-size="12">mt-bench-119 · llama-speculative</text>
+<rect x="390" y="965" width="295.71" height="18" rx="3" fill="#ca5d22"/>
+<text x="693.71" y="978" font-size="12">11.92</text>
+<text x="378" y="1008" text-anchor="end" font-size="12">mt-bench-121 · guffin-speculative</text>
+<rect x="390" y="995" width="496.97" height="18" rx="3" fill="#087f8c"/>
+<text x="894.97" y="1008" font-size="12">20.04</text>
+<text x="378" y="1038" text-anchor="end" font-size="12">mt-bench-121 · llama-speculative</text>
+<rect x="390" y="1025" width="257.13" height="18" rx="3" fill="#ca5d22"/>
+<text x="655.13" y="1038" font-size="12">10.37</text>
+<text x="378" y="1068" text-anchor="end" font-size="12">mt-bench-123 · guffin-speculative</text>
+<rect x="390" y="1055" width="506.59" height="18" rx="3" fill="#087f8c"/>
+<text x="904.59" y="1068" font-size="12">20.42</text>
+<text x="378" y="1098" text-anchor="end" font-size="12">mt-bench-123 · llama-speculative</text>
+<rect x="390" y="1085" width="256.87" height="18" rx="3" fill="#ca5d22"/>
+<text x="654.87" y="1098" font-size="12">10.36</text>
+<text x="378" y="1128" text-anchor="end" font-size="12">mt-bench-124 · guffin-speculative</text>
+<rect x="390" y="1115" width="487.38" height="18" rx="3" fill="#087f8c"/>
+<text x="885.38" y="1128" font-size="12">19.65</text>
+<text x="378" y="1158" text-anchor="end" font-size="12">mt-bench-124 · llama-speculative</text>
+<rect x="390" y="1145" width="224.24" height="18" rx="3" fill="#ca5d22"/>
+<text x="622.24" y="1158" font-size="12">9.04</text>
+<text x="378" y="1188" text-anchor="end" font-size="12">mt-bench-126 · guffin-speculative</text>
+<rect x="390" y="1175" width="490.99" height="18" rx="3" fill="#087f8c"/>
+<text x="888.99" y="1188" font-size="12">19.79</text>
+<text x="378" y="1218" text-anchor="end" font-size="12">mt-bench-126 · llama-speculative</text>
+<rect x="390" y="1205" width="240.90" height="18" rx="3" fill="#ca5d22"/>
+<text x="638.90" y="1218" font-size="12">9.71</text>
+<text x="378" y="1248" text-anchor="end" font-size="12">mt-bench-131 · guffin-speculative</text>
+<rect x="390" y="1235" width="507.99" height="18" rx="3" fill="#087f8c"/>
+<text x="905.99" y="1248" font-size="12">20.48</text>
+<text x="378" y="1278" text-anchor="end" font-size="12">mt-bench-131 · llama-speculative</text>
+<rect x="390" y="1265" width="302.23" height="18" rx="3" fill="#ca5d22"/>
+<text x="700.23" y="1278" font-size="12">12.18</text>
+<text x="378" y="1308" text-anchor="end" font-size="12">mt-bench-133 · guffin-speculative</text>
+<rect x="390" y="1295" width="468.30" height="18" rx="3" fill="#087f8c"/>
+<text x="866.30" y="1308" font-size="12">18.88</text>
+<text x="378" y="1338" text-anchor="end" font-size="12">mt-bench-133 · llama-speculative</text>
+<rect x="390" y="1325" width="300.83" height="18" rx="3" fill="#ca5d22"/>
+<text x="698.83" y="1338" font-size="12">12.13</text>
+<text x="378" y="1368" text-anchor="end" font-size="12">mt-bench-134 · guffin-speculative</text>
+<rect x="390" y="1355" width="487.60" height="18" rx="3" fill="#087f8c"/>
+<text x="885.60" y="1368" font-size="12">19.66</text>
+<text x="378" y="1398" text-anchor="end" font-size="12">mt-bench-134 · llama-speculative</text>
+<rect x="390" y="1385" width="256.92" height="18" rx="3" fill="#ca5d22"/>
+<text x="654.92" y="1398" font-size="12">10.36</text>
+<text x="378" y="1428" text-anchor="end" font-size="12">mt-bench-140 · guffin-speculative</text>
+<rect x="390" y="1415" width="493.78" height="18" rx="3" fill="#087f8c"/>
+<text x="891.78" y="1428" font-size="12">19.91</text>
+<text x="378" y="1458" text-anchor="end" font-size="12">mt-bench-140 · llama-speculative</text>
+<rect x="390" y="1445" width="295.80" height="18" rx="3" fill="#ca5d22"/>
+<text x="693.80" y="1458" font-size="12">11.93</text>
+<text x="378" y="1488" text-anchor="end" font-size="12">mt-bench-141 · guffin-speculative</text>
+<rect x="390" y="1475" width="436.36" height="18" rx="3" fill="#087f8c"/>
+<text x="834.36" y="1488" font-size="12">17.59</text>
+<text x="378" y="1518" text-anchor="end" font-size="12">mt-bench-141 · llama-speculative</text>
+<rect x="390" y="1505" width="192.82" height="18" rx="3" fill="#ca5d22"/>
+<text x="590.82" y="1518" font-size="12">7.77</text>
+<text x="378" y="1548" text-anchor="end" font-size="12">mt-bench-143 · guffin-speculative</text>
+<rect x="390" y="1535" width="452.98" height="18" rx="3" fill="#087f8c"/>
+<text x="850.98" y="1548" font-size="12">18.26</text>
+<text x="378" y="1578" text-anchor="end" font-size="12">mt-bench-143 · llama-speculative</text>
+<rect x="390" y="1565" width="212.70" height="18" rx="3" fill="#ca5d22"/>
+<text x="610.70" y="1578" font-size="12">8.57</text>
+<text x="378" y="1608" text-anchor="end" font-size="12">mt-bench-145 · guffin-speculative</text>
+<rect x="390" y="1595" width="443.80" height="18" rx="3" fill="#087f8c"/>
+<text x="841.80" y="1608" font-size="12">17.89</text>
+<text x="378" y="1638" text-anchor="end" font-size="12">mt-bench-145 · llama-speculative</text>
+<rect x="390" y="1625" width="202.99" height="18" rx="3" fill="#ca5d22"/>
+<text x="600.99" y="1638" font-size="12">8.18</text>
+<text x="378" y="1668" text-anchor="end" font-size="12">mt-bench-149 · guffin-speculative</text>
+<rect x="390" y="1655" width="449.25" height="18" rx="3" fill="#087f8c"/>
+<text x="847.25" y="1668" font-size="12">18.11</text>
+<text x="378" y="1698" text-anchor="end" font-size="12">mt-bench-149 · llama-speculative</text>
+<rect x="390" y="1685" width="215.78" height="18" rx="3" fill="#ca5d22"/>
+<text x="613.78" y="1698" font-size="12">8.70</text>
+<text x="378" y="1728" text-anchor="end" font-size="12">mt-bench-151 · guffin-speculative</text>
+<rect x="390" y="1715" width="437.98" height="18" rx="3" fill="#087f8c"/>
+<text x="835.98" y="1728" font-size="12">17.66</text>
+<text x="378" y="1758" text-anchor="end" font-size="12">mt-bench-151 · llama-speculative</text>
+<rect x="390" y="1745" width="197.64" height="18" rx="3" fill="#ca5d22"/>
+<text x="595.64" y="1758" font-size="12">7.97</text>
+<text x="378" y="1788" text-anchor="end" font-size="12">mt-bench-154 · guffin-speculative</text>
+<rect x="390" y="1775" width="422.39" height="18" rx="3" fill="#087f8c"/>
+<text x="820.39" y="1788" font-size="12">17.03</text>
+<text x="378" y="1818" text-anchor="end" font-size="12">mt-bench-154 · llama-speculative</text>
+<rect x="390" y="1805" width="190.11" height="18" rx="3" fill="#ca5d22"/>
+<text x="588.11" y="1818" font-size="12">7.66</text>
+<text x="378" y="1848" text-anchor="end" font-size="12">mt-bench-155 · guffin-speculative</text>
+<rect x="390" y="1835" width="417.51" height="18" rx="3" fill="#087f8c"/>
+<text x="815.51" y="1848" font-size="12">16.83</text>
+<text x="378" y="1878" text-anchor="end" font-size="12">mt-bench-155 · llama-speculative</text>
+<rect x="390" y="1865" width="177.05" height="18" rx="3" fill="#ca5d22"/>
+<text x="575.05" y="1878" font-size="12">7.14</text>
+<text x="378" y="1908" text-anchor="end" font-size="12">mt-bench-157 · guffin-speculative</text>
+<rect x="390" y="1895" width="430.34" height="18" rx="3" fill="#087f8c"/>
+<text x="828.34" y="1908" font-size="12">17.35</text>
+<text x="378" y="1938" text-anchor="end" font-size="12">mt-bench-157 · llama-speculative</text>
+<rect x="390" y="1925" width="179.77" height="18" rx="3" fill="#ca5d22"/>
+<text x="577.77" y="1938" font-size="12">7.25</text>
+<text x="378" y="1968" text-anchor="end" font-size="12">mt-bench-81 · guffin-speculative</text>
+<rect x="390" y="1955" width="420.37" height="18" rx="3" fill="#087f8c"/>
+<text x="818.37" y="1968" font-size="12">16.95</text>
+<text x="378" y="1998" text-anchor="end" font-size="12">mt-bench-81 · llama-speculative</text>
+<rect x="390" y="1985" width="181.53" height="18" rx="3" fill="#ca5d22"/>
+<text x="579.53" y="1998" font-size="12">7.32</text>
+<text x="378" y="2028" text-anchor="end" font-size="12">mt-bench-82 · guffin-speculative</text>
+<rect x="390" y="2015" width="468.77" height="18" rx="3" fill="#087f8c"/>
+<text x="866.77" y="2028" font-size="12">18.90</text>
+<text x="378" y="2058" text-anchor="end" font-size="12">mt-bench-82 · llama-speculative</text>
+<rect x="390" y="2045" width="220.34" height="18" rx="3" fill="#ca5d22"/>
+<text x="618.34" y="2058" font-size="12">8.88</text>
+<text x="378" y="2088" text-anchor="end" font-size="12">mt-bench-87 · guffin-speculative</text>
+<rect x="390" y="2075" width="438.09" height="18" rx="3" fill="#087f8c"/>
+<text x="836.09" y="2088" font-size="12">17.66</text>
+<text x="378" y="2118" text-anchor="end" font-size="12">mt-bench-87 · llama-speculative</text>
+<rect x="390" y="2105" width="171.78" height="18" rx="3" fill="#ca5d22"/>
+<text x="569.78" y="2118" font-size="12">6.93</text>
+<text x="378" y="2148" text-anchor="end" font-size="12">mt-bench-90 · guffin-speculative</text>
+<rect x="390" y="2135" width="492.33" height="18" rx="3" fill="#087f8c"/>
+<text x="890.33" y="2148" font-size="12">19.85</text>
+<text x="378" y="2178" text-anchor="end" font-size="12">mt-bench-90 · llama-speculative</text>
+<rect x="390" y="2165" width="243.37" height="18" rx="3" fill="#ca5d22"/>
+<text x="641.37" y="2178" font-size="12">9.81</text>
+<text x="378" y="2208" text-anchor="end" font-size="12">mt-bench-95 · guffin-speculative</text>
+<rect x="390" y="2195" width="437.14" height="18" rx="3" fill="#087f8c"/>
+<text x="835.14" y="2208" font-size="12">17.62</text>
+<text x="378" y="2238" text-anchor="end" font-size="12">mt-bench-95 · llama-speculative</text>
+<rect x="390" y="2225" width="186.29" height="18" rx="3" fill="#ca5d22"/>
+<text x="584.29" y="2238" font-size="12">7.51</text>
+<text x="378" y="2268" text-anchor="end" font-size="12">mt-bench-96 · guffin-speculative</text>
+<rect x="390" y="2255" width="438.08" height="18" rx="3" fill="#087f8c"/>
+<text x="836.08" y="2268" font-size="12">17.66</text>
+<text x="378" y="2298" text-anchor="end" font-size="12">mt-bench-96 · llama-speculative</text>
+<rect x="390" y="2285" width="186.02" height="18" rx="3" fill="#ca5d22"/>
+<text x="584.02" y="2298" font-size="12">7.50</text>
+<text x="378" y="2328" text-anchor="end" font-size="12">mt-bench-97 · guffin-speculative</text>
+<rect x="390" y="2315" width="450.66" height="18" rx="3" fill="#087f8c"/>
+<text x="848.66" y="2328" font-size="12">18.17</text>
+<text x="378" y="2358" text-anchor="end" font-size="12">mt-bench-97 · llama-speculative</text>
+<rect x="390" y="2345" width="209.07" height="18" rx="3" fill="#ca5d22"/>
+<text x="607.07" y="2358" font-size="12">8.43</text>
+</g>
+</svg>

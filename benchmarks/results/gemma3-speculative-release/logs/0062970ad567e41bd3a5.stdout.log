@@ -1,0 +1,71 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... Okay, here's a review of the Guffin project documents, addressing your requested points.
+
+**Architecture**
+
+Guffin is a C++20 and Metal-based engine designed for running local Gemma language models (specifically targeting Gemma 3 12B, with support for Gemma 3 270M and Gemma 2 9B) on Apple Silicon Macs (specifically a 16 GiB MacBook Air M4). It aims to optimize inference performance on resource-constrained devices. The core architecture comprises:
+
+*   **CLI:** Handles user interaction, streaming output, and metrics.
+*   **Chat Session:** Manages conversation history, context, and stopping conditions.
+*   **Prepared Plans:** Represents the model's weights, key/value caches, and scratch buffers.
+*   **Gemma Target & Drafter:** These are Metal GPU kernels responsible for model execution. The target handles the main inference, while the drafter (270M Gemma) provides speculative token proposals for faster generation.
+*   **CPU Target Sampler:**  Performs final token selection using the target's candidates, leveraging CPU resources.
+
+The project emphasizes explicit ownership of resources and reusing work where possible, particularly in the speculative decoding process.  The architecture diagram in the README illustrates the flow of data and control.
+
+**Boundary Between Production Execution and Experimental Evidence**
+
+The boundary is clearly defined. **Production execution** refers to the actual inference process during usage. **Experimental evidence** is generated during development and testing to validate design choices and performance improvements.  The `ENGINE_PRINCIPLES.md` document reinforces this, stating that performance-sensitive code should be tested with real-world inputs and that any changes must improve the overall end-to-end performance.  The `docs/PERFORMANCE.md` file explicitly separates released benchmarks from pending ones.  Crucially, independent numerical references and fault injection are kept *outside* of production execution.
+
+**Three Important Correctness Contracts**
+
+1.  **Lossless Probability Correction:** Speculative decoding *must* preserve the configured target sampling distribution.  This is verified by `tests/engine/lossless_sampling_tests.cpp`.
+2.  **Numerical Accuracy of Metal Kernels:**  Packed projections, fused sums, and floating-point operations within the Metal kernels must be numerically accurate. This is tested via `tests/tensor/gemma3_metal_tests.cpp`.
+3.  **Target/Verifier Cache Agreement:**  The target and draft caches, sampler state, and callback receipts must remain synchronized during execution.  This is checked by `tests/engine/gemma2_metal_plan_tests.cpp`.
+
+**Stated Limitations**
+
+*   **Hardware Specificity:** Primarily tested on a 16 GiB MacBook Air M4.  Performance on other devices is unvalidated.
+*   **Model Support:** While Gemma 2 and 3 are supported, compatibility isn't guaranteed for all model variants.
+*   **Performance Data Pending:** Benchmarks and comparisons to `llama.cpp` are not yet finalized.
+*   **Numerical Validation Boundary:** There's an unresolved issue with independent 128-token prompts failing validation, suggesting a boundary in numerical validation.
+
+
+
+Hopefully, this review provides a good overview for a new contributor!
+[ Prompt: 96.7 t/s | Generation: 13.5 t/s | TTFT: 47.695511 s ]
+[ Detail: Evaluated: 4611 | Cached: 0 | Decoded: 693 | Prompt: 47.695511 s | Generation: 51.351109 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":693,"stop_reason":"stop_token","selected_token_hash":"bcfdeb7547dc9bde","decoded_tokens":693,"initial_cache_position":0,"final_cache_position":5304,"evaluated_prompt_tokens":4611,"reused_cache_tokens":0,"decode_wall_ns":51438815499,"gpu_ns":50681802847,"selection_ns":266752,"proposer_ns":0,"generation_completion_ns":51440191292,"full_turn_ns":99141713167,"first_text_ns":47783342458,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":432,"learned_accepted_edges":259,"learned_proposed_edges":432,"learned_numeric_refusals":0,"learned_draft_ns":4141682675,"learned_draft_gpu_ns":3897715853,"learned_target_gpu_ns":39465248700,"learned_cycle_ns":44088160212,"standalone_prefill_ns":7180773458,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":190860,"standalone_draft_readback_bytes":105912,"standalone_draft_wall_ns":11335020420,"standalone_draft_gpu_ns":11060847773,"standalone_draft_command_buffer_count":938,"standalone_draft_compute_dispatch_count":191100,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,432,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[432,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[173,259,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[173,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":259,"learned_horizon_limited_cycle_count":259,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":757012652,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1804,"commits":1804,"waits":1804,"compute_encoders":1804,"compute_dispatches":614571,"blit_encoders":0,"barriers":423644,"transient_allocations":0,"selector_dispatches":4763,"max_candidates":40,"compact_readback_bytes":276800,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":124416,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":21169,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":41568,"attention_partitions":360256,"attention_tokens":69823968,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":5153056931622} ]
+> ## Guffin Contribution Checklist: Sampling/Cache Logic Changes
+
+**Goal:** Ensure correctness and performance of modified sampling or cache logic.
+
+**I. Automated Correctness Checks (Mandatory)**
+
+*   [ ] **Lossless Probability:** Run `make test` – specifically, verify `tests/engine/lossless_sampling_tests.cpp` passes. Ensure the new logic maintains the configured sampling distribution.
+*   [ ] **Numerical Integrity:** Run `make test` – focus on `tests/tensor/gemma3_metal_tests.cpp`. Confirm packed projections, fused sums, and floating-point operations remain numerically accurate.
+*   [ ] **Cache Synchronization:** Run `make test` – verify `tests/engine/gemma2_metal_plan_tests.cpp` passes. Confirm target/draft caches & callback receipts remain synchronized.
+*   [ ] **Tensor Validation:** Run `make test` – check `tests/tensor/tensor_tests.cpp`. Ensure descriptors validate and views check backing storage.
+*   [ ] **Code Review:** Address all reviewer comments, focusing on ownership, resource lifetimes, and explicit dependencies.
+
+**II. Actual-Chat Performance Measurements (Highly Recommended)**
+
+*   [ ] **Define Baseline:** Record existing performance (tokens/s, TTFT) from the `Performance` section (currently pending).
+*   [ ] **Implement Measurement:** Add instrumentation to the new code to track key metrics.
+*   [ ] **Run Benchmarks:** Execute the modified code on representative prompts.
+*   [ ] **Compare Performance:**  Does the change improve end-to-end chat performance beyond statistical noise? If not, reconsider.
+*   [ ] **Document Findings:** Record prompt, model, settings, and timings in `docs/PERFORMANCE.md`.
+
+
+
+**Important Notes:**
+
+*   Adhere to `ENGINE_PRINCIPLES.md` regarding independent numerical references & avoiding production dependencies for validation.
+*   Consult `docs/ENGINE_PRINCIPLES.md` and `docs/NEXT_TASK.md` for architectural guidelines.
+[ Prompt: 62.9 t/s | Generation: 16.6 t/s | TTFT: 0.826133 s ]
+[ Detail: Evaluated: 52 | Cached: 5304 | Decoded: 437 | Prompt: 0.826133 s | Generation: 26.355404 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":437,"stop_reason":"stop_token","selected_token_hash":"4d0d4669a17f39c5","decoded_tokens":437,"initial_cache_position":5304,"final_cache_position":5793,"evaluated_prompt_tokens":52,"reused_cache_tokens":5304,"decode_wall_ns":26439043154,"gpu_ns":25991963773,"selection_ns":173179,"proposer_ns":0,"generation_completion_ns":26440206666,"full_turn_ns":27289052333,"first_text_ns":931948750,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":268,"learned_accepted_edges":167,"learned_proposed_edges":268,"learned_numeric_refusals":0,"learned_draft_ns":2381890201,"learned_draft_gpu_ns":2233291381,"learned_target_gpu_ns":23507383644,"learned_cycle_ns":26185355752,"standalone_prefill_ns":86715292,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":107024,"standalone_draft_readback_bytes":64776,"standalone_draft_wall_ns":2478695478,"standalone_draft_gpu_ns":2329217672,"standalone_draft_command_buffer_count":538,"standalone_draft_compute_dispatch_count":103420,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,268,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[268,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[101,167,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":167,"learned_horizon_limited_cycle_count":167,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":447079381,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1076,"commits":1076,"waits":1076,"compute_encoders":1076,"compute_dispatches":366827,"blit_encoders":0,"barriers":252080,"transient_allocations":0,"selector_dispatches":2959,"max_candidates":40,"compact_readback_bytes":171840,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":77184,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":13133,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":25824,"attention_partitions":223808,"attention_tokens":46045072,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":3249169527078} ]
+> 

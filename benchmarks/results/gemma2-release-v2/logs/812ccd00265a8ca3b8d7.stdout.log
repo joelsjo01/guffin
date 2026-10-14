@@ -1,0 +1,73 @@
+Guffin
+/help for commands, /exit to quit.
+
+> Here's how to solve this probability problem:
+
+**1. Understand the Basics**
+
+* Each die has 6 sides (numbers 1-6).
+* When rolling two dice, there are 6 * 6 = 36 possible combinations.
+
+**2.  Find the Opposite**
+
+It's easier to calculate the probability of the event *not* happening and subtract from 1.  The opposite of rolling a total of at least 3 is rolling a total of 2 or less.
+
+**3.  Calculate the Probability of Rolling 2 or Less**
+
+*  The combinations that result in a total of 2 are: (1, 1)
+*  The combinations that result in a total of 1 are: (1, 0) 
+
+There are 2 successful combinations out of 36 total.
+
+**4. Calculate the Probability of Rolling at Least 3**
+
+* Probability (at least 3) = 1 - Probability (2 or less)
+* Probability (at least 3) = 1 - (2/36) 
+* Probability (at least 3) = 1 - (1/18)
+* Probability (at least 3) = 17/18
+
+
+
+**Therefore, the probability of rolling a total number that is at least 3 when rolling two dice is 17/18.**
+[ Prompt: 134.6 t/s | Generation: 17.2 t/s | TTFT: 0.230274 s ]
+[ Detail: Evaluated: 31 | Cached: 0 | Decoded: 297 | Prompt: 0.230274 s | Generation: 17.234050 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":297,"stop_reason":"stop_token","selected_token_hash":"26a16fc59604fe86","decoded_tokens":297,"initial_cache_position":0,"final_cache_position":328,"evaluated_prompt_tokens":31,"reused_cache_tokens":0,"decode_wall_ns":17280549365,"gpu_ns":17112468743,"selection_ns":1055948,"proposer_ns":1313741,"generation_completion_ns":17285612833,"full_turn_ns":17516491000,"first_text_ns":291788042,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":27,"speculative_matches":21,"speculative_misses":6,"speculative_fallbacks":248,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":4,"matches":2},{"match_length":"2","support":"2","confidence":"1","cycles":10,"matches":8},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"2","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"3-4","support":"2","confidence":"1","cycles":3,"matches":2},{"match_length":"3-4","support":"4+","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"5-8","support":"2","confidence":"1","cycles":4,"matches":4},{"match_length":"9-16","support":"2","confidence":"1","cycles":3,"matches":3}],"wall_minus_gpu_ns":168080622,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":282,"commits":282,"waits":282,"compute_encoders":282,"compute_dispatches":182645,"blit_encoders":0,"barriers":133482,"transient_allocations":0,"selector_dispatches":3025,"max_candidates":40,"compact_readback_bytes":96640,"q4_decode":67977,"q8_decode":275,"q8_width_two":0,"q4_small_batch":7371,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":5229,"q6_small_batch":567,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":12726,"attention_partitions":15834,"attention_tokens":2302356,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":1729551473664} ]
+> Here's how to solve this problem:
+
+**1.  Consider the Overlap**
+
+Notice that some numbers satisfy both conditions (even *and* at least 3).  These are: 4, 6, 8, 10, etc.
+
+**2.  Break it Down**
+
+To avoid double-counting, let's break the problem into parts:
+
+* **Probability of rolling an even number:** 
+   * There are 18 even numbers possible (2, 4, 6, ... 12).
+   *  Probability = 18/36 = 1/2
+
+* **Probability of rolling at least 3:** We already calculated this as 17/18.
+
+* **Probability of rolling an even number AND at least 3:**
+   *  List the combinations: (2, 2), (2, 4), (2, 6), (4, 2), (4, 4), (4, 6), (6, 2), (6, 4), (6, 6)
+   * There are 9 combinations.
+   * Probability = 9/36 = 1/4
+
+**3.  Use the Addition Rule**
+
+The probability of either event happening is:
+
+P(even or at least 3) = P(even) + P(at least 3) - P(even and at least 3)
+
+P(even or at least 3) = (1/2) + (17/18) - (1/4)
+
+P(even or at least 3) = **29/36**
+
+
+
+
+
+[ Prompt: 77.6 t/s | Generation: 17.4 t/s | TTFT: 0.425123 s ]
+[ Detail: Evaluated: 33 | Cached: 328 | Decoded: 360 | Prompt: 0.425123 s | Generation: 20.677352 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":360,"stop_reason":"stop_token","selected_token_hash":"3b646326ba5b8ad7","decoded_tokens":360,"initial_cache_position":328,"final_cache_position":721,"evaluated_prompt_tokens":33,"reused_cache_tokens":328,"decode_wall_ns":20721049875,"gpu_ns":20522652402,"selection_ns":1270376,"proposer_ns":4140708,"generation_completion_ns":20729452375,"full_turn_ns":21160597834,"first_text_ns":493620292,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":61,"speculative_matches":40,"speculative_misses":21,"speculative_fallbacks":258,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":7,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":13,"matches":6},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"2","support":"3","confidence":"1","cycles":6,"matches":5},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":3,"matches":2},{"match_length":"2","support":"4+","confidence":"1","cycles":9,"matches":7},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"3-4","support":"2","confidence":"1","cycles":10,"matches":8},{"match_length":"3-4","support":"3","confidence":"1","cycles":2,"matches":2},{"match_length":"3-4","support":"4+","confidence":"2/3-1","cycles":2,"matches":1},{"match_length":"3-4","support":"4+","confidence":"1","cycles":2,"matches":2},{"match_length":"5-8","support":"2","confidence":"1","cycles":4,"matches":4},{"match_length":"9-16","support":"2","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":198397473,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":341,"commits":341,"waits":341,"compute_encoders":341,"compute_dispatches":225513,"blit_encoders":0,"barriers":165428,"transient_allocations":0,"selector_dispatches":3509,"max_candidates":40,"compact_readback_bytes":121600,"q4_decode":70707,"q8_decode":319,"q8_width_two":0,"q4_small_batch":16653,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":5439,"q6_small_batch":1281,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":16002,"attention_partitions":50820,"attention_tokens":8669052,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":2096632817664} ]
+> 

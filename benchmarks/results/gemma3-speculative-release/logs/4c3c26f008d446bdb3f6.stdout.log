@@ -1,0 +1,54 @@
+
+
+Loading model... |-\|/-\|/-\|/-\| 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Extract the following information from the presented texts: The name of the book, the author, the main character, the year of publication. Output in the format of "main character, book, author, year of publication", one book per line.\\ 
+a) In the realm of wizarding literature, a true standout is the work of J.K. Rowling. One of her books that left an indelible mark is 'Harry Potter and the Philosopher's Stone'. This iconic tale, published in 1997, tells the story of Harry, a young orphan who discovers his magical abilities on his 11th birthday. Soon, he finds himself at the Hogwarts School of Witchcraft and Wizardry, a place teeming with magic and adventure, located somewhere in Scotland.\\ 
+b) The magic of Middle-earth has entranced readers worldwide, thanks to the brilliance of J.R.R. Tolkien. In one of his seminal works, 'The Lord of the Rings: The Fellowship of the Ring', published in 1954, we meet Frodo Baggins, a brave hobbit tasked with the perilous quest of destroying the One Ring. The epic journey takes him from the peaceful Shire to the tumultuous regions of Middle-earth.\\ 
+c) In a galaxy far, far away, the imagination of L.E. Starlighter gives us 'The Prism Galaxy Chronicles: The Awakening of the Starcaster'. Published in 2028, the story is about Zylo, a humble spaceship mechanic, who unexpectedly discovers he's a Starcaster - a rare individual with the power to manipulate stardust. Set against the backdrop of an interstellar empire in turmoil, Zylo's destiny unfolds on numerous alien worlds, each with its unique cosmic charm.
+[0mHarry, Harry Potter and the Philosopher's Stone, J.K. Rowling, 1997
+Frodo Baggins, The Lord of the Rings: The Fellowship of the Ring, J.R.R. Tolkien, 1954
+Zylo, The Prism Galaxy Chronicles: The Awakening of the Starcaster, L.E. Starlighter, 2028
+[35m
+[ Prompt: 115.7 t/s | Generation: 11.6 t/s ]
+[0m[1m[32m
+> Reformulate your earlier reply, output it in JSON format and only include books published after 1980.
+[0m```json
+[
+  {
+    "main_character": "Zylo",
+    "book": "The Prism Galaxy Chronicles: The Awakening of the Starcaster",
+    "author": "L.E. Starlighter",
+    "year_of_publication": 2028
+  }
+]
+```
+[35m
+[ Prompt: 93.8 t/s | Generation: 12.9 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

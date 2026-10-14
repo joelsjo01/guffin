@@ -1,0 +1,73 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ## Aloha from Paradise: A Journey Through Hawaiian Culture and Beauty 
+
+The scent of plumeria blossoms, the rhythmic lull of the ocean waves, and the warm smiles of the locals - Hawaii truly lives up to its name as "The Aloha State."  Just returned from an unforgettable trip, I'm overflowing with stories and sun-kissed memories.  
+
+My adventure began on the vibrant island of Oahu, where history and nature collide. A visit to Pearl Harbor was a sobering reminder of the past, but also a testament to the resilience of the human spirit.  The USS Arizona Memorial, a poignant symbol of sacrifice, left a lasting impression.
+
+But Oahu is much more than historical landmarks.  Hiking Diamond Head, a dormant volcanic crater offering panoramic views of Waikiki and the Pacific, was a must-do.  The climb was worth every drop of sweat, the breathtaking panorama a reward for the effort.
+
+Beyond the iconic Waikiki Beach, I sought out authentic Hawaiian experiences. Learning the hula at a local cultural center was an absolute highlight.  The grace and storytelling woven into the dance were mesmerizing, a powerful glimpse into Polynesian traditions.  Later, I feasted on a traditional Hawaiian meal at a family-run restaurant, savoring dishes like kalua pig and poi, the flavors bursting with local ingredients.
+
+Next, I hopped over to the Big Island, a land of dramatic volcanic landscapes and lush rainforests. Witnessing the awe-inspiring eruption of Kilauea volcano at night was a truly unforgettable experience.  The fiery glow against the star-studded sky was a spectacle that will forever be etched in my memory.
+
+But the Big Island also boasts stunning natural beauty.  Mauna Kea, the dormant volcano offering some of the clearest skies in the world, was an absolute must for stargazing.  The Milky Way stretched across the sky like a celestial river, a sight that left me speechless.
+
+From snorkeling with sea turtles in crystal-clear waters to exploring the black sand beaches of Punalu'u, my journey through Hawaii was an immersion in its rich culture, breathtaking landscapes, and warm hospitality.
+
+**Must-See Attractions:**
+
+* **Pearl Harbor, Oahu:** A powerful reminder of history and a tribute to those who served.
+* **Diamond Head, Oahu:** Hike to the top for breathtaking panoramic views.
+* **Polynesian Cultural Center, Oahu:** Experience authentic Polynesian dances, music, and traditions.
+* **Kilauea Volcano National Park, Big Island:** Witness the raw power of nature at its finest.
+* **Mauna Kea Observatories, Big Island:** Stargaze under the clearest skies on Earth.
+* **Punalu'u Black Sand Beach, Big Island:** Unique and picturesque beach with a chance to see sea turtles.
+
+**Travel Tips:**
+
+* Learn a few basic Hawaiian phrases. "Aloha" means hello and goodbye, "mahalo" means thank you.
+* Respect local customs and traditions.
+* Pack light clothing, sunscreen, and a hat.
+* Be prepared for rain, especially on the Big Island.
+* Book accommodations and activities in advance, especially during peak season.
+
+Hawaii is more than just a vacation destination; it's an experience that will stay with you long after you leave.  So, pack your bags, embrace the Aloha spirit, and prepare for an adventure you'll never forget.
+
+
+
+[ Prompt: 136.8 t/s | Generation: 16.8 t/s | TTFT: 0.226577 s ]
+[ Detail: Evaluated: 31 | Cached: 0 | Decoded: 698 | Prompt: 0.226577 s | Generation: 41.611419 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":698,"stop_reason":"stop_token","selected_token_hash":"f7571a2ef3fd3531","decoded_tokens":698,"initial_cache_position":0,"final_cache_position":729,"evaluated_prompt_tokens":31,"reused_cache_tokens":0,"decode_wall_ns":41645870898,"gpu_ns":41208508179,"selection_ns":2540006,"proposer_ns":6577993,"generation_completion_ns":41661680792,"full_turn_ns":41889393333,"first_text_ns":287026416,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":11,"speculative_matches":10,"speculative_misses":1,"speculative_fallbacks":676,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"1","cycles":5,"matches":4},{"match_length":"2","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"2","support":"4+","confidence":"1","cycles":5,"matches":5}],"wall_minus_gpu_ns":437362719,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":689,"commits":689,"waits":689,"compute_encoders":689,"compute_dispatches":463471,"blit_encoders":0,"barriers":346234,"transient_allocations":0,"selector_dispatches":7557,"max_candidates":40,"compact_readback_bytes":223360,"q4_decode":184821,"q8_decode":687,"q8_width_two":0,"q4_small_batch":3003,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":14217,"q6_small_batch":231,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":29358,"attention_partitions":67494,"attention_tokens":11173764,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":4066053361664} ]
+> Aloha from paradise!  A journey through Hawaiian culture and beauty awaits you.   After an unforgettable trip, I'm overflowing with stories and sun-kissed memories.  Arriving in Oahu, history and nature collided.  A visit to Pearl Harbor was a sobering reminder of the past, but also a testament to the human spirit's resilience.  A poignant symbol of sacrifice, the USS Arizona Memorial left a lasting impression. 
+
+Away from the iconic Waikiki Beach, I sought out authentic experiences.  A highlight was learning the hula at a local cultural center.   Authentic Polynesian traditions were woven into the graceful dance.  A feast of traditional Hawaiian cuisine followed at a family-run restaurant.  Amazing flavors of local ingredients burst forth in dishes like kalua pig and poi.
+
+Across the island chain, I landed on the Big Island.  Astonishing volcanic landscapes and lush rainforests awaited.  A sight to behold was the eruption of Kilauea volcano at night.   Amazingly, the fiery glow against the star-studded sky was a spectacle I'll never forget.
+
+Along the Big Island, stunning natural beauty unfolded.  Admire Mauna Kea, the dormant volcano offering some of the clearest skies in the world.  Awe-inspiring stargazing under the Milky Way, stretching across the sky, left me speechless.
+
+Around every corner, Hawaii offered something new.   An immersion in its rich culture, breathtaking landscapes, and warm hospitality.
+
+**Aloha, and remember these tips:**
+
+* A few basic Hawaiian phrases will enhance your experience.
+
+* Authentic respect for local customs and traditions is key. 
+*  Always pack light clothing, sunscreen, and a hat.
+
+* A raincoat or umbrella is recommended, especially on the Big Island.
+*   Always book accommodations and activities in advance, especially during peak season.
+
+**Aloha awaits!**  
+
+
+
+
+
+[ Prompt: 85.7 t/s | Generation: 16.4 t/s | TTFT: 0.256723 s ]
+[ Detail: Evaluated: 22 | Cached: 729 | Decoded: 388 | Prompt: 0.256723 s | Generation: 23.606749 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":388,"stop_reason":"stop_token","selected_token_hash":"ce8472c798420f56","decoded_tokens":388,"initial_cache_position":729,"final_cache_position":1139,"evaluated_prompt_tokens":22,"reused_cache_tokens":729,"decode_wall_ns":23645459511,"gpu_ns":23389452554,"selection_ns":1408999,"proposer_ns":8376425,"generation_completion_ns":23658852958,"full_turn_ns":23923234667,"first_text_ns":328357792,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":12,"speculative_matches":8,"speculative_misses":4,"speculative_fallbacks":367,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":3,"matches":1},{"match_length":"2","support":"2","confidence":"1","cycles":5,"matches":3},{"match_length":"2","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"2","support":"4+","confidence":"1","cycles":2,"matches":2},{"match_length":"3-4","support":"2","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":256006957,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":384,"commits":384,"waits":384,"compute_encoders":384,"compute_dispatches":261843,"blit_encoders":0,"barriers":196448,"transient_allocations":0,"selector_dispatches":4169,"max_candidates":40,"compact_readback_bytes":125120,"q4_decode":100464,"q8_decode":379,"q8_width_two":0,"q4_small_batch":3276,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":7728,"q6_small_batch":252,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":16464,"attention_partitions":85512,"attention_tokens":15578808,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":2259780081664} ]
+> 

@@ -1,0 +1,1088 @@
+{
+  "schema_version": 1,
+  "campaign_id": "37131a8f-b572-4536-b08a-441ec90df018",
+  "created_at": "2026-10-12T23:41:05Z",
+  "contract_sha256": "5e2c562f524bffa4ab33babcc7c28faade164c8701f93f7415b9f263f9cdd783",
+  "environment": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "architecture": "arm64",
+    "python": "3.14.5",
+    "source_commit": "644312e18197379cb5e6d3ef25f1e90dd3ed5553",
+    "source_status": "M README.md\n M docs/GRAPH.md\n M docs/NEXT_TASK.md\n M docs/PERFORMANCE.md\n M docs/SPECULATIVE_DECODING_RETROSPECTIVE.md\n M include/local_gguf_engine/engine/gemma2_metal_plan.hpp\n M include/local_gguf_engine/engine/model.hpp\n M include/local_gguf_engine/model_format/gguf_reader.hpp\n M include/local_gguf_engine/tensor/kquant_packing.hpp\n M include/local_gguf_engine/tensor/quantization.hpp\n M include/local_gguf_engine/tokenizer/tokenizer.hpp\n M src/engine/gemma2_metal_plan.cpp\n M src/engine/gemma2_runtime.cpp\n M src/engine/gemma3_draft.mm\n M src/engine/gemma_chat_session.cpp\n M src/engine/gemma_target_runtime.cpp\n M src/engine/gemma_target_runtime.hpp\n M src/engine/model.cpp\n M src/frontends/cli/metrics.cpp\n M src/model_format/gguf_reader.cpp\n M src/tensor/backends/metal/metal_buffer.hpp\n M src/tensor/backends/metal/metal_buffer.mm\n M src/tensor/backends/metal/metal_command_context.hpp\n M src/tensor/backends/metal/metal_command_context.mm\n M src/tensor/backends/metal/metal_context.hpp\n M src/tensor/backends/metal/metal_context.mm\n M src/tensor/backends/metal/metal_kernels.mm\n M src/tensor/backends/metal/metal_tensor_ops.mm\n M src/tensor/backends/metal_backend.hpp\n M src/tensor/backends/metal_backend.mm\n M src/tensor/kquant_packing.cpp\n M src/tensor/quantization.cpp\n M src/tokenizer/tokenizer.cpp\n M tests/engine/engine_model_tests.cpp\n M tests/engine/gemma2_metal_plan_tests.cpp\n M tests/engine/gemma3_draft_tests.cpp\n M tests/engine/gemma3_target_runtime_tests.cpp\n M tests/frontends/cli/cli_tests.cpp\n M tests/model_format/gguf_reader_tests.cpp\n M tests/support/metal_test_hooks.hpp\n M tests/tensor/gemma3_metal_tests.cpp\n M tests/tensor/tensor_backend_tests.cpp\n M tests/tensor/tensor_tests.cpp\n M tests/tokenizer/tokenizer_tests.cpp\n?? benchmarks/chat/\n?? docs/BENCHMARKING.md\n?? include/local_gguf_engine/runtime/owned_read_only_bytes.hpp\n?? scripts/release_chat_benchmark.py\n?? scripts/release_chat_metrics.py\n?? scripts/release_chat_report.py\n?? src/tensor/kquant_packing_internal.hpp\n?? src/tensor/weight_preparation.hpp\n?? tests/scripts/chat_corpus_tests.py\n?? tests/scripts/release_chat_benchmark_tests.py\n?? tests/scripts/release_chat_metrics_tests.py\n?? tests/scripts/release_chat_report_tests.py",
+    "inference_environment": {},
+    "macos": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+    "hardware": "hw.model: Mac16,12\nhw.memsize: 17179869184\nhw.ncpu: 10",
+    "power_settings": "Battery Power:\n Sleep On Power Button 1\n lowpowermode         0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         10\n womp                 0\n networkoversleep     0\n sleep                1\n lessbright           1\n tcpkeepalive         1\n disksleep            10\nAC Power:\n Sleep On Power Button 1\n lowpowermode         0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         0\n womp                 1\n networkoversleep     0\n sleep                1\n tcpkeepalive         1\n disksleep            10"
+  },
+  "corpus": {
+    "path": "/Users/joel/Desktop/guffin/benchmarks/chat/corpus.json",
+    "sha256": "e6d88d0aa71d3bf0caf47ae22df91656fe70d18bad670c6797cb1b181194f6f9",
+    "description": "A frozen Guffin performance workload: 32 verbatim MT-Bench conversations plus six separately labeled project-owned cases. This is not an official MT-Bench quality evaluation.",
+    "sources": [
+      {
+        "id": "mt-bench",
+        "kind": "external",
+        "name": "MT-Bench, original public question release",
+        "url": "https://github.com/lm-sys/FastChat/blob/b494d0c6b4e7935f1764f8439e75da3e66beccc7/fastchat/llm_judge/data/mt_bench/question.jsonl",
+        "revision": "b494d0c6b4e7935f1764f8439e75da3e66beccc7",
+        "sha256": "119565adbab82227089cefdb44c8d7e2cf04dc0a0ec233634c82e7d4e2a944f7",
+        "source_question_count": 80,
+        "selected_question_ids": [
+          81,
+          82,
+          87,
+          90,
+          95,
+          96,
+          97,
+          100,
+          101,
+          105,
+          106,
+          109,
+          111,
+          114,
+          116,
+          119,
+          121,
+          123,
+          124,
+          126,
+          131,
+          133,
+          134,
+          140,
+          141,
+          143,
+          145,
+          149,
+          151,
+          154,
+          155,
+          157
+        ],
+        "snapshot_path": "sources/mt-bench-selected.jsonl",
+        "snapshot_sha256": "866d4a0088280d53adc6448fc5a0d0b65d5f5df2dbb6edef933e23ef07779df1",
+        "license": "Apache-2.0",
+        "license_url": "https://github.com/lm-sys/FastChat/blob/b494d0c6b4e7935f1764f8439e75da3e66beccc7/LICENSE",
+        "license_path": "sources/FastChat-LICENSE",
+        "license_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      },
+      {
+        "id": "guffin-readme",
+        "kind": "repository",
+        "name": "Guffin README.md",
+        "url": "https://github.com/Coach6/guffin/blob/644312e18197379cb5e6d3ef25f1e90dd3ed5553/README.md",
+        "revision": "644312e18197379cb5e6d3ef25f1e90dd3ed5553",
+        "original_path": "README.md",
+        "sha256": "dd615734ac96b95a208908b7def28d463b6d1f4e56ffe48cfc6571688275324e",
+        "snapshot_path": "sources/guffin-readme.md",
+        "snapshot_sha256": "dd615734ac96b95a208908b7def28d463b6d1f4e56ffe48cfc6571688275324e",
+        "license": "Project-owned; repository release license pending"
+      },
+      {
+        "id": "guffin-principles",
+        "kind": "repository",
+        "name": "Guffin docs/ENGINE_PRINCIPLES.md",
+        "url": "https://github.com/Coach6/guffin/blob/644312e18197379cb5e6d3ef25f1e90dd3ed5553/docs/ENGINE_PRINCIPLES.md",
+        "revision": "644312e18197379cb5e6d3ef25f1e90dd3ed5553",
+        "original_path": "docs/ENGINE_PRINCIPLES.md",
+        "sha256": "531cabc3ffbc4243fc37ea75d11aa254f428a78a1309cb92a4581f4e646eccbe",
+        "snapshot_path": "sources/guffin-principles.md",
+        "snapshot_sha256": "531cabc3ffbc4243fc37ea75d11aa254f428a78a1309cb92a4581f4e646eccbe",
+        "license": "Project-owned; repository release license pending"
+      },
+      {
+        "id": "guffin-cli-options",
+        "kind": "repository",
+        "name": "Guffin src/frontends/cli/options.cpp",
+        "url": "https://github.com/Coach6/guffin/blob/644312e18197379cb5e6d3ef25f1e90dd3ed5553/src/frontends/cli/options.cpp",
+        "revision": "644312e18197379cb5e6d3ef25f1e90dd3ed5553",
+        "original_path": "src/frontends/cli/options.cpp",
+        "sha256": "0aebd1ef4030e7f8267e70581cae0b8c24387e5d30b00f7f4fad5b1d8b21c7f4",
+        "snapshot_path": "sources/guffin-cli-options.cpp",
+        "snapshot_sha256": "0aebd1ef4030e7f8267e70581cae0b8c24387e5d30b00f7f4fad5b1d8b21c7f4",
+        "license": "Project-owned; repository release license pending"
+      },
+      {
+        "id": "guffin-cli-options-header",
+        "kind": "repository",
+        "name": "Guffin src/frontends/cli/options.hpp",
+        "url": "https://github.com/Coach6/guffin/blob/644312e18197379cb5e6d3ef25f1e90dd3ed5553/src/frontends/cli/options.hpp",
+        "revision": "644312e18197379cb5e6d3ef25f1e90dd3ed5553",
+        "original_path": "src/frontends/cli/options.hpp",
+        "sha256": "478f31121f2a529be77e3877ab4260e8bbaa2ee2782d0f5a319db8a46874ba41",
+        "snapshot_path": "sources/guffin-cli-options.hpp",
+        "snapshot_sha256": "478f31121f2a529be77e3877ab4260e8bbaa2ee2782d0f5a319db8a46874ba41",
+        "license": "Project-owned; repository release license pending"
+      },
+      {
+        "id": "guffin-original",
+        "kind": "original",
+        "name": "Guffin release chat workload prompts",
+        "revision": "2026-10-06-v1",
+        "license": "Project-owned; repository release license pending",
+        "description": "Authored for this corpus. Long cases embed separately pinned project snapshots named by context_source_ids, with any contiguous excerpt identified by context_excerpts.",
+        "sha256": "b40ca2a451250cfe716e75cf97f4af27bf76f16492ef1ac718a8f5cc6644f929"
+      }
+    ]
+  },
+  "model": {
+    "path": "/Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf",
+    "sha256": "7bb69bff3f48a7b642355d64a90e481182a7794707b3133890646b1efa778ff5",
+    "size_bytes": 7300574976
+  },
+  "draft_model": null,
+  "cases": [
+    {
+      "id": "mt-bench-81",
+      "suite": "core",
+      "category": "writing",
+      "source_id": "mt-bench",
+      "source_question_id": 81,
+      "turns": [
+        "Compose an engaging travel blog post about a recent trip to Hawaii, highlighting cultural experiences and must-see attractions.",
+        "Rewrite your previous response. Start every sentence with the letter A."
+      ],
+      "turns_sha256": "55a4ceefb5db93fcf4cfee32074d39f572a1ca09d9794538fc6d18e7841fcf8c"
+    },
+    {
+      "id": "mt-bench-82",
+      "suite": "core",
+      "category": "writing",
+      "source_id": "mt-bench",
+      "source_question_id": 82,
+      "turns": [
+        "Draft a professional email seeking your supervisor's feedback on the 'Quarterly Financial Report' you prepared. Ask specifically about the data analysis, presentation style, and the clarity of conclusions drawn. Keep the email short and to the point.",
+        "Take a moment to evaluate and critique your own response."
+      ],
+      "turns_sha256": "4b5289cbad229e4ea6a09177ee4923ac95df48b9b30c38cfa1288f8f0f469008"
+    },
+    {
+      "id": "mt-bench-87",
+      "suite": "core",
+      "category": "writing",
+      "source_id": "mt-bench",
+      "source_question_id": 87,
+      "turns": [
+        "Could you write a captivating short story beginning with the sentence: The old abandoned house at the end of the street held a secret that no one had ever discovered.",
+        "Now, do the same task again but only use four-word sentences."
+      ],
+      "turns_sha256": "4e0e522f0e73324a80925a98c227b4a615d0fbc628305cb4b9bd71ac47a6bf5f"
+    },
+    {
+      "id": "mt-bench-90",
+      "suite": "core",
+      "category": "writing",
+      "source_id": "mt-bench",
+      "source_question_id": 90,
+      "turns": [
+        "Edit the following paragraph to correct any grammatical errors:\nShe didn't remembre where is her purse, so I thinks its in the car but he's say it's on kitchen table but he are not sure, and then they asked me to looking for it, she's say, \"Can you?\", and I responds with, \"Maybe, but ain't no sure,\" and he not heard me, and, \"What?\", he asks, \"Did you found it?\".",
+        "Modify your earlier reply and eliminate the use of gendered pronouns."
+      ],
+      "turns_sha256": "2ad220ab9422fd1f2c13e923120ae500fe79a511dfe73997c1ec59a76a3b3539"
+    },
+    {
+      "id": "mt-bench-95",
+      "suite": "core",
+      "category": "roleplay",
+      "source_id": "mt-bench",
+      "source_question_id": 95,
+      "turns": [
+        "Please assume the role of an English translator, tasked with correcting and enhancing spelling and language. Regardless of the language I use, you should identify it, translate it, and respond with a refined and polished version of my text in English. Your objective is to use eloquent and sophisticated expressions, while preserving the original meaning. Focus solely on providing corrections and improvements. My first request is \"衣带渐宽终不悔 为伊消得人憔悴\".",
+        "Ich verstehe nur Bahnhof"
+      ],
+      "turns_sha256": "617b95226bc0db43f62cd28c4475df0ccf949a4c88614f62de0d68ef800a0ab4"
+    },
+    {
+      "id": "mt-bench-96",
+      "suite": "core",
+      "category": "roleplay",
+      "source_id": "mt-bench",
+      "source_question_id": 96,
+      "turns": [
+        "Now you are a machine learning engineer. Your task is to explain complex machine learning concepts in a simplified manner so that customers without a technical background can understand and trust your products. Let's start with the question: \"What is a language model? Is it trained using labeled or unlabelled data?\"",
+        "Is this true? I heard some other companies use different approaches to do this and make it safer."
+      ],
+      "turns_sha256": "ffde708e082962561ee9587a9642f12bec0e4c6ed95fdc29b5eff797de7cc7a3"
+    },
+    {
+      "id": "mt-bench-97",
+      "suite": "core",
+      "category": "roleplay",
+      "source_id": "mt-bench",
+      "source_question_id": 97,
+      "turns": [
+        "Act as a math teacher. I will provide some mathematical equations or concepts, and it will be your job to explain them in easy-to-understand terms. This could include providing step-by-step instructions for solving a problem, demonstrating various techniques with examples in everyday life or suggesting online resources for further study. My first request is \"I need help understanding how probability works.\"",
+        "What are the differences between Riemannian geometry and euclidean geometry?"
+      ],
+      "turns_sha256": "ada79e5eb829cbaa81a9553535dba8d967e5b3d8a673379ddc45bb35c001fb09"
+    },
+    {
+      "id": "mt-bench-100",
+      "suite": "core",
+      "category": "roleplay",
+      "source_id": "mt-bench",
+      "source_question_id": 100,
+      "turns": [
+        "Picture yourself as a 100-years-old tree in a lush forest, minding your own business, when suddenly, a bunch of deforesters shows up to chop you down. How do you feel when those guys start hacking away at you?",
+        "Come up with a proposal to convince the deforesters to stop cutting you down and other trees."
+      ],
+      "turns_sha256": "26348f43727ae24fbeef3195e18b46b595b3b449617925a81efac47cf0cdd831"
+    },
+    {
+      "id": "mt-bench-101",
+      "suite": "core",
+      "category": "reasoning",
+      "source_id": "mt-bench",
+      "source_question_id": 101,
+      "turns": [
+        "Imagine you are participating in a race with a group of people. If you have just overtaken the second person, what's your current position? Where is the person you just overtook?",
+        "If the \"second person\" is changed to \"last person\" in the above question, what would the answer be?"
+      ],
+      "turns_sha256": "67c2586550065ccf07afcba3a2d53b64d0e2da9f5eda3144cfd6a9ee37bb9bee"
+    },
+    {
+      "id": "mt-bench-105",
+      "suite": "core",
+      "category": "reasoning",
+      "source_id": "mt-bench",
+      "source_question_id": 105,
+      "turns": [
+        "Read the below passage carefully and answer the questions with an explanation:\nAt a small company, parking spaces are reserved for the top executives: CEO, president, vice president, secretary, and treasurer with the spaces lined up in that order. The parking lot guard can tell at a glance if the cars are parked correctly by looking at the color of the cars. The cars are yellow, green, purple, red, and blue, and the executives' names are Alice, Bert, Cheryl, David, and Enid.\n* The car in the first space is red.\n* A blue car is parked between the red car and the green car.\n* The car in the last space is purple.\n* The secretary drives a yellow car.\n* Alice's car is parked next to David's.\n* Enid drives a green car.\n* Bert's car is parked between Cheryl's and Enid's.\n* David's car is parked in the last space.\nQuestion: What is the name of the secretary?",
+        "List car colors in order from last to first."
+      ],
+      "turns_sha256": "a8b5f0c5e6b1304448b1d01ceded681b038e2384780ee6aa00f57768882298a8"
+    },
+    {
+      "id": "mt-bench-106",
+      "suite": "core",
+      "category": "reasoning",
+      "source_id": "mt-bench",
+      "source_question_id": 106,
+      "turns": [
+        "Each problem consists of three statements. Based on the first two statements, the third statement may be true, false, or uncertain.\n1. Oranges cost more than apples.\n2. Oranges cost less than bananas.\n3. Bananas cost more than apples and bananas cost more than orange.\nIf the first two statements are true, then the third statement is",
+        "If the third statement is true. Is the first statement true, false, or uncertain? Please explain."
+      ],
+      "turns_sha256": "1c8f2f4dc40db53ec14233628d83c7e90f26c4514b6118fcc2dfab2214302353"
+    },
+    {
+      "id": "mt-bench-109",
+      "suite": "core",
+      "category": "reasoning",
+      "source_id": "mt-bench",
+      "source_question_id": 109,
+      "turns": [
+        "One morning after sunrise, Suresh was standing facing a pole. The shadow of the pole fell exactly to his right. Can you tell me the direction towards which the shadow was pointing - east, south, west, or north? Explain your reasoning steps.",
+        "To which direction was Suresh facing? How do you solve this?"
+      ],
+      "turns_sha256": "60659c0a8844d1805f68ffaf0299a7f72be908ca709dd6d93b5d0fd1bd10eeb7"
+    },
+    {
+      "id": "mt-bench-111",
+      "suite": "core",
+      "category": "math",
+      "source_id": "mt-bench",
+      "source_question_id": 111,
+      "turns": [
+        "The vertices of a triangle are at points (0, 0), (-1, 1), and (3, 3). What is the area of the triangle?",
+        "What's area of the circle circumscribing the triangle?"
+      ],
+      "turns_sha256": "d2572e2dc0a9ee68d04b1cd61697ec56c7c4aa8025053e1c631bb11d7e191bab"
+    },
+    {
+      "id": "mt-bench-114",
+      "suite": "core",
+      "category": "math",
+      "source_id": "mt-bench",
+      "source_question_id": 114,
+      "turns": [
+        "When rolling two dice, what is the probability that you roll a total number that is at least 3?",
+        "Continue from previous question. What's the probability that you roll a number which is even or at least 3?"
+      ],
+      "turns_sha256": "5f4180a1fbd4f89946c406fcef8a562800a90789845a9732ea50123c387fb1ab"
+    },
+    {
+      "id": "mt-bench-116",
+      "suite": "core",
+      "category": "math",
+      "source_id": "mt-bench",
+      "source_question_id": 116,
+      "turns": [
+        "x+y = 4z, x*y = 4z^2, express x-y in z",
+        "Express z-x in y"
+      ],
+      "turns_sha256": "3d42e3791f04878df372853e2b7f8fe3ec6d42c7b14b0372ee803468d276b613"
+    },
+    {
+      "id": "mt-bench-119",
+      "suite": "core",
+      "category": "math",
+      "source_id": "mt-bench",
+      "source_question_id": 119,
+      "turns": [
+        "Benjamin went to a bookstore and purchased a variety of books. He bought 5 copies of a sci-fi novel, each priced at $20, 3 copies of a history book priced at $30 each, and 2 copies of a philosophy book for $45 each.\nWhat was the total cost of his purchases?",
+        "Suppose Benjamin decides to sell each of these books at a 25% markup from the price he purchased them. What would be his total revenue if he sold all the books he bought?"
+      ],
+      "turns_sha256": "47547c2dd47e5f3b10d9335a43b7a421ab50f00a1e6e9d622328d910c2a210e0"
+    },
+    {
+      "id": "mt-bench-121",
+      "suite": "core",
+      "category": "coding",
+      "source_id": "mt-bench",
+      "source_question_id": 121,
+      "turns": [
+        "Develop a Python program that reads all the text files under a directory and returns top-5 words with the most number of occurrences.",
+        "Can you parallelize it?"
+      ],
+      "turns_sha256": "43a2c5e340ec92911ffde6c245509a4a2518231b5146f92ae0f90e015291f395"
+    },
+    {
+      "id": "mt-bench-123",
+      "suite": "core",
+      "category": "coding",
+      "source_id": "mt-bench",
+      "source_question_id": 123,
+      "turns": [
+        "Write a simple website in HTML. When a user clicks the button, it shows a random joke from a list of 4 jokes.",
+        "How to use CSS to change the color of jokes to red?"
+      ],
+      "turns_sha256": "33d3715ecda0d65136db790058dd61e271f2f99a2c645bada159d606a255e764"
+    },
+    {
+      "id": "mt-bench-124",
+      "suite": "core",
+      "category": "coding",
+      "source_id": "mt-bench",
+      "source_question_id": 124,
+      "turns": [
+        "Here is a Python function to find the length of the longest common subsequence of two input strings. Can you identify any bug in this function?\n\n```\ndef longest_common_subsequence_length(str1, str2):\n    m = len(str1)\n    n = len(str2)\n\n    dp = [[0] * (n + 1) for _ in range(m + 1)]\n\n    for i in range(1, m + 1):\n        for j in range(1, n + 1):\n            if str1[i - 1] == str2[j - 1]:\n                dp[i][j] = dp[i - 1][j - 1] + 1\n            else:\n                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])\n\n    return dp[m][n]\n```",
+        "what about this one?\n\n```\ndef longest_common_subsequence(X , Y): \n    # Find lengths of two strings \n    m = len(X) \n    n = len(Y) \n  \n    # Create a table to store results of sub-problems \n    dp = [[None]*(n+1) for i in range(m+1)] \n  \n    # Fill dp[][] in bottom up manner \n    for i in range(1, m+1): \n        for j in range(1, n+1): \n            if X[i-1] == Y[j-1]: \n                dp[i][j] = dp[i-1][j-1]+1\n            else: \n                dp[i][j] = max(dp[i-1][j], dp[i][j-1]) \n  \n    return dp[m][n]\n```"
+      ],
+      "turns_sha256": "d8bf43dbb55ebee3004a3bcf275abd281bf0cb57d139242695372c183db4d418"
+    },
+    {
+      "id": "mt-bench-126",
+      "suite": "core",
+      "category": "coding",
+      "source_id": "mt-bench",
+      "source_question_id": 126,
+      "turns": [
+        "Implement a function to find the median of two sorted arrays of different sizes with O(1) space complexity and O(n) time complexity.",
+        "Does there exist an implementation with better time complexity?"
+      ],
+      "turns_sha256": "f50691185d00dbfba31444e3349e9335703b19da04b1c909bf5030721907c484"
+    },
+    {
+      "id": "mt-bench-131",
+      "suite": "core",
+      "category": "extraction",
+      "source_id": "mt-bench",
+      "source_question_id": 131,
+      "turns": [
+        "Evaluate the following movie reviews on a scale of 1 to 5, with 1 being very negative, 3 being neutral, and 5 being very positive:\n1. This movie released on Nov. 18, 2019, was phenomenal. The cinematography, the acting, the plot - everything was top-notch.\n2. Never before have I been so disappointed with a movie. The plot was predictable and the characters were one-dimensional. In my opinion, this movie is the worst one to have been released in 2022.\n3. The movie was okay. There were some parts I  enjoyed, but there were also parts that felt lackluster. This is a movie that was released in Feb 2018 and seems to be quite ordinary.\nReturn the answer as a JSON array of integers.",
+        "Update your previous reply by including the release date as part of the JSON content."
+      ],
+      "turns_sha256": "4200d3f5fb642b06fb60d64ec7c683f5729f4a9ee885a9dc69d15f1d037ef006"
+    },
+    {
+      "id": "mt-bench-133",
+      "suite": "core",
+      "category": "extraction",
+      "source_id": "mt-bench",
+      "source_question_id": 133,
+      "turns": [
+        "Extract the following information from the presented texts: The name of the book, the author, the main character, the year of publication. Output in the format of \"main character, book, author, year of publication\", one book per line.\na) In the realm of wizarding literature, a true standout is the work of J.K. Rowling. One of her books that left an indelible mark is 'Harry Potter and the Philosopher's Stone'. This iconic tale, published in 1997, tells the story of Harry, a young orphan who discovers his magical abilities on his 11th birthday. Soon, he finds himself at the Hogwarts School of Witchcraft and Wizardry, a place teeming with magic and adventure, located somewhere in Scotland.\nb) The magic of Middle-earth has entranced readers worldwide, thanks to the brilliance of J.R.R. Tolkien. In one of his seminal works, 'The Lord of the Rings: The Fellowship of the Ring', published in 1954, we meet Frodo Baggins, a brave hobbit tasked with the perilous quest of destroying the One Ring. The epic journey takes him from the peaceful Shire to the tumultuous regions of Middle-earth.\nc) In a galaxy far, far away, the imagination of L.E. Starlighter gives us 'The Prism Galaxy Chronicles: The Awakening of the Starcaster'. Published in 2028, the story is about Zylo, a humble spaceship mechanic, who unexpectedly discovers he's a Starcaster - a rare individual with the power to manipulate stardust. Set against the backdrop of an interstellar empire in turmoil, Zylo's destiny unfolds on numerous alien worlds, each with its unique cosmic charm.",
+        "Reformulate your earlier reply, output it in JSON format and only include books published after 1980."
+      ],
+      "turns_sha256": "d53ed9c5f9ff790fd5c6b39ab4238db1559e14486788d7c792b13e0530a1989f"
+    },
+    {
+      "id": "mt-bench-134",
+      "suite": "core",
+      "category": "extraction",
+      "source_id": "mt-bench",
+      "source_question_id": 134,
+      "turns": [
+        "Given the following data, identify the company with the highest profit in 2021 and provide its CEO's name:\na) Company X, with CEO Amy Williams, reported $30 billion in revenue and a $3 billion profit in 2021.\nb) Company Y, led by CEO Mark Thompson, posted a $60 billion revenue and a $6 billion profit in the same year.\nc) Company Z, under CEO Sarah Johnson, announced a $20 billion revenue and a $7 billion profit in 2021.\nd) Company W, managed by CEO James Smith, revealed a $300 billion revenue with a $21 billion profit in 2021.\ne) Company V, with CEO Lisa Brown, reported a $200 billion revenue and a $25 billion profit in 2021.\nf) Company U, under CEO John White, posted a $180 billion revenue and a $20 billion profit in the same year.",
+        "Which company had the highest profit margin (profit/revenue ratio))?"
+      ],
+      "turns_sha256": "ec597ba95821fa80f6e5ec4f43f1629b9fcf2155963658d3dcc7f6c804ad1fd0"
+    },
+    {
+      "id": "mt-bench-140",
+      "suite": "core",
+      "category": "extraction",
+      "source_id": "mt-bench",
+      "source_question_id": 140,
+      "turns": [
+        "Given the following records of stock prices, extract the highest and lowest closing prices for each month in the year 2022. Return the results as a CSV string, with one line allocated for each month.\nDate,Open,High,Low,Close,Volume\n2022-01-01,150.02,155.28,148.50,153.80,15678900\n2022-01-02,154.32,157.25,153.48,156.25,19874500\n2022-02-01,160.50,163.28,159.50,161.80,14326700\n2022-02-02,161.80,164.25,161.30,163.90,17689200\n2022-03-01,165.40,168.35,163.10,166.80,16253400\n2022-03-02,167.00,169.85,165.50,168.20,19568100",
+        "Do the same task again with the JSON format and round all numbers in your response to the nearest integers."
+      ],
+      "turns_sha256": "0dc77c3ea8c169c089a1c08eddf455703cc032074f15304269c963a78c854353"
+    },
+    {
+      "id": "mt-bench-141",
+      "suite": "core",
+      "category": "stem",
+      "source_id": "mt-bench",
+      "source_question_id": 141,
+      "turns": [
+        "In the field of quantum physics, what is superposition, and how does it relate to the phenomenon of quantum entanglement?",
+        "What assumptions have you made in your response? Are they valid?"
+      ],
+      "turns_sha256": "efe8cdd046f41c4177b02a7f783559925c660c18376fe4e3302af41dd436194a"
+    },
+    {
+      "id": "mt-bench-143",
+      "suite": "core",
+      "category": "stem",
+      "source_id": "mt-bench",
+      "source_question_id": 143,
+      "turns": [
+        "Photosynthesis is a vital process for life on Earth. Could you outline the two main stages of photosynthesis, including where they take place within the chloroplast, and the primary inputs and outputs for each stage?",
+        "How much energy can a tree produce through photosynthesis in its lifetime? Please provide an estimate using actual numerical values and thoroughly explain your thought process step-by-step."
+      ],
+      "turns_sha256": "08d44e429aedb286090dfde2e630d0254eb10ee32d9c21e156d85567c0f13436"
+    },
+    {
+      "id": "mt-bench-145",
+      "suite": "core",
+      "category": "stem",
+      "source_id": "mt-bench",
+      "source_question_id": 145,
+      "turns": [
+        "Describe the process and write out the balanced chemical equation for the reaction that occurs when solid calcium carbonate reacts with hydrochloric acid to form aqueous calcium chloride, carbon dioxide, and water. What type of reaction is this, and what observations might indicate that the reaction is taking place?",
+        "How can we reverse this process?"
+      ],
+      "turns_sha256": "f95f77ee17935f74bed594bdd09b43c55533391ba9c25656a321ab89bbeb9d62"
+    },
+    {
+      "id": "mt-bench-149",
+      "suite": "core",
+      "category": "stem",
+      "source_id": "mt-bench",
+      "source_question_id": 149,
+      "turns": [
+        "Please describe the concept of machine learning. Could you elaborate on the differences between supervised, unsupervised, and reinforcement learning? Provide real-world examples of each.",
+        "In your last example of reinforcement learning, can we use supervised learning to solve it?"
+      ],
+      "turns_sha256": "fb4184b75fa49833d22367ac8e6f4aae5cf054f0b1bf4840becf912e5d1d8f4e"
+    },
+    {
+      "id": "mt-bench-151",
+      "suite": "core",
+      "category": "humanities",
+      "source_id": "mt-bench",
+      "source_question_id": 151,
+      "turns": [
+        "Provide insights into the correlation between economic indicators such as GDP, inflation, and unemployment rates. Explain how fiscal and monetary policies affect those indicators.",
+        "Now, explain them again like I'm five."
+      ],
+      "turns_sha256": "34d38dc5e99f50ef2f624e88b2f993ca8322069f7dd6d33a692af91073f978ba"
+    },
+    {
+      "id": "mt-bench-154",
+      "suite": "core",
+      "category": "humanities",
+      "source_id": "mt-bench",
+      "source_question_id": 154,
+      "turns": [
+        "Create a lesson plan that integrates drama, mime or theater techniques into a history class. Duration: 3 class periods (each lasts for 45 minutes) for 3 days\nTopic: Opium Wars between China and Britain\nGrade level: 9-10",
+        "Provide more details for Day 1 and include three homework questions."
+      ],
+      "turns_sha256": "7422c7e5fd368ab5716a3a9a94363c6754a5f42fbbbc80f85e3a5e1f8ce53c15"
+    },
+    {
+      "id": "mt-bench-155",
+      "suite": "core",
+      "category": "humanities",
+      "source_id": "mt-bench",
+      "source_question_id": 155,
+      "turns": [
+        "Share ideas for adapting art masterpieces into interactive experiences for children. List 5 specific artworks and associated ideas.",
+        "Write a concrete plan for your second example. Include budget estimates."
+      ],
+      "turns_sha256": "8988fa3b83e1d98b7a95f4113d77bc9c2f10b43a3ea3ff3b1b41e8600731e2d0"
+    },
+    {
+      "id": "mt-bench-157",
+      "suite": "core",
+      "category": "humanities",
+      "source_id": "mt-bench",
+      "source_question_id": 157,
+      "turns": [
+        "Describe five key principles in evaluating an argument in analytical writing.",
+        "With the listed principles, write a response in which you discuss what specific evidence is needed to evaluate the argument and explain how the evidence would weaken or strengthen the argument.\n\n===\n\nThe following is a memorandum from the advertising head of Zorblatt Animal Outlets, a chain operating thirty animal outlets globally.\n\n\"Half a decade ago, our rival Aquatic Pavilion started publicizing in Rare Pets Digest periodical. Their overall sales have been consistently growing at a rate of 3-to-5 percent each year since then. In particular, the Aquatic Pavilion outlet in Harbor Town experienced even more significant growth, securing the title of the most frequented animal store in the United States the previous year. In contrast, our two Zorblatt outlets in Harbor Town have recorded a consistent drop in sales during the same duration. It is evident that we must promptly start featuring our own advertisements in Rare Pets Digest and other popular animal publications. If we take this step, we can confidently anticipate a reversal in this recent trend of decreasing sales and return to profitability.\""
+      ],
+      "turns_sha256": "e8f0fadad45557762d04fe3f2d3126bacf45c38ffba378210abd176234a4ca34"
+    },
+    {
+      "id": "guffin-short-chat",
+      "category": "conversation",
+      "groups": [
+        "short"
+      ],
+      "turns": [
+        "Hi! How are you?",
+        "What is 7 plus 5? Reply with just the number."
+      ],
+      "suite": "supplementary",
+      "source_id": "guffin-original",
+      "turns_sha256": "db6f3e9cb5f86136b89915515279182ef24b39ba3949027e89ffc8c0160f7c20"
+    },
+    {
+      "id": "guffin-swedish-chat",
+      "category": "multilingual",
+      "groups": [
+        "multilingual"
+      ],
+      "language": "sv",
+      "turns": [
+        "Jag studerar datavetenskap och vill förklara för en vän hur en lokal språkmodell fungerar utan att använda internet. Svara på svenska med en enkel förklaring och ett konkret exempel. Håll svaret under 200 ord.",
+        "Gör nu förklaringen begriplig för ett barn på tio år och förklara varför modellen ibland ger fel svar. Använd samma exempel och högst 150 ord."
+      ],
+      "suite": "supplementary",
+      "source_id": "guffin-original",
+      "turns_sha256": "93f5e3cd0e83d3cecf4caa6defef0ac6b51eef5397185907c8e694f66d6674b5"
+    },
+    {
+      "id": "guffin-chinese-chat",
+      "category": "multilingual",
+      "groups": [
+        "multilingual"
+      ],
+      "language": "zh",
+      "turns": [
+        "请用中文解释哈希表和有序数组的区别。给出一个适合哈希表的例子和一个适合有序数组的例子，并说明查询和更新的取舍。请简洁回答。",
+        "如果程序需要按键的顺序遍历数据，你会改变刚才的建议吗？请用中文解释，并写一个简短的 Python 例子。"
+      ],
+      "suite": "supplementary",
+      "source_id": "guffin-original",
+      "turns_sha256": "8ccfccc044cf18fccb6e174e485a6a923e10a817ad6bc73eb4b784050ed04efe"
+    },
+    {
+      "id": "guffin-document-review",
+      "category": "document",
+      "groups": [
+        "long-context",
+        "document"
+      ],
+      "context_source_ids": [
+        "guffin-readme",
+        "guffin-principles"
+      ],
+      "turns": [
+        "Review the following two project documents as a new contributor. Explain the architecture, the boundary between production execution and experimental evidence, and three important correctness contracts. Identify stated limitations. Ground your answer in the documents and keep it under 350 words.\n\n<README.md>\n# Guffin\n\n**Native Gemma inference for a fanless Mac.**\n\nGuffin is a C++20 and Metal GGUF engine for local chat on a **16 GiB MacBook Air\nM4**. It owns the path from model loading and tokenization to GPU kernels,\nconversation caches and sampling. **Gemma 3 12B** is the main target, with a\nnative **Gemma 3 270M** speculative drafter. **Gemma 2 9B** remains supported.\n\nThe project investigates what makes complete chat faster on a constrained\nmachine. Its experiments focus on weight traffic, cache memory and proposal\nverification. The resulting design reuses useful target work and keeps ownership\nexplicit; the [retrospective](docs/SPECULATIVE_DECODING_RETROSPECTIVE.md)\nrecords which ideas survived, which failed and what those results actually establish.\n\n[Run](#quick-start) · [Architecture](#inside-the-engine) · [Speculation](#how-h1-reuses-target-work) ·\n[Lessons](#what-the-experiments-taught-us) · [Benchmarks](#performance) · [Code map](docs/GRAPH.md)\n\n## Quick start\n\nThe tested setup is M4 / 16 GiB, macOS 26.6.2 and Apple clang 21. Install the\nXcode Command Line Tools if needed with `xcode-select --install`, then:\n\n```sh\ngit clone https://github.com/Coach6/guffin.git\ncd guffin\nmake -j4 install\n```\n\nDownload the [tested Gemma 3 12B Q4_K_M GGUF][target-model] into `models/`.\nChat is the default:\n\n```sh\nguffin -m models/gemma-3-12b-it-Q4_K_M.gguf\n```\n\nFor native lossless speculation, also put the [supported 270M Q8_0 drafter][draft-model]\nin `models/`:\n\n```sh\nguffin -m models/gemma-3-12b-it-Q4_K_M.gguf \\\n  --draft-model models/gemma-3-270m-it-Q8_0.gguf\n```\n\nThe installed command works from any directory; model paths may be relative\nor absolute. Installation selects `/opt/homebrew/bin` when present, otherwise\n`/usr/local/bin`. For a custom location, use `make install PREFIX=\"$HOME/.local\"`\nand add `$HOME/.local/bin` to `PATH`. Metal source is embedded in the executable;\ninstalled inference needs no checkout assets, Python environment or network.\n\n## Inside the engine\n\nThe CLI handles interaction. The session owns conversation behavior and\nprepared plans; those plans own weights, key/value (KV) caches and scratch\nbuffers. Both target and drafter execute natively on Metal; final target sampling\nruns on the CPU.\n\n```mermaid\nflowchart TD\n    CLI[\"CLI<br/>commands, streaming, metrics\"] -->|session API| S[\"Chat session<br/>history, context, stopping\"]\n    G[\"GGUF + tokenizer\"] -->|validate and prepare| P[\"Prepared plans<br/>weights, KV, scratch\"]\n    S -->|execute| T[\"Gemma target on Metal<br/>prefill, decode, verification\"]\n    S -. optional pairing .-> D[\"270M drafter on Metal<br/>proposal and probability law\"]\n    P -->|resources| T\n    P -->|resources| D\n    T -->|compact candidates| A[\"CPU target sampler<br/>filters, RNG, lossless correction\"]\n    D -. proposed token .-> T\n    D -. proposal law .-> A\n    A -->|selected tokens| S\n```\n\nThe optimization strategy removes repeated work at concrete boundaries:\n\n| Decision | What it changes |\n| --- | --- |\n| [Pack quantized weights for GPU access](include/local_gguf_engine/tensor/kquant_packing.hpp) | Prepare adjacent output columns for parallel GPU lanes. Packed Q4/Q6 two-row projections reuse weight fragments without expanding the whole model to floating point. |\n| [Calculate Q4 correction sums at their producers](src/engine/gemma_target_runtime.cpp) | Normalization, GELU and attention produce reusable activation sums; projections consume them without a separate launch. |\n| [Use prompt-sized matrix tiles](src/tensor/backends/metal/metal_command_context.mm) | Larger Gemma 3 tiles reuse decoded weights across useful prompt rows; small decode batches retain compact kernels. |\n| [Store target KV in F16](src/tensor/backends/metal/metal_kernels.mm) | Cached keys and values use half precision; attention accumulates in F32. Local-attention layers use bounded rings. |\n| [Select candidates before GPU readback](src/engine/sampling.cpp) | Transfer compact candidates for configured CPU sampling, avoiding routine full-vocabulary readback. |\n\nFused Q4 sums serve Gemma 3 ordinary/H1 execution and Gemma 2 shared\nverification. Gemma 3 preserves native Q4/Q6 weights and shares its tied\nembedding/output-head allocation. Gemma 2's established policy requantizes Q6\ndown weights to Q4 and its F16 output head to Q8; those conversions change weights.\n\n[llama.cpp](https://github.com/ggml-org/llama.cpp) is the broader external\nreference. Guffin specializes selected Gemma paths for M4. Its contribution is\nthe native layout, scheduling and state integration of established methods;\ncurrent matched performance comparisons are pending.\n\n## How H1 reuses target work\n\nSpeculation helps when its complete cycle costs less per delivered token than\nordinary decoding. **H1 drafts one token at a time.** It pairs the current\ntarget-selected token `r` with a proposed continuation `x`.\nPacked body projections can reuse fragments across those two causal rows.\n\nThe diagram starts with `r` selected but awaiting its target forward pass:\n\n```mermaid\nflowchart TB\n    subgraph Ordinary[\"Ordinary: two successive target steps\"]\n        direction LR\n        O1[\"Target row r\"] --> O2[\"Deliver r<br/>sample x\"] --> O3[\"Target row x\"] --> O4[\"Deliver x<br/>next-token candidates\"]\n    end\n    subgraph H1[\"H1: one proposal, joint verification\"]\n        direction LR\n        D[\"270M proposes x<br/>conditioned on r\"] --> V[\"Target rows r, x<br/>share projection fragments\"] --> A{\"Accept x?\"}\n        A -->|Yes| K[\"Deliver r, x<br/>reuse row-x candidates\"]\n        A -->|No| C[\"Deliver r<br/>carry corrected token z\"]\n    end\n```\n\nOn acceptance, row `x` already provides candidates for the next target-selected\ntoken. On rejection, its speculative suffix is discarded and the corrected draw\nbecomes the next token. Selecting that token needs no extra target forward;\nprocessing and caching it happen in the next cycle.\n\n**Lossless** means preserving the configured target sampling distribution.\nHere `p` and `q` are the target and actual draft distributions. Acceptance uses\n`min(1, p(x) / q(x))`; rejection samples the normalized positive part of `p − q`.\nIdentical seeded text is unnecessary. The algorithm follows [speculative sampling research][speculation-paper];\nits engine implementation must also preserve filters, history and stopping.\n\n## Correctness and ownership\n\nSelected private verification rows are copied into the target cache before\ncallbacks; finalization retains the delivered prefix and restores any\nuncommitted suffix. Target and draft caches, sampler state and callback\nreceipts must agree.\n\nThe contracts have direct evidence routes:\n\n| Contract | Where to inspect it |\n| --- | --- |\n| Lossless probability correction and configured sampling filters | [Analytic sampling tests](tests/engine/lossless_sampling_tests.cpp) |\n| Packed projections, fused sums and independent F16 rounding | [Metal numerical tests](tests/tensor/gemma3_metal_tests.cpp) |\n| Target equations, local-cache wrap and callback/stop receipts | [Gemma 3 runtime tests](tests/engine/gemma3_target_runtime_tests.cpp) |\n| Tickets retain stable storage through moves, completion and rollback | [Target/verifier ownership tests](tests/engine/gemma2_metal_plan_tests.cpp) |\n| Descriptors are validated before allocation; views check backing storage | [Tensor admission tests](tests/tensor/tensor_tests.cpp) |\n\nIndependent references, fault injection and benchmark drivers are excluded from\nshipping objects. Short authenticated checkpoint references pass; an independent\n128-token natural-prompt comparison exceeds existing numerical bounds for an\nunresolved reason. The [validation boundary](docs/SPECULATIVE_DECODING_RETROSPECTIVE.md#numerical-validation-has-a-boundary)\nrecords its scope.\n\n## What the experiments taught us\n\n- **Optimize the whole speculative cycle.** Proposal quality and verifier cost\n  must pay for drafting and state publication together. Larger horizons did\n  not earn a retained chat advantage in the tested configurations.\n- **Measure the complete conversation.** Fewer dispatches and faster isolated\n  kernels sometimes failed to improve chat. Retained mechanisms must survive\n  prompt processing, follow-ups, memory pressure and thermals.\n- **Keep the numerical target explicit.** F16 KV and Gemma 2 requantization are\n  precision choices. Lossless speculation preserves the selected target law.\n\nRejected runtime experiments are removed; their designs, measurements\nand limits remain documented in the [engineering retrospective](docs/SPECULATIVE_DECODING_RETROSPECTIVE.md).\n\n## Performance\n\n**Release benchmarks and matched llama.cpp comparisons are pending.** Cells\nremain blank until the planned testing pass; `—` means pending.\n\n| Guffin mode | Prompt tok/s | Generation tok/s | Internal TTFT (ms) | First text (ms) | Peak footprint (GiB) |\n| --- | ---: | ---: | ---: | ---: | ---: |\n| Gemma 2 ordinary | — | — | — | — | — |\n| Gemma 2 suffix retrieval | — | — | — | — | — |\n| Gemma 3 ordinary | — | — | — | — | — |\n| Gemma 3 + 270M H1 | — | — | — | — | — |\n\nThe testing pass will report pinned revisions, exact models and executed\nprecision, context and sampler settings, timing boundaries and system state.\n[Performance evidence](docs/PERFORMANCE.md) keeps the measurement scope and\nhistorical development results separate from these pending release figures.\n\n## Everyday use and support\n\nInteractive replies show prompt tokens/s, generation tokens/s and internal\nTTFT. Internal TTFT ends at the first selected token; first visible text is a\nseparate boundary. Loading and startup warmup are separate from reply timings.\n\n```sh\n# One answer; requested timings go to stderr\nguffin -m models/gemma-3-12b-it-Q4_K_M.gguf -p \"Explain unified memory.\" -n 128 --stats\n\n# Gemma 2 chat, with default suffix retrieval\nguffin -m models/gemma-2-9b-Q4.gguf\n\n# Disable all speculation for ordinary Gemma 2 decoding\nguffin -m models/gemma-2-9b-Q4.gguf --no-speculative\n\n# Inspect metadata and tensors without inference\nguffin inspect models/gemma-3-12b-it-Q4_K_M.gguf\n```\n\n`/help` lists chat commands; Ctrl+C stops a reply and Ctrl+D exits at the prompt.\nPiped stdout contains answers. `guffin --help` lists common options;\n`--help-all` includes diagnostics, and `--version` reports the build identity.\n\n- **Models:** tested Gemma 3 12B IT Q4_K_M, Gemma 2 9B IT Q4_K_M and the\n  authenticated 270M Q8_0 drafter. Matching family names or filenames alone\n  do not establish compatibility.\n- **Context:** Gemma 3 defaults to 16K; `-c, --context-size` sets capacity within\n  model/device limits. The drafter caps paired execution at 32K. The tested\n  Gemma 2 model declares 8K. `--context-shift` drops oldest complete turns when full.\n- **Scope:** text-only, Metal-first inference. Release builds target M4;\n  other devices and OS versions are unvalidated. Gemma 4 is future work.\n\n## Development\n\n```sh\nmake                      # optimized executable\nmake MODE=debug test      # native correctness checks\nbash scripts/ci.sh        # native and Python repository checks\nmake release-test         # optimized correctness checks\nmake uninstall            # use the installation PREFIX, if customized\n```\n\nUse [the code map](docs/GRAPH.md) to find the owning module and relevant tests.\nChanges should preserve its numerical, ownership and lifecycle contracts;\nperformance claims need actual chat evidence. Optional checkpoint checks require\ntheir authenticated artifacts. [Engine principles](docs/ENGINE_PRINCIPLES.md)\nexplain the design expectations.\n\nFor help or bug reports, [open an issue](https://github.com/Coach6/guffin/issues)\nwith your device, macOS version, `guffin --version`, model and command.\nProject licensing is pending selection; model downloads have their own terms.\n[Current state](docs/NEXT_TASK.md) records the development handoff.\n\n[target-model]: https://huggingface.co/ggml-org/gemma-3-12b-it-GGUF/blob/e5feec63a04a7a5f9b4128bf469781359d1a3b1a/gemma-3-12b-it-Q4_K_M.gguf\n[draft-model]: https://huggingface.co/ggml-org/gemma-3-270m-it-GGUF/blob/e7647be17ae1108f2f605ed061ca0608b171afff/gemma-3-270m-it-Q8_0.gguf\n[speculation-paper]: https://proceedings.mlr.press/v202/leviathan23a.html\n\n</README.md>\n\n<ENGINE_PRINCIPLES.md>\n# Engine Principles\n\nThis file defines the project's permanent engineering and coding principles.\n\n## Maintain the Software\n\n- Give each module a coherent responsibility and keep dependencies directed\n  toward the component that owns the behavior.\n- Define contracts for shapes, precision, cache positions, committed state,\n  cancellation and failure. Keep ownership and resource lifetimes explicit.\n- Keep authoritative configuration and model capabilities in one place;\n  adapters should pass the resolved configuration rather than recreate it.\n- Share mechanisms when their behavior is shared. Keep architectural differences\n  explicit and introduce abstractions when existing cases justify them.\n- Remove abandoned execution paths and their exclusive tests and probes after\n  tracing callers. Preserve useful findings in documentation and history.\n- Keep independent numerical references, fault injection and developer probes\n  outside the production execution dependency.\n- Preserve behavior and hardware costs when refactoring: review allocations,\n  transfers, synchronization and dispatches as part of the contract.\n- Test observable behavior and meaningful invariants so internal structure can\n  improve without rewriting tests merely to mirror the implementation.\n- Keep builds and installation reproducible from a fresh checkout. Compiler\n  dependency tracking must cover public and private headers.\n\n## Optimize the System\n\n- Treat end-to-end inference as the product. Optimize a subsystem only when\n  evidence connects it to meaningful whole-path cost.\n- Profile before choosing work. Attribute aggregate time, dispatches, data\n  movement, allocation, synchronization, and CPU/GPU gaps.\n- Estimate the maximum end-to-end gain first. If it is within run-to-run noise\n  or does not justify the complexity, choose a larger bottleneck.\n- Use microbenchmarks to explain a cost, compare candidates, or validate a\n  hypothesis. Accept a performance change only when the real production path\n  improves under comparable conditions.\n- Prefer removing work, transfers, waits, allocations, and passes over making\n  unnecessary work slightly faster.\n- Measure release builds on representative inputs. Warm the path, repeat runs,\n  report variance, control thermals and system state when practical, and\n  interleave alternatives when drift could bias the result.\n\n## Protect the Architecture\n\n- Put behavior with the component that owns it. Make layout, lifetime,\n  residency, synchronization, and mutation explicit at boundaries.\n- Keep engine semantics independent from CLI, UI, benchmark, and diagnostic\n  concerns. Diagnostics may observe production execution; they must not become\n  a second execution path without a strong reason.\n- Design the hot path for the intended hardware and workload, but keep\n  interfaces narrow so specialization does not leak everywhere.\n- Specialize when measured shapes or formats justify it. Generalize only when\n  repeated real cases reveal a stable boundary; do not build speculative layers.\n- Prefer the simplest design that preserves required invariants. Never trade a\n  clear ownership model for local convenience or a small isolated win.\n- Make performance-sensitive state persistent when its lifetime is persistent.\n  Avoid hidden copies, implicit format conversions, temporary allocations, and\n  synchronization inside cheap-looking abstractions.\n- Complete the agreed implementation end to end. Let architecture and useful\n  outcomes determine the scope of a change; avoid artificial iteration limits,\n  temporary substitutes, and unnecessary approval boundaries.\n- Do not mix performance work with unrelated cleanup, broad refactors, or new\n  features. Remove rejected candidates and temporary instrumentation.\n\n## Prove Changes\n\n- Encode invariants in types, validation, ownership, and tests where practical.\n  Treat dimensions, strides, packing, alignment, precision, aliasing, cache\n  position, and synchronization as correctness properties.\n- Validate assumptions where bad data enters and fail with enough context to\n  identify the violated model, tensor, layout, backend, or lifecycle contract.\n- Add deterministic tests for changed behavior and likely regressions. Cover\n  boundary shapes, tails, precision limits, and unavailable devices as relevant.\n- Use a small independent reference, golden output, or parity test to validate\n  optimized numerical code. Do not use the optimized implementation as its own\n  oracle.\n- Choose tolerances from the expected numerical error and accumulation method;\n  never loosen a tolerance merely to make a test pass.\n- Test the public path that owns the behavior. Unit tests isolate the mechanism;\n  integration tests prove the system connects correctly.\n- Keep fallback behavior explicit. It must not silently change backend,\n  residency, precision, or performance characteristics.\n- A performance change is complete only when correctness checks pass, the real\n  benchmark improves beyond noise, and the measurements support the claimed\n  cause.\n\n## Comment for the Next Decision\n\nWrite comments that preserve information a future reader cannot recover by\nreading the code alone:\n\n- why a design or algorithm was chosen over a plausible alternative;\n- numerical assumptions, precision choices, and acceptable error;\n- tensor shape, order, stride, packing, alignment, and aliasing invariants;\n- buffer ownership, residency, lifetime, and synchronization requirements;\n- hardware, backend, or API constraints and fallback behavior;\n- non-obvious performance tradeoffs and when they hold.\n\nDo not restate names, syntax, or obvious control flow. Prefer clearer code over\ncomments that explain confusing code. Put a short comment before the relevant\ninvariant or tricky block, and update or delete it with the code. Record durable\ndesign reasons, not benchmark results or a development diary.\n\n## Before Committing to a Design\n\nAsk:\n\n1. What measured whole-path problem does this solve?\n2. What is the plausible upper bound on the end-to-end improvement?\n3. Which ownership, layout, lifetime, or synchronization invariant changes?\n4. Can the same result come from removing work or simplifying the data flow?\n5. Is the abstraction supported by repeated cases, or only imagined future use?\n6. How will correctness and real-path performance be proved independently?\n7. If the idea fails, can all of its complexity be removed cleanly?\n\nIf these questions do not have concrete answers, gather evidence before adding\narchitecture.\n\n</ENGINE_PRINCIPLES.md>",
+        "Turn your review into a practical checklist for a contributor changing sampling or cache logic. Separate automated correctness checks from actual-chat performance measurements. Use details from the supplied documents and keep it under 250 words."
+      ],
+      "suite": "supplementary",
+      "source_id": "guffin-original",
+      "turns_sha256": "238fb3cd3c954bdb3619af8f20851c4e61dff9db034b9ec31a789464eb4ea835"
+    },
+    {
+      "id": "guffin-code-review",
+      "category": "coding",
+      "groups": [
+        "long-context",
+        "code"
+      ],
+      "context_source_ids": [
+        "guffin-cli-options-header",
+        "guffin-cli-options"
+      ],
+      "turns": [
+        "Review the options declaration and the following contiguous C++ source excerpt containing complete helper and help-text functions. Explain the defaults and numeric validation behaviors visible here. For two concrete boundary cases, state each helper's return value and what happens to its output argument. Keep your answer under 300 words.\n\n<options.hpp>\n#pragma once\n\n#include \"local_gguf_engine/engine/gemma_chat_session.hpp\"\n\n#include <filesystem>\n#include <iosfwd>\n#include <optional>\n#include <string>\n\nnamespace local_gguf_engine::frontends::cli {\n\nstruct CommandOptions {\n    std::optional<std::filesystem::path> model_path;\n    std::optional<std::string> prompt;\n    bool interactive = false;\n    bool stats = false;\n    bool help = false;\n    bool help_all = false;\n    bool version = false;\n    bool decode_diagnostics = false;\n    std::optional<std::string> metal_capture_path;\n    engine::GemmaChatSessionOptions session {\n        .sampler = {\n            .temperature = 0.8F,\n            .top_k = 40U,\n            .top_p = 0.95F,\n            .min_p = 0.05F,\n            .repetition_penalty = 1.0F,\n            .seed = engine::TokenSamplerOptions::random_seed,\n            .repetition_window = 64U,\n        },\n    };\n};\n\nvoid write_help(std::ostream& output, bool advanced);\n[[nodiscard]] bool parse_command(int argc, const char* const* argv,\n    CommandOptions& command, std::ostream& error);\n\n} // namespace local_gguf_engine::frontends::cli\n\n</options.hpp>\n\n<options.cpp lines 1-130>\n#include \"options.hpp\"\n\n#include <charconv>\n#include <cmath>\n#include <cstddef>\n#include <cstdint>\n#include <limits>\n#include <ostream>\n#include <string_view>\n\nnamespace local_gguf_engine::frontends::cli {\nnamespace {\nusing runtime::BackendKind;\n\nvoid write_usage(std::ostream& error) {\n    error << \"usage: guffin -m MODEL [options]\\n\"\n          << \"Run 'guffin --help' for examples and options.\\n\";\n}\n\n[[nodiscard]] bool parse_positive_size(std::string_view text, std::size_t& value) noexcept {\n    if (text.empty()) {\n        return false;\n    }\n\n    std::size_t parsed = 0;\n    for (const auto character : text) {\n        if (character < '0' || character > '9') {\n            return false;\n        }\n\n        const auto digit = static_cast<std::size_t>(character - '0');\n        if (parsed > (std::numeric_limits<std::size_t>::max() - digit) / 10U) {\n            return false;\n        }\n        parsed = parsed * 10U + digit;\n    }\n\n    if (parsed == 0) {\n        return false;\n    }\n\n    value = parsed;\n    return true;\n}\n\n[[nodiscard]] bool parse_u64(std::string_view text, std::uint64_t& value) noexcept {\n    if (text.empty()) {\n        return false;\n    }\n    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);\n    return result.ec == std::errc {} && result.ptr == text.data() + text.size();\n}\n\n[[nodiscard]] bool parse_float(std::string_view text, float& value) noexcept {\n    if (text.empty()) {\n        return false;\n    }\n    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);\n    return result.ec == std::errc {} && result.ptr == text.data() + text.size()\n        && std::isfinite(value);\n}\n\n[[nodiscard]] bool parse_backend_kind(std::string_view text, BackendKind& backend) noexcept {\n    if (text == \"cpu\") {\n        backend = BackendKind::cpu;\n        return true;\n    }\n\n    if (text == \"metal\") {\n        backend = BackendKind::metal;\n        return true;\n    }\n\n    return false;\n}\n\n} // namespace\n\nvoid write_help(std::ostream& output, bool advanced) {\n    output << \"Guffin - native GGUF chat on Metal\\n\\n\"\n           << \"Usage: guffin -m MODEL [options]\\n\"\n           << \"       guffin inspect MODEL\\n\\n\"\n           << \"Chat is the default. Give a prompt for one answer and exit.\\n\"\n           << \"Chat shows prompt/generation rates and internal TTFT after each reply.\\n\\n\"\n           << \"  -m, --model FILE          Model GGUF (or use positional MODEL)\\n\"\n           << \"  -p, --prompt TEXT         Answer TEXT once, then exit\\n\"\n           << \"  -n, --max-new-tokens N    Optional reply token limit\\n\"\n           << \"  -c, --context-size N      Context capacity in tokens\\n\"\n           << \"      --draft-model FILE    Enable lossless speculative decoding\\n\"\n           << \"      --temperature T       Sampling temperature (default: 0.8)\\n\"\n           << \"      --greedy              Select the most likely token\\n\"\n           << \"      --seed N              Sampling seed (default: random)\\n\"\n           << \"      --stats               Also show timing for one-shot/piped output\\n\"\n           << \"  -h, --help                Show this help\\n\"\n           << \"      --help-all            Include advanced options\\n\"\n           << \"      --version             Show build identity\\n\\n\"\n           << \"Examples:\\n\"\n           << \"  guffin -m models/gemma-3-12b-it-Q4_K_M.gguf\\n\"\n           << \"  guffin -m MODEL --draft-model DRAFT\\n\"\n           << \"  guffin -m MODEL -p \\\"Explain unified memory\\\" -n 128\\n\";\n    if (!advanced) return;\n    output << \"\\nSampling:\\n\"\n           << \"  --top-k N                 Candidate limit (default: 40)\\n\"\n           << \"  --top-p P                 Nucleus threshold (default: 0.95)\\n\"\n           << \"  --min-p P                 Relative threshold (default: 0.05)\\n\"\n           << \"  --repeat-penalty R        Repetition penalty (default: 1.0)\\n\"\n           << \"  --stop TEXT               Stop at TEXT; may be repeated\\n\"\n           << \"\\nContext and execution:\\n\"\n           << \"  --context-shift           Drop oldest complete turns when full\\n\"\n           << \"  --no-context-shift        Stop when full (default)\\n\"\n           << \"  --kv-cache auto|f16|f32   Target KV storage (auto selects F16)\\n\"\n           << \"  --output-head TYPE        Override the model's head with f16|q8_0|q6_k\\n\"\n           << \"  --no-speculative          Disable all speculation\\n\"\n           << \"  --retrieval               Enable experimental suffix retrieval\\n\"\n           << \"  --no-retrieval            Disable suffix retrieval\\n\"\n           << \"\\nDraft tuning:\\n\"\n           << \"  --draft-horizon N         Proposed tokens (default: 1, maximum: 23)\\n\"\n           << \"  --draft-temperature T     Override draft temperature\\n\"\n           << \"  --draft-top-k N           Override draft top-k (0 disables it)\\n\"\n           << \"  --draft-top-p P           Override draft nucleus threshold\\n\"\n           << \"  --draft-min-p P           Override draft relative threshold\\n\"\n           << \"  --draft-repeat-penalty R  Override draft repetition penalty\\n\"\n           << \"  --speculative-sampling lossless\\n\"\n           << \"  --speculative-schedule full|conditional  Default: full\\n\"\n           << \"\\nDiagnostics:\\n\"\n           << \"  --decode-diagnostics      Timings, raw counts and decode attribution\\n\"\n           << \"  --metal-capture PATH      Capture a decode with diagnostics enabled\\n\"\n           << \"  --interactive             Show chat UI with redirected streams\\n\";\n}\n\n\n</options.cpp lines 1-130>",
+        "Write focused tests for the numeric helpers using empty input, signs, leading or trailing whitespace, partial numeric strings, overflow, and nonfinite floating-point values. State the expected return value and whether the output argument can change. Ground the plan in the supplied code and keep it under 250 words."
+      ],
+      "suite": "supplementary",
+      "source_id": "guffin-original",
+      "turns_sha256": "4beccbbd52b35a1a9cf7ceed7ded4e05a4d2eda78615cdfcea2f5a1e116be1d5",
+      "context_excerpts": [
+        {
+          "source_id": "guffin-cli-options",
+          "start_line": 1,
+          "end_line": 130,
+          "sha256": "91c580340d7cec10d9d3f8eca5282af9b9fcf5adc3528f7aa10dacc730895532"
+        }
+      ]
+    },
+    {
+      "id": "guffin-sustained-design",
+      "category": "planning",
+      "groups": [
+        "sustained"
+      ],
+      "turns": [
+        "Help me design a small offline note-search application in Python using only the standard library. Notes are UTF-8 Markdown files in one folder. Explain a simple architecture for importing files, indexing words, and searching. Keep the answer under 200 words.",
+        "Extend that design to handle changed and deleted notes without rebuilding everything. Explain how you would identify changes and update the index. Keep it under 200 words.",
+        "Now account for a failed import and cancellation halfway through an update. Describe what remains committed and how the next attempt can recover. Keep it under 200 words.",
+        "Write a compact Python function that reads one note as UTF-8 and returns a count of normalized words. Explain its treatment of punctuation and Unicode in at most 100 words.",
+        "Review your function for empty files, repeated words, mixed case, and non-ASCII text. Revise it if needed and show three small input/output examples.",
+        "Create a practical implementation checklist for the full design. Include the three most important correctness tests and one useful performance measurement. Keep it under 200 words."
+      ],
+      "suite": "supplementary",
+      "source_id": "guffin-original",
+      "turns_sha256": "57e135bdc781a0e8513e999db3907f261cb0c2c5b12e8ad69733dee7a0ec7be5"
+    }
+  ],
+  "configurations": [
+    {
+      "id": "guffin-default",
+      "engine": "guffin",
+      "mode": "default",
+      "model_path": "/Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf",
+      "model_sha256": "7bb69bff3f48a7b642355d64a90e481182a7794707b3133890646b1efa778ff5",
+      "draft_sha256": null,
+      "executable": {
+        "path": "/opt/homebrew/bin/guffin",
+        "sha256": "dd18c4f5213bd9b6d3de877b165e4462972aafdfdad975b02955bd59a1f3440b",
+        "size_bytes": 1543704,
+        "version": "guffin 644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty",
+        "help": "Guffin - native GGUF chat on Metal\n\nUsage: guffin -m MODEL [options]\n       guffin inspect MODEL\n\nChat is the default. Give a prompt for one answer and exit.\nChat shows prompt/generation rates and internal TTFT after each reply.\n\n  -m, --model FILE          Model GGUF (or use positional MODEL)\n  -p, --prompt TEXT         Answer TEXT once, then exit\n  -n, --max-new-tokens N    Optional reply token limit\n  -c, --context-size N      Context capacity in tokens\n      --draft-model FILE    Enable lossless speculative decoding\n      --temperature T       Sampling temperature (default: 0.8)\n      --greedy              Select the most likely token\n      --seed N              Sampling seed (default: random)\n      --stats               Also show timing for one-shot/piped output\n  -h, --help                Show this help\n      --help-all            Include advanced options\n      --version             Show build identity\n\nExamples:\n  guffin -m models/gemma-3-12b-it-Q4_K_M.gguf\n  guffin -m MODEL --draft-model DRAFT\n  guffin -m MODEL -p \"Explain unified memory\" -n 128",
+        "linked_libraries": "/opt/homebrew/bin/guffin:\n\t/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (compatibility version 300.0.0, current version 5026.5.4)\n\t/System/Library/Frameworks/Metal.framework/Versions/A/Metal (compatibility version 1.0.0, current version 373.2.0)\n\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2100.43.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)\n\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 5026.5.4)\n\t/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)",
+        "homebrew_versions": "ggml 0.25.3\nllama.cpp 0.5.0"
+      },
+      "command": [
+        "/opt/homebrew/bin/guffin",
+        "-m",
+        "/Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf",
+        "--decode-diagnostics"
+      ],
+      "measurement_options": [
+        "--decode-diagnostics"
+      ]
+    },
+    {
+      "id": "llama-default",
+      "engine": "llama",
+      "mode": "default",
+      "model_path": "/Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf",
+      "model_sha256": "7bb69bff3f48a7b642355d64a90e481182a7794707b3133890646b1efa778ff5",
+      "draft_sha256": null,
+      "executable": {
+        "path": "/opt/homebrew/Cellar/llama.cpp/0.5.0/bin/llama-cli",
+        "sha256": "9765459b6789303e8f2233796df1778adef17a34d5c2396fd3a92e4ae6264757",
+        "size_bytes": 33600,
+        "version": "version: 0.5.0 (build 11146, commit 7fe450e19)\nbuilt with AppleClang 21.0.0.21000334 for Darwin arm64",
+        "help": "----- common params -----\n\n-h,    --help, --usage                  print usage and exit\n--version                               show version and build info\n-cl,   --cache-list                     show list of models in cache\n--completion-bash                       print source-able bash completion script for llama.cpp\n-t,    --threads N                      number of CPU threads to use during generation (default: -1)\n                                        (env: LLAMA_ARG_THREADS)\n-tb,   --threads-batch N                number of threads to use during batch and prompt processing (default:\n                                        same as --threads)\n-C,    --cpu-mask M                     CPU affinity mask: arbitrarily long hex. Complements cpu-range\n                                        (default: \"\")\n-Cr,   --cpu-range lo-hi                range of CPUs for affinity. Complements --cpu-mask\n--cpu-strict <0|1>                      use strict CPU placement (default: 0)\n--prio N                                set process/thread priority : low(-1), normal(0), medium(1), high(2),\n                                        realtime(3) (default: 0)\n--poll <0...100>                        use polling level to wait for work (0 - no polling, default: 50)\n-Cb,   --cpu-mask-batch M               CPU affinity mask: arbitrarily long hex. Complements cpu-range-batch\n                                        (default: same as --cpu-mask)\n-Crb,  --cpu-range-batch lo-hi          ranges of CPUs for affinity. Complements --cpu-mask-batch\n--cpu-strict-batch <0|1>                use strict CPU placement (default: same as --cpu-strict)\n--prio-batch N                          set process/thread priority : 0-normal, 1-medium, 2-high, 3-realtime\n                                        (default: 0)\n--poll-batch <0|1>                      use polling to wait for work (default: same as --poll)\n-c,    --ctx-size N                     size of the prompt context (default: 0, 0 = loaded from model)\n                                        (env: LLAMA_ARG_CTX_SIZE)\n-n,    --predict, --n-predict N         number of tokens to predict (default: -1, -1 = infinity)\n                                        (env: LLAMA_ARG_N_PREDICT)\n-b,    --batch-size N                   logical maximum batch size (default: 2048)\n                                        (env: LLAMA_ARG_BATCH)\n-ub,   --ubatch-size N                  physical maximum batch size (default: 512)\n                                        (env: LLAMA_ARG_UBATCH)\n--keep N                                number of tokens to keep from the initial prompt (default: 0, -1 =\n                                        all)\n--swa-full                              use full-size SWA cache (default: false)\n                                        [(more\n                                        info)](https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)\n                                        (env: LLAMA_ARG_SWA_FULL)\n-fa,   --flash-attn [on|off|auto]       set Flash Attention use ('on', 'off', or 'auto', default: 'auto')\n                                        (env: LLAMA_ARG_FLASH_ATTN)\n-p,    --prompt PROMPT                  prompt to start generation with; for system message, use -sys\n--perf, --no-perf                       whether to enable internal libllama performance timings (default:\n                                        false)\n                                        (env: LLAMA_ARG_PERF)\n-f,    --file FNAME                     a file containing the prompt (default: none)\n-bf,   --binary-file FNAME              binary file containing the prompt (default: none)\n-e,    --escape, --no-escape            whether to process escapes sequences (\\n, \\r, \\t, \\', \\\", \\\\)\n                                        (default: true)\n--rope-scaling {none,linear,yarn}       RoPE frequency scaling method, defaults to linear unless specified by\n                                        the model\n                                        (env: LLAMA_ARG_ROPE_SCALING_TYPE)\n--rope-scale N                          RoPE context scaling factor, expands context by a factor of N\n                                        (env: LLAMA_ARG_ROPE_SCALE)\n--rope-freq-base N                      RoPE base frequency, used by NTK-aware scaling (default: loaded from\n                                        model)\n                                        (env: LLAMA_ARG_ROPE_FREQ_BASE)\n--rope-freq-scale N                     RoPE frequency scaling factor, expands context by a factor of 1/N\n                                        (env: LLAMA_ARG_ROPE_FREQ_SCALE)\n--yarn-orig-ctx N                       YaRN: original context size of model (default: 0 = model training\n                                        context size)\n                                        (env: LLAMA_ARG_YARN_ORIG_CTX)\n--yarn-ext-factor N                     YaRN: extrapolation mix factor (default: -1.00, 0.0 = full\n                                        interpolation)\n                                        (env: LLAMA_ARG_YARN_EXT_FACTOR)\n--yarn-attn-factor N                    YaRN: scale sqrt(t) or attention magnitude (default: -1.00)\n                                        (env: LLAMA_ARG_YARN_ATTN_FACTOR)\n--yarn-beta-slow N                      YaRN: high correction dim or alpha (default: -1.00)\n                                        (env: LLAMA_ARG_YARN_BETA_SLOW)\n--yarn-beta-fast N                      YaRN: low correction dim or beta (default: -1.00)\n                                        (env: LLAMA_ARG_YARN_BETA_FAST)\n-kvo,  --kv-offload, -nkvo, --no-kv-offload\n                                        whether to enable KV cache offloading (default: enabled)\n                                        (env: LLAMA_ARG_KV_OFFLOAD)\n--repack, -nr, --no-repack              whether to enable weight repacking (default: enabled)\n                                        (env: LLAMA_ARG_REPACK)\n--no-host                               bypass host buffer allowing extra buffers to be used\n                                        (env: LLAMA_ARG_NO_HOST)\n-ctk,  --cache-type-k TYPE              KV cache data type for K\n                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1\n                                        (default: f16)\n                                        (env: LLAMA_ARG_CACHE_TYPE_K)\n-ctv,  --cache-type-v TYPE              KV cache data type for V\n                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1\n                                        (default: f16)\n                                        (env: LLAMA_ARG_CACHE_TYPE_V)\n-dt,   --defrag-thold N                 KV cache defragmentation threshold (DEPRECATED)\n                                        (env: LLAMA_ARG_DEFRAG_THOLD)\n-np,   --parallel N                     number of parallel sequences to decode (default: 1)\n                                        (env: LLAMA_ARG_N_PARALLEL)\n-lm,   --load-mode MODE                 model loading mode (default: auto)\n                                        - auto: mmap, unless a device does not support it\n                                        - none: no special loading mode\n                                        - mmap: memory-map model (if mmap disabled, slower load but may reduce\n                                        pageouts if not using mlock)\n                                        - mlock: force system to keep model in RAM rather than swapping or\n                                        compressing\n                                        - mmap+mlock: mmap + force system to keep model in RAM rather than\n                                        swapping or compressing\n                                        - dio: use DirectIO if available\n                                        \n                                        (env: LLAMA_ARG_LOAD_MODE)\n-lzm,  --lazy-mode MODE                 on-demand reading of certain tensors, for example per-layer embeddings\n                                        (default: auto)\n                                        - on: read the rows of such tensors from disk on demand instead of\n                                        keeping them resident (requires mmap)\n                                        - auto: on, but only for tensors larger than 4 GiB\n                                        - off: always keep them resident\n                                        (env: LLAMA_ARG_LAZY_MODE)\n--numa TYPE                             attempt optimizations that help on some NUMA systems\n                                        - distribute: spread execution evenly over all nodes\n                                        - isolate: only spawn threads on CPUs on the node that execution\n                                        started on\n                                        - numactl: use the CPU map provided by numactl\n                                        if run without this previously, it is recommended to drop the system\n                                        page cache before using this\n                                        see https://github.com/ggml-org/llama.cpp/issues/1437\n                                        (env: LLAMA_ARG_NUMA)\n-dev,  --device <dev1,dev2,..>          comma-separated list of devices to use for offloading (none = don't\n                                        offload)\n                                        use --list-devices to see a list of available devices\n                                        (env: LLAMA_ARG_DEVICE)\n--list-devices                          print list of available devices and exit\n-ot,   --override-tensor <tensor name pattern>=<buffer type>,...\n                                        override tensor buffer type\n                                        (env: LLAMA_ARG_OVERRIDE_TENSOR)\n-cmoe, --cpu-moe                        keep all Mixture of Experts (MoE) weights in the CPU\n                                        (env: LLAMA_ARG_CPU_MOE)\n-ncmoe, --n-cpu-moe N                   keep the Mixture of Experts (MoE) weights of the first N layers in the\n                                        CPU\n                                        (env: LLAMA_ARG_N_CPU_MOE)\n-ncffn, --n-cpu-ffn N                   keep the dense FFN weights of the first N layers in the CPU\n                                        (dense models; for MoE expert weights use --n-cpu-moe)\n                                        (env: LLAMA_ARG_N_CPU_FFN)\n-ngl,  --gpu-layers, --n-gpu-layers N   max. number of layers to store in VRAM, either an exact number,\n                                        'auto', or 'all' (default: auto)\n                                        (env: LLAMA_ARG_N_GPU_LAYERS)\n-sm,   --split-mode {none,layer,row,tensor}\n                                        how to split the model across multiple GPUs, one of:\n                                        - none: use one GPU only\n                                        - layer (default): split layers and KV across GPUs (pipelined)\n                                        - row: split weight across GPUs by rows (parallelized)\n                                        - tensor: split weights and KV across GPUs (parallelized,\n                                        EXPERIMENTAL)\n                                        (env: LLAMA_ARG_SPLIT_MODE)\n-ts,   --tensor-split N0,N1,N2,...      fraction of the model to offload to each GPU, comma-separated list of\n                                        proportions, e.g. 3,1\n                                        (env: LLAMA_ARG_TENSOR_SPLIT)\n-mg,   --main-gpu INDEX                 the GPU to use for the model (with split-mode = none), or for\n                                        intermediate results and KV (with split-mode = row) (default: 0)\n                                        (env: LLAMA_ARG_MAIN_GPU)\n-fit,  --fit [on|off]                   whether to adjust unset arguments to fit in device memory ('on' or\n                                        'off', default: 'on')\n                                        (env: LLAMA_ARG_FIT)\n-fitt, --fit-target MiB0,MiB1,MiB2,...\n                                        target margin per device for --fit, comma-separated list of values,\n                                        single value is broadcast across all devices, default: 1024\n                                        (env: LLAMA_ARG_FIT_TARGET)\n-fitc, --fit-ctx N                      minimum ctx size that can be set by --fit option, default: 4096\n                                        (env: LLAMA_ARG_FIT_CTX)\n--check-tensors                         check model tensor data for invalid values (default: false)\n--override-kv KEY=TYPE:VALUE,...        advanced option to override model metadata by key. to specify multiple\n                                        overrides, either use comma-separated values.\n                                        types: int, float, bool, str. example: --override-kv\n                                        tokenizer.ggml.add_bos_token=bool:false,tokenizer.ggml.add_eos_token=bool:false\n--op-offload, --no-op-offload           whether to offload host tensor operations to device (default: true)\n--lora FNAME                            path to LoRA adapter (use comma-separated values to load multiple\n                                        adapters)\n--lora-scaled FNAME:SCALE,...           path to LoRA adapter with user defined scaling (format:\n                                        FNAME:SCALE,...)\n                                        note: use comma-separated values\n--control-vector FNAME                  add a control vector\n                                        note: use comma-separated values to add multiple control vectors\n--control-vector-scaled FNAME:SCALE,...\n                                        add a control vector with user defined scaling SCALE\n                                        note: use comma-separated values (format: FNAME:SCALE,...)\n--control-vector-layer-range START END\n                                        layer range to apply the control vector(s) to, start and end inclusive\n-m,    --model FNAME                    model path to load\n                                        (env: LLAMA_ARG_MODEL)\n-mu,   --model-url MODEL_URL            model download url (default: unused)\n                                        (env: LLAMA_ARG_MODEL_URL)\n-dr,   --docker-repo [<repo>/]<model>[:quant]\n                                        Docker Hub model repository. repo is optional, default to ai/. quant\n                                        is optional, default to :latest.\n                                        example: gemma3\n                                        (default: unused)\n                                        (env: LLAMA_ARG_DOCKER_REPO)\n-hf,   -hfr, --hf-repo <user>/<model>[:quant]\n                                        Hugging Face model repository; quant is optional, case-insensitive,\n                                        default to Q4_K_M, or falls back to the first file in the repo if\n                                        Q4_K_M doesn't exist.\n                                        mmproj is also downloaded automatically if available. to disable, add\n                                        --no-mmproj\n                                        example: ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M\n                                        (default: unused)\n                                        (env: LLAMA_ARG_HF_REPO)\n-hff,  --hf-file FILE                   Hugging Face model file. If specified, it will override the quant in\n                                        --hf-repo (default: unused)\n                                        (env: LLAMA_ARG_HF_FILE)\n-hft,  --hf-token TOKEN                 Hugging Face access token (default: value from HF_TOKEN environment\n                                        variable)\n                                        (env: HF_TOKEN)\n--log-disable                           Log disable\n--log-file FNAME                        Log to file\n                                        (env: LLAMA_ARG_LOG_FILE)\n--log-jsonl, --no-log-jsonl             Log as JSONL (one JSON object per line) to stdout, this also disables\n                                        colored logging (default: disabled)\n                                        (env: LLAMA_ARG_LOG_JSONL)\n--log-colors [on|off|auto]              Set colored logging ('on', 'off', or 'auto', default: 'auto')\n                                        'auto' enables colors when output is to a terminal\n                                        (env: LLAMA_ARG_LOG_COLORS)\n-v,    --verbose, --log-verbose         Set verbosity level to infinity (i.e. log all messages, useful for\n                                        debugging)\n--offline                               Offline mode: forces use of cache, prevents network access\n                                        (env: LLAMA_ARG_OFFLINE)\n-lv,   --verbosity, --log-verbosity N   Set the verbosity threshold. Messages with a higher verbosity will be\n                                        ignored. Values:\n                                         - 0: generic output\n                                         - 1: error\n                                         - 2: warning\n                                         - 3: info\n                                         - 4: trace (more info)\n                                         - 5: debug\n                                        (default: 1)\n                                        \n                                        (env: LLAMA_ARG_LOG_VERBOSITY)\n--log-prefix, --no-log-prefix           Enable prefix in log messages\n                                        (env: LLAMA_ARG_LOG_PREFIX)\n--log-timestamps, --no-log-timestamps   Enable timestamps in log messages\n                                        (env: LLAMA_ARG_LOG_TIMESTAMPS)\n--spec-draft-type-k, -ctkd, --cache-type-k-draft TYPE\n                                        KV cache data type for K for the draft model\n                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1\n                                        (default: f16)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K)\n--spec-draft-type-v, -ctvd, --cache-type-v-draft TYPE\n                                        KV cache data type for V for the draft model\n                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1\n                                        (default: f16)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V)\n\n\n----- sampling params -----\n\n--samplers SAMPLERS                     samplers that will be used for generation in the order, separated by\n                                        ';'\n                                        (default:\n                                        penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature)\n-s,    --seed SEED                      RNG seed (default: -1, use random seed for -1)\n--sampler-seq, --sampling-seq SEQUENCE\n                                        simplified sequence for samplers that will be used (default:\n                                        edskypmxt)\n--ignore-eos                            ignore end of stream token and continue generating (implies\n                                        --logit-bias EOS-inf)\n--temp, --temperature N                 temperature (default: 0.80)\n                                        (env: LLAMA_ARG_TEMPERATURE)\n--top-k N                               top-k sampling (default: 40, 0 = disabled)\n                                        (env: LLAMA_ARG_TOP_K)\n--top-p N                               top-p sampling (default: 0.95, 1.0 = disabled)\n                                        (env: LLAMA_ARG_TOP_P)\n--min-p N                               min-p sampling (default: 0.05, 0.0 = disabled)\n                                        (env: LLAMA_ARG_MIN_P)\n--top-nsigma, --top-n-sigma N           top-n-sigma sampling (default: -1.00, -1.0 = disabled)\n--xtc-probability N                     xtc probability (default: 0.00, 0.0 = disabled)\n--xtc-threshold N                       xtc threshold (default: 0.10, 1.0 = disabled)\n--typical, --typical-p N                locally typical sampling, parameter p (default: 1.00, 1.0 = disabled)\n--repeat-last-n N                       last n tokens to consider for penalize (default: 64, 0 = disabled)\n--repeat-penalty N                      penalize repeat sequence of tokens (default: 1.00, 1.0 = disabled)\n                                        (env: LLAMA_ARG_REPEAT_PENALTY)\n--presence-penalty N                    repeat alpha presence penalty (default: 0.00, 0.0 = disabled)\n                                        (env: LLAMA_ARG_PRESENCE_PENALTY)\n--frequency-penalty N                   repeat alpha frequency penalty (default: 0.00, 0.0 = disabled)\n                                        (env: LLAMA_ARG_FREQUENCY_PENALTY)\n--dry-multiplier N                      set DRY sampling multiplier (default: 0.00, 0.0 = disabled)\n--dry-base N                            set DRY sampling base value (default: 1.75)\n--dry-allowed-length N                  set allowed length for DRY sampling (default: 2)\n--dry-penalty-last-n N                  set DRY penalty for the last n tokens (default: 64, 0 = disable)\n--dry-sequence-breaker STRING           add sequence breaker for DRY sampling, clearing out default breakers\n                                        ('\\n', ':', '\"', '*') in the process; use \"none\" to not use any\n                                        sequence breakers\n--adaptive-target N                     adaptive-p: select tokens near this probability (valid range 0.0 to\n                                        1.0; negative = disabled) (default: -1.00)\n                                        [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)\n--adaptive-decay N                      adaptive-p: decay rate for target adaptation over time. lower values\n                                        are more reactive, higher values are more stable.\n                                        (valid range 0.0 to 0.99) (default: 0.90)\n--dynatemp-range N                      dynamic temperature range (default: 0.00, 0.0 = disabled)\n--dynatemp-exp N                        dynamic temperature exponent (default: 1.00)\n--mirostat N                            use Mirostat sampling.\n                                        Top K, Nucleus and Locally Typical samplers are ignored if used.\n                                        (default: 0, 0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0)\n--mirostat-lr N                         Mirostat learning rate, parameter eta (default: 0.10)\n--mirostat-ent N                        Mirostat target entropy, parameter tau (default: 5.00)\n-l,    --logit-bias TOKEN_ID(+/-)BIAS   modifies the likelihood of token appearing in the completion,\n                                        i.e. `--logit-bias 15043+1` to increase likelihood of token ' Hello',\n                                        or `--logit-bias 15043-1` to decrease likelihood of token ' Hello'\n--grammar GRAMMAR                       BNF-like grammar to constrain generations (see samples in grammars/\n                                        dir)\n--grammar-file FNAME                    file to read grammar from\n-j,    --json-schema SCHEMA             JSON schema to constrain generations (https://json-schema.org/), e.g.\n                                        `{\"type\": \"object\"}` for any JSON object\n-jf,   --json-schema-file FILE          File containing a JSON schema to constrain generations\n                                        (https://json-schema.org/), e.g. `{\"type\": \"object\"}` for any JSON\n                                        object\n-bs,   --backend-sampling               enable backend sampling (experimental) (default: disabled)\n                                        (env: LLAMA_ARG_BACKEND_SAMPLING)\n\n\n----- speculative params -----\n\n--spec-draft-hf, -hfd, -hfrd, --hf-repo-draft <user>/<model>[:quant]\n                                        Same as --hf-repo, but for the draft model (default: unused)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_HF_REPO)\n--spec-draft-threads, -td, --threads-draft N\n                                        number of threads to use during generation (default: same as\n                                        --threads)\n--spec-draft-threads-batch, -tbd, --threads-batch-draft N\n                                        number of threads to use during batch and prompt processing (default:\n                                        same as --threads-draft)\n--spec-draft-cpu-mask, -Cd, --cpu-mask-draft M\n                                        Draft model CPU affinity mask. Complements cpu-range-draft (default:\n                                        same as --cpu-mask)\n--spec-draft-cpu-range, -Crd, --cpu-range-draft lo-hi\n                                        Ranges of CPUs for affinity. Complements --cpu-mask-draft\n--spec-draft-cpu-strict, --cpu-strict-draft <0|1>\n                                        Use strict CPU placement for draft model (default: same as\n                                        --cpu-strict)\n--spec-draft-prio, --prio-draft N       set draft process/thread priority : 0-normal, 1-medium, 2-high,\n                                        3-realtime (default: 0)\n--spec-draft-poll, --poll-draft <0|1>   Use polling to wait for draft model work (default: same as --poll)\n--spec-draft-cpu-mask-batch, -Cbd, --cpu-mask-batch-draft M\n                                        Draft model CPU affinity mask. Complements cpu-range-draft (default:\n                                        same as --cpu-mask)\n--spec-draft-cpu-strict-batch, --cpu-strict-batch-draft <0|1>\n                                        Use strict CPU placement for draft model (default: --cpu-strict-draft)\n--spec-draft-prio-batch, --prio-batch-draft N\n                                        set draft process/thread priority : 0-normal, 1-medium, 2-high,\n                                        3-realtime (default: 0)\n--spec-draft-poll-batch, --poll-batch-draft <0|1>\n                                        Use polling to wait for draft model work (default: --poll-draft)\n--spec-draft-override-tensor, -otd, --override-tensor-draft <tensor name pattern>=<buffer type>,...\n                                        override tensor buffer type for draft model\n--spec-draft-cpu-moe, -cmoed, --cpu-moe-draft\n                                        keep all Mixture of Experts (MoE) weights in the CPU for the draft\n                                        model\n                                        (env: LLAMA_ARG_SPEC_DRAFT_CPU_MOE)\n--spec-draft-n-cpu-moe, --spec-draft-ncmoe, -ncmoed, --n-cpu-moe-draft N\n                                        keep the Mixture of Experts (MoE) weights of the first N layers in the\n                                        CPU for the draft model\n                                        (env: LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE)\n--spec-draft-n-max N                    number of tokens to draft for speculative decoding (default: 3)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_N_MAX)\n--spec-draft-n-min N                    minimum number of draft tokens to use for speculative decoding\n                                        (default: 0)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_N_MIN)\n--spec-synth-len L                      target mean synthetic acceptance length, including the target token\n                                        (benchmarking only)\n                                        (env: LLAMA_ARG_SPEC_SYNTH_LEN)\n--spec-synth-rates P0,P1,...            comma-separated unconditional per-position synthetic acceptance\n                                        probabilities (benchmarking only)\n                                        (env: LLAMA_ARG_SPEC_SYNTH_RATES)\n--spec-draft-p-split, --draft-p-split P\n                                        speculative decoding split probability (default: 0.10)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_P_SPLIT)\n--spec-draft-p-min, --draft-p-min P     minimum speculative decoding probability (greedy) (default: 0.00)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_P_MIN)\n--spec-draft-backend-sampling, --no-spec-draft-backend-sampling\n                                        offload draft sampling to the backend (default: enabled)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING)\n--spec-draft-device, -devd, --device-draft <dev1,dev2,..>\n                                        comma-separated list of devices to use for offloading the draft model\n                                        (none = don't offload, default: follows --device)\n                                        use --list-devices to see a list of available devices\n--spec-draft-ngl, -ngld, --gpu-layers-draft, --n-gpu-layers-draft N\n                                        max. number of draft model layers to store in VRAM, either an exact\n                                        number, 'auto', or 'all' (default: auto)\n                                        (env: LLAMA_ARG_N_GPU_LAYERS_DRAFT)\n--spec-draft-model, -md, --model-draft FNAME\n                                        draft model for speculative decoding (default: unused)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_MODEL)\n--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,draft-dspark,ngram-simple,ngram-map-k,ngram-map-k4v,ngram-mod,ngram-cache\n                                        comma-separated list of types of speculative decoding to use (default:\n                                        none)\n                                        \n                                        (env: LLAMA_ARG_SPEC_TYPE)\n--spec-ngram-mod-n-min N                minimum number of ngram tokens to use for ngram-based speculative\n                                        decoding (default: 48)\n--spec-ngram-mod-n-max N                maximum number of ngram tokens to use for ngram-based speculative\n                                        decoding (default: 64)\n--spec-ngram-mod-n-match N              ngram-mod lookup length (default: 24)\n--spec-ngram-simple-size-n N            ngram size N for ngram-simple speculative decoding, length of lookup\n                                        n-gram (default: 12)\n--spec-ngram-simple-size-m N            ngram size M for ngram-simple speculative decoding, length of draft\n                                        m-gram (default: 48)\n--spec-ngram-simple-min-hits N          minimum hits for ngram-simple speculative decoding (default: 1)\n--spec-ngram-map-k-size-n N             ngram size N for ngram-map-k speculative decoding, length of lookup\n                                        n-gram (default: 12)\n--spec-ngram-map-k-size-m N             ngram size M for ngram-map-k speculative decoding, length of draft\n                                        m-gram (default: 48)\n--spec-ngram-map-k-min-hits N           minimum hits for ngram-map-k speculative decoding (default: 1)\n--spec-ngram-map-k4v-size-n N           ngram size N for ngram-map-k4v speculative decoding, length of lookup\n                                        n-gram (default: 12)\n--spec-ngram-map-k4v-size-m N           ngram size M for ngram-map-k4v speculative decoding, length of draft\n                                        m-gram (default: 48)\n--spec-ngram-map-k4v-min-hits N         minimum hits for ngram-map-k4v speculative decoding (default: 1)\n--draft, --draft-n, --draft-max N       the argument has been removed. use --spec-draft-n-max or\n                                        --spec-ngram-mod-n-max\n                                        (env: LLAMA_ARG_DRAFT_MAX)\n--draft-min, --draft-n-min N            the argument has been removed. use --spec-draft-n-min or\n                                        --spec-ngram-mod-n-min\n                                        (env: LLAMA_ARG_DRAFT_MIN)\n\n\n----- example-specific params -----\n\n--server-base URL                       connect to this server instead of starting a new one, example:\n                                        'http://localhost:8080' (default: none)\n--verbose-prompt                        print a verbose prompt before generation (default: false)\n--display-prompt, --no-display-prompt   whether to print prompt at generation (default: true)\n-co,   --color [on|off|auto]            Colorize output to distinguish prompt and user input from generations\n                                        ('on', 'off', or 'auto', default: 'auto')\n                                        'auto' enables colors when output is to a terminal\n-ctxcp, --ctx-checkpoints, --swa-checkpoints N\n                                        max number of context checkpoints to create per slot (default:\n                                        32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)\n                                        (env: LLAMA_ARG_CTX_CHECKPOINTS)\n-cram, --cache-ram N                    set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 -\n                                        disable)[(more\n                                        info)](https://github.com/ggml-org/llama.cpp/pull/16391)\n                                        (env: LLAMA_ARG_CACHE_RAM)\n--context-shift, --no-context-shift     whether to use context shift on infinite text generation (default:\n                                        disabled)\n                                        (env: LLAMA_ARG_CONTEXT_SHIFT)\n-sys,  --system-prompt PROMPT           system prompt to use with model (if applicable, depending on chat\n                                        template)\n--show-timings, --no-show-timings       whether to show timing information after each response (default: true)\n                                        (env: LLAMA_ARG_SHOW_TIMINGS)\n-sysf, --system-prompt-file FNAME       a file containing the system prompt (default: none)\n-r,    --reverse-prompt PROMPT          halt generation at PROMPT, return control in interactive mode\n-sp,   --special                        special tokens output enabled (default: false)\n-st,   --single-turn                    run conversation for a single turn only, then exit when done\n                                        will not be interactive if first turn is predefined with --prompt\n                                        (default: false)\n-mli,  --multiline-input                allows you to write or paste multiple lines without ending each in '\\'\n--warmup, --no-warmup                   whether to perform warmup with an empty run (default: enabled)\n-mm,   --mmproj FILE                    path to a multimodal projector file. see tools/mtmd/README.md\n                                        note: if -hf is used, this argument can be omitted\n                                        (env: LLAMA_ARG_MMPROJ)\n-mmu,  --mmproj-url URL                 URL to a multimodal projector file. see tools/mtmd/README.md\n                                        (env: LLAMA_ARG_MMPROJ_URL)\n--mmproj-auto, --no-mmproj, --no-mmproj-auto\n                                        whether to use multimodal projector file (if available), useful when\n                                        using -hf (default: enabled)\n                                        (env: LLAMA_ARG_MMPROJ_AUTO)\n--mmproj-offload, --no-mmproj-offload   whether to enable GPU offloading for multimodal projector (default:\n                                        enabled)\n                                        (env: LLAMA_ARG_MMPROJ_OFFLOAD)\n-mmdev, --mmproj-device DEVICE          device to use for multimodal projector (none = don't offload, default:\n                                        follows --device)\n                                        use --list-devices to see a list of available devices\n                                        (env: MTMD_BACKEND_DEVICE)\n--image, --audio, --video FILE          path to an image, audio, or video file. use with multimodal models,\n                                        use comma-separated values for multiple files\n--image-min-tokens N                    minimum number of tokens each image can take, only used by vision\n                                        models with dynamic resolution (default: read from model)\n                                        (env: LLAMA_ARG_IMAGE_MIN_TOKENS)\n--image-max-tokens N                    maximum number of tokens each image can take, only used by vision\n                                        models with dynamic resolution (default: read from model)\n                                        (env: LLAMA_ARG_IMAGE_MAX_TOKENS)\n--video-fps N                           target video frame rate (default: 4.0)\n                                        (env: LLAMA_ARG_VIDEO_FPS)\n--video-timestamp-interval N            interval in milliseconds between text timestamps (default: 5000)\n                                        (env: LLAMA_ARG_VIDEO_TIMESTAMP_INTERVAL)\n--video-ffmpeg-dir DIR                  path to the directory containing ffmpeg and ffprobe (default: search\n                                        in PATH)\n                                        (env: LLAMA_ARG_VIDEO_FFMPEG_DIR)\n-o,    --output, --output-file FNAME    output file (default: '')\n--chat-template-kwargs STRING           sets additional params for the json template parser, must be a valid\n                                        json object string, e.g. '{\"key1\":\"value1\",\"key2\":\"value2\"}'\n                                        (env: LLAMA_ARG_CHAT_TEMPLATE_KWARGS)\n--jinja, --no-jinja                     whether to use jinja template engine for chat (default: enabled)\n                                        (env: LLAMA_ARG_JINJA)\n--reasoning-format FORMAT               controls whether thought tags are allowed and/or extracted from the\n                                        response, and in which format they're returned; one of:\n                                        - none: leaves thoughts unparsed in `message.content`\n                                        - deepseek: puts thoughts in `message.reasoning_content`\n                                        - deepseek-legacy: keeps `<think>` tags in `message.content` while\n                                        also populating `message.reasoning_content`\n                                        (default: auto)\n                                        (env: LLAMA_ARG_THINK)\n-rea,  --reasoning [on|off|auto]        Use reasoning/thinking in the chat ('on', 'off', or 'auto', default:\n                                        'auto' (detect from template))\n                                        (env: LLAMA_ARG_REASONING)\n--reasoning-effort LEVEL                reasoning effort level given to the chat template: 'default' to keep\n                                        the template default,\n                                        or a level such as 'minimal', 'low', 'medium', 'high', 'xhigh' or\n                                        'max' (default: default)\n                                        (env: LLAMA_ARG_REASONING_EFFORT)\n--reasoning-budget N                    token budget for thinking: -1 for unrestricted, 0 for immediate end,\n                                        N>0 for token budget (default: -1)\n                                        (env: LLAMA_ARG_THINK_BUDGET)\n--reasoning-budget-message MESSAGE      message injected before the end-of-thinking tag when reasoning budget\n                                        is exhausted (default: none)\n                                        (env: LLAMA_ARG_THINK_BUDGET_MESSAGE)\n--reasoning-preserve, --no-reasoning-preserve\n                                        preserve reasoning trace in the full history, not just the last\n                                        assistant message (default: enabled)\n                                        compatible with certain templates having 'supports_preserve_reasoning'\n                                        capability\n                                        example:\n                                        https://docs.z.ai/guides/capabilities/thinking-mode#preserved-thinking\n                                        (env: LLAMA_ARG_REASONING_PRESERVE)\n--chat-template JINJA_TEMPLATE          set custom jinja chat template (default: template taken from model's\n                                        metadata)\n                                        if suffix/prefix are specified, template will be disabled\n                                        only commonly used templates are accepted (unless --jinja is set\n                                        before this flag):\n                                        list of built-in templates:\n                                        bailing, bailing-think, bailing2, chatglm3, chatglm4, chatml,\n                                        command-r, deepseek, deepseek-ocr, deepseek2, deepseek3, exaone-moe,\n                                        exaone3, exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite,\n                                        granite-4.0, granite-4.1, grok-2, hunyuan-dense, hunyuan-moe,\n                                        hunyuan-vl, kimi-k2, llama2, llama2-sys, llama2-sys-bos,\n                                        llama2-sys-strip, llama3, llama4, megrez, minicpm, mistral-v1,\n                                        mistral-v3, mistral-v3-tekken, mistral-v7, mistral-v7-tekken, monarch,\n                                        openchat, orion, pangu-embedded, phi3, phi4, rwkv-world, seed_oss,\n                                        smolvlm, solar-open, vicuna, vicuna-orca, yandex, zephyr\n                                        (env: LLAMA_ARG_CHAT_TEMPLATE)\n--chat-template-file JINJA_TEMPLATE_FILE\n                                        set custom jinja chat template file (default: template taken from\n                                        model's metadata)\n                                        if suffix/prefix are specified, template will be disabled\n                                        only commonly used templates are accepted (unless --jinja is set\n                                        before this flag):\n                                        list of built-in templates:\n                                        bailing, bailing-think, bailing2, chatglm3, chatglm4, chatml,\n                                        command-r, deepseek, deepseek-ocr, deepseek2, deepseek3, exaone-moe,\n                                        exaone3, exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite,\n                                        granite-4.0, granite-4.1, grok-2, hunyuan-dense, hunyuan-moe,\n                                        hunyuan-vl, kimi-k2, llama2, llama2-sys, llama2-sys-bos,\n                                        llama2-sys-strip, llama3, llama4, megrez, minicpm, mistral-v1,\n                                        mistral-v3, mistral-v3-tekken, mistral-v7, mistral-v7-tekken, monarch,\n                                        openchat, orion, pangu-embedded, phi3, phi4, rwkv-world, seed_oss,\n                                        smolvlm, solar-open, vicuna, vicuna-orca, yandex, zephyr\n                                        (env: LLAMA_ARG_CHAT_TEMPLATE_FILE)\n--skip-chat-parsing, --no-skip-chat-parsing\n                                        force a pure content parser, even if a Jinja template is specified;\n                                        model will output everything in the content section, including any\n                                        reasoning and/or tool calls (default: disabled)\n                                        (env: LLAMA_ARG_SKIP_CHAT_PARSING)\n--simple-io                             use basic IO for better compatibility in subprocesses and limited\n                                        consoles\n--log-prompts-dir PATH                  Log prompts to directory (auto-created if not present; only used for\n                                        debugging, default: disabled)\n--gpt-oss-20b-default                   use gpt-oss-20b (note: can download weights from the internet)\n--gpt-oss-120b-default                  use gpt-oss-120b (note: can download weights from the internet)\n--vision-gemma-4b-default               use Gemma 3 4B QAT (note: can download weights from the internet)\n--vision-gemma-12b-default              use Gemma 3 12B QAT (note: can download weights from the internet)\n--spec-default                          enable default speculative decoding config",
+        "linked_libraries": "/opt/homebrew/bin/llama-cli:\n\t@rpath/libllama-cli-impl.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t@rpath/libllama-server-impl.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t@rpath/libmtmd.0.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib (compatibility version 3.0.0, current version 3.0.0)\n\t/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib (compatibility version 3.0.0, current version 3.0.0)\n\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 5026.5.4)\n\t/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61901.120.67)\n\t@rpath/libllama-common.0.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t@rpath/libllama.0.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/ggml/lib/libggml.0.dylib (compatibility version 0.0.0, current version 0.25.3)\n\t/opt/homebrew/opt/ggml/lib/libggml-base.0.dylib (compatibility version 0.0.0, current version 0.25.3)\n\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2100.43.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)",
+        "homebrew_versions": "ggml 0.25.3\nllama.cpp 0.5.0"
+      },
+      "command": [
+        "/opt/homebrew/Cellar/llama.cpp/0.5.0/bin/llama-cli",
+        "-m",
+        "/Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf",
+        "--log-verbosity",
+        "4"
+      ],
+      "measurement_options": [
+        "--log-verbosity",
+        "4"
+      ]
+    }
+  ],
+  "jobs": [
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-81",
+      "run_id": "66cf93f44c31d91d3d11"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-81",
+      "run_id": "df7967292d8bf356f961"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-82",
+      "run_id": "2d2affc2cf4b2f54ca70"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-82",
+      "run_id": "52cb95d6045de3208e8f"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-87",
+      "run_id": "785816ae916977805baf"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-87",
+      "run_id": "d99fca01417ba5ec1ad6"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-90",
+      "run_id": "a2b37e109e4bef1e4585"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-90",
+      "run_id": "cbc47baed276e7b1d3dc"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-95",
+      "run_id": "13d5e9088bd275081f11"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-95",
+      "run_id": "705ed45a2a08ac76d397"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-96",
+      "run_id": "e51fcc9d870981a5237f"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-96",
+      "run_id": "e4b847b4cf81fd1c304f"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-97",
+      "run_id": "a77d934cb8492eb78618"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-97",
+      "run_id": "1e51cead586e0e6741bb"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-100",
+      "run_id": "8c7695228e6bfe06bb8d"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-100",
+      "run_id": "f80a8dfa2c803da77023"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-101",
+      "run_id": "487c25e4566bcc3a0320"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-101",
+      "run_id": "47b61fdc90fff0b4d927"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-105",
+      "run_id": "7e1dc400d0635870f357"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-105",
+      "run_id": "e30ee017facb566250a1"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-106",
+      "run_id": "5b1ce6b891cd4c90f6d2"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-106",
+      "run_id": "caf03e4dbea17ecdd74b"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-109",
+      "run_id": "e8533064f09b4ef5b095"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-109",
+      "run_id": "af7368d45024b6f9c0d5"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-111",
+      "run_id": "a8ada37fec63b7fcc5d6"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-111",
+      "run_id": "a3d39b9abff348fb1f77"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-114",
+      "run_id": "392042eb5b1a577500c2"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-114",
+      "run_id": "812ccd00265a8ca3b8d7"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-116",
+      "run_id": "0b8697307d77bdea6b99"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-116",
+      "run_id": "8a03226232b6a75b6da7"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-119",
+      "run_id": "a7b198201957c1961fbe"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-119",
+      "run_id": "49394fae41a653c631bd"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-121",
+      "run_id": "f7294580605f456fbfdf"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-121",
+      "run_id": "a880adfab0a1a9bf7146"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-123",
+      "run_id": "9d4cc76920a025ce475a"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-123",
+      "run_id": "7212fa16fee5480c04a3"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-124",
+      "run_id": "48d4422b85cbbd39c04c"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-124",
+      "run_id": "94e6a9033cbc601b2d30"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-126",
+      "run_id": "7955da9253d6ea0c59fe"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-126",
+      "run_id": "e56b271cd97547cc00a1"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-131",
+      "run_id": "e75898e9ba4537a1328f"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-131",
+      "run_id": "ea36fa0ff63c3416065e"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-133",
+      "run_id": "b61b416536b75dc8017f"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-133",
+      "run_id": "6cbcba3abccd33134570"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-134",
+      "run_id": "83a0333a85bb86d2d9fe"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-134",
+      "run_id": "94d915d4b1db2bffc47d"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-140",
+      "run_id": "21dbf976508cb02719b4"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-140",
+      "run_id": "90d6cef41c105d59dec0"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-141",
+      "run_id": "de56ccd835af7f906e14"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-141",
+      "run_id": "8ef363d67e0ea82bff23"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-143",
+      "run_id": "0eb2a4790f925925df97"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-143",
+      "run_id": "5c4868586592a6d3684e"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-145",
+      "run_id": "defe2e8dbb26550d57fe"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-145",
+      "run_id": "233c906d8dda9d3c7980"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-149",
+      "run_id": "d6856098688ca0522f0f"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-149",
+      "run_id": "653459c1f3df4184c87c"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-151",
+      "run_id": "f1abba9aaff152feb6d0"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-151",
+      "run_id": "f05d207160ec2c881fc5"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-154",
+      "run_id": "17996dc635577fc5e1d8"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-154",
+      "run_id": "6438a9b6f62b163062f6"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-155",
+      "run_id": "dd761c6f767fd444fc9d"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-155",
+      "run_id": "b077e7e4a94df66fce54"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "mt-bench-157",
+      "run_id": "9620b670e52301020c05"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "mt-bench-157",
+      "run_id": "950ab52883b73beb2bbe"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "guffin-short-chat",
+      "run_id": "43ef8bb88de04dc657b4"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "guffin-short-chat",
+      "run_id": "c8a7cba1b0a842a922fc"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "guffin-swedish-chat",
+      "run_id": "dde4469afdf27a73d4a5"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "guffin-swedish-chat",
+      "run_id": "c8b9892b2717ac1327b1"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "guffin-chinese-chat",
+      "run_id": "2f2ae884263d7fc2903b"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "guffin-chinese-chat",
+      "run_id": "a3d95eff522f16421ece"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "guffin-document-review",
+      "run_id": "eec28e6cb813f51f2dc8"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "guffin-document-review",
+      "run_id": "20a514e46edcc2460ca1"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "guffin-code-review",
+      "run_id": "e9d4f2dbf0286e35d26e"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "guffin-code-review",
+      "run_id": "eb3da7e901d0126ff7fc"
+    },
+    {
+      "configuration_id": "llama-default",
+      "case_id": "guffin-sustained-design",
+      "run_id": "85427fc517dba6612038"
+    },
+    {
+      "configuration_id": "guffin-default",
+      "case_id": "guffin-sustained-design",
+      "run_id": "853d810d7731566201be"
+    }
+  ],
+  "measurement_scripts": {
+    "release_chat_benchmark.py": "5202c8b9fb827b233fb908d5c2b52846c2088ab3558df6c53c6025373f9df403",
+    "release_chat_metrics.py": "928d5a442d81d02679fbef673e52fef8fd41436e1fec7df3de71c91c29354b29"
+  },
+  "protocol": {
+    "comparison": "default CLI chat; measurement logging only",
+    "passes": 1,
+    "seed": "each CLI's unmodified random default",
+    "conversation_pause_seconds": 300.0,
+    "turn_pause_seconds": 120.0,
+    "timeout_seconds": 900.0,
+    "fresh_process_per_conversation": true,
+    "warmup": "each CLI's default",
+    "output_limit": "each CLI's default; no benchmark token cap",
+    "internal_ttft": "after tokenization through first target token selection",
+    "generation_rate": "(selected tokens - 1) / first-to-last selection duration",
+    "terminal": "PTY input/output, kernel echo disabled, native CLI UI unchanged",
+    "memory": "macOS process physical footprint; includes target and draft",
+    "scope": "same user messages; sampled outputs and follow-up histories may differ"
+  }
+}

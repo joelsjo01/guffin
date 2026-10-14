@@ -1,0 +1,95 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> ... ... ... ... ... ... ... ... ... ... Okay, let's break down this puzzle step-by-step to determine the name of the secretary.
+
+**1. Setting up the Framework**
+
+First, let's create a table to represent the parking spaces and keep track of the clues:
+
+| Space | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| Car Color |  |  |  |  |  |
+| Executive Name |  |  |  |  |  |
+| Title | CEO | President | VP | Secretary | Treasurer |
+
+**2. Incorporating the Clues**
+
+Now, let's use the clues to fill in the table:
+
+*   **Clue 1: The car in the first space is red.**
+    | Space | 1 | 2 | 3 | 4 | 5 |
+    |---|---|---|---|---|---|
+    | Car Color | Red |  |  |  |  |
+    | Executive Name |  |  |  |  |  |
+    | Title | CEO | President | VP | Secretary | Treasurer |
+
+*   **Clue 2: A blue car is parked between the red car and the green car.**
+    | Space | 1 | 2 | 3 | 4 | 5 |
+    |---|---|---|---|---|---|
+    | Car Color | Red | Blue | Green |  |  |
+    | Executive Name |  |  |  |  |  |
+    | Title | CEO | President | VP | Secretary | Treasurer |
+
+*   **Clue 3: The car in the last space is purple.**
+    | Space | 1 | 2 | 3 | 4 | 5 |
+    |---|---|---|---|---|---|
+    | Car Color | Red | Blue | Green |  | Purple |
+    | Executive Name |  |  |  |  |  |
+    | Title | CEO | President | VP | Secretary | Treasurer |
+
+*   **Clue 6: Enid drives a green car.**
+    | Space | 1 | 2 | 3 | 4 | 5 |
+    |---|---|---|---|---|---|
+    | Car Color | Red | Blue | Green |  | Purple |
+    | Executive Name |  |  | Enid |  |  |
+    | Title | CEO | President | VP | Secretary | Treasurer |
+
+*   **Clue 8: David's car is parked in the last space.**
+    | Space | 1 | 2 | 3 | 4 | 5 |
+    |---|---|---|---|---|---|
+    | Car Color | Red | Blue | Green |  | Purple |
+    | Executive Name |  |  | Enid |  | David |
+    | Title | CEO | President | VP | Secretary | Treasurer |
+
+*   **Clue 4: The secretary drives a yellow car.**  This is a crucial clue.
+    | Space | 1 | 2 | 3 | 4 | 5 |
+    |---|---|---|---|---|---|
+    | Car Color | Red | Blue | Green | Yellow | Purple |
+    | Executive Name |  |  | Enid |  | David |
+    | Title | CEO | President | VP | Secretary | Treasurer |
+
+*   **Clue 5: Alice's car is parked next to David's.** Since David is in the last spot, Alice must be in the second-to-last spot.
+    | Space | 1 | 2 | 3 | 4 | 5 |
+    |---|---|---|---|---|---|
+    | Car Color | Red | Blue | Green | Yellow | Purple |
+    | Executive Name |  |  | Enid | Alice | David |
+    | Title | CEO | President | VP | Secretary | Treasurer |
+
+*   **Clue 7: Bert's car is parked between Cheryl's and Enid's.** This means the order must be Cheryl - Bert - Enid. The only remaining spots are spaces 1, 2, and 3.
+    | Space | 1 | 2 | 3 | 4 | 5 |
+    |---|---|---|---|---|---|
+    | Car Color | Red | Blue | Green | Yellow | Purple |
+    | Executive Name | Cheryl | Bert | Enid | Alice | David |
+    | Title | CEO | President | VP | Secretary | Treasurer |
+
+**3. Determining the Secretary**
+
+The table now shows that the Secretary is in space 4, and Alice is in the fourth space. We also know that the Secretary drives a yellow car.
+
+**Answer:** The name of the secretary is Alice.
+[ Prompt: 93.7 t/s | Generation: 20.9 t/s | TTFT: 2.402346 s ]
+[ Detail: Evaluated: 225 | Cached: 0 | Decoded: 1028 | Prompt: 2.402346 s | Generation: 49.147274 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":1028,"stop_reason":"stop_token","selected_token_hash":"800aa488b5336ba4","decoded_tokens":1028,"initial_cache_position":0,"final_cache_position":1253,"evaluated_prompt_tokens":225,"reused_cache_tokens":0,"decode_wall_ns":49146950752,"gpu_ns":48248744216,"selection_ns":435261,"proposer_ns":0,"generation_completion_ns":49148494208,"full_turn_ns":51551296291,"first_text_ns":2479354791,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":542,"learned_accepted_edges":485,"learned_proposed_edges":542,"learned_numeric_refusals":0,"learned_draft_ns":4778238657,"learned_draft_gpu_ns":4479654715,"learned_target_gpu_ns":43377027629,"learned_cycle_ns":48752275996,"standalone_prefill_ns":318126750,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":217492,"standalone_draft_readback_bytes":121688,"standalone_draft_wall_ns":5096380872,"standalone_draft_gpu_ns":4796068213,"standalone_draft_command_buffer_count":1088,"standalone_draft_compute_dispatch_count":207965,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,542,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[542,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[57,485,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[57,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":485,"learned_horizon_limited_cycle_count":484,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":898206536,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":2173,"commits":2173,"waits":2173,"compute_encoders":2173,"compute_dispatches":736971,"blit_encoders":0,"barriers":505972,"transient_allocations":0,"selector_dispatches":5973,"max_candidates":40,"compact_readback_bytes":347200,"q4_decode":288,"q8_decode":0,"q8_width_two":0,"q4_small_batch":156096,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":48,"q6_small_batch":26559,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":0,"output_elided_weight_bytes":0,"attention_dispatches":52080,"attention_partitions":185248,"attention_tokens":37499272,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":7645297858872} ]
+> Okay, based on the solved puzzle, here are the car colors listed in order from last to first:
+
+1.  Purple
+2.  Yellow
+3.  Green
+4.  Blue
+5.  Red
+[ Prompt: 42.2 t/s | Generation: 18.8 t/s | TTFT: 0.450727 s ]
+[ Detail: Evaluated: 19 | Cached: 1253 | Decoded: 47 | Prompt: 0.450727 s | Generation: 2.502410 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":47,"stop_reason":"stop_token","selected_token_hash":"29de32dc114fbc76","decoded_tokens":47,"initial_cache_position":1253,"final_cache_position":1319,"evaluated_prompt_tokens":19,"reused_cache_tokens":1253,"decode_wall_ns":2582198206,"gpu_ns":2534145190,"selection_ns":28498,"proposer_ns":0,"generation_completion_ns":2583131417,"full_turn_ns":3038763875,"first_text_ns":536659250,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":26,"learned_accepted_edges":19,"learned_proposed_edges":26,"learned_numeric_refusals":0,"learned_draft_ns":224764627,"learned_draft_gpu_ns":210243051,"learned_target_gpu_ns":2133171516,"learned_cycle_ns":2386434039,"standalone_prefill_ns":34923750,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":10472,"standalone_draft_readback_bytes":5776,"standalone_draft_wall_ns":268696461,"standalone_draft_gpu_ns":253276633,"standalone_draft_command_buffer_count":54,"standalone_draft_compute_dispatch_count":11324,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,26,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[26,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[7,19,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[7,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":19,"learned_horizon_limited_cycle_count":19,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":48053016,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":108,"commits":108,"waits":108,"compute_encoders":108,"compute_dispatches":38539,"blit_encoders":0,"barriers":26552,"transient_allocations":0,"selector_dispatches":297,"max_candidates":40,"compact_readback_bytes":16960,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":7488,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":1275,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":2592,"attention_partitions":12096,"attention_tokens":2771632,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":348716059218} ]
+> 

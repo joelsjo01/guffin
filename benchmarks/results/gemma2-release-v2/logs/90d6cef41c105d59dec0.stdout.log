@@ -1,0 +1,48 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ... ... ... ... ... ... ... Month,Highest Close,Lowest Close
+January,156.25,148.50
+February,164.25,159.50
+March,169.85,163.10 
+
+
+**Explanation:**
+
+1. **Data Extraction:** The code would first need to parse the provided CSV data and store it in a suitable data structure (like a list of dictionaries, where each dictionary represents a single stock price record).
+
+2. **Month Grouping:** It would then group the records by month (using the "Date" column).
+
+3. **Highest and Lowest Calculation:** For each month group, it would calculate the highest and lowest "Close" values.
+
+4. **CSV Formatting:** Finally, it would format the results as a CSV string, with each line representing a month and containing the "Month", "Highest Close", and "Lowest Close" values.
+
+
+
+Let me know if you'd like me to provide code snippets in a specific programming language to accomplish this!
+[ Prompt: 168.5 t/s | Generation: 16.9 t/s | TTFT: 2.089423 s ]
+[ Detail: Evaluated: 352 | Cached: 0 | Decoded: 218 | Prompt: 2.089423 s | Generation: 12.929217 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":218,"stop_reason":"stop_token","selected_token_hash":"d8be891b5679f60d","decoded_tokens":218,"initial_cache_position":0,"final_cache_position":570,"evaluated_prompt_tokens":352,"reused_cache_tokens":0,"decode_wall_ns":12974061050,"gpu_ns":12836216012,"selection_ns":748201,"proposer_ns":2383999,"generation_completion_ns":12979346125,"full_turn_ns":15071596709,"first_text_ns":2153748584,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":12,"speculative_matches":6,"speculative_misses":6,"speculative_fallbacks":199,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":3,"matches":0},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"2","support":"4+","confidence":"1","cycles":4,"matches":3},{"match_length":"3-4","support":"3","confidence":"1","cycles":2,"matches":2},{"match_length":"3-4","support":"4+","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":137845038,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":218,"commits":218,"waits":218,"compute_encoders":218,"compute_dispatches":146679,"blit_encoders":0,"barriers":109592,"transient_allocations":0,"selector_dispatches":2321,"max_candidates":40,"compact_readback_bytes":71360,"q4_decode":54600,"q8_decode":211,"q8_width_two":0,"q4_small_batch":3276,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":4200,"q6_small_batch":252,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":9408,"attention_partitions":23688,"attention_tokens":4330200,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":1269243121664} ]
+> ```json
+{
+  "January": {
+    "Highest Close": 156,
+    "Lowest Close": 149
+  },
+  "February": {
+    "Highest Close": 164,
+    "Lowest Close": 159
+  },
+  "March": {
+    "Highest Close": 169,
+    "Lowest Close": 163
+  }
+}
+``` 
+
+
+
+[ Prompt: 112.1 t/s | Generation: 18.0 t/s | TTFT: 0.267730 s ]
+[ Detail: Evaluated: 30 | Cached: 570 | Decoded: 101 | Prompt: 0.267730 s | Generation: 5.619182 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":101,"stop_reason":"stop_token","selected_token_hash":"30a551747da6f7a3","decoded_tokens":101,"initial_cache_position":570,"final_cache_position":701,"evaluated_prompt_tokens":30,"reused_cache_tokens":570,"decode_wall_ns":5666758163,"gpu_ns":5560326910,"selection_ns":391378,"proposer_ns":1320076,"generation_completion_ns":5669672792,"full_turn_ns":5943107042,"first_text_ns":337435083,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":19,"speculative_matches":12,"speculative_misses":7,"speculative_fallbacks":69,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"2","support":"2","confidence":"1","cycles":4,"matches":4},{"match_length":"2","support":"3","confidence":"1","cycles":2,"matches":2},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"3-4","support":"2","confidence":"1","cycles":5,"matches":2},{"match_length":"3-4","support":"4+","confidence":"1","cycles":1,"matches":0},{"match_length":"5-8","support":"2","confidence":"1","cycles":4,"matches":4}],"wall_minus_gpu_ns":106431253,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":96,"commits":96,"waits":96,"compute_encoders":96,"compute_dispatches":62931,"blit_encoders":0,"barriers":46001,"transient_allocations":0,"selector_dispatches":968,"max_candidates":40,"compact_readback_bytes":34240,"q4_decode":19110,"q8_decode":88,"q8_width_two":0,"q4_small_batch":5187,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":1470,"q6_small_batch":399,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":4536,"attention_partitions":18144,"attention_tokens":2954826,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":587520625664} ]
+> 

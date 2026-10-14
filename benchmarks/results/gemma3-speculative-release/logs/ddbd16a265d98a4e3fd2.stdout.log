@@ -1,0 +1,51 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> ... Let the cost of each sci-fi novel be $20.
+Benjamin bought 5 copies of the sci-fi novel, so the total cost of sci-fi novels is 5 * $20 = $100.
+
+Let the cost of each history book be $30.
+Benjamin bought 3 copies of the history book, so the total cost of history books is 3 * $30 = $90.
+
+Let the cost of each philosophy book be $45.
+Benjamin bought 2 copies of the philosophy book, so the total cost of philosophy books is 2 * $45 = $90.
+
+The total cost of his purchases is the sum of the cost of sci-fi novels, history books, and philosophy books.
+Total cost = $100 + $90 + $90 = $280.
+
+Final Answer: The final answer is $\boxed{280}$
+[ Prompt: 86.5 t/s | Generation: 21.8 t/s | TTFT: 0.902247 s ]
+[ Detail: Evaluated: 78 | Cached: 0 | Decoded: 199 | Prompt: 0.902247 s | Generation: 9.128367 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":199,"stop_reason":"stop_token","selected_token_hash":"541d2bb2e69e7b3d","decoded_tokens":199,"initial_cache_position":0,"final_cache_position":277,"evaluated_prompt_tokens":78,"reused_cache_tokens":0,"decode_wall_ns":9128456954,"gpu_ns":8960453247,"selection_ns":99629,"proposer_ns":0,"generation_completion_ns":9129498416,"full_turn_ns":10032036541,"first_text_ns":978091250,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":102,"learned_accepted_edges":96,"learned_proposed_edges":102,"learned_numeric_refusals":0,"learned_draft_ns":855952166,"learned_draft_gpu_ns":799337716,"learned_target_gpu_ns":7976974115,"learned_cycle_ns":8942877245,"standalone_prefill_ns":110043416,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":41100,"standalone_draft_readback_bytes":22656,"standalone_draft_wall_ns":966002375,"standalone_draft_gpu_ns":908677924,"standalone_draft_command_buffer_count":206,"standalone_draft_compute_dispatch_count":39348,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,102,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[102,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[6,96,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":96,"learned_horizon_limited_cycle_count":95,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":168003707,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":411,"commits":411,"waits":411,"compute_encoders":411,"compute_dispatches":135410,"blit_encoders":0,"barriers":91591,"transient_allocations":0,"selector_dispatches":1133,"max_candidates":40,"compact_readback_bytes":65600,"q4_decode":288,"q8_decode":0,"q8_width_two":0,"q4_small_batch":29376,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":48,"q6_small_batch":4999,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":0,"output_elided_weight_bytes":0,"attention_dispatches":9840,"attention_partitions":10848,"attention_tokens":1740528,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":1479974974626} ]
+> First, we need to find the original cost of each type of book:
+- Sci-fi novel: $20
+- History book: $30
+- Philosophy book: $45
+
+Benjamin sells each book at a 25% markup from the price he purchased them.
+Markup = 25% of the original price.
+
+For the sci-fi novel:
+Markup = 0.25 * $20 = $5
+Selling price = $20 + $5 = $25
+Since he has 5 sci-fi novels, the revenue from selling them is 5 * $25 = $125
+
+For the history book:
+Markup = 0.25 * $30 = $7.50
+Selling price = $30 + $7.50 = $37.50
+Since he has 3 history books, the revenue from selling them is 3 * $37.50 = $112.50
+
+For the philosophy book:
+Markup = 0.25 * $45 = $11.25
+Selling price = $45 + $11.25 = $56.25
+Since he has 2 philosophy books, the revenue from selling them is 2 * $56.25 = $112.50
+
+Total revenue = Revenue from sci-fi novels + Revenue from history books + Revenue from philosophy books
+Total revenue = $125 + $112.50 + $112.50 = $125 + 225 = $350
+
+Final Answer: The final answer is $\boxed{350}$
+[ Prompt: 74.1 t/s | Generation: 21.3 t/s | TTFT: 0.634264 s ]
+[ Detail: Evaluated: 47 | Cached: 277 | Decoded: 366 | Prompt: 0.634264 s | Generation: 17.221188 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":366,"stop_reason":"stop_token","selected_token_hash":"a1c0db74bbb58a1e","decoded_tokens":366,"initial_cache_position":277,"final_cache_position":690,"evaluated_prompt_tokens":47,"reused_cache_tokens":277,"decode_wall_ns":17299458953,"gpu_ns":16981948418,"selection_ns":161789,"proposer_ns":0,"generation_completion_ns":17300598958,"full_turn_ns":17936797167,"first_text_ns":713417459,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":192,"learned_accepted_edges":172,"learned_proposed_edges":192,"learned_numeric_refusals":0,"learned_draft_ns":1688141331,"learned_draft_gpu_ns":1582053391,"learned_target_gpu_ns":15174105446,"learned_cycle_ns":17071226489,"standalone_prefill_ns":72538750,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":76932,"standalone_draft_readback_bytes":42840,"standalone_draft_wall_ns":1769647795,"standalone_draft_gpu_ns":1662672515,"standalone_draft_command_buffer_count":386,"standalone_draft_compute_dispatch_count":74424,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,192,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[192,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[20,172,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":172,"learned_horizon_limited_cycle_count":172,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":317510535,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":772,"commits":772,"waits":772,"compute_encoders":772,"compute_dispatches":263655,"blit_encoders":0,"barriers":181118,"transient_allocations":0,"selector_dispatches":2123,"max_candidates":40,"compact_readback_bytes":123200,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":55296,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":9409,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":18528,"attention_partitions":54432,"attention_tokens":9331440,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":2721138254724} ]
+> 

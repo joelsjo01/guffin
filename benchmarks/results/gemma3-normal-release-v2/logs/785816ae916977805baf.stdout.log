@@ -1,0 +1,60 @@
+Guffin
+/help for commands, /exit to quit.
+
+> The old abandoned house at the end of the street held a secret that no one had ever discovered. It wasn't a gruesome murder, a hidden treasure, or a forgotten love affair. It was something far more peculiar, something that hummed beneath the peeling paint and choked by the overgrown ivy – a resonance.
+
+For generations, the locals of Oakhaven had avoided the Blackwood House. Tales of whispers and shadows clung to it like the honeysuckle smothering its porch. Children dared each other to run past it, their laughter swallowed by the oppressive silence that emanated from within. But Elara, a young woman recently returned to Oakhaven after years in the city, found herself inexplicably drawn to it. 
+
+Elara wasn’t interested in ghost stories. She was a composer, struggling to recapture the spark that had fueled her music before the city’s noise had drowned it out. She felt a strange, persistent pull towards Blackwood House, a feeling akin to a forgotten melody struggling to surface.
+
+Armed with a rusty key she'd found tucked under a loose brick in the crumbling wall, she slipped inside. Dust motes danced in the shafts of sunlight filtering through the grimy windows. The air was thick with the scent of decay and something else… something subtly sweet, like dried lavender and aged wood. 
+
+As she moved deeper, the feeling intensified. It wasn’t a sound, not exactly. It was a vibration, a low thrumming that resonated in her bones. She followed it, room by room, past decaying furniture and portraits with faded eyes. 
+
+Finally, she reached the music room. A grand piano, its ivory keys yellowed and cracked, dominated the space. It was here the resonance pulsed strongest.  As she approached, she noticed something peculiar about the walls. They weren’t plaster, but a series of intricately carved wooden panels, each depicting a swirling pattern of leaves, flowers, and strangely geometric shapes. 
+
+Instinctively, Elara ran her hand over the panels. As she touched a particular spiral, the resonance sharpened. The room seemed to breathe.  Then, she realized. The carvings weren’t just decorative; they were a massive, complex musical instrument. 
+
+She tentatively pressed a key on the piano. The vibration in the walls amplified, transforming the note into a rich, layered chord.  She played another, and then another, experimenting with the intricate system. The house responded, the walls vibrating in harmony with her touch, creating a sound unlike anything she had ever heard. It was organic, alive, a symphony built into the very fabric of the house. 
+
+The secret of Blackwood House wasn’t a ghost or a tragedy. It was a masterpiece of sonic architecture, a forgotten instrument built by a long-dead Blackwood who had understood the power of resonance, of music that resonated not just in the ears, but in the very soul.
+
+Elara spent weeks deciphering the intricate system, learning to coax music from the walls. She rediscovered her spark, the joy of creation rekindled by the house's unique voice. The whispers and shadows remained, but they no longer felt menacing. They were part of the music, an integral part of the house’s story. 
+
+One evening, as the sun dipped below the horizon, she played a full movement, the house resonating with a breathtaking beauty. As the final notes faded, a single, luminous hummingbird appeared in the window, hovering for a moment before darting off into the twilight. 
+
+Elara knew then that the house’s secret wasn’t just hers to keep.  It was a gift, a responsibility, a song waiting to be shared with the world, a melody that had waited centuries to be heard. And she, the unlikely keyholder, was finally ready to let it sing.
+
+
+
+
+[ Prompt: 68.1 t/s | Generation: 13.0 t/s | TTFT: 0.601798 s ]
+[ Detail: Evaluated: 41 | Cached: 0 | Decoded: 791 | Prompt: 0.601798 s | Generation: 60.999740 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":791,"stop_reason":"stop_token","selected_token_hash":"808bbb29c2cff26a","decoded_tokens":791,"initial_cache_position":0,"final_cache_position":832,"evaluated_prompt_tokens":41,"reused_cache_tokens":0,"decode_wall_ns":61058653124,"gpu_ns":60465394690,"selection_ns":2932999,"proposer_ns":0,"generation_completion_ns":61069463875,"full_turn_ns":61673122250,"first_text_ns":679003041,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":593258434,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":791,"commits":791,"waits":791,"compute_encoders":791,"compute_dispatches":722133,"blit_encoders":0,"barriers":493535,"transient_allocations":0,"selector_dispatches":8690,"max_candidates":40,"compact_readback_bytes":252800,"q4_decode":227808,"q8_decode":0,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":37968,"q6_small_batch":790,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":37968,"attention_partitions":96336,"attention_tokens":16592016,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":5881888828674} ]
+> The old house hid secrets. No one found them ever. It held a strange resonance. No one understood its song.
+
+Locals avoided Blackwood House. Tales whispered of shadows. Children dared quick runs past. Silence choked the street.
+
+Elara returned to Oakhaven. She sought lost inspiration. Music felt distant, drowned. A pull drew her near.
+
+A rusty key unlocked it. Dust danced in sunlight. Decay smelled faintly sweet. Lavender and old wood.
+
+She followed the vibration. Rooms showed faded portraits. The resonance pulsed stronger. The music room appeared.
+
+A grand piano stood there. Keys yellowed and cracked. Walls held carved panels. Leaves, flowers, strange shapes.
+
+She touched a spiral carving. The resonance sharpened then. Walls seemed to breathe now. It was a hidden instrument.
+
+She pressed a single key. Walls amplified the note. A chord filled the room. She played another softly. The house responded warmly.
+
+It was organic, truly alive. A symphony built within. The Blackwood understood music. He knew resonant power.
+
+Elara learned the system. She found her lost spark. The house's voice felt unique. Whispers felt less scary.
+
+She played a full movement. The house resonated brightly. A hummingbird appeared briefly. It hovered, then flew off.
+
+The secret felt precious now. It was a gift, truly. A song waited patiently. She would share the music.
+[ Prompt: 52.5 t/s | Generation: 12.8 t/s | TTFT: 0.457563 s ]
+[ Detail: Evaluated: 24 | Cached: 832 | Decoded: 295 | Prompt: 0.457563 s | Generation: 23.134660 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":295,"stop_reason":"stop_token","selected_token_hash":"a2bfc96af3789b80","decoded_tokens":295,"initial_cache_position":832,"final_cache_position":1151,"evaluated_prompt_tokens":24,"reused_cache_tokens":832,"decode_wall_ns":23200896294,"gpu_ns":22978359848,"selection_ns":1115163,"proposer_ns":0,"generation_completion_ns":23205099333,"full_turn_ns":23673336625,"first_text_ns":545932375,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":222536446,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":295,"commits":295,"waits":295,"compute_encoders":295,"compute_dispatches":273157,"blit_encoders":0,"barriers":187903,"transient_allocations":0,"selector_dispatches":3234,"max_candidates":40,"compact_readback_bytes":94080,"q4_decode":84960,"q8_decode":0,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":14160,"q6_small_batch":294,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":14160,"attention_partitions":60704,"attention_tokens":13891520,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":2193106982370} ]
+> 

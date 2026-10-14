@@ -1,0 +1,58 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Imagine you are participating in a race with a group of people. If you have just overtaken the second person, what's your current position? Where is the person you just overtook?
+[0mThis is a classic trick question!
+
+*   **Your current position:** You are in **second place**. When you overtake the person in second place, you take their spot.
+
+*   **The person you overtook:** The person you overtook is now in **third place**.
+
+
+
+Let me know if you'd like to try another riddle!
+[35m
+[ Prompt: 56.5 t/s | Generation: 13.0 t/s ]
+[0m[1m[32m
+> If the "second person" is changed to "last person" in the above question, what would the answer be?
+[0mOkay, let's adjust the scenario!
+
+If you overtake the **last person** in the race:
+
+*   **Your current position:** You are in **last place**. You've simply moved into the position previously held by the person who was last.
+
+*   **The person you overtook:** The person you overtook is now in **second to last place** (the position before last).
+
+
+
+It's a bit of a different outcome than overtaking someone in the middle of the pack!
+[35m
+[ Prompt: 87.7 t/s | Generation: 12.9 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

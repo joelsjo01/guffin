@@ -1,0 +1,3 @@
+# Keep captured terminal bytes and CSV line endings unchanged.
+benchmarks/results/*/logs/*.log -text -diff
+benchmarks/results/*/report/*.csv -text whitespace=cr-at-eol

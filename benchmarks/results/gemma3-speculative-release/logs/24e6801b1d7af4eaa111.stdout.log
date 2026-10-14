@@ -1,0 +1,73 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Could you write a captivating short story beginning with the sentence: The old abandoned house at the end of the street held a secret that no one had ever discovered.
+[0mThe old abandoned house at the end of the street held a secret that no one had ever discovered. Locals called it Blackwood Manor, a name whispered with a mix of fear and morbid curiosity. Its windows were dark eyes staring out from a crumbling facade, ivy clawing its way up the walls like desperate fingers. Generations had tried to uncover its mysteries – daredevil teenagers, history buffs, even a paranormal investigation team – but all had emerged empty-handed, unnerved by the oppressive silence and the sense of being watched.
+
+Elara wasn't a daredevil, a historian, or a ghost hunter. She was a botanist, drawn to Blackwood Manor by the rumors of a unique, untamed garden. The previous owners, the Blackwood family, were renowned eccentric horticulturists, rumored to have cultivated plants from across the globe. Now, decades after their abrupt disappearance, their legacy lay choked by weeds and neglect.
+
+Armed with gardening gloves, a trowel, and a healthy dose of skepticism, Elara squeezed through a gap in the overgrown gate. The garden was a riot of chaos – roses tangled with thorny vines, lilies dwarfed by monstrous ferns, and a strange, shimmering moss carpeted the ground. It was beautiful, but unsettling. 
+
+She began clearing a patch near a crumbling stone fountain, her hands finding something hard beneath the soil. A terracotta pot, buried deep. Inside, nestled in crumbling earth, was a seed. It wasn't like any seed she’d ever seen – iridescent, almost pulsing with a faint, inner light. 
+
+Driven by an inexplicable compulsion, Elara planted the seed. Days turned into weeks. She returned to Blackwood Manor, neglecting her own garden, obsessed with the mysterious seed. It sprouted, slowly at first, then with startling speed. It grew into a vine unlike any she recognized, its leaves a deep violet, its flowers an ethereal silver. 
+
+One evening, the vine bloomed. The scent was intoxicating, sweet and melancholic, and as Elara breathed it in, a memory flooded her mind – a laughing girl, a kind face, the feeling of being held. It wasn’t her memory, she knew, but it felt intimately familiar.
+
+Suddenly, the air shimmered. A faint image coalesced before her – a young woman, dressed in Victorian clothing, tending to the vine. The woman smiled, a sad, knowing smile. 
+
+“They thought we were lost,” the image whispered, her voice like the rustling of leaves. “But the garden remembers. It holds us.”
+
+Elara understood. The Blackwood family hadn’t disappeared. They had *become* part of the garden, their essence woven into the very fabric of the plants. The vine was a conduit, a living memory, triggered by the seed’s awakening. 
+
+The image began to fade, but before it vanished, she spoke one final sentence. “Protect it. It’s more than just a garden. It’s a sanctuary.”
+
+Then, silence. The shimmering ceased. Elara stood alone, the scent of silver flowers lingering in the air. The secret of Blackwood Manor wasn’t a ghost story or a buried treasure. It was a living, breathing legacy, a testament to the enduring power of nature, and the enduring bonds of family – a secret now entrusted to a botanist who had only sought to cultivate a garden.  And Elara knew, with a certainty that settled deep within her bones, that she would protect it, forever.
+
+
+
+[35m
+[ Prompt: 50.6 t/s | Generation: 7.3 t/s ]
+[0m[1m[32m
+> Now, do the same task again but only use four-word sentences.
+[0mThe old house held secrets. No one ever found them. Locals feared Blackwood Manor. Windows stared, dark and cold. Ivy climbed, desperate hands. Teenagers dared, then fled. Historians searched, found nothing. Paranormal teams felt watched.
+
+Elara sought a garden. Blackwood family grew plants. Rumors spoke of wonders. Now, neglect choked beauty. She squeezed through the gate. The garden was chaotic. Roses tangled, thorns sharp. Lilies hid, ferns grew. Moss shimmered, strangely bright.
+
+She cleared a hidden spot. Her hands found something hard. A pot, buried deep. Inside, a pulsing seed. It glowed, iridescent light. She planted the strange seed. Days passed, slowly then fast. She returned, obsessed now.
+
+A vine grew, violet leaves. Silver flowers bloomed bright. The scent felt melancholic. Memories flooded her mind. Not her memories, somehow known. A woman appeared faintly. Victorian clothes, gentle smile. 
+
+"They thought we vanished.” Her voice, rustling leaves. “The garden remembers us." She held the living memory. The vine became a conduit. "Protect it," she whispered. "It's a sanctuary.”
+
+The image faded quickly. Elara stood, scent lingered. The secret wasn't ghosts. It was nature's legacy. Family bonds remained strong. She would protect this place. Forever.
+[35m
+[ Prompt: 114.9 t/s | Generation: 6.1 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

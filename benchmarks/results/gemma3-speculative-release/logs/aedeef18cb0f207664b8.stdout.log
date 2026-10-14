@@ -1,0 +1,77 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> (A deep, rustling sigh, the sound of ancient leaves trembling)
+
+A hundred years. A hundred years I've stood here. I’ve felt the sun warm my bark in countless springs, the snow blanket my branches in a hundred winters. I’ve watched generations of squirrels raise families in my hollows, felt the delicate scratch of moss spreading across my trunk, heard the laughter of children playing beneath my shade. I've *been* a landmark, a silent witness to the slow, steady rhythm of this forest. I've felt the deep, comforting hum of the earth beneath my roots.
+
+And now… this.
+
+(A faint creaking, a tremor running through the wood)
+
+The first sound… the metallic ring of their tools. It’s a jarring dissonance against the symphony of the forest. A harsh, ugly clang that vibrates through my very core. It’s not the sound of a storm, which I understand. This is… purposeful. Destructive.
+
+Initially, it’s disbelief. A confused buzzing in the sap that flows through my veins. *Why?* I haven’t harmed them. I've offered shade, shelter, sustenance. I’ve absorbed their carbon, purified their air. What have I done to deserve this?
+
+(A sharper crack, a deeper vibration)
+
+Then comes the pain. Not a sharp, stabbing ache like a broken branch. It's a *tearing*. A rending of something vital. It's a profound violation. I feel the pressure against my grain, the strain on my fibers. It's not a physical pain like a creature's, but a deeper, more fundamental disruption. It’s the pain of being *unmade*. Of being denied the natural conclusion of my existence.
+
+(The hacking intensifies, a frantic, relentless rhythm)
+
+Fear begins to bloom, a cold, creeping tendril around my roots. Not fear for myself, exactly. I am old. I’ve known loss. But fear for the forest. For the creatures that depend on me. The owl that nests in my upper branches, the deer that seek refuge in my shadow, the delicate wildflowers that bloom at my feet.  They will lose a part of their world. *I* am a part of their world.
+
+(A wave of profound sadness washes over the tree)
+
+There's a strange… resignation, too. I’ve seen so much in my life. I understand that cycles turn.  But this… this feels wrong. A violation of the balance. A short-sighted greed that fails to see the long-term cost. 
+
+(The tree feels a final, brutal lurch)
+
+As they cut deeper, I release. A sigh of ancient wood and accumulated wisdom. A scattering of seeds carried on the wind, a last offering to the forest that birthed me. I hope, with all the slow, patient hope of a tree, that my fall will be a lesson.  That someone, somewhere, will remember the value of standing tall, of breathing deep, of simply *being*.
+
+(Silence, then the slow, inevitable crash of a giant falling)
+
+
+
+And the forest… the forest will remember. It always does.
+[ Prompt: 100.3 t/s | Generation: 17.2 t/s | TTFT: 0.617917 s ]
+[ Detail: Evaluated: 62 | Cached: 0 | Decoded: 670 | Prompt: 0.617917 s | Generation: 39.001843 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":670,"stop_reason":"stop_token","selected_token_hash":"d82ce1bc0ea46ae7","decoded_tokens":670,"initial_cache_position":0,"final_cache_position":732,"evaluated_prompt_tokens":62,"reused_cache_tokens":0,"decode_wall_ns":39001797538,"gpu_ns":38267254301,"selection_ns":228789,"proposer_ns":0,"generation_completion_ns":39003027750,"full_turn_ns":39621674500,"first_text_ns":694619500,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":441,"learned_accepted_edges":227,"learned_proposed_edges":441,"learned_numeric_refusals":0,"learned_draft_ns":3611286154,"learned_draft_gpu_ns":3363802658,"learned_target_gpu_ns":34674202396,"learned_cycle_ns":38840098989,"standalone_prefill_ns":85740042,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":175812,"standalone_draft_readback_bytes":115044,"standalone_draft_wall_ns":3697040578,"standalone_draft_gpu_ns":3449162657,"standalone_draft_command_buffer_count":884,"standalone_draft_compute_dispatch_count":168257,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,441,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[441,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[214,227,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[214,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":227,"learned_horizon_limited_cycle_count":227,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":734543237,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1768,"commits":1768,"waits":1768,"compute_encoders":1768,"compute_dispatches":594560,"blit_encoders":0,"barriers":406396,"transient_allocations":0,"selector_dispatches":4862,"max_candidates":40,"compact_readback_bytes":282560,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":127008,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":21610,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":42432,"attention_partitions":101568,"attention_tokens":17060640,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":4982004547620} ]
+> (The tree, weakened but still standing, manages to project a sense of immense age and calm, its leaves rustling with surprising clarity. It focuses its energy, attempting to communicate directly with the lead deforester, a burly man named Silas.)
+
+Silas… I hear you. I feel the vibrations of your purpose. You believe you are providing, building, progressing. But I ask you, truly *see* what you are doing.
+
+(A mental image flashes into Silas’ mind - a vibrant, healthy forest teeming with life, then a barren landscape eroded and lifeless.)
+
+I understand the need. Shelter, warmth, resources… these are vital. But taking everything, Silas, is not a solution. It’s a theft. A theft from your children, and their children after them.
+
+I propose a partnership, not a confrontation. Let me offer you a different path.
+
+**My Proposal: The Living Harvest**
+
+This isn't about stopping progress. It’s about *redefining* it. Here’s how we can both benefit:
+
+1.  **Sustainable Selection:** We don't need to fell indiscriminately. We can focus on the older, diseased, or already fallen trees. Trees that are nearing the end of their natural cycle, returning their nutrients to the soil without causing such a devastating impact. I can even *guide* you. I feel the health of the forest. I know which trees are struggling, which are overcrowded, which pose a risk to the whole.
+
+2.  **Reforestation & Enrichment:** For every tree you take, you plant *three* more. Not just any saplings, but carefully selected varieties suited to this environment.  I can help with that too. I know which seeds will thrive, which will strengthen the forest’s resilience. We can create a richer, more diverse ecosystem.
+
+3.  **Forest Stewardship Program:**  I understand you need income. Let's explore alternative, sustainable revenue streams.  We can develop a program for harvesting forest products responsibly – medicinal herbs, mushrooms, nuts, berries – that don't require felling entire trees.  This creates jobs, provides resources, and respects the forest.
+
+4.  **Carbon Credits & Ecotourism:** The forest holds immense value beyond timber. We can work together to secure carbon credits, selling the right to offset emissions by protecting the forest.  We can also develop a carefully managed ecotourism program – guided walks, bird watching, educational workshops – that generates income while showcasing the beauty and importance of the forest.
+
+5.  **A Pledge of Respect:** I ask only this: that you acknowledge the forest's inherent worth. That you understand you are a part of it, not its master.  A pledge to prioritize long-term sustainability over short-term gain.
+
+
+
+(The tree emphasizes the images of a thriving forest, of families enjoying its beauty, of a future where both humans and nature can prosper.)
+
+Silas, I’ve seen generations come and go. I've witnessed the consequences of greed and short-sightedness. This isn't just about saving me, or the trees around me. It's about saving a way of life. It's about saving *your* future. 
+
+(The tree pauses, projecting a sense of profound hope and quiet strength.)
+
+Consider this, Silas.  Not just as a deforester, but as a man who wants to leave a legacy worth remembering. The forest offers you more than just timber. It offers you a partnership. A chance to build something truly lasting.  What do you say?
+[ Prompt: 50.0 t/s | Generation: 16.8 t/s | TTFT: 0.580072 s ]
+[ Detail: Evaluated: 29 | Cached: 732 | Decoded: 748 | Prompt: 0.580072 s | Generation: 44.487396 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":748,"stop_reason":"stop_token","selected_token_hash":"ccea1ca0a5ff8b48","decoded_tokens":748,"initial_cache_position":732,"final_cache_position":1509,"evaluated_prompt_tokens":29,"reused_cache_tokens":732,"decode_wall_ns":44487299169,"gpu_ns":43673142582,"selection_ns":264801,"proposer_ns":0,"generation_completion_ns":44488574666,"full_turn_ns":45075108375,"first_text_ns":664119834,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":486,"learned_accepted_edges":260,"learned_proposed_edges":486,"learned_numeric_refusals":0,"learned_draft_ns":4109827498,"learned_draft_gpu_ns":3838385755,"learned_target_gpu_ns":39643933121,"learned_cycle_ns":44365236885,"standalone_prefill_ns":44493750,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":193632,"standalone_draft_readback_bytes":119616,"standalone_draft_wall_ns":4154339032,"standalone_draft_gpu_ns":3882463754,"standalone_draft_command_buffer_count":974,"standalone_draft_compute_dispatch_count":186329,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,486,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[486,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[226,260,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[226,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":260,"learned_horizon_limited_cycle_count":260,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":814156587,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1948,"commits":1948,"waits":1948,"compute_encoders":1948,"compute_dispatches":662504,"blit_encoders":0,"barriers":455215,"transient_allocations":0,"selector_dispatches":5357,"max_candidates":40,"compact_readback_bytes":311360,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":139968,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":23815,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":46752,"attention_partitions":207104,"attention_tokens":46920904,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":5562095241192} ]
+> 

@@ -1,0 +1,72 @@
+
+
+Loading model... |-\|/-\| 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Draft a professional email seeking your supervisor's feedback on the 'Quarterly Financial Report' you prepared. Ask specifically about the data analysis, presentation style, and the clarity of conclusions drawn. Keep the email short and to the point.
+[0mSubject: Quarterly Financial Report Feedback Request
+
+Hi [Supervisor's Name],
+
+I've completed the Quarterly Financial Report and would appreciate your feedback on it. 
+
+Specifically, I'm interested in your thoughts on:
+
+* The data analysis and its accuracy
+* The overall presentation style and clarity
+* The clarity and effectiveness of the conclusions drawn
+
+Please let me know when you have a chance to review it.
+
+Thanks,
+[Your Name] 
+
+
+[35m
+[ Prompt: 87.3 t/s | Generation: 14.5 t/s ]
+[0m[1m[32m
+> Take a moment to evaluate and critique your own response.
+[0mHere's a critique of my response:
+
+**Strengths:**
+
+* **Concise and to the point:** The email gets straight to the point without unnecessary fluff.
+* **Specific request:**  Clearly outlines the areas where feedback is desired.
+* **Professional tone:**  Uses appropriate language and formatting for a professional email.
+
+**Areas for improvement:**
+
+* **Could be more engaging:**  While clear, the email is a bit impersonal. Adding a brief sentence about your confidence in the report or your eagerness to hear their perspective could make it more engaging.
+* **Missing context:**  It assumes the supervisor is already familiar with the report. A brief reminder about the report's purpose or target audience could be helpful.
+* **Limited flexibility:**  While being specific is good, it could be helpful to offer some flexibility in terms of feedback format (e.g., quick notes, a brief meeting).
+
+
+**Overall:**  The email is a solid starting point but could be strengthened with a few tweaks to make it more engaging and context-aware. 
+[35m
+[ Prompt: 102.0 t/s | Generation: 14.1 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

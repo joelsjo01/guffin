@@ -1,0 +1,52 @@
+
+
+Loading model... |-\|/-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Jag studerar datavetenskap och vill förklara för en vän hur en lokal språkmodell fungerar utan att använda internet. Svara på svenska med en enkel förklaring och ett konkret exempel. Håll svaret under 200 ord.
+[0mOkej, här är en förklaring du kan använda:
+
+"Tänk dig att vi vill att datorn ska kunna skriva som en människa, men utan att använda internet. Det är precis vad en lokal språkmodell gör. 
+
+Modellen tränas på en massa text – kanske en hel bokserie eller en stor samling artiklar. Den lär sig då vilka ord som ofta kommer efter varandra. Den skapar en sorts "minne" av språket.
+
+När du ger den en startfras, till exempel "En vacker dag...", så tittar den i sitt "minne" och gissar vilket ord som troligast kommer härnäst. Kanske "solen" eller "sken". Sen gissar den vilket ord som troligast kommer efter *det* ordet, och så vidare.
+
+Det är som att fylla i luckor, men baserat på mönster den lärt sig. Den kan alltså generera text som låter som den kom från den text den tränades på.  Ingen internetanslutning behövs, allt finns i modellen själv!"
+[35m
+[ Prompt: 75.8 t/s | Generation: 12.9 t/s ]
+[0m[1m[32m
+> Gör nu förklaringen begriplig för ett barn på tio år och förklara varför modellen ibland ger fel svar. Använd samma exempel och högst 150 ord.
+[0m"Föreställ dig att vi lär datorn att skriva som en bok. Den läser boken om och om igen och lär sig vilka ord som brukar komma efter varandra. Om du skriver "En vacker dag...", så vet datorn att ord som "solen" eller "sken" ofta kommer efter det. Den gissar alltså vilket ord som passar bäst!
+
+Det är som att leka med ordklossar och bygga en mening. Datorn använder bara det den lärt sig från boken.
+
+Ibland kan den göra fel! Om boken har ett ovanligt ord eller en konstig fras, kanske datorn gissar fel. Den vet ju bara vad den lärt sig, och om den inte sett det förut, kan den hitta på något konstigt. Det är som att försöka rita något du aldrig sett – det blir kanske inte helt rätt!"
+[35m
+[ Prompt: 110.5 t/s | Generation: 12.8 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

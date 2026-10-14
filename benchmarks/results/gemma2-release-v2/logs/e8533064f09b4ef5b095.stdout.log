@@ -1,0 +1,57 @@
+
+
+Loading model... |-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> One morning after sunrise, Suresh was standing facing a pole. The shadow of the pole fell exactly to his right. Can you tell me the direction towards which the shadow was pointing - east, south, west, or north? Explain your reasoning steps.
+[0mHere's how to figure this out:
+
+* **The Sun's Position:**  The sun rises in the east and moves across the sky to the west. 
+* **Shadows and the Sun:**  Shadows are cast in the opposite direction of the sun.
+
+* **Putting it Together:** Since the sun is rising in the east, the shadow of the pole would be pointing to the **west**. 
+
+
+Let me know if you have any other riddles! 
+[35m
+[ Prompt: 89.7 t/s | Generation: 13.7 t/s ]
+[0m[1m[32m
+> To which direction was Suresh facing? How do you solve this?
+[0mSuresh was facing **east**. 
+
+Here's why:
+
+* **Shadows and the Sun:**  Remember, shadows point in the opposite direction of the sun.
+* **Sunrise:** The sun rises in the east.
+
+Since the shadow of the pole fell to Suresh's right, and the sun was rising in the east, Suresh must have been facing east. 
+
+
+[35m
+[ Prompt: 103.7 t/s | Generation: 13.7 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

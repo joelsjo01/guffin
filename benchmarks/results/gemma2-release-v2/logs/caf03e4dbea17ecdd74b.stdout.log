@@ -1,0 +1,67 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\| 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Each problem consists of three statements. Based on the first two statements, the third statement may be true, false, or uncertain.\\ 
+1. Oranges cost more than apples.\\ 
+2. Oranges cost less than bananas.\\ 
+3. Bananas cost more than apples and bananas cost more than orange.\\ 
+If the first two statements are true, then the third statement is
+[0mHere's how to break down the logic:
+
+* **Statement 1:** Oranges > Apples (Oranges are more expensive than apples)
+* **Statement 2:** Oranges < Bananas (Oranges are less expensive than bananas)
+
+* **Statement 3:** Bananas > Apples AND Bananas > Oranges
+
+**Conclusion:**
+
+Since oranges are less expensive than bananas, and bananas are more expensive than apples, statement 3 is **TRUE**. 
+
+
+Let me know if you'd like to try another one! 
+[35m
+[ Prompt: 98.5 t/s | Generation: 13.7 t/s ]
+[0m[1m[32m
+> If the third statement is true. Is the first statement true, false, or uncertain? Please explain.
+[0mIf the third statement is true, the first statement is **true**. Here's why:
+
+* **Statement 3:**  Bananas > Apples AND Bananas > Oranges
+
+This means bananas are the most expensive, followed by oranges, and then apples.
+
+* **Statement 1:** Oranges > Apples
+
+Since bananas are more expensive than oranges, and oranges are more expensive than apples, statement 1 must also be true. 
+
+
+Let me know if you'd like to explore more logic puzzles!
+[35m
+[ Prompt: 118.2 t/s | Generation: 13.6 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

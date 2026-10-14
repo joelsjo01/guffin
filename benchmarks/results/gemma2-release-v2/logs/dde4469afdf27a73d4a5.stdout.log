@@ -1,0 +1,52 @@
+
+
+Loading model... |-\|/-\| 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Jag studerar datavetenskap och vill förklara för en vän hur en lokal språkmodell fungerar utan att använda internet. Svara på svenska med en enkel förklaring och ett konkret exempel. Håll svaret under 200 ord.
+[0mEn lokal språkmodell är som en super-smart bok. 📚 Den har läst en massa text och lärt sig mönster i språket, utan att vara ansluten till internet. 
+
+Tänk dig att du har läst alla böcker i biblioteket. Du kan då förutsäga vilket ord som kommer näst i en mening, eller skriva en ny mening som låter rätt. 
+
+En lokal språkmodell gör ungefär samma sak. Den har "läst" en enorm mängd text och kan därför generera ny text, översätta språk eller svara på frågor, allt utan att behöva leta efter information online. 
+
+Exempelvis, om du frågar "Vad är huvudstaden i Sverige?", kan en lokal språkmodell, som har lärt sig detta från sin träning, svara "Stockholm". 
+[35m
+[ Prompt: 93.3 t/s | Generation: 14.1 t/s ]
+[0m[1m[32m
+> Gör nu förklaringen begriplig för ett barn på tio år och förklara varför modellen ibland ger fel svar. Använd samma exempel och högst 150 ord.
+[0mEn lokal språkmodell är som en superbra läsare som har läst massor av böcker. Den kan sedan använda det den har lärt sig för att skriva nya berättelser eller svara på frågor.
+
+Om du frågar "Vad är huvudstaden i Sverige?", kan modellen svara "Stockholm", för den har läst det många gånger. 
+
+Men ibland kan modellen göra misstag, som när den tror att "Stockholm" är huvudstaden i Finland. Det beror på att den inte alltid förstår allt i texterna den har läst och kan ibland blanda ihop saker.
+
+
+[35m
+[ Prompt: 127.8 t/s | Generation: 13.5 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

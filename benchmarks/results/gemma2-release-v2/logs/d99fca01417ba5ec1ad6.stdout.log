@@ -1,0 +1,68 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Could you write a captivating short story beginning with the sentence: The old abandoned house at the end of the street held a secret that no one had ever discovered.
+[0mThe old abandoned house at the end of the street held a secret that no one had ever discovered. It stood hunched and skeletal against the backdrop of the setting sun, its windows vacant eyes staring out at the world. Locals whispered tales of flickering lights in the dead of night, disembodied laughter echoing from within, and a chilling presence that clung to the overgrown garden like morning mist. But no one dared venture closer than the rusty wrought iron gate, its once vibrant paint now peeling like sunburned skin.
+
+Ten-year-old Lily, however, was not deterred by the whispers. She found the house fascinating, its secrets whispering to her like a siren song. While other children played hopscotch and tag, Lily would sit on her porch swing, tracing the house's outline in the fading light, her imagination weaving tales of hidden treasures and forgotten magic.
+
+One day, a fierce storm raged through the town, tearing at the roof tiles and whipping the wind into a frenzy. As Lily watched, a single, gnarled oak branch snapped, crashing through the boarded-up window of the abandoned house. The sight sparked a fire in her belly, a yearning to finally unveil the truth behind the whispers. 
+
+Ignoring her mother's warnings, Lily slipped out into the storm. The rain lashed at her face, but she pressed on, her heart pounding with a mix of fear and excitement.  She reached the house, its shadow looming large against the bruised sky.  Carefully, she navigated the treacherous path through the garden, her eyes drawn to the shattered window.
+
+Inside, the house was dark and musty, the air thick with the scent of damp earth and decay. Lily crept inside, her hand outstretched, feeling her way along the cold, damp walls.  She stumbled upon a dusty wooden door hidden behind a cobweb-covered curtain. With a trembling hand, she pushed it open.
+
+The room beyond was bathed in a soft, ethereal light emanating from a crystal orb resting on a pedestal in the center of the room. As Lily approached, the orb hummed to life, bathing the room in a kaleidoscope of colors. Then, an image flickered to life within the orb: a young girl with vibrant eyes and a mischievous grin, dancing in a sunlit meadow, surrounded by laughing children.
+
+Lily watched, mesmerized, as the image shifted and changed, revealing a history of joy and laughter, of love and family. The secret of the house, she realized, wasn't a dark one, but a forgotten one, a story of happiness and life that had been silenced by time.
+
+As the storm raged outside, Lily sat in the heart of the abandoned house, surrounded by the echoes of laughter and joy, finally understanding the whispers that had beckoned her for so long. The old house held a secret, yes, but it was a secret worth keeping, a secret that whispered of hope and the enduring power of memory.
+
+
+[35m
+[ Prompt: 63.1 t/s | Generation: 13.6 t/s ]
+[0m[1m[32m
+> Now, do the same task again but only use four-word sentences.
+[0mThe old house stood alone. No one dared approach.  A secret lay hidden.  
+
+Lily, a curious girl, saw it often.  She imagined stories.  She longed to know.  
+
+One stormy night, a branch fell.  A window shattered.  Lily seized her chance. 
+
+The house was dark inside.  Dust covered everything.  Lily felt a presence.  She found a hidden door.
+
+A glowing orb pulsed softly.  Lily gasped in awe.  The orb showed images.  A family laughed together.
+
+Children played in meadows.  Time passed, memories faded.  The house stood empty.  Lily understood. 
+
+
+[35m
+[ Prompt: 146.5 t/s | Generation: 13.3 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

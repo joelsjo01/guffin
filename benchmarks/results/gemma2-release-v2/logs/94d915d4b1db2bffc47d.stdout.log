@@ -1,0 +1,61 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\| 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Given the following data, identify the company with the highest profit in 2021 and provide its CEO's name:\\ 
+a) Company X, with CEO Amy Williams, reported $30 billion in revenue and a $3 billion profit in 2021.\\ 
+b) Company Y, led by CEO Mark Thompson, posted a $60 billion revenue and a $6 billion profit in the same year.\\ 
+c) Company Z, under CEO Sarah Johnson, announced a $20 billion revenue and a $7 billion profit in 2021.\\ 
+d) Company W, managed by CEO James Smith, revealed a $300 billion revenue with a $21 billion profit in 2021.\\ 
+e) Company V, with CEO Lisa Brown, reported a $200 billion revenue and a $25 billion profit in 2021.\\ 
+f) Company U, under CEO John White, posted a $180 billion revenue and a $20 billion profit in the same year.
+[0mThe company with the highest profit in 2021 is **Company V**, with a profit of **$25 billion**.  
+
+Its CEO's name is **Lisa Brown**. 
+
+
+[35m
+[ Prompt: 143.7 t/s | Generation: 14.1 t/s ]
+[0m[1m[32m
+> Which company had the highest profit margin (profit///revenue ratio))?
+[0mTo determine the company with the highest profit margin, we need to calculate the ratio of profit to revenue for each company:
+
+* **Company X:**  $3 billion profit / $30 billion revenue = 0.1 or 10%
+* **Company Y:** $6 billion profit / $60 billion revenue = 0.1 or 10%
+* **Company Z:** $7 billion profit / $20 billion revenue = 0.35 or 35%
+* **Company W:** $21 billion profit / $300 billion revenue = 0.07 or 7%
+* **Company V:** $25 billion profit / $200 billion revenue = 0.125 or 12.5%
+* **Company U:** $20 billion profit / $180 billion revenue = 0.111 or 11.1%
+
+**Company Z** has the highest profit margin at **35%**. 
+
+
+[35m
+[ Prompt: 80.8 t/s | Generation: 14.1 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

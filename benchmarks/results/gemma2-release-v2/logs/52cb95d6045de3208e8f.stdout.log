@@ -1,0 +1,58 @@
+Guffin
+/help for commands, /exit to quit.
+
+> Subject: Quarterly Financial Report - Feedback Request
+
+Hi [Supervisor's Name],
+
+I've completed the Quarterly Financial Report and would appreciate your feedback.
+
+Specifically, I'd like to hear your thoughts on the data analysis, presentation style, and the clarity of the conclusions drawn.
+
+Please let me know when you have a few minutes to review it.
+
+Thanks,
+
+[Your Name] 
+
+
+
+[ Prompt: 134.9 t/s | Generation: 16.5 t/s | TTFT: 0.407727 s ]
+[ Detail: Evaluated: 55 | Cached: 0 | Decoded: 84 | Prompt: 0.407727 s | Generation: 5.094085 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":84,"stop_reason":"stop_token","selected_token_hash":"a9388d35f57587a0","decoded_tokens":84,"initial_cache_position":0,"final_cache_position":139,"evaluated_prompt_tokens":55,"reused_cache_tokens":0,"decode_wall_ns":5142108869,"gpu_ns":5092648459,"selection_ns":314837,"proposer_ns":245118,"generation_completion_ns":5143611584,"full_turn_ns":5555898375,"first_text_ns":473539291,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":83,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":49460410,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":84,"commits":84,"waits":84,"compute_encoders":84,"compute_dispatches":54083,"blit_encoders":0,"barriers":39888,"transient_allocations":0,"selector_dispatches":913,"max_candidates":40,"compact_readback_bytes":26560,"q4_decode":22932,"q8_decode":83,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":1764,"q6_small_batch":0,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":3528,"attention_partitions":3528,"attention_tokens":343980,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":488466929664} ]
+> The email is generally well-structured and professional. 
+
+**Strengths:**
+
+* **Concise:** It gets straight to the point and avoids unnecessary fluff.
+* **Specific:** It clearly outlines the areas where feedback is requested.
+* **Polite:** The tone is respectful and appreciative.
+
+**Areas for improvement:**
+
+* **Context:**  While it's assumed the supervisor is aware of the report, briefly mentioning the period it covers (e.g., Q3 2023) could be helpful.
+* **Call to action:**  Instead of just asking for a time to review, it could be more proactive by suggesting a specific timeframe or offering to schedule a meeting.
+
+
+**Revised Email:**
+
+Subject: Quarterly Financial Report (Q3 2023) - Feedback Request
+
+Hi [Supervisor's Name],
+
+I've completed the Quarterly Financial Report for Q3 2023 and would appreciate your feedback.
+
+Specifically, I'd like to hear your thoughts on the data analysis, presentation style, and the clarity of the conclusions drawn.
+
+Would you have some time to review it by [date]? I'm available to discuss it further on [date/time] or [date/time] if that works for you.
+
+Thanks,
+
+[Your Name] 
+
+
+
+[ Prompt: 82.7 t/s | Generation: 16.6 t/s | TTFT: 0.241694 s ]
+[ Detail: Evaluated: 20 | Cached: 139 | Decoded: 274 | Prompt: 0.241694 s | Generation: 16.525457 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":274,"stop_reason":"stop_token","selected_token_hash":"7b28a379189b1e44","decoded_tokens":274,"initial_cache_position":139,"final_cache_position":433,"evaluated_prompt_tokens":20,"reused_cache_tokens":139,"decode_wall_ns":16570656386,"gpu_ns":16410845733,"selection_ns":992704,"proposer_ns":2125384,"generation_completion_ns":16576447417,"full_turn_ns":16821762709,"first_text_ns":308808417,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":14,"speculative_matches":11,"speculative_misses":3,"speculative_fallbacks":248,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"1","cycles":7,"matches":5},{"match_length":"2","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"3-4","support":"2","confidence":"1","cycles":2,"matches":2},{"match_length":"5-8","support":"2","confidence":"1","cycles":3,"matches":2},{"match_length":"9-16","support":"2","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":159810653,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":266,"commits":266,"waits":266,"compute_encoders":266,"compute_dispatches":177633,"blit_encoders":0,"barriers":131885,"transient_allocations":0,"selector_dispatches":2882,"max_candidates":40,"compact_readback_bytes":88320,"q4_decode":67977,"q8_decode":262,"q8_width_two":0,"q4_small_batch":3822,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":5229,"q6_small_batch":294,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":11634,"attention_partitions":19194,"attention_tokens":3456600,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":1595537649664} ]
+> 

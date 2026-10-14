@@ -1,0 +1,56 @@
+
+
+Loading model... |-\|/-\|/-\|/-\| 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Jag studerar datavetenskap och vill förklara för en vän hur en lokal språkmodell fungerar utan att använda internet. Svara på svenska med en enkel förklaring och ett konkret exempel. Håll svaret under 200 ord.
+[0mOkej, så här kan du förklara det för din vän:
+
+"Tänk dig att vi vill att datorn ska förutsäga vilket ord som kommer härnäst i en mening. En lokal språkmodell gör det utan att behöva koppla upp sig till internet. Den har istället 'läst' en stor mängd text (som böcker, artiklar, etc.) och lagrat information om hur ord brukar användas tillsammans.
+
+Modellen tittar på de ord som redan finns i meningen och räknar ut sannolikheten för att olika ord ska följa efter.  Den väljer sedan det ord som den tror är mest troligt.
+
+**Exempel:**
+
+Vi ger modellen meningen: "Jag gillar att äta..."
+
+Modellen har lärt sig att efter "äta" brukar ord som "glass", "frukt", "mat" eller "godis" vara vanliga. Den kanske bedömer att "glass" är mest sannolikt baserat på vad den 'läst'. Då föreslår den "glass" som nästa ord.
+
+Det är som att den 'gissar' baserat på mönster den hittat i texten den tränats på."
+[35m
+[ Prompt: 77.1 t/s | Generation: 7.2 t/s ]
+[0m[1m[32m
+> Gör nu förklaringen begriplig för ett barn på tio år och förklara varför modellen ibland ger fel svar. Använd samma exempel och högst 150 ord.
+[0m"Tänk dig att vi lär datorn att skriva som oss! Den har läst jättemycket berättelser och vet vilka ord som ofta kommer efter varandra. 
+
+Om vi skriver "Jag gillar att äta...", så tittar datorn på vad den lärt sig. Den vet att efter "äta" kommer ofta ord som "glass", "mat" eller "frukt". Den väljer det ord den tror är bäst!
+
+Ibland kan den gissa fel! Kanske har den läst en berättelse där någon äter en sten, då kan den gissa "sten" – fast det är ju konstigt! Den gör bara det den lärt sig, och ibland är det inte rätt svar. Ju mer den "läser", desto bättre blir den på att gissa rätt."
+[35m
+[ Prompt: 105.1 t/s | Generation: 6.7 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

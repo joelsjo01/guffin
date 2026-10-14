@@ -1,0 +1,499 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="4955" viewBox="0 0 1040 4955" role="img">
+<title>Internal time to first token by turn</title>
+<desc>Single-pass chat measurements. Missing values have no bar. No uncertainty or stability estimate.</desc>
+<rect width="100%" height="100%" fill="#fff"/>
+<g font-family="system-ui, sans-serif" fill="#17212b">
+<text x="24" y="31" font-size="22" font-weight="600">Internal time to first token by turn</text>
+<text x="24" y="56" font-size="13">Single pass · jointly complete conversations · milliseconds; lower is faster · natural outputs can differ</text>
+<line x1="390.0" y1="83" x2="390.0" y2="4907" stroke="#e2e8f0"/>
+<text x="390.0" y="4930" text-anchor="middle" font-size="11">0.00</text>
+<line x1="522.5" y1="83" x2="522.5" y2="4907" stroke="#e2e8f0"/>
+<text x="522.5" y="4930" text-anchor="middle" font-size="11">11921.77</text>
+<line x1="655.0" y1="83" x2="655.0" y2="4907" stroke="#e2e8f0"/>
+<text x="655.0" y="4930" text-anchor="middle" font-size="11">23843.54</text>
+<line x1="787.5" y1="83" x2="787.5" y2="4907" stroke="#e2e8f0"/>
+<text x="787.5" y="4930" text-anchor="middle" font-size="11">35765.30</text>
+<line x1="920.0" y1="83" x2="920.0" y2="4907" stroke="#e2e8f0"/>
+<text x="920.0" y="4930" text-anchor="middle" font-size="11">47687.07</text>
+<text x="378" y="108" text-anchor="end" font-size="12">guffin-chinese-chat · turn 1 · guffin-default</text>
+<rect x="390" y="95" width="6.75" height="18" rx="3" fill="#087f8c"/>
+<text x="404.75" y="108" font-size="12">607.58</text>
+<text x="378" y="138" text-anchor="end" font-size="12">guffin-chinese-chat · turn 1 · llama-default</text>
+<rect x="390" y="125" width="9.02" height="18" rx="3" fill="#ca5d22"/>
+<text x="407.02" y="138" font-size="12">811.27</text>
+<text x="378" y="168" text-anchor="end" font-size="12">guffin-chinese-chat · turn 2 · guffin-default</text>
+<rect x="390" y="155" width="6.96" height="18" rx="3" fill="#087f8c"/>
+<text x="404.96" y="168" font-size="12">626.04</text>
+<text x="378" y="198" text-anchor="end" font-size="12">guffin-chinese-chat · turn 2 · llama-default</text>
+<rect x="390" y="185" width="26.98" height="18" rx="3" fill="#ca5d22"/>
+<text x="424.98" y="198" font-size="12">2427.29</text>
+<text x="378" y="228" text-anchor="end" font-size="12">guffin-code-review · turn 1 · guffin-default</text>
+<rect x="390" y="215" width="230.35" height="18" rx="3" fill="#087f8c"/>
+<text x="628.35" y="228" font-size="12">20725.81</text>
+<text x="378" y="258" text-anchor="end" font-size="12">guffin-code-review · turn 1 · llama-default</text>
+<rect x="390" y="245" width="189.96" height="18" rx="3" fill="#ca5d22"/>
+<text x="587.96" y="258" font-size="12">17091.78</text>
+<text x="378" y="288" text-anchor="end" font-size="12">guffin-code-review · turn 2 · guffin-default</text>
+<rect x="390" y="275" width="10.96" height="18" rx="3" fill="#087f8c"/>
+<text x="408.96" y="288" font-size="12">986.55</text>
+<text x="378" y="318" text-anchor="end" font-size="12">guffin-code-review · turn 2 · llama-default</text>
+<rect x="390" y="305" width="14.82" height="18" rx="3" fill="#ca5d22"/>
+<text x="412.82" y="318" font-size="12">1333.87</text>
+<text x="378" y="348" text-anchor="end" font-size="12">guffin-document-review · turn 1 · guffin-default</text>
+<rect x="390" y="335" width="530.00" height="18" rx="3" fill="#087f8c"/>
+<text x="928.00" y="348" font-size="12">47687.07</text>
+<text x="378" y="378" text-anchor="end" font-size="12">guffin-document-review · turn 1 · llama-default</text>
+<rect x="390" y="365" width="429.03" height="18" rx="3" fill="#ca5d22"/>
+<text x="827.03" y="378" font-size="12">38602.64</text>
+<text x="378" y="408" text-anchor="end" font-size="12">guffin-document-review · turn 2 · guffin-default</text>
+<rect x="390" y="395" width="9.10" height="18" rx="3" fill="#087f8c"/>
+<text x="407.10" y="408" font-size="12">818.72</text>
+<text x="378" y="438" text-anchor="end" font-size="12">guffin-document-review · turn 2 · llama-default</text>
+<rect x="390" y="425" width="13.01" height="18" rx="3" fill="#ca5d22"/>
+<text x="411.01" y="438" font-size="12">1170.37</text>
+<text x="378" y="468" text-anchor="end" font-size="12">guffin-short-chat · turn 1 · guffin-default</text>
+<rect x="390" y="455" width="3.25" height="18" rx="3" fill="#087f8c"/>
+<text x="401.25" y="468" font-size="12">292.44</text>
+<text x="378" y="498" text-anchor="end" font-size="12">guffin-short-chat · turn 1 · llama-default</text>
+<rect x="390" y="485" width="6.46" height="18" rx="3" fill="#ca5d22"/>
+<text x="404.46" y="498" font-size="12">581.56</text>
+<text x="378" y="528" text-anchor="end" font-size="12">guffin-short-chat · turn 2 · guffin-default</text>
+<rect x="390" y="515" width="4.92" height="18" rx="3" fill="#087f8c"/>
+<text x="402.92" y="528" font-size="12">443.02</text>
+<text x="378" y="558" text-anchor="end" font-size="12">guffin-short-chat · turn 2 · llama-default</text>
+<rect x="390" y="545" width="11.31" height="18" rx="3" fill="#ca5d22"/>
+<text x="409.31" y="558" font-size="12">1017.86</text>
+<text x="378" y="588" text-anchor="end" font-size="12">guffin-sustained-design · turn 1 · guffin-default</text>
+<rect x="390" y="575" width="6.85" height="18" rx="3" fill="#087f8c"/>
+<text x="404.85" y="588" font-size="12">616.44</text>
+<text x="378" y="618" text-anchor="end" font-size="12">guffin-sustained-design · turn 1 · llama-default</text>
+<rect x="390" y="605" width="9.09" height="18" rx="3" fill="#ca5d22"/>
+<text x="407.09" y="618" font-size="12">817.47</text>
+<text x="378" y="648" text-anchor="end" font-size="12">guffin-sustained-design · turn 2 · guffin-default</text>
+<rect x="390" y="635" width="6.97" height="18" rx="3" fill="#087f8c"/>
+<text x="404.97" y="648" font-size="12">626.74</text>
+<text x="378" y="678" text-anchor="end" font-size="12">guffin-sustained-design · turn 2 · llama-default</text>
+<rect x="390" y="665" width="37.98" height="18" rx="3" fill="#ca5d22"/>
+<text x="435.98" y="678" font-size="12">3417.51</text>
+<text x="378" y="708" text-anchor="end" font-size="12">guffin-sustained-design · turn 3 · guffin-default</text>
+<rect x="390" y="695" width="7.33" height="18" rx="3" fill="#087f8c"/>
+<text x="405.33" y="708" font-size="12">659.75</text>
+<text x="378" y="738" text-anchor="end" font-size="12">guffin-sustained-design · turn 3 · llama-default</text>
+<rect x="390" y="725" width="33.59" height="18" rx="3" fill="#ca5d22"/>
+<text x="431.59" y="738" font-size="12">3022.45</text>
+<text x="378" y="768" text-anchor="end" font-size="12">guffin-sustained-design · turn 4 · guffin-default</text>
+<rect x="390" y="755" width="7.26" height="18" rx="3" fill="#087f8c"/>
+<text x="405.26" y="768" font-size="12">653.46</text>
+<text x="378" y="798" text-anchor="end" font-size="12">guffin-sustained-design · turn 4 · llama-default</text>
+<rect x="390" y="785" width="33.91" height="18" rx="3" fill="#ca5d22"/>
+<text x="431.91" y="798" font-size="12">3051.43</text>
+<text x="378" y="828" text-anchor="end" font-size="12">guffin-sustained-design · turn 5 · guffin-default</text>
+<rect x="390" y="815" width="7.31" height="18" rx="3" fill="#087f8c"/>
+<text x="405.31" y="828" font-size="12">658.05</text>
+<text x="378" y="858" text-anchor="end" font-size="12">guffin-sustained-design · turn 5 · llama-default</text>
+<rect x="390" y="845" width="12.74" height="18" rx="3" fill="#ca5d22"/>
+<text x="410.74" y="858" font-size="12">1146.63</text>
+<text x="378" y="888" text-anchor="end" font-size="12">guffin-sustained-design · turn 6 · guffin-default</text>
+<rect x="390" y="875" width="7.33" height="18" rx="3" fill="#087f8c"/>
+<text x="405.33" y="888" font-size="12">659.41</text>
+<text x="378" y="918" text-anchor="end" font-size="12">guffin-sustained-design · turn 6 · llama-default</text>
+<rect x="390" y="905" width="12.55" height="18" rx="3" fill="#ca5d22"/>
+<text x="410.55" y="918" font-size="12">1129.12</text>
+<text x="378" y="948" text-anchor="end" font-size="12">guffin-swedish-chat · turn 1 · guffin-default</text>
+<rect x="390" y="935" width="6.85" height="18" rx="3" fill="#087f8c"/>
+<text x="404.85" y="948" font-size="12">616.76</text>
+<text x="378" y="978" text-anchor="end" font-size="12">guffin-swedish-chat · turn 1 · llama-default</text>
+<rect x="390" y="965" width="9.09" height="18" rx="3" fill="#ca5d22"/>
+<text x="407.09" y="978" font-size="12">818.17</text>
+<text x="378" y="1008" text-anchor="end" font-size="12">guffin-swedish-chat · turn 2 · guffin-default</text>
+<rect x="390" y="995" width="7.10" height="18" rx="3" fill="#087f8c"/>
+<text x="405.10" y="1008" font-size="12">638.74</text>
+<text x="378" y="1038" text-anchor="end" font-size="12">guffin-swedish-chat · turn 2 · llama-default</text>
+<rect x="390" y="1025" width="30.08" height="18" rx="3" fill="#ca5d22"/>
+<text x="428.08" y="1038" font-size="12">2706.13</text>
+<text x="378" y="1068" text-anchor="end" font-size="12">mt-bench-100 · turn 1 · guffin-default</text>
+<rect x="390" y="1055" width="6.87" height="18" rx="3" fill="#087f8c"/>
+<text x="404.87" y="1068" font-size="12">618.28</text>
+<text x="378" y="1098" text-anchor="end" font-size="12">mt-bench-100 · turn 1 · llama-default</text>
+<rect x="390" y="1085" width="8.87" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.87" y="1098" font-size="12">798.21</text>
+<text x="378" y="1128" text-anchor="end" font-size="12">mt-bench-100 · turn 2 · guffin-default</text>
+<rect x="390" y="1115" width="6.47" height="18" rx="3" fill="#087f8c"/>
+<text x="404.47" y="1128" font-size="12">581.88</text>
+<text x="378" y="1158" text-anchor="end" font-size="12">mt-bench-100 · turn 2 · llama-default</text>
+<rect x="390" y="1145" width="77.84" height="18" rx="3" fill="#ca5d22"/>
+<text x="475.84" y="1158" font-size="12">7003.90</text>
+<text x="378" y="1188" text-anchor="end" font-size="12">mt-bench-101 · turn 1 · guffin-default</text>
+<rect x="390" y="1175" width="6.75" height="18" rx="3" fill="#087f8c"/>
+<text x="404.75" y="1188" font-size="12">607.68</text>
+<text x="378" y="1218" text-anchor="end" font-size="12">mt-bench-101 · turn 1 · llama-default</text>
+<rect x="390" y="1205" width="9.05" height="18" rx="3" fill="#ca5d22"/>
+<text x="407.05" y="1218" font-size="12">813.84</text>
+<text x="378" y="1248" text-anchor="end" font-size="12">mt-bench-101 · turn 2 · guffin-default</text>
+<rect x="390" y="1235" width="6.81" height="18" rx="3" fill="#087f8c"/>
+<text x="404.81" y="1248" font-size="12">612.49</text>
+<text x="378" y="1278" text-anchor="end" font-size="12">mt-bench-101 · turn 2 · llama-default</text>
+<rect x="390" y="1265" width="13.81" height="18" rx="3" fill="#ca5d22"/>
+<text x="411.81" y="1278" font-size="12">1242.46</text>
+<text x="378" y="1308" text-anchor="end" font-size="12">mt-bench-105 · turn 1 · guffin-default</text>
+<rect x="390" y="1295" width="26.69" height="18" rx="3" fill="#087f8c"/>
+<text x="424.69" y="1308" font-size="12">2401.79</text>
+<text x="378" y="1338" text-anchor="end" font-size="12">mt-bench-105 · turn 1 · llama-default</text>
+<rect x="390" y="1325" width="22.03" height="18" rx="3" fill="#ca5d22"/>
+<text x="420.03" y="1338" font-size="12">1981.97</text>
+<text x="378" y="1368" text-anchor="end" font-size="12">mt-bench-105 · turn 2 · guffin-default</text>
+<rect x="390" y="1355" width="4.99" height="18" rx="3" fill="#087f8c"/>
+<text x="402.99" y="1368" font-size="12">448.79</text>
+<text x="378" y="1398" text-anchor="end" font-size="12">mt-bench-105 · turn 2 · llama-default</text>
+<rect x="390" y="1385" width="8.77" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.77" y="1398" font-size="12">789.13</text>
+<text x="378" y="1428" text-anchor="end" font-size="12">mt-bench-106 · turn 1 · guffin-default</text>
+<rect x="390" y="1415" width="10.10" height="18" rx="3" fill="#087f8c"/>
+<text x="408.10" y="1428" font-size="12">908.41</text>
+<text x="378" y="1458" text-anchor="end" font-size="12">mt-bench-106 · turn 1 · llama-default</text>
+<rect x="390" y="1445" width="11.42" height="18" rx="3" fill="#ca5d22"/>
+<text x="409.42" y="1458" font-size="12">1027.34</text>
+<text x="378" y="1488" text-anchor="end" font-size="12">mt-bench-106 · turn 2 · guffin-default</text>
+<rect x="390" y="1475" width="6.46" height="18" rx="3" fill="#087f8c"/>
+<text x="404.46" y="1488" font-size="12">581.08</text>
+<text x="378" y="1518" text-anchor="end" font-size="12">mt-bench-106 · turn 2 · llama-default</text>
+<rect x="390" y="1505" width="16.63" height="18" rx="3" fill="#ca5d22"/>
+<text x="414.63" y="1518" font-size="12">1496.38</text>
+<text x="378" y="1548" text-anchor="end" font-size="12">mt-bench-109 · turn 1 · guffin-default</text>
+<rect x="390" y="1535" width="6.81" height="18" rx="3" fill="#087f8c"/>
+<text x="404.81" y="1548" font-size="12">613.07</text>
+<text x="378" y="1578" text-anchor="end" font-size="12">mt-bench-109 · turn 1 · llama-default</text>
+<rect x="390" y="1565" width="8.93" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.93" y="1578" font-size="12">803.81</text>
+<text x="378" y="1608" text-anchor="end" font-size="12">mt-bench-109 · turn 2 · guffin-default</text>
+<rect x="390" y="1595" width="4.86" height="18" rx="3" fill="#087f8c"/>
+<text x="402.86" y="1608" font-size="12">437.11</text>
+<text x="378" y="1638" text-anchor="end" font-size="12">mt-bench-109 · turn 2 · llama-default</text>
+<rect x="390" y="1625" width="21.84" height="18" rx="3" fill="#ca5d22"/>
+<text x="419.84" y="1638" font-size="12">1964.88</text>
+<text x="378" y="1668" text-anchor="end" font-size="12">mt-bench-111 · turn 1 · guffin-default</text>
+<rect x="390" y="1655" width="6.70" height="18" rx="3" fill="#087f8c"/>
+<text x="404.70" y="1668" font-size="12">602.41</text>
+<text x="378" y="1698" text-anchor="end" font-size="12">mt-bench-111 · turn 1 · llama-default</text>
+<rect x="390" y="1685" width="8.77" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.77" y="1698" font-size="12">789.07</text>
+<text x="378" y="1728" text-anchor="end" font-size="12">mt-bench-111 · turn 2 · guffin-default</text>
+<rect x="390" y="1715" width="4.94" height="18" rx="3" fill="#087f8c"/>
+<text x="402.94" y="1728" font-size="12">444.82</text>
+<text x="378" y="1758" text-anchor="end" font-size="12">mt-bench-111 · turn 2 · llama-default</text>
+<rect x="390" y="1745" width="9.42" height="18" rx="3" fill="#ca5d22"/>
+<text x="407.42" y="1758" font-size="12">847.20</text>
+<text x="378" y="1788" text-anchor="end" font-size="12">mt-bench-114 · turn 1 · guffin-default</text>
+<rect x="390" y="1775" width="6.12" height="18" rx="3" fill="#087f8c"/>
+<text x="404.12" y="1788" font-size="12">550.51</text>
+<text x="378" y="1818" text-anchor="end" font-size="12">mt-bench-114 · turn 1 · llama-default</text>
+<rect x="390" y="1805" width="6.52" height="18" rx="3" fill="#ca5d22"/>
+<text x="404.52" y="1818" font-size="12">586.91</text>
+<text x="378" y="1848" text-anchor="end" font-size="12">mt-bench-114 · turn 2 · guffin-default</text>
+<rect x="390" y="1835" width="6.89" height="18" rx="3" fill="#087f8c"/>
+<text x="404.89" y="1848" font-size="12">619.94</text>
+<text x="378" y="1878" text-anchor="end" font-size="12">mt-bench-114 · turn 2 · llama-default</text>
+<rect x="390" y="1865" width="52.55" height="18" rx="3" fill="#ca5d22"/>
+<text x="450.55" y="1878" font-size="12">4727.96</text>
+<text x="378" y="1908" text-anchor="end" font-size="12">mt-bench-116 · turn 1 · guffin-default</text>
+<rect x="390" y="1895" width="6.64" height="18" rx="3" fill="#087f8c"/>
+<text x="404.64" y="1908" font-size="12">597.67</text>
+<text x="378" y="1938" text-anchor="end" font-size="12">mt-bench-116 · turn 1 · llama-default</text>
+<rect x="390" y="1925" width="6.54" height="18" rx="3" fill="#ca5d22"/>
+<text x="404.54" y="1938" font-size="12">588.31</text>
+<text x="378" y="1968" text-anchor="end" font-size="12">mt-bench-116 · turn 2 · guffin-default</text>
+<rect x="390" y="1955" width="3.47" height="18" rx="3" fill="#087f8c"/>
+<text x="401.47" y="1968" font-size="12">312.05</text>
+<text x="378" y="1998" text-anchor="end" font-size="12">mt-bench-116 · turn 2 · llama-default</text>
+<rect x="390" y="1985" width="40.70" height="18" rx="3" fill="#ca5d22"/>
+<text x="438.70" y="1998" font-size="12">3662.12</text>
+<text x="378" y="2028" text-anchor="end" font-size="12">mt-bench-119 · turn 1 · guffin-default</text>
+<rect x="390" y="2015" width="10.03" height="18" rx="3" fill="#087f8c"/>
+<text x="408.03" y="2028" font-size="12">902.27</text>
+<text x="378" y="2058" text-anchor="end" font-size="12">mt-bench-119 · turn 1 · llama-default</text>
+<rect x="390" y="2045" width="11.47" height="18" rx="3" fill="#ca5d22"/>
+<text x="409.47" y="2058" font-size="12">1032.19</text>
+<text x="378" y="2088" text-anchor="end" font-size="12">mt-bench-119 · turn 2 · guffin-default</text>
+<rect x="390" y="2075" width="7.03" height="18" rx="3" fill="#087f8c"/>
+<text x="405.03" y="2088" font-size="12">632.45</text>
+<text x="378" y="2118" text-anchor="end" font-size="12">mt-bench-119 · turn 2 · llama-default</text>
+<rect x="390" y="2105" width="24.46" height="18" rx="3" fill="#ca5d22"/>
+<text x="422.46" y="2118" font-size="12">2200.41</text>
+<text x="378" y="2148" text-anchor="end" font-size="12">mt-bench-121 · turn 1 · guffin-default</text>
+<rect x="390" y="2135" width="6.64" height="18" rx="3" fill="#087f8c"/>
+<text x="404.64" y="2148" font-size="12">597.59</text>
+<text x="378" y="2178" text-anchor="end" font-size="12">mt-bench-121 · turn 1 · llama-default</text>
+<rect x="390" y="2165" width="6.50" height="18" rx="3" fill="#ca5d22"/>
+<text x="404.50" y="2178" font-size="12">584.81</text>
+<text x="378" y="2208" text-anchor="end" font-size="12">mt-bench-121 · turn 2 · guffin-default</text>
+<rect x="390" y="2195" width="3.61" height="18" rx="3" fill="#087f8c"/>
+<text x="401.61" y="2208" font-size="12">325.04</text>
+<text x="378" y="2238" text-anchor="end" font-size="12">mt-bench-121 · turn 2 · llama-default</text>
+<rect x="390" y="2225" width="8.79" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.79" y="2238" font-size="12">790.78</text>
+<text x="378" y="2268" text-anchor="end" font-size="12">mt-bench-123 · turn 1 · guffin-default</text>
+<rect x="390" y="2255" width="6.69" height="18" rx="3" fill="#087f8c"/>
+<text x="404.69" y="2268" font-size="12">601.57</text>
+<text x="378" y="2298" text-anchor="end" font-size="12">mt-bench-123 · turn 1 · llama-default</text>
+<rect x="390" y="2285" width="6.32" height="18" rx="3" fill="#ca5d22"/>
+<text x="404.32" y="2298" font-size="12">569.05</text>
+<text x="378" y="2328" text-anchor="end" font-size="12">mt-bench-123 · turn 2 · guffin-default</text>
+<rect x="390" y="2315" width="4.99" height="18" rx="3" fill="#087f8c"/>
+<text x="402.99" y="2328" font-size="12">449.00</text>
+<text x="378" y="2358" text-anchor="end" font-size="12">mt-bench-123 · turn 2 · llama-default</text>
+<rect x="390" y="2345" width="86.27" height="18" rx="3" fill="#ca5d22"/>
+<text x="484.27" y="2358" font-size="12">7762.03</text>
+<text x="378" y="2388" text-anchor="end" font-size="12">mt-bench-124 · turn 1 · guffin-default</text>
+<rect x="390" y="2375" width="23.50" height="18" rx="3" fill="#087f8c"/>
+<text x="421.50" y="2388" font-size="12">2114.74</text>
+<text x="378" y="2418" text-anchor="end" font-size="12">mt-bench-124 · turn 1 · llama-default</text>
+<rect x="390" y="2405" width="22.25" height="18" rx="3" fill="#ca5d22"/>
+<text x="420.25" y="2418" font-size="12">2001.66</text>
+<text x="378" y="2448" text-anchor="end" font-size="12">mt-bench-124 · turn 2 · guffin-default</text>
+<rect x="390" y="2435" width="25.39" height="18" rx="3" fill="#087f8c"/>
+<text x="423.39" y="2448" font-size="12">2284.26</text>
+<text x="378" y="2478" text-anchor="end" font-size="12">mt-bench-124 · turn 2 · llama-default</text>
+<rect x="390" y="2465" width="98.08" height="18" rx="3" fill="#ca5d22"/>
+<text x="496.08" y="2478" font-size="12">8825.23</text>
+<text x="378" y="2508" text-anchor="end" font-size="12">mt-bench-126 · turn 1 · guffin-default</text>
+<rect x="390" y="2495" width="6.68" height="18" rx="3" fill="#087f8c"/>
+<text x="404.68" y="2508" font-size="12">601.48</text>
+<text x="378" y="2538" text-anchor="end" font-size="12">mt-bench-126 · turn 1 · llama-default</text>
+<rect x="390" y="2525" width="8.84" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.84" y="2538" font-size="12">795.50</text>
+<text x="378" y="2568" text-anchor="end" font-size="12">mt-bench-126 · turn 2 · guffin-default</text>
+<rect x="390" y="2555" width="5.14" height="18" rx="3" fill="#087f8c"/>
+<text x="403.14" y="2568" font-size="12">462.12</text>
+<text x="378" y="2598" text-anchor="end" font-size="12">mt-bench-126 · turn 2 · llama-default</text>
+<rect x="390" y="2585" width="9.03" height="18" rx="3" fill="#ca5d22"/>
+<text x="407.03" y="2598" font-size="12">812.41</text>
+<text x="378" y="2628" text-anchor="end" font-size="12">mt-bench-131 · turn 1 · guffin-default</text>
+<rect x="390" y="2615" width="20.20" height="18" rx="3" fill="#087f8c"/>
+<text x="418.20" y="2628" font-size="12">1817.82</text>
+<text x="378" y="2658" text-anchor="end" font-size="12">mt-bench-131 · turn 1 · llama-default</text>
+<rect x="390" y="2645" width="19.51" height="18" rx="3" fill="#ca5d22"/>
+<text x="417.51" y="2658" font-size="12">1755.39</text>
+<text x="378" y="2688" text-anchor="end" font-size="12">mt-bench-131 · turn 2 · guffin-default</text>
+<rect x="390" y="2675" width="6.44" height="18" rx="3" fill="#087f8c"/>
+<text x="404.44" y="2688" font-size="12">579.14</text>
+<text x="378" y="2718" text-anchor="end" font-size="12">mt-bench-131 · turn 2 · llama-default</text>
+<rect x="390" y="2705" width="8.82" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.82" y="2718" font-size="12">794.01</text>
+<text x="378" y="2748" text-anchor="end" font-size="12">mt-bench-133 · turn 1 · guffin-default</text>
+<rect x="390" y="2735" width="40.33" height="18" rx="3" fill="#087f8c"/>
+<text x="438.33" y="2748" font-size="12">3628.94</text>
+<text x="378" y="2778" text-anchor="end" font-size="12">mt-bench-133 · turn 1 · llama-default</text>
+<rect x="390" y="2765" width="35.22" height="18" rx="3" fill="#ca5d22"/>
+<text x="433.22" y="2778" font-size="12">3169.37</text>
+<text x="378" y="2808" text-anchor="end" font-size="12">mt-bench-133 · turn 2 · guffin-default</text>
+<rect x="390" y="2795" width="3.94" height="18" rx="3" fill="#087f8c"/>
+<text x="401.94" y="2808" font-size="12">354.53</text>
+<text x="378" y="2838" text-anchor="end" font-size="12">mt-bench-133 · turn 2 · llama-default</text>
+<rect x="390" y="2825" width="14.65" height="18" rx="3" fill="#ca5d22"/>
+<text x="412.65" y="2838" font-size="12">1318.08</text>
+<text x="378" y="2868" text-anchor="end" font-size="12">mt-bench-134 · turn 1 · guffin-default</text>
+<rect x="390" y="2855" width="26.66" height="18" rx="3" fill="#087f8c"/>
+<text x="424.66" y="2868" font-size="12">2398.50</text>
+<text x="378" y="2898" text-anchor="end" font-size="12">mt-bench-134 · turn 1 · llama-default</text>
+<rect x="390" y="2885" width="21.97" height="18" rx="3" fill="#ca5d22"/>
+<text x="419.97" y="2898" font-size="12">1976.71</text>
+<text x="378" y="2928" text-anchor="end" font-size="12">mt-bench-134 · turn 2 · guffin-default</text>
+<rect x="390" y="2915" width="4.99" height="18" rx="3" fill="#087f8c"/>
+<text x="402.99" y="2928" font-size="12">448.57</text>
+<text x="378" y="2958" text-anchor="end" font-size="12">mt-bench-134 · turn 2 · llama-default</text>
+<rect x="390" y="2945" width="11.63" height="18" rx="3" fill="#ca5d22"/>
+<text x="409.63" y="2958" font-size="12">1046.76</text>
+<text x="378" y="2988" text-anchor="end" font-size="12">mt-bench-140 · turn 1 · guffin-default</text>
+<rect x="390" y="2975" width="37.12" height="18" rx="3" fill="#087f8c"/>
+<text x="435.12" y="2988" font-size="12">3339.83</text>
+<text x="378" y="3018" text-anchor="end" font-size="12">mt-bench-140 · turn 1 · llama-default</text>
+<rect x="390" y="3005" width="32.88" height="18" rx="3" fill="#ca5d22"/>
+<text x="430.88" y="3018" font-size="12">2958.33</text>
+<text x="378" y="3048" text-anchor="end" font-size="12">mt-bench-140 · turn 2 · guffin-default</text>
+<rect x="390" y="3035" width="6.46" height="18" rx="3" fill="#087f8c"/>
+<text x="404.46" y="3048" font-size="12">581.60</text>
+<text x="378" y="3078" text-anchor="end" font-size="12">mt-bench-140 · turn 2 · llama-default</text>
+<rect x="390" y="3065" width="14.42" height="18" rx="3" fill="#ca5d22"/>
+<text x="412.42" y="3078" font-size="12">1297.63</text>
+<text x="378" y="3108" text-anchor="end" font-size="12">mt-bench-141 · turn 1 · guffin-default</text>
+<rect x="390" y="3095" width="3.63" height="18" rx="3" fill="#087f8c"/>
+<text x="401.63" y="3108" font-size="12">326.39</text>
+<text x="378" y="3138" text-anchor="end" font-size="12">mt-bench-141 · turn 1 · llama-default</text>
+<rect x="390" y="3125" width="6.62" height="18" rx="3" fill="#ca5d22"/>
+<text x="404.62" y="3138" font-size="12">595.22</text>
+<text x="378" y="3168" text-anchor="end" font-size="12">mt-bench-141 · turn 2 · guffin-default</text>
+<rect x="390" y="3155" width="5.02" height="18" rx="3" fill="#087f8c"/>
+<text x="403.02" y="3168" font-size="12">451.92</text>
+<text x="378" y="3198" text-anchor="end" font-size="12">mt-bench-141 · turn 2 · llama-default</text>
+<rect x="390" y="3185" width="9.64" height="18" rx="3" fill="#ca5d22"/>
+<text x="407.64" y="3198" font-size="12">867.70</text>
+<text x="378" y="3228" text-anchor="end" font-size="12">mt-bench-143 · turn 1 · guffin-default</text>
+<rect x="390" y="3215" width="6.76" height="18" rx="3" fill="#087f8c"/>
+<text x="404.76" y="3228" font-size="12">608.51</text>
+<text x="378" y="3258" text-anchor="end" font-size="12">mt-bench-143 · turn 1 · llama-default</text>
+<rect x="390" y="3245" width="8.80" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.80" y="3258" font-size="12">792.23</text>
+<text x="378" y="3288" text-anchor="end" font-size="12">mt-bench-143 · turn 2 · guffin-default</text>
+<rect x="390" y="3275" width="7.30" height="18" rx="3" fill="#087f8c"/>
+<text x="405.30" y="3288" font-size="12">656.57</text>
+<text x="378" y="3318" text-anchor="end" font-size="12">mt-bench-143 · turn 2 · llama-default</text>
+<rect x="390" y="3305" width="11.23" height="18" rx="3" fill="#ca5d22"/>
+<text x="409.23" y="3318" font-size="12">1010.60</text>
+<text x="378" y="3348" text-anchor="end" font-size="12">mt-bench-145 · turn 1 · guffin-default</text>
+<rect x="390" y="3335" width="6.87" height="18" rx="3" fill="#087f8c"/>
+<text x="404.87" y="3348" font-size="12">617.97</text>
+<text x="378" y="3378" text-anchor="end" font-size="12">mt-bench-145 · turn 1 · llama-default</text>
+<rect x="390" y="3365" width="9.08" height="18" rx="3" fill="#ca5d22"/>
+<text x="407.08" y="3378" font-size="12">816.96</text>
+<text x="378" y="3408" text-anchor="end" font-size="12">mt-bench-145 · turn 2 · guffin-default</text>
+<rect x="390" y="3395" width="3.60" height="18" rx="3" fill="#087f8c"/>
+<text x="401.60" y="3408" font-size="12">323.75</text>
+<text x="378" y="3438" text-anchor="end" font-size="12">mt-bench-145 · turn 2 · llama-default</text>
+<rect x="390" y="3425" width="84.21" height="18" rx="3" fill="#ca5d22"/>
+<text x="482.21" y="3438" font-size="12">7576.45</text>
+<text x="378" y="3468" text-anchor="end" font-size="12">mt-bench-149 · turn 1 · guffin-default</text>
+<rect x="390" y="3455" width="6.72" height="18" rx="3" fill="#087f8c"/>
+<text x="404.72" y="3468" font-size="12">604.67</text>
+<text x="378" y="3498" text-anchor="end" font-size="12">mt-bench-149 · turn 1 · llama-default</text>
+<rect x="390" y="3485" width="8.92" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.92" y="3498" font-size="12">802.29</text>
+<text x="378" y="3528" text-anchor="end" font-size="12">mt-bench-149 · turn 2 · guffin-default</text>
+<rect x="390" y="3515" width="6.50" height="18" rx="3" fill="#087f8c"/>
+<text x="404.50" y="3528" font-size="12">585.10</text>
+<text x="378" y="3558" text-anchor="end" font-size="12">mt-bench-149 · turn 2 · llama-default</text>
+<rect x="390" y="3545" width="8.46" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.46" y="3558" font-size="12">761.39</text>
+<text x="378" y="3588" text-anchor="end" font-size="12">mt-bench-151 · turn 1 · guffin-default</text>
+<rect x="390" y="3575" width="6.70" height="18" rx="3" fill="#087f8c"/>
+<text x="404.70" y="3588" font-size="12">603.19</text>
+<text x="378" y="3618" text-anchor="end" font-size="12">mt-bench-151 · turn 1 · llama-default</text>
+<rect x="390" y="3605" width="6.29" height="18" rx="3" fill="#ca5d22"/>
+<text x="404.29" y="3618" font-size="12">565.53</text>
+<text x="378" y="3648" text-anchor="end" font-size="12">mt-bench-151 · turn 2 · guffin-default</text>
+<rect x="390" y="3635" width="4.98" height="18" rx="3" fill="#087f8c"/>
+<text x="402.98" y="3648" font-size="12">448.47</text>
+<text x="378" y="3678" text-anchor="end" font-size="12">mt-bench-151 · turn 2 · llama-default</text>
+<rect x="390" y="3665" width="8.93" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.93" y="3678" font-size="12">803.50</text>
+<text x="378" y="3708" text-anchor="end" font-size="12">mt-bench-154 · turn 1 · guffin-default</text>
+<rect x="390" y="3695" width="6.97" height="18" rx="3" fill="#087f8c"/>
+<text x="404.97" y="3708" font-size="12">626.76</text>
+<text x="378" y="3738" text-anchor="end" font-size="12">mt-bench-154 · turn 1 · llama-default</text>
+<rect x="390" y="3725" width="8.87" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.87" y="3738" font-size="12">798.36</text>
+<text x="378" y="3768" text-anchor="end" font-size="12">mt-bench-154 · turn 2 · guffin-default</text>
+<rect x="390" y="3755" width="5.18" height="18" rx="3" fill="#087f8c"/>
+<text x="403.18" y="3768" font-size="12">466.43</text>
+<text x="378" y="3798" text-anchor="end" font-size="12">mt-bench-154 · turn 2 · llama-default</text>
+<rect x="390" y="3785" width="8.90" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.90" y="3798" font-size="12">801.01</text>
+<text x="378" y="3828" text-anchor="end" font-size="12">mt-bench-155 · turn 1 · guffin-default</text>
+<rect x="390" y="3815" width="6.13" height="18" rx="3" fill="#087f8c"/>
+<text x="404.13" y="3828" font-size="12">551.48</text>
+<text x="378" y="3858" text-anchor="end" font-size="12">mt-bench-155 · turn 1 · llama-default</text>
+<rect x="390" y="3845" width="6.30" height="18" rx="3" fill="#ca5d22"/>
+<text x="404.30" y="3858" font-size="12">567.25</text>
+<text x="378" y="3888" text-anchor="end" font-size="12">mt-bench-155 · turn 2 · guffin-default</text>
+<rect x="390" y="3875" width="5.04" height="18" rx="3" fill="#087f8c"/>
+<text x="403.04" y="3888" font-size="12">453.21</text>
+<text x="378" y="3918" text-anchor="end" font-size="12">mt-bench-155 · turn 2 · llama-default</text>
+<rect x="390" y="3905" width="151.58" height="18" rx="3" fill="#ca5d22"/>
+<text x="549.58" y="3918" font-size="12">13638.13</text>
+<text x="378" y="3948" text-anchor="end" font-size="12">mt-bench-157 · turn 1 · guffin-default</text>
+<rect x="390" y="3935" width="4.52" height="18" rx="3" fill="#087f8c"/>
+<text x="402.52" y="3948" font-size="12">407.07</text>
+<text x="378" y="3978" text-anchor="end" font-size="12">mt-bench-157 · turn 1 · llama-default</text>
+<rect x="390" y="3965" width="6.30" height="18" rx="3" fill="#ca5d22"/>
+<text x="404.30" y="3978" font-size="12">566.84</text>
+<text x="378" y="4008" text-anchor="end" font-size="12">mt-bench-157 · turn 2 · guffin-default</text>
+<rect x="390" y="3995" width="24.97" height="18" rx="3" fill="#087f8c"/>
+<text x="422.97" y="4008" font-size="12">2246.75</text>
+<text x="378" y="4038" text-anchor="end" font-size="12">mt-bench-157 · turn 2 · llama-default</text>
+<rect x="390" y="4025" width="25.68" height="18" rx="3" fill="#ca5d22"/>
+<text x="423.68" y="4038" font-size="12">2310.36</text>
+<text x="378" y="4068" text-anchor="end" font-size="12">mt-bench-81 · turn 1 · guffin-default</text>
+<rect x="390" y="4055" width="5.97" height="18" rx="3" fill="#087f8c"/>
+<text x="403.97" y="4068" font-size="12">537.50</text>
+<text x="378" y="4098" text-anchor="end" font-size="12">mt-bench-81 · turn 1 · llama-default</text>
+<rect x="390" y="4085" width="6.49" height="18" rx="3" fill="#ca5d22"/>
+<text x="404.49" y="4098" font-size="12">583.68</text>
+<text x="378" y="4128" text-anchor="end" font-size="12">mt-bench-81 · turn 2 · guffin-default</text>
+<rect x="390" y="4115" width="4.95" height="18" rx="3" fill="#087f8c"/>
+<text x="402.95" y="4128" font-size="12">444.94</text>
+<text x="378" y="4158" text-anchor="end" font-size="12">mt-bench-81 · turn 2 · llama-default</text>
+<rect x="390" y="4145" width="10.25" height="18" rx="3" fill="#ca5d22"/>
+<text x="408.25" y="4158" font-size="12">922.09</text>
+<text x="378" y="4188" text-anchor="end" font-size="12">mt-bench-82 · turn 1 · guffin-default</text>
+<rect x="390" y="4175" width="6.80" height="18" rx="3" fill="#087f8c"/>
+<text x="404.80" y="4188" font-size="12">611.84</text>
+<text x="378" y="4218" text-anchor="end" font-size="12">mt-bench-82 · turn 1 · llama-default</text>
+<rect x="390" y="4205" width="9.13" height="18" rx="3" fill="#ca5d22"/>
+<text x="407.13" y="4218" font-size="12">821.28</text>
+<text x="378" y="4248" text-anchor="end" font-size="12">mt-bench-82 · turn 2 · guffin-default</text>
+<rect x="390" y="4235" width="4.83" height="18" rx="3" fill="#087f8c"/>
+<text x="402.83" y="4248" font-size="12">434.65</text>
+<text x="378" y="4278" text-anchor="end" font-size="12">mt-bench-82 · turn 2 · llama-default</text>
+<rect x="390" y="4265" width="13.93" height="18" rx="3" fill="#ca5d22"/>
+<text x="411.93" y="4278" font-size="12">1253.38</text>
+<text x="378" y="4308" text-anchor="end" font-size="12">mt-bench-87 · turn 1 · guffin-default</text>
+<rect x="390" y="4295" width="6.69" height="18" rx="3" fill="#087f8c"/>
+<text x="404.69" y="4308" font-size="12">601.80</text>
+<text x="378" y="4338" text-anchor="end" font-size="12">mt-bench-87 · turn 1 · llama-default</text>
+<rect x="390" y="4325" width="9.02" height="18" rx="3" fill="#ca5d22"/>
+<text x="407.02" y="4338" font-size="12">811.28</text>
+<text x="378" y="4368" text-anchor="end" font-size="12">mt-bench-87 · turn 2 · guffin-default</text>
+<rect x="390" y="4355" width="5.09" height="18" rx="3" fill="#087f8c"/>
+<text x="403.09" y="4368" font-size="12">457.56</text>
+<text x="378" y="4398" text-anchor="end" font-size="12">mt-bench-87 · turn 2 · llama-default</text>
+<rect x="390" y="4385" width="93.61" height="18" rx="3" fill="#ca5d22"/>
+<text x="491.61" y="4398" font-size="12">8422.24</text>
+<text x="378" y="4428" text-anchor="end" font-size="12">mt-bench-90 · turn 1 · guffin-default</text>
+<rect x="390" y="4415" width="13.37" height="18" rx="3" fill="#087f8c"/>
+<text x="411.37" y="4428" font-size="12">1203.16</text>
+<text x="378" y="4458" text-anchor="end" font-size="12">mt-bench-90 · turn 1 · llama-default</text>
+<rect x="390" y="4445" width="13.98" height="18" rx="3" fill="#ca5d22"/>
+<text x="411.98" y="4458" font-size="12">1258.07</text>
+<text x="378" y="4488" text-anchor="end" font-size="12">mt-bench-90 · turn 2 · guffin-default</text>
+<rect x="390" y="4475" width="4.92" height="18" rx="3" fill="#087f8c"/>
+<text x="402.92" y="4488" font-size="12">442.68</text>
+<text x="378" y="4518" text-anchor="end" font-size="12">mt-bench-90 · turn 2 · llama-default</text>
+<rect x="390" y="4505" width="46.04" height="18" rx="3" fill="#ca5d22"/>
+<text x="444.04" y="4518" font-size="12">4142.16</text>
+<text x="378" y="4548" text-anchor="end" font-size="12">mt-bench-95 · turn 1 · guffin-default</text>
+<rect x="390" y="4535" width="13.31" height="18" rx="3" fill="#087f8c"/>
+<text x="411.31" y="4548" font-size="12">1197.60</text>
+<text x="378" y="4578" text-anchor="end" font-size="12">mt-bench-95 · turn 1 · llama-default</text>
+<rect x="390" y="4565" width="11.71" height="18" rx="3" fill="#ca5d22"/>
+<text x="409.71" y="4578" font-size="12">1053.94</text>
+<text x="378" y="4608" text-anchor="end" font-size="12">mt-bench-95 · turn 2 · guffin-default</text>
+<rect x="390" y="4595" width="3.47" height="18" rx="3" fill="#087f8c"/>
+<text x="401.47" y="4608" font-size="12">312.54</text>
+<text x="378" y="4638" text-anchor="end" font-size="12">mt-bench-95 · turn 2 · llama-default</text>
+<rect x="390" y="4625" width="16.70" height="18" rx="3" fill="#ca5d22"/>
+<text x="414.70" y="4638" font-size="12">1502.17</text>
+<text x="378" y="4668" text-anchor="end" font-size="12">mt-bench-96 · turn 1 · guffin-default</text>
+<rect x="390" y="4655" width="9.95" height="18" rx="3" fill="#087f8c"/>
+<text x="407.95" y="4668" font-size="12">895.41</text>
+<text x="378" y="4698" text-anchor="end" font-size="12">mt-bench-96 · turn 1 · llama-default</text>
+<rect x="390" y="4685" width="8.85" height="18" rx="3" fill="#ca5d22"/>
+<text x="406.85" y="4698" font-size="12">796.22</text>
+<text x="378" y="4728" text-anchor="end" font-size="12">mt-bench-96 · turn 2 · guffin-default</text>
+<rect x="390" y="4715" width="6.54" height="18" rx="3" fill="#087f8c"/>
+<text x="404.54" y="4728" font-size="12">588.50</text>
+<text x="378" y="4758" text-anchor="end" font-size="12">mt-bench-96 · turn 2 · llama-default</text>
+<rect x="390" y="4745" width="80.80" height="18" rx="3" fill="#ca5d22"/>
+<text x="478.80" y="4758" font-size="12">7270.16</text>
+<text x="378" y="4788" text-anchor="end" font-size="12">mt-bench-97 · turn 1 · guffin-default</text>
+<rect x="390" y="4775" width="10.11" height="18" rx="3" fill="#087f8c"/>
+<text x="408.11" y="4788" font-size="12">909.96</text>
+<text x="378" y="4818" text-anchor="end" font-size="12">mt-bench-97 · turn 1 · llama-default</text>
+<rect x="390" y="4805" width="11.65" height="18" rx="3" fill="#ca5d22"/>
+<text x="409.65" y="4818" font-size="12">1048.30</text>
+<text x="378" y="4848" text-anchor="end" font-size="12">mt-bench-97 · turn 2 · guffin-default</text>
+<rect x="390" y="4835" width="4.99" height="18" rx="3" fill="#087f8c"/>
+<text x="402.99" y="4848" font-size="12">448.80</text>
+<text x="378" y="4878" text-anchor="end" font-size="12">mt-bench-97 · turn 2 · llama-default</text>
+<rect x="390" y="4865" width="10.18" height="18" rx="3" fill="#ca5d22"/>
+<text x="408.18" y="4878" font-size="12">916.13</text>
+</g>
+</svg>

@@ -1,0 +1,73 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Edit the following paragraph to correct any grammatical errors:\\ 
+She didn't remembre where is her purse, so I thinks its in the car but he's say it's on kitchen table but he are not sure, and then they asked me to looking for it, she's say, "Can you?", and I responds with, "Maybe, but ain't no sure," and he not heard me, and, "What?", he asks, "Did you found it?".
+[0mHere's the edited paragraph with grammatical corrections:
+
+She didn't remember where her purse was, so I think it's in the car. He says it's on the kitchen table, but he isn't sure. Then they asked me to look for it. She said, "Can you?" and I responded with, "Maybe, but I'm not sure." He didn't hear me, and, "What?", he asked, "Did you find it?"
+
+**Here's a breakdown of the changes:**
+
+*   **"remembre"** corrected to **"remember"** (spelling)
+*   **"where is her purse"** corrected to **"where her purse was"** (subject-verb agreement and tense)
+*   **"I thinks"** corrected to **"I think"** (subject-verb agreement)
+*   **"its"** corrected to **"it's"** (contraction)
+*   **"he's say"** corrected to **"He says"** (subject-verb agreement)
+*   **"he are not sure"** corrected to **"he isn't sure"** (subject-verb agreement and contraction)
+*   **"looking for it"** corrected to **"look for it"** (infinitive)
+*   **"she's say"** corrected to **"She said"** (subject-verb agreement and tense)
+*   **"I responds"** corrected to **"I responded"** (verb tense)
+*   **"ain't no sure"** corrected to **"I'm not sure"** (more formal and grammatically correct)
+*   **"he not heard me"** corrected to **"He didn't hear me"** (verb tense and negation)
+*   **"and, "What?" he asks"** corrected to **"and, "What?" he asked"** (verb tense)
+*   **"Did you found it?"** corrected to **"Did you find it?"** (verb tense)
+
+
+
+I aimed for clarity and standard grammar while preserving the original tone.
+[35m
+[ Prompt: 85.7 t/s | Generation: 10.4 t/s ]
+[0m[1m[32m
+> Modify your earlier reply and eliminate the use of gendered pronouns.
+[0mHere's the edited paragraph with grammatical corrections, eliminating gendered pronouns:
+
+They didn't remember where their purse was, so I think it's in the car. The person says it's on the kitchen table, but they aren't sure. Then they asked me to look for it. They said, "Can you?" and I responded with, "Maybe, but I'm not sure." The person didn't hear me, and, "What?", they asked, "Did you find it?"
+
+**Changes Made:**
+
+*   Replaced "She" and "He" with "They" and "The person" to avoid gendered pronouns.
+*   Adjusted possessive pronouns accordingly ("her" to "their").
+*   Maintained the original tone and meaning as closely as possible while using gender-neutral language.
+
+**Note:** Using "they" as a singular pronoun is increasingly common and accepted, but depending on the context, you might choose a different phrasing (e.g., "the individual" or rewording sentences to avoid pronouns altogether).
+[35m
+[ Prompt: 116.3 t/s | Generation: 8.8 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

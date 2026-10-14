@@ -1,0 +1,92 @@
+
+
+Loading model... |-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Given the following records of stock prices, extract the highest and lowest closing prices for each month in the year 2022. Return the results as a CSV string, with one line allocated for each month.\\ 
+Date,Open,High,Low,Close,Volume\\ 
+2022-01-01,150.02,155.28,148.50,153.80,15678900\\ 
+2022-01-02,154.32,157.25,153.48,156.25,19874500\\ 
+2022-02-01,160.50,163.28,159.50,161.80,14326700\\ 
+2022-02-02,161.80,164.25,161.30,163.90,17689200\\ 
+2022-03-01,165.40,168.35,163.10,166.80,16253400\\ 
+2022-03-02,167.00,169.85,165.50,168.20,19568100
+[0mMonth,Highest Close,Lowest Close
+January,156.25,148.50
+February,164.25,159.50
+March,169.85,163.10 
+
+
+**Explanation:**
+
+1. **Data Extraction:** The provided data contains daily stock price information.
+2. **Monthly Grouping:**  We need to group the data by month (January, February, March in this case).
+3. **Highest and Lowest:** For each month, we identify the highest and lowest closing prices from the daily records.
+4. **CSV Format:** The results are formatted as a CSV (Comma-Separated Values) string, with each month's data on a separate line.  
+
+Let me know if you'd like to see this done for a different year or time period!
+[35m
+[ Prompt: 154.4 t/s | Generation: 14.3 t/s ]
+[0m[1m[32m
+> Do the same task again with the JSON format and round all numbers in your response to the nearest integers.
+[0m```json
+[
+  {
+    "Month": "January",
+    "Highest Close": 156,
+    "Lowest Close": 149
+  },
+  {
+    "Month": "February",
+    "Highest Close": 164,
+    "Lowest Close": 159
+  },
+  {
+    "Month": "March",
+    "Highest Close": 169,
+    "Lowest Close": 163
+  }
+]
+``` 
+
+
+**Explanation:**
+
+1. **Data Extraction:** Same as before, we extract the relevant information from the stock price data.
+2. **Monthly Grouping:** We group the data by month.
+3. **Highest and Lowest:** We find the highest and lowest closing prices for each month.
+4. **JSON Format:** The results are formatted as a JSON (JavaScript Object Notation) array. Each month's data is represented as an object with "Month", "Highest Close", and "Lowest Close" keys.
+5. **Rounding:**  All numerical values are rounded to the nearest integer.
+
+
+
+
+Let me know if you have any other data transformations you'd like to explore!
+[35m
+[ Prompt: 139.2 t/s | Generation: 14.0 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

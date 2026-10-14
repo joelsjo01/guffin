@@ -1,0 +1,60 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> ## 哈希表 vs. 有序数组
+
+**哈希表（Hash Table）：**
+
+*   **原理：** 通过哈希函数将键映射到数组索引，实现快速查找。
+*   **特点：** 查找、插入、删除平均时间复杂度 O(1)，但可能存在冲突，最坏情况 O(n)。无序。
+*   **例子：** 统计网站页面浏览量，键是页面URL，值是浏览次数。
+*   **取舍：** 快速查询，不关心顺序。
+
+**有序数组（Sorted Array）：**
+
+*   **原理：** 数组元素按特定顺序排列。
+*   **特点：** 查找时间复杂度 O(log n) (二分查找)，插入、删除时间复杂度 O(n) (需要移动元素)。有序。
+*   **例子：** 记录学生成绩，按成绩高低排序。
+*   **取舍：** 需要保持数据有序，牺牲部分查询效率。
+
+**总结：** 哈希表擅长快速查找，有序数组擅长保持数据顺序。
+
+[ Prompt: 79.2 t/s | Generation: 18.7 t/s | TTFT: 0.606320 s ]
+[ Detail: Evaluated: 48 | Cached: 0 | Decoded: 236 | Prompt: 0.606320 s | Generation: 12.610976 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":236,"stop_reason":"stop_token","selected_token_hash":"585883de28b1e9a4","decoded_tokens":236,"initial_cache_position":0,"final_cache_position":284,"evaluated_prompt_tokens":48,"reused_cache_tokens":0,"decode_wall_ns":12610577250,"gpu_ns":11951160383,"selection_ns":474870,"proposer_ns":0,"generation_completion_ns":12613057250,"full_turn_ns":13219949542,"first_text_ns":684462709,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":140,"learned_accepted_edges":95,"learned_proposed_edges":140,"learned_numeric_refusals":0,"learned_draft_ns":1163234041,"learned_draft_gpu_ns":1015929443,"learned_target_gpu_ns":10794805066,"learned_cycle_ns":12465651373,"standalone_prefill_ns":67340084,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":56020,"standalone_draft_readback_bytes":32676,"standalone_draft_wall_ns":1230634001,"standalone_draft_gpu_ns":1082320568,"standalone_draft_command_buffer_count":281,"standalone_draft_compute_dispatch_count":53405,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,140,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[140,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[45,95,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[45,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":95,"learned_horizon_limited_cycle_count":94,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":659416867,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":562,"commits":562,"waits":562,"compute_encoders":562,"compute_dispatches":185019,"blit_encoders":0,"barriers":125140,"transient_allocations":0,"selector_dispatches":1551,"max_candidates":40,"compact_readback_bytes":89920,"q4_decode":288,"q8_decode":0,"q8_width_two":0,"q4_small_batch":40320,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":48,"q6_small_batch":6861,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":0,"output_elided_weight_bytes":0,"attention_dispatches":13488,"attention_partitions":15120,"attention_tokens":2237424,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":1755146201064} ]
+> 好的，如果程序需要按键的顺序遍历数据，我的建议会改变。
+
+**改变的解释：**
+
+哈希表本身是无序的。虽然可以通过一些技巧（例如使用链表来存储哈希冲突的元素），但无法保证遍历的顺序与键的插入顺序一致。因此，如果**必须**按照键的顺序遍历数据，哈希表就不适合使用。
+
+有序数组（或者说，使用有序的键值对结构）是更好的选择。 它可以保证元素按照键的顺序排列，因此遍历时就能够按照插入顺序得到数据。
+
+**Python 例子：**
+
+下面分别演示哈希表和有序数组的遍历，并说明差异。
+
+```python
+# 哈希表（字典） - 遍历顺序不保证
+my_dict = {"b": 2, "a": 1, "c": 3}  # 插入顺序: a -> b -> c
+print("哈希表遍历：")
+for key in my_dict:
+    print(key, my_dict[key]) # 打印顺序可能不是 a -> b -> c
+# 可能输出：c 3, a 1, b 2  (顺序不可预测)
+
+# 有序数组 (列表 of 元组) - 遍历顺序保证
+my_list = [("a", 1), ("b", 2), ("c", 3)] # 顺序: a -> b -> c
+print("\n有序数组遍历：")
+for item in my_list:
+    print(item[0], item[1])  # 打印顺序一定为 a -> b -> c
+# 输出：a 1, b 2, c 3
+```
+
+**结论：**
+
+如果按键的顺序遍历是硬性要求，那么应该优先选择有序数组（或类似的有序键值对结构），而放弃使用哈希表。 尽管有序数组的插入和删除效率较低，但在需要顺序遍历的情况下，这是一种必要的权衡。  Python 的 `collections.OrderedDict` 也提供了一种有顺序的字典，但在Python 3.7+中，常规字典已经保证插入顺序，所以通常不需要显式使用`OrderedDict`了。
+[ Prompt: 61.7 t/s | Generation: 17.4 t/s | TTFT: 0.664769 s ]
+[ Detail: Evaluated: 41 | Cached: 284 | Decoded: 476 | Prompt: 0.664769 s | Generation: 27.283867 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":476,"stop_reason":"stop_token","selected_token_hash":"d1a004b60b6555b3","decoded_tokens":476,"initial_cache_position":284,"final_cache_position":801,"evaluated_prompt_tokens":41,"reused_cache_tokens":284,"decode_wall_ns":27363209002,"gpu_ns":25959849989,"selection_ns":856332,"proposer_ns":0,"generation_completion_ns":27368299500,"full_turn_ns":28035569208,"first_text_ns":747250583,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":300,"learned_accepted_edges":174,"learned_proposed_edges":300,"learned_numeric_refusals":0,"learned_draft_ns":2600439912,"learned_draft_gpu_ns":2291780655,"learned_target_gpu_ns":23449905126,"learned_cycle_ns":27139432832,"standalone_prefill_ns":63043708,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":119684,"standalone_draft_readback_bytes":72408,"standalone_draft_wall_ns":2672391166,"standalone_draft_gpu_ns":2361847738,"standalone_draft_command_buffer_count":602,"standalone_draft_compute_dispatch_count":115608,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,300,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[300,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[126,174,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[126,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":174,"learned_horizon_limited_cycle_count":174,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":1403359013,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1204,"commits":1204,"waits":1204,"compute_encoders":1204,"compute_dispatches":410247,"blit_encoders":0,"barriers":281810,"transient_allocations":0,"selector_dispatches":3311,"max_candidates":40,"compact_readback_bytes":192320,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":86400,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":14701,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":28896,"attention_partitions":91392,"attention_tokens":16133328,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":3539214873864} ]
+> 

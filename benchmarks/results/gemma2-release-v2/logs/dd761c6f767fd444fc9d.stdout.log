@@ -1,0 +1,110 @@
+Guffin
+/help for commands, /exit to quit.
+
+> Here are 5 ideas for adapting art masterpieces into interactive experiences for children:
+
+**1. Artwork:**  **Vincent van Gogh's "Starry Night"**
+
+* **Interactive Experience:**  "Starry Night" Sensory Play. 
+    * Create a large, darkened room with projected images of "Starry Night" swirling on the walls and ceiling.
+    * Provide children with sensory materials like textured fabrics, soft glow sticks, and musical instruments that create swirling and twirling sounds.
+    * Encourage them to explore the textures, sounds, and lights, mimicking the movement and energy of the painting.
+
+**2. Artwork:** **Leonardo da Vinci's "Mona Lisa"**
+
+* **Interactive Experience:** "Mona Lisa's Mystery" Interactive Story.
+    * Children can access a digital version of the Mona Lisa on a tablet or touchscreen.
+    * Using voice recognition or touch, they can ask questions about the painting, Mona Lisa's life, or the Renaissance period.
+    * The interactive experience could provide clues and answer questions, encouraging children to learn about the artwork and its context.
+
+**3. Artwork:** **Pablo Picasso's "Guernica"**
+
+* **Interactive Experience:** "Guernica: A Call for Peace" Collaborative Mural.
+    * Show children simplified versions of the different figures and symbols in "Guernica."
+    * Provide them with large sheets of paper and various art materials.
+    * Encourage them to create their own interpretations of peace and harmony, inspired by the powerful message of the painting.
+
+**4. Artwork:** **Claude Monet's "Water Lilies"**
+
+* **Interactive Experience:** "Water Lilies" Sensory Garden.
+    * Create a space with a large pond or water feature, surrounded by floating lily pads and plants.
+    * Provide children with watercolors, brushes, and paper to paint their own interpretations of the lilies.
+    * Encourage them to touch the water, listen to its sounds, and observe the movement of the lilies, connecting with the painting's serene atmosphere.
+
+**5. Artwork:** **Henri Matisse's "The Dance"**
+
+* **Interactive Experience:** "The Dance" Movement Exploration.
+    * Play excerpts of lively music inspired by Matisse's painting.
+    * Encourage children to move their bodies freely, expressing their emotions and interpretations of the dance depicted in the artwork.
+    * Provide props like scarves, ribbons, or masks to enhance their movement exploration.
+
+
+
+**Remember:**
+
+* **Age-appropriateness:** Adapt the complexity and engagement level based on the children's ages.
+* **Accessibility:** Consider children with diverse learning styles and abilities. 
+* **Safety:** Ensure all materials and activities are safe and supervised.
+* **Fun:** Make the experience enjoyable and engaging for children!
+[ Prompt: 130.1 t/s | Generation: 16.9 t/s | TTFT: 0.230569 s ]
+[ Detail: Evaluated: 30 | Cached: 0 | Decoded: 588 | Prompt: 0.230569 s | Generation: 34.858652 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":588,"stop_reason":"stop_token","selected_token_hash":"89c05d2ea89620a5","decoded_tokens":588,"initial_cache_position":0,"final_cache_position":618,"evaluated_prompt_tokens":30,"reused_cache_tokens":0,"decode_wall_ns":34898805337,"gpu_ns":34554908619,"selection_ns":2096497,"proposer_ns":4453914,"generation_completion_ns":34910833458,"full_turn_ns":35143722208,"first_text_ns":294248500,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":45,"speculative_matches":34,"speculative_misses":11,"speculative_fallbacks":508,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"2","support":"2","confidence":"1","cycles":10,"matches":8},{"match_length":"2","support":"3","confidence":"1","cycles":4,"matches":4},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":4,"matches":0},{"match_length":"2","support":"4+","confidence":"1","cycles":14,"matches":13},{"match_length":"3-4","support":"2","confidence":"1","cycles":1,"matches":1},{"match_length":"3-4","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"3-4","support":"4+","confidence":"1","cycles":1,"matches":1},{"match_length":"5-8","support":"2","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"5-8","support":"2","confidence":"1","cycles":3,"matches":2},{"match_length":"5-8","support":"3","confidence":"2/3-1","cycles":1,"matches":1},{"match_length":"5-8","support":"3","confidence":"1","cycles":2,"matches":1},{"match_length":"5-8","support":"4+","confidence":"1","cycles":1,"matches":1}],"wall_minus_gpu_ns":343896718,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":565,"commits":565,"waits":565,"compute_encoders":565,"compute_dispatches":374991,"blit_encoders":0,"barriers":277124,"transient_allocations":0,"selector_dispatches":6083,"max_candidates":40,"compact_readback_bytes":191360,"q4_decode":138957,"q8_decode":553,"q8_width_two":0,"q4_small_batch":12285,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":10689,"q6_small_batch":945,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":25158,"attention_partitions":50064,"attention_tokens":8233512,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":3425117681664} ]
+> Here's a concrete plan for the "Mona Lisa's Mystery" Interactive Story experience, designed for children aged 6-10:
+
+**Project Title:**  Mona Lisa's Mystery: An Interactive Adventure
+
+**Target Audience:** Children aged 6-10 years old
+
+**Learning Objectives:**
+
+*  Introduce children to Leonardo da Vinci's "Mona Lisa."
+*  Spark curiosity about Renaissance art and history.
+*  Develop critical thinking and problem-solving skills.
+*  Enhance vocabulary and storytelling abilities.
+
+**Materials:**
+
+* **Hardware:**
+    *  7-10 Tablets or interactive touchscreens (budget: $700-$1400)
+    *  Headphones for individual use (budget: $70-$140)
+* **Software:**
+    *  Interactive storytelling platform (e.g., Twine, Storybird, or similar) (budget: $0-$200 for subscription or one-time purchase)
+    *  High-resolution digital image of "Mona Lisa" (public domain, free)
+    *  Sound effects and background music (free or royalty-free options)
+
+**Content Development:**
+
+* **Storyline:**
+    *  Create an engaging narrative where children act as detectives trying to solve a mystery about the "Mona Lisa."
+    *  Include questions about the painting's details, historical context, and Mona Lisa's possible identity.
+    *  Embed clues and riddles within the story, leading children to discover facts about the artwork and Renaissance Italy.
+* **Interactive Elements:**
+    *  Use touch-sensitive elements to allow children to select dialogue options, examine details of the painting, or access additional information.
+    *  Incorporate voice recognition for children to ask questions directly to the interactive story.
+* **Visuals:**
+    *  Use high-quality images of the "Mona Lisa" and relevant historical scenes.
+    *  Include animated elements or simple illustrations to enhance the storytelling.
+
+**Implementation:**
+
+1. **Setup:** Arrange tablets/touchscreens in a comfortable space with headphones available for each child.
+2. **Introduction:** Briefly introduce "Mona Lisa" and the interactive story's premise.
+3. **Exploration:** Children independently navigate the interactive story, answering questions, solving puzzles, and learning about the artwork.
+4. **Discussion:** After completing the story, facilitate a discussion about the experience, encouraging children to share their observations and insights.
+
+**Budget Estimate:**
+
+* Hardware: $700 - $1400
+* Software: $0 - $200
+* Content Development (optional freelance assistance): $500 - $1000
+
+**Total Estimated Budget:** $1200 - $2600
+
+
+ **Note:** This budget is an estimate and can vary depending on the specific hardware, software, and content development choices.  
+
+This interactive experience allows children to engage with "Mona Lisa" in a dynamic and memorable way, fostering a deeper understanding and appreciation for art history.
+[ Prompt: 87.8 t/s | Generation: 16.5 t/s | TTFT: 0.250671 s ]
+[ Detail: Evaluated: 22 | Cached: 618 | Decoded: 643 | Prompt: 0.250671 s | Generation: 39.086416 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma2","retrieval_decode":true,"context_capacity":8192,"kv_cache_dtype":"f16","selected_tokens":643,"stop_reason":"stop_token","selected_token_hash":"c6c6ccffea653a07","decoded_tokens":643,"initial_cache_position":618,"final_cache_position":1283,"evaluated_prompt_tokens":22,"reused_cache_tokens":618,"decode_wall_ns":39120150402,"gpu_ns":38744959687,"selection_ns":2339880,"proposer_ns":12801656,"generation_completion_ns":39140783250,"full_turn_ns":39399138167,"first_text_ns":322930750,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":62,"speculative_matches":41,"speculative_misses":21,"speculative_fallbacks":539,"speculative_rollbacks":0,"proposal_buckets":[{"match_length":"2","support":"2","confidence":"2/3-1","cycles":3,"matches":3},{"match_length":"2","support":"2","confidence":"1","cycles":12,"matches":11},{"match_length":"2","support":"3","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"2","support":"3","confidence":"1","cycles":4,"matches":3},{"match_length":"2","support":"4+","confidence":"2/3-1","cycles":12,"matches":4},{"match_length":"2","support":"4+","confidence":"1","cycles":16,"matches":14},{"match_length":"3-4","support":"2","confidence":"2/3-1","cycles":1,"matches":0},{"match_length":"3-4","support":"2","confidence":"1","cycles":8,"matches":4},{"match_length":"3-4","support":"3","confidence":"1","cycles":1,"matches":1},{"match_length":"3-4","support":"4+","confidence":"2/3-1","cycles":2,"matches":0},{"match_length":"3-4","support":"4+","confidence":"1","cycles":2,"matches":1}],"wall_minus_gpu_ns":375190715,"resident_weights_bytes":7662057472,"output_head_policy":"q8_0","resident_kv_bytes":2113929216,"resident_scratch_bytes":59244360,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":623,"commits":623,"waits":623,"compute_encoders":623,"compute_dispatches":419049,"blit_encoders":0,"barriers":311222,"transient_allocations":0,"selector_dispatches":6611,"max_candidates":40,"compact_readback_bytes":212160,"q4_decode":147420,"q8_decode":601,"q8_width_two":0,"q4_small_batch":16926,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":11340,"q6_small_batch":1302,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":974862336,"attention_dispatches":27888,"attention_partitions":156240,"attention_tokens":26801670,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":7168,"attention_projections":1106681856,"ffn_gate_up":2495152128,"ffn_down":1247576064,"output_head":974848000,"norms":2422784,"total":5826688000},"scheduled_bytes_total":3745585521664} ]
+> 

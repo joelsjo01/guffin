@@ -1,0 +1,36 @@
+Guffin
+/help for commands, /exit to quit.
+
+> ... ... ... ... ... ... ... ```csv
+Month,High,Low
+January,157.25,148.50
+February,164.25,159.50
+March,169.85,163.10
+```
+
+[ Prompt: 105.4 t/s | Generation: 13.1 t/s | TTFT: 3.339833 s ]
+[ Detail: Evaluated: 352 | Cached: 0 | Decoded: 60 | Prompt: 3.339833 s | Generation: 4.569829 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":60,"stop_reason":"stop_token","selected_token_hash":"5fa98d08dbb6498c","decoded_tokens":60,"initial_cache_position":0,"final_cache_position":412,"evaluated_prompt_tokens":352,"reused_cache_tokens":0,"decode_wall_ns":4638042711,"gpu_ns":4594295597,"selection_ns":235294,"proposer_ns":0,"generation_completion_ns":4639008250,"full_turn_ns":7982446500,"first_text_ns":3421390417,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":43747114,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":60,"commits":60,"waits":60,"compute_encoders":60,"compute_dispatches":55547,"blit_encoders":0,"barriers":38208,"transient_allocations":0,"selector_dispatches":649,"max_candidates":40,"compact_readback_bytes":18880,"q4_decode":17280,"q8_decode":0,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":2880,"q6_small_batch":59,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":2880,"attention_partitions":5760,"attention_tokens":1101600,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":445397841480} ]
+> ```json
+[
+  {
+    "Month": "January",
+    "High": 157,
+    "Low": 149
+  },
+  {
+    "Month": "February",
+    "High": 164,
+    "Low": 160
+  },
+  {
+    "Month": "March",
+    "High": 170,
+    "Low": 163
+  }
+]
+```
+[ Prompt: 51.6 t/s | Generation: 13.0 t/s | TTFT: 0.581600 s ]
+[ Detail: Evaluated: 30 | Cached: 412 | Decoded: 108 | Prompt: 0.581600 s | Generation: 8.286015 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":108,"stop_reason":"stop_token","selected_token_hash":"9f598612f621cb04","decoded_tokens":108,"initial_cache_position":412,"final_cache_position":550,"evaluated_prompt_tokens":30,"reused_cache_tokens":412,"decode_wall_ns":8354271084,"gpu_ns":8274315868,"selection_ns":389002,"proposer_ns":0,"generation_completion_ns":8355854709,"full_turn_ns":8939887709,"first_text_ns":661160792,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":79955216,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":108,"commits":108,"waits":108,"compute_encoders":108,"compute_dispatches":99995,"blit_encoders":0,"barriers":68784,"transient_allocations":0,"selector_dispatches":1177,"max_candidates":40,"compact_readback_bytes":34240,"q4_decode":31104,"q8_decode":0,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":5184,"q6_small_batch":107,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":5184,"attention_partitions":14016,"attention_tokens":2573856,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":802376729832} ]
+> 

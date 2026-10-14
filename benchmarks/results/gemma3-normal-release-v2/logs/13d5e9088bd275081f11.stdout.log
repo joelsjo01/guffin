@@ -1,0 +1,42 @@
+Guffin
+/help for commands, /exit to quit.
+
+> **Language Identified:** Classical Chinese
+
+**Translation and Refined English Version:**
+
+"Though my robes grow loose and my belt extends, I harbor no regret; for her sake, I wither and fade."
+
+**Alternatively, with slightly more poetic license (to capture the emotional depth):**
+
+"Let my garments hang, my form decline; no sorrow dwells within, to fade for her, a worthy sign."
+
+
+
+**Explanation of Changes:**
+
+*   **"衣带渐宽" (Yīdài jiàn kuān):**  Translated as "Though my robes grow loose and my belt extends" or "Let my garments hang," capturing the visual image of a person losing weight.
+*   **"终不悔" (Zhōng bù huǐ):** Rendered as "I harbor no regret" or "no sorrow dwells within," emphasizing the unwavering devotion.
+*   **"为伊消得人憔悴" (Wèi yī xiāo dé rén qiáo cuì):** Translated as "for her sake, I wither and fade" or "to fade for her, a worthy sign." This conveys the sacrifice and emotional toll taken for the beloved. I aimed for a balance between literal accuracy and evocative language.
+[ Prompt: 83.5 t/s | Generation: 13.1 t/s | TTFT: 1.197603 s ]
+[ Detail: Evaluated: 100 | Cached: 0 | Decoded: 253 | Prompt: 1.197603 s | Generation: 19.328453 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":253,"stop_reason":"stop_token","selected_token_hash":"b19294bc19d6f165","decoded_tokens":253,"initial_cache_position":0,"final_cache_position":353,"evaluated_prompt_tokens":100,"reused_cache_tokens":0,"decode_wall_ns":19393548121,"gpu_ns":19207022044,"selection_ns":942202,"proposer_ns":0,"generation_completion_ns":19397230042,"full_turn_ns":20596270917,"first_text_ns":1274314667,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":186526077,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":253,"commits":253,"waits":253,"compute_encoders":253,"compute_dispatches":226777,"blit_encoders":0,"barriers":153661,"transient_allocations":0,"selector_dispatches":2772,"max_candidates":40,"compact_readback_bytes":80640,"q4_decode":72864,"q8_decode":0,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":12144,"q6_small_batch":252,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":12144,"attention_partitions":16800,"attention_tokens":2756688,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":1880750455062} ]
+> **Language Identified:** German
+
+**Refined English Version:**
+
+"I don't understand a word of it."
+
+**Alternatively (more idiomatic):**
+
+"It's all Greek to me."
+
+
+
+**Explanation of Changes:**
+
+The original German phrase "Ich verstehe nur Bahnhof" literally translates to "I only understand train station." However, its idiomatic meaning is "I don't understand anything." The refined English versions convey this intended meaning in a natural and comprehensible way.
+[ Prompt: 44.8 t/s | Generation: 13.0 t/s | TTFT: 0.312542 s ]
+[ Detail: Evaluated: 14 | Cached: 353 | Decoded: 103 | Prompt: 0.312542 s | Generation: 7.909870 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":103,"stop_reason":"stop_token","selected_token_hash":"e7fedca7c4bc58b7","decoded_tokens":103,"initial_cache_position":353,"final_cache_position":470,"evaluated_prompt_tokens":14,"reused_cache_tokens":353,"decode_wall_ns":7977507583,"gpu_ns":7902432405,"selection_ns":385168,"proposer_ns":0,"generation_completion_ns":7979073083,"full_turn_ns":8296321250,"first_text_ns":393945875,"learned_owned_bytes":0,"learned_horizon":0,"speculative_draft_model":"none","speculative_sampling":"exact-match","learned_verification_schedule":"full","learned_draft_head":"f16","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":0,"learned_accepted_edges":0,"learned_proposed_edges":0,"learned_numeric_refusals":0,"learned_draft_ns":0,"learned_draft_gpu_ns":0,"learned_target_gpu_ns":0,"learned_cycle_ns":0,"standalone_prefill_ns":0,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":0,"standalone_draft_readback_bytes":0,"standalone_draft_wall_ns":0,"standalone_draft_gpu_ns":0,"standalone_draft_command_buffer_count":0,"standalone_draft_compute_dispatch_count":0,"standalone_draft_sampler":"none","standalone_repetition_window":null,"standalone_effective_sampler":null,"learned_horizon_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":0,"learned_horizon_limited_cycle_count":0,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":75075178,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":103,"commits":103,"waits":103,"compute_encoders":103,"compute_dispatches":95365,"blit_encoders":0,"barriers":65599,"transient_allocations":0,"selector_dispatches":1122,"max_candidates":40,"compact_readback_bytes":32640,"q4_decode":29664,"q8_decode":0,"q8_width_two":0,"q4_small_batch":0,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":4944,"q6_small_batch":102,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":4944,"attention_partitions":9888,"attention_tokens":2071536,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":765191428962} ]
+> 

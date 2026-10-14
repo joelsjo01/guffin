@@ -1,0 +1,78 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Each problem consists of three statements. Based on the first two statements, the third statement may be true, false, or uncertain.\\ 
+1. Oranges cost more than apples.\\ 
+2. Oranges cost less than bananas.\\ 
+3. Bananas cost more than apples and bananas cost more than orange.\\ 
+If the first two statements are true, then the third statement is
+[0mLet's analyze the statements:
+
+*   **Statement 1:** Oranges cost more than apples. (O > A)
+*   **Statement 2:** Oranges cost less than bananas. (O < B)
+
+Combining these, we have: B > O > A
+
+Now, let's look at the third statement:
+
+*   **Statement 3:** Bananas cost more than apples and bananas cost more than oranges. (B > A and B > O)
+
+From our combined analysis of the first two statements, we know that B > O > A.  Therefore, the third statement (B > A and B > O) is **true**.
+
+**Answer:** True
+[35m
+[ Prompt: 80.9 t/s | Generation: 10.4 t/s ]
+[0m[1m[32m
+> If the third statement is true. Is the first statement true, false, or uncertain? Please explain.
+[0mOkay, let's analyze this from the opposite direction. We're now assuming the third statement is true and want to determine if the first statement (Oranges cost more than apples) is true, false, or uncertain.
+
+*   **Statement 3 (Given as True):** Bananas cost more than apples and bananas cost more than oranges. (B > A and B > O)
+
+Let's break down what this tells us:
+
+*   B > A (Bananas cost more than apples)
+*   B > O (Bananas cost more than oranges)
+
+Now, let's consider the first statement we're trying to determine:
+
+*   **Statement 1 (Question):** Oranges cost more than apples. (O > A)
+
+Could Statement 1 be true? Yes, it's *possible*.  We know B > O and B > A.  It's perfectly compatible for O to be greater than A while still satisfying the information from the third statement. For example, B > O > A.
+
+Could Statement 1 be false? Yes, it's also *possible*. We know B > O and B > A. It's perfectly compatible for O to be less than A while still satisfying the information from the third statement. For example, B > A > O.
+
+Since the truth of Statement 1 (O > A) is not definitively determined by the truth of Statement 3 (B > A and B > O), the first statement is **uncertain**.
+
+
+
+**Answer:** Uncertain
+[35m
+[ Prompt: 102.2 t/s | Generation: 8.7 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

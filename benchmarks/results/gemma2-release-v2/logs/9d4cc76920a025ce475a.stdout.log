@@ -1,0 +1,133 @@
+
+
+Loading model... |-\|/-\| 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Write a simple website in HTML. When a user clicks the button, it shows a random joke from a list of 4 jokes.
+[0m```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Random Joke Website</title>
+</head>
+<body>
+  <h1>Tell Me a Joke!</h1>
+  <button id="jokeButton">Get a Joke</button>
+  <p id="jokeDisplay"></p>
+
+  <script>
+    const jokes = [
+      "Why don't scientists trust atoms? Because they make up everything!",
+      "What do you call a lazy kangaroo? A pouch potato!",
+      "Why did the bicycle fall over? Because it was two tired!",
+      "What do you call a bear with no teeth? A gummy bear!"
+    ];
+
+    const jokeButton = document.getElementById("jokeButton");
+    const jokeDisplay = document.getElementById("jokeDisplay");
+
+    jokeButton.addEventListener("click", function() {
+      const randomIndex = Math.floor(Math.random() * jokes.length);
+      jokeDisplay.textContent = jokes[randomIndex];
+    });
+  </script>
+</body>
+</html>
+```
+
+**Explanation:**
+
+1. **HTML Structure:**
+   - The code sets up a basic HTML structure with a heading (`<h1>`), a button (`<button>`), and a paragraph (`<p>`) to display the joke.
+   - The `id` attributes are used to easily reference these elements in the JavaScript code.
+
+2. **JavaScript Logic:**
+   - **Joke Array:** An array `jokes` stores the list of jokes.
+   - **Element References:** JavaScript gets references to the button and paragraph elements using `document.getElementById()`.
+   - **Event Listener:** An event listener is added to the button. It listens for the "click" event.
+   - **Random Joke:**
+     - When the button is clicked, the code generates a random number using `Math.random()` and multiplies it by the number of jokes (`jokes.length`).
+     - `Math.floor()` is used to round down the result to an integer, ensuring a valid index for the `jokes` array.
+     - The joke at the random index is selected using `jokes[randomIndex]` and displayed in the paragraph (`jokeDisplay`).
+
+**How to Use:**
+
+1. Save the code as an HTML file (e.g., `joke.html`).
+2. Open the file in a web browser.
+3. Click the "Get a Joke" button to see a random joke from the list.
+[35m
+[ Prompt: 78.1 t/s | Generation: 13.9 t/s ]
+[0m[1m[32m
+> How to use CSS to change the color of jokes to red?
+[0m```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Random Joke Website</title>
+  <style>
+    #jokeDisplay {
+      color: red;
+    }
+  </style>
+</head>
+<body>
+  <h1>Tell Me a Joke!</h1>
+  <button id="jokeButton">Get a Joke</button>
+  <p id="jokeDisplay"></p>
+
+  <script>
+    // JavaScript code from previous example (unchanged)
+  </script>
+</body>
+</html>
+
+```
+
+**Explanation:**
+
+1. **Inline Style (Not Recommended):**  You could add the styling directly within the `<p>` tag:
+   ```html
+   <p id="jokeDisplay" style="color: red;"> </p>
+   ```
+
+2. **Internal Style Sheet (Within `<head>`):** We've used this method here.
+   - Create a `<style>` tag inside the `<head>` section.
+   - Within the `<style>` tags, write CSS rules.
+   - To target the paragraph with the `id` "jokeDisplay", we use `#jokeDisplay { color: red; }`.
+
+**How it Works:**
+
+- The CSS rule `#jokeDisplay { color: red; }` says: "For any element with the ID `jokeDisplay`, set its text color to red."
+
+- When the browser parses the HTML, it applies the CSS rules to the corresponding elements. So, the text inside the `<p>` with `id="jokeDisplay"` will now be displayed in red.
+
+
+
+[35m
+[ Prompt: 143.1 t/s | Generation: 13.4 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

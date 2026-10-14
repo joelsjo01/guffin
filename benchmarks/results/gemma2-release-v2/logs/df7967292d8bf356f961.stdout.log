@@ -1,0 +1,88 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\| 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Compose an engaging travel blog post about a recent trip to Hawaii, highlighting cultural experiences and must-see attractions.
+[0m## Aloha from Paradise: A Cultural Journey Through the Heart of Hawaii
+
+The scent of plumeria, the gentle lull of ukulele melodies, and the warmth of a thousand smiles - Hawaii welcomed me with open arms, enveloping me in its unique charm. It wasn't just another vacation; it was a journey into a vibrant culture, a feast for the senses, and a reminder of the simple joys of life.
+
+My adventure began on the "Gathering Place," Oahu. Pearl Harbor, a poignant reminder of history, left me humbled and reflective. The USS Arizona Memorial, a solemn tribute to those lost, resonated deeply, reminding us of the cost of peace. 
+
+But Oahu is more than just history. The vibrant spirit of Waikiki pulsated with life, from the colorful street art to the rhythmic hula dancers. I learned about the art of lei making, crafting a fragrant garland with fragrant plumeria blossoms, a symbol of welcome and aloha.
+
+Next, I ventured to the Big Island, a land of fire and ice. Witnessing the raw power of Kilauea volcano, a fiery spectacle spewing molten lava into the night sky, was awe-inspiring. The stark beauty of the volcanic landscape contrasted with the lush green rainforests, home to cascading waterfalls and vibrant flora.
+
+On Maui, the "Valley Isle," I found tranquility amidst stunning natural beauty. The Road to Hana, a winding journey through lush valleys and dramatic coastlines, offered breathtaking views at every turn.  Snorkeling in Molokini Crater, a submerged volcanic caldera teeming with marine life, was a magical underwater experience.
+
+No trip to Hawaii is complete without experiencing the warmth and generosity of its people. From the friendly smiles of local shopkeepers to the captivating storytelling of cultural performers, I felt welcomed and embraced.
+
+Here are some must-sees for your own Hawaiian adventure:
+
+* **Pearl Harbor (Oahu):** A poignant reminder of history and sacrifice.
+* **Diamond Head (Oahu):** Hike to the summit for panoramic views of Waikiki.
+* **Kilauea Volcano (Big Island):** Witness the power of nature firsthand.
+* **Road to Hana (Maui):** A scenic drive through breathtaking landscapes.
+* **Molokini Crater (Maui):** Snorkel in a vibrant underwater paradise.
+
+But beyond the iconic attractions, Hawaii's true beauty lies in its culture. Take the time to learn a few Hawaiian words, listen to the stories of the islands, and immerse yourself in the spirit of aloha. It's a journey that will stay with you long after you leave paradise.
+
+
+
+[35m
+[ Prompt: 68.4 t/s | Generation: 14.4 t/s ]
+[0m[1m[32m
+> Rewrite your previous response. Start every sentence with the letter A.
+[0mAloha from paradise, where the air is sweet with plumeria and the ukulele's melody dances on the breeze.  A journey to Hawaii isn't just a vacation; it's a cultural immersion, a feast for the senses, and a reminder of life's simple joys.
+
+A first stop was Oahu, the "Gathering Place." A visit to Pearl Harbor, a poignant reminder of history, left me humbled and reflective.  A solemn tribute to those lost, the USS Arizona Memorial resonated deeply, reminding us of the cost of peace.
+
+A vibrant spirit pulsed through Waikiki, from the colorful street art to the rhythmic hula dancers.  A lesson in lei making followed, crafting a fragrant garland with plumeria blossoms, a symbol of welcome and aloha.
+
+A journey to the Big Island revealed a land of fire and ice.  Awe-inspiring was witnessing the raw power of Kilauea volcano, spewing molten lava into the night sky.  Astonishing was the contrast between the stark volcanic landscape and the lush green rainforests.
+
+A trip to Maui, the "Valley Isle," offered tranquility amidst stunning natural beauty.  A winding journey through lush valleys and dramatic coastlines, the Road to Hana, offered breathtaking views at every turn.  An unforgettable underwater experience awaited in Molokini Crater, a submerged volcanic caldera teeming with marine life.
+
+A trip to Hawaii wouldn't be complete without experiencing the warmth and generosity of its people.  A friendly smile from a local shopkeeper and captivating storytelling from cultural performers, all contributed to a feeling of being welcomed and embraced.
+
+A few must-sees for your own Hawaiian adventure include:
+
+* **Pearl Harbor (Oahu):** A poignant reminder of history and sacrifice.
+* **Diamond Head (Oahu):** A hike to the summit unveils panoramic views of Waikiki.
+* **Kilauea Volcano (Big Island):** A witness to the power of nature firsthand.
+* **Road to Hana (Maui):** A scenic drive through breathtaking landscapes.
+* **Molokini Crater (Maui):** Snorkel in a vibrant underwater paradise.
+
+A journey through the islands' culture is essential to truly experiencing Hawaii's magic.  Absorb the local language, listen to their stories, and immerse yourself in the spirit of aloha.  A journey that will stay with you long after you leave paradise.
+
+
+
+[35m
+[ Prompt: 148.6 t/s | Generation: 14.0 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

@@ -1,0 +1,81 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Each problem consists of three statements. Based on the first two statements, the third statement may be true, false, or uncertain.\\ 
+1. Oranges cost more than apples.\\ 
+2. Oranges cost less than bananas.\\ 
+3. Bananas cost more than apples and bananas cost more than orange.\\ 
+If the first two statements are true, then the third statement is
+[0mLet's break down the statements:
+
+*   **Statement 1:** Oranges > Apples (where ">" means "cost more than")
+*   **Statement 2:** Oranges < Bananas
+*   **Statement 3:** Bananas > Apples AND Bananas > Oranges
+
+From statements 1 and 2, we can combine them to form:
+
+Apples < Oranges < Bananas
+
+This means: Bananas > Oranges, and Bananas > Apples.
+
+Therefore, Statement 3 is **true**.
+[35m
+[ Prompt: 82.7 t/s | Generation: 13.3 t/s ]
+[0m[1m[32m
+> If the third statement is true. Is the first statement true, false, or uncertain? Please explain.
+[0mLet's analyze this. We're now assuming Statement 3 is true:
+
+*   **Statement 3 (True):** Bananas > Apples AND Bananas > Oranges
+
+This tells us two things:
+
+1.  Bananas cost more than apples (Bananas > Apples)
+2.  Bananas cost more than oranges (Bananas > Oranges)
+
+Now let's consider the first statement:
+
+*   **Statement 1:** Oranges cost more than apples (Oranges > Apples)
+
+We need to determine if this statement *must* be true, false, or uncertain given that Statement 3 is true.
+
+Here's the key: Statement 3 tells us Bananas > Oranges. But it *doesn't* tell us the relationship between oranges and apples.  Oranges could be more expensive than apples, or they could be less expensive.
+
+**Example 1: Statement 1 is True**
+
+*   Bananas > Oranges > Apples  (Statement 3 and Statement 1 are both true)
+
+**Example 2: Statement 1 is False**
+
+*   Bananas > Apples > Oranges (Statement 3 is true, but Statement 1 is false)
+
+Since Statement 1 can be either true or false while Statement 3 remains true, the first statement is **uncertain**.
+[35m
+[ Prompt: 98.9 t/s | Generation: 12.8 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

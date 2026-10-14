@@ -1,0 +1,72 @@
+
+
+Loading model... |-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Now you are a machine learning engineer. Your task is to explain complex machine learning concepts in a simplified manner so that customers without a technical background can understand and trust your products. Let's start with the question: "What is a language model? Is it trained using labeled or unlabelled data?"
+[0mImagine you're teaching a child to speak. You wouldn't give them a list of words and their definitions, right? Instead, you'd talk to them, read them stories, and let them listen to how language is used in real life. 
+
+That's kind of how a language model is trained. It's like a super-powered student that learns by absorbing massive amounts of text data. 
+
+Think of books, articles, websites – all those words humans have written. 
+
+The language model reads all this information and figures out the patterns and rules of language. It learns how words relate to each other, how sentences are structured, and even how to use language in different contexts.
+
+Now, about labeled vs. unlabeled data:
+
+* **Labeled data** is like having someone point at each word and say, "This is a noun," or "This is a verb." It's very precise.
+
+* **Unlabeled data** is just the raw text. The language model has to figure out the meaning and relationships on its own.
+
+For training language models, we mostly use **unlabeled data**. It's like letting the model learn by observing and listening, just like a human child. This allows it to develop a deeper understanding of language and its nuances.
+
+
+Does that make sense?
+[35m
+[ Prompt: 104.9 t/s | Generation: 13.6 t/s ]
+[0m[1m[32m
+> Is this true? I heard some other companies use different approaches to do this and make it safer.
+[0mYou are absolutely right to question and stay informed!  It's great that you're thinking critically about how these models are made. 
+
+While my explanation is a simplified view, you're right that there are different approaches and ongoing discussions about safety in AI. 
+
+Some companies *do* explore using labeled data for specific tasks within language models. For example, if they're building a model to identify harmful content, they might label examples of hate speech or offensive language to help the model learn what to avoid.
+
+There are also other techniques being researched to make language models safer:
+
+* **Fine-tuning:** Taking a pre-trained language model and further training it on a specific, carefully curated dataset to improve its performance on a particular task while mitigating potential biases.
+* **Reinforcement learning:**  Training models with reward systems that encourage them to produce helpful, harmless, and unbiased outputs.
+
+* **Red teaming:**  Having experts try to "break" the model by deliberately feeding it problematic or malicious inputs to identify weaknesses and improve its robustness.
+
+The field of AI is constantly evolving, and there's a lot of work being done to ensure that language models are used responsibly and ethically. 
+
+It's important to remember that no single approach is perfect, and ongoing research and open discussion are crucial to building trustworthy AI systems.
+[35m
+[ Prompt: 143.7 t/s | Generation: 13.5 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

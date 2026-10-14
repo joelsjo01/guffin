@@ -1,0 +1,95 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-2-9b-Q4.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> The vertices of a triangle are at points (0, 0), (-1, 1), and (3, 3). What is the area of the triangle?
+[0mHere's how to find the area of the triangle:
+
+**1. Visualize the Triangle**
+
+It helps to plot the points on a graph to see the triangle's shape.
+
+**2. Choose a Base and Height**
+
+*  You can choose any side of the triangle as the base. Let's choose the line segment between (0,0) and (3,3) as our base.
+*  The height is the perpendicular distance from the third vertex (-1,1) to the base.
+
+**3. Calculate Base and Height**
+
+* **Base:**  The distance between (0,0) and (3,3) can be found using the distance formula: √[(3-0)² + (3-0)²] = √18 = 3√2
+* **Height:** This is a little trickier. You'll need to:
+    * Find the equation of the line containing the base.
+    * Find the equation of the line perpendicular to the base that passes through (-1,1).
+    * Find the point of intersection of these two lines.
+    * Calculate the distance between (-1,1) and the point of intersection.
+
+**4. Use the Area Formula**
+
+*  Area of a triangle = (1/2) * base * height
+
+**Let me know if you'd like me to work through the height calculation steps!** 
+
+
+[35m
+[ Prompt: 68.7 t/s | Generation: 14.0 t/s ]
+[0m[1m[32m
+> What's area of the circle circumscribing the triangle?
+[0mHere's how to find the area of the circle circumscribing the triangle:
+
+**1. Understand Circumscribing Circle**
+
+A circle circumscribes a triangle if all three vertices of the triangle lie on the circle. The center of this circle is called the circumcenter.
+
+**2. Find the Circumcenter**
+
+*  The circumcenter of a triangle can be found using various methods, including:
+    * **Angle Bisectors:** The circumcenter is the point where the angle bisectors of the triangle intersect.
+    * **Perpendicular Bisectors:** The circumcenter is the intersection of the perpendicular bisectors of the triangle's sides.
+    * **Formulas:** There are specific formulas to calculate the circumcenter coordinates based on the triangle's vertices.
+
+*  For this problem, it might be easiest to use a graphing calculator or online tool to find the circumcenter.
+
+**3. Calculate the Circumradius**
+
+* The circumradius (R) is the distance from the circumcenter to any of the triangle's vertices.
+
+* You can use the distance formula to find this radius once you have the circumcenter coordinates.
+
+**4. Calculate the Area**
+
+* Area of a circle = π * R²
+
+   where R is the circumradius.
+
+
+
+Let me know if you'd like me to walk through any of these steps in more detail, or if you have the circumcenter coordinates and need help with the radius and area calculation!
+[35m
+[ Prompt: 139.0 t/s | Generation: 13.6 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...
