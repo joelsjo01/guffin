@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -50,6 +51,10 @@
 namespace local_gguf_engine::tensor::backends::metal {
 
 namespace {
+
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+__weak id<MTLBuffer> last_initializer_buffer;
+#endif
 
 // Retaining MTLBuffer objects alone does not keep their backing memory resident
 // between turns. Match ggml 0.13.1's 500 ms requests and three-minute idle window.
@@ -416,19 +421,41 @@ BackendBuffer initialize_metal_backend_buffer(const TensorDescriptor& descriptor
     const std::function<void(std::span<std::uint8_t>)>& initializer) {
     validate_tensor_descriptor(descriptor);
     if (!initializer) throw std::invalid_argument("Metal buffer initializer must not be empty");
+    std::exception_ptr failure;
     @autoreleasepool {
-        id<MTLDevice> device = metal_device_or_throw();
-        if (descriptor.byte_count > device.maxBufferLength)
-            throw std::invalid_argument("Metal tensor initialization exceeds maxBufferLength");
-        id<MTLBuffer> buffer = [device newBufferWithLength:static_cast<NSUInteger>(descriptor.byte_count)
-            options:MTLResourceStorageModeShared];
-        if (buffer == nil)
-            throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
-                "Metal initialized buffer allocation failed");
-        initializer({static_cast<std::uint8_t*>(buffer.contents), static_cast<std::size_t>(descriptor.byte_count)});
-        return make_metal_backend_buffer(descriptor, buffer);
+        try {
+            id<MTLDevice> device = metal_device_or_throw();
+            if (descriptor.byte_count > device.maxBufferLength)
+                throw std::invalid_argument("Metal tensor initialization exceeds maxBufferLength");
+            // contents returns an interior pointer; the local owner already
+            // spans every callback use, so ARC need not autorelease the buffer.
+            id<MTLBuffer> __attribute__((objc_precise_lifetime)) buffer =
+                [device newBufferWithLength:static_cast<NSUInteger>(descriptor.byte_count)
+                    options:MTLResourceStorageModeShared];
+            if (buffer == nil)
+                throw metal_error(runtime::BackendErrorCode::metal_execution_failed,
+                    "Metal initialized buffer allocation failed");
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+            last_initializer_buffer = buffer;
+#endif
+            initializer({static_cast<std::uint8_t*>(buffer.contents), static_cast<std::size_t>(descriptor.byte_count)});
+            return make_metal_backend_buffer(descriptor, buffer);
+        } catch (...) {
+            // C++ unwinding skips autorelease-pool drainage. Leave the pool
+            // normally before propagating failure, including callback failures.
+            failure = std::current_exception();
+        }
+    }
+    std::rethrow_exception(failure);
+}
+
+#if defined(LOCAL_GGUF_ENGINE_TESTING)
+bool initialized_metal_buffer_is_alive_for_testing() noexcept {
+    @autoreleasepool {
+        return last_initializer_buffer != nil;
     }
 }
+#endif
 
 BackendBuffer copy_tensor_to_metal_backend(const TensorStorage& storage) {
     return copy_tensor_view_to_metal_backend(storage.view());

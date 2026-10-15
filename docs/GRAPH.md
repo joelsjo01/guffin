@@ -104,5 +104,6 @@ engine/gemma_chat_session
 | [AGENTS](../AGENTS.md), [principles](ENGINE_PRINCIPLES.md) | Operating contract and engineering principles |
 | [Current baton](NEXT_TASK.md) | Current state and next task |
 | [README](../README.md) | Public architecture and usage |
+| [Release notes](RELEASE_NOTES.md) | Initial release scope and limits |
 | [Benchmark guide](BENCHMARKING.md), [performance](PERFORMANCE.md) | Protocol and results |
 | [Retrospective](SPECULATIVE_DECODING_RETROSPECTIVE.md), [development archive](archive/DEVELOPMENT_HISTORY.md) | Design narrative and historical record |

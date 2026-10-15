@@ -53,6 +53,9 @@ their effective capacity before timing; do not silently truncate a case. The six
 session. The runner's normal pauses apply to every turn, including this case;
 it is not an uninterrupted thermal stress test.
 
+Frozen inputs and campaign records retain their original `Coach6/guffin` URLs;
+the current repository is [joelsjo01/guffin](https://github.com/joelsjo01/guffin).
+
 The documents and code are snapshots from Guffin revision
 `644312e18197379cb5e6d3ef25f1e90dd3ed5553`, rather than live files. The code case
 uses a contiguous excerpt of `options.cpp` lines 1–130, ending after the complete
@@ -97,9 +100,9 @@ The source question file is distributed in FastChat's Apache-2.0 repository;
 the exact pinned [FastChat license](sources/FastChat-LICENSE) is included.
 Retain the source attribution and license when redistributing these fixtures.
 
-The six supplementary cases and embedded Guffin snapshots are project-owned.
-The repository's eventual release license remains a maintainer decision;
-including the FastChat license does not assign that license to Guffin.
+The six supplementary cases and embedded Guffin snapshots are project-owned
+and covered by Guffin's [MIT license](../../LICENSE). The upstream MT-Bench
+fixtures retain their Apache-2.0 license and attribution.
 
 Offline integrity checks require only Python's standard library:
 

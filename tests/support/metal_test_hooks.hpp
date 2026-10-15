@@ -14,6 +14,8 @@ void set_default_metal_pipelines_forbidden_for_testing(bool forbidden) noexcept;
 // Uses an isolated fake device; returns false when the OS lacks the API.
 // A supported device deliberately fails allocation to test error propagation.
 [[nodiscard]] bool exercise_metal_buffer_residency_for_testing(bool supported);
+// Observes the latest final-storage allocation without retaining it.
+[[nodiscard]] bool initialized_metal_buffer_is_alive_for_testing() noexcept;
 [[nodiscard]] BackendBuffer shared_metal_buffer_view_for_testing(
     const BackendBuffer& parent, TensorDescriptor descriptor, std::size_t byte_offset
 );

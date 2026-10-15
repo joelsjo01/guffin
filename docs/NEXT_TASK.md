@@ -1,6 +1,6 @@
 # Current state and next work
 
-*Updated October 14, 2026. This file owns the current handoff; completed
+*Updated October 15, 2026. This file owns the current handoff; completed
 experiments belong in the [retrospective](SPECULATIVE_DECODING_RETROSPECTIVE.md)
 and [performance record](PERFORMANCE.md).*
 
@@ -49,16 +49,28 @@ single-pass performance observations, not answer-quality or numerical
 correctness evaluations. Gemma 2 retains its distinct executed-weight policy;
 the speculative comparison retains each engine's own algorithm and defaults.
 
-The October 14 Metal/runtime review found no blocking defect. The resulting
-source fixes preserve shader arithmetic, schedules and precision while aligning
-unknown-token decoding and hardening benchmark resource/receipt handling.
+The source review preserves shader arithmetic, schedules and precision.
 Offline validation checked all **76 receipts / 160 turns per campaign**, answer
 hashes and log references; regenerated JSON/CSV/Markdown/SVG reports were
-byte-identical. Final CI passes **537 registered native cases and 132 Python
-cases**, with 15 existing Python skips and no compiler warnings. Artifact-dependent native
-reference cases retain their availability gates.
-No performance campaign was rerun. The README is unchanged in this
-pass; the next baton below owns its deferred refresh.
+byte-identical. October 15 local CI passes **537 registered native cases and
+132 Python cases**, with 15 existing Python skips and no compiler warnings.
+Artifact-dependent native reference cases retain their availability gates.
+Metal final-buffer initialization now releases failed allocations and drains
+its autorelease pool before propagating callback errors; regression coverage
+observes the actual buffer lifetime rather than device-wide memory totals.
+
+A fresh export of the intended working tree, without cached build products or
+model payloads, builds and installs successfully. The staged optimized binary
+links only system libraries and works outside the checkout. Installed Gemma 2,
+Gemma 3 and H1 two-turn chat, cache reuse, H1 interruption and continuation,
+piped output, one-shot interruption, model errors and uninstall all pass.
+A prefix containing spaces was exercised; the existing global installation was
+preserved. No performance campaign was rerun for these correctness checks.
+The README now presents the final results with a labelled generation chart,
+separate first/follow-up TTFT, architecture and H1 diagrams, supported usage
+and concise comparison limits. Its figures and claims were checked against
+raw campaign counts and current execution code. No performance campaign was
+rerun for the documentation refresh.
 
 ## Remaining numerical boundary
 
@@ -74,24 +86,22 @@ logit/cache gates and were removed. No tolerance was relaxed. Wider-context
 and answer-quality fidelity remain unestablished; lossless H1 preserves the
 configured native target law. See [numerical limits](PERFORMANCE.md#numerical-limits).
 
-## Next baton: refresh the README
+## Release handoff: v0.1.0
 
-**Objective:** at the next user prompt, refresh the README using the three
-final campaigns and the current architecture. The user explicitly deferred
-that edit during the present pass; this review and cleanup are complete.
+**Identity:** the initial release is `v0.1.0` on `main`, with
+[release notes](RELEASE_NOTES.md), an MIT license, the final README and the
+three preserved benchmark campaigns. The repository is `joelsjo01/guffin`;
+its SSH remote and account authentication are verified.
 
-**Constraints:** preserve its explanatory structure; attach every headline to
-its model, mode, suite and measurement boundary. Keep ordinary and speculative
-comparisons distinct, disclose Gemma 2's numerical policy, slower large-prompt
-TTFT and higher reported physical footprint with mapped-weight accounting
-limits, and retain the F16 fidelity limit.
-Do not infer quality correctness from successful conversations. Use the
-retrospective for the longer development story and GRAPH only to locate code.
+**Scope:** keep the release limited to the tested M4 Gemma paths and retain
+the documented numerical boundary. Local correctness and installation checks
+are complete. No further optimization, model support or benchmark rerun is
+requested for this release.
 
-**Verification:** check figures and links against the retained manifests,
-receipts and reports without rerunning inference. Check Markdown/diagram
-rendering and ensure no headline depends on removed development artifacts.
+**Verification:** the October 15 CI and installation checks cover the current
+runtime source. The maintainer authorized publication without waiting for
+GitHub CI; its result must remain unconfirmed until observed. Verify the
+pushed source commit, annotated tag and published GitHub Release separately.
 
-**Stop condition:** the README accurately presents the released engine,
-measured benefits and limitations. New inference optimization, precision
-qualification or model coverage is a separate task.
+**Stop condition:** the release source is on `main`, `v0.1.0` identifies that
+commit, and the GitHub Release is published with the prepared notes.

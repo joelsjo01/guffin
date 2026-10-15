@@ -92,9 +92,9 @@ That lesson kept returning: a plausible answer can survive a numerical or
 state error. Independent equations, discriminating fixtures and explicit
 contracts were needed before the text itself became useful evidence.
 
-*Evidence: the [first layout correction](https://github.com/Coach6/guffin/commit/19751ff),
-[Gemma chat repair](https://github.com/Coach6/guffin/commit/71a989d), and
-[shared block loop](https://github.com/Coach6/guffin/commit/783b496).*
+*Evidence: the [first layout correction](https://github.com/joelsjo01/guffin/commit/19751ff),
+[Gemma chat repair](https://github.com/joelsjo01/guffin/commit/71a989d), and
+[shared block loop](https://github.com/joelsjo01/guffin/commit/783b496).*
 
 ## Ordinary inference set the economics
 
@@ -137,9 +137,9 @@ favorable than sustained streams did. Repeated measurements corrected that
 assumption: two rows were promising, while increasing row count could cross
 into a much less efficient kernel family.
 
-*Evidence: the archived [whole-system opportunity audit](https://github.com/Coach6/guffin/blob/4579c7f/docs/DECODE_RESEARCH_PROGRAM.md#phase-2-local-whole-system-opportunity-audit),
-[sustained kernel investigation](https://github.com/Coach6/guffin/blob/4579c7f/docs/DECODE_RESEARCH_PROGRAM.md#phase-3-decode-pipeline-and-kernel-deep-dive),
-and [completed memory/storage trials](https://github.com/Coach6/guffin/blob/4579c7f/docs/DECODE_ACCELERATION_MASTER_PLAN.md).*
+*Evidence: the archived [whole-system opportunity audit](https://github.com/joelsjo01/guffin/blob/4579c7f/docs/DECODE_RESEARCH_PROGRAM.md#phase-2-local-whole-system-opportunity-audit),
+[sustained kernel investigation](https://github.com/joelsjo01/guffin/blob/4579c7f/docs/DECODE_RESEARCH_PROGRAM.md#phase-3-decode-pipeline-and-kernel-deep-dive),
+and [completed memory/storage trials](https://github.com/joelsjo01/guffin/blob/4579c7f/docs/DECODE_ACCELERATION_MASTER_PLAN.md).*
 
 ## Retrieval was a small win worth keeping
 
@@ -169,8 +169,8 @@ prefill staged new KV privately, performed attention, and published afterward.
 These fixes survived the experiments that found them. The project gained both
 a small speedup and a more trustworthy cache mechanism.
 
-*Evidence: [retained retrieval, transaction and matched comparison](https://github.com/Coach6/guffin/blob/e525bca/docs/NEXT_TASK.md#retained-stage-4-implementation),
-plus the [wrapped-prefill correction](https://github.com/Coach6/guffin/commit/cd49f53).*
+*Evidence: [retained retrieval, transaction and matched comparison](https://github.com/joelsjo01/guffin/blob/e525bca/docs/NEXT_TASK.md#retained-stage-4-implementation),
+plus the [wrapped-prefill correction](https://github.com/joelsjo01/guffin/commit/cd49f53).*
 
 ## Learned heads: first repair the experiment, then judge it
 
@@ -214,8 +214,8 @@ needed to discover the execution-cost problem. Faithful implementation was
 valuable; expanding the surrounding infrastructure before the hardware gate
 paid off was less valuable.
 
-*Evidence: [compact-head repair and replay](https://github.com/Coach6/guffin/blob/e525bca/docs/NEXT_TASK.md#archived-compact-head-result-and-controlled-reopening)
-and the [Stage 5R postmortem](https://github.com/Coach6/guffin/blob/063e6f6/docs/STAGE5R_SPECULATIVE_DECODING_POSTMORTEM.md).*
+*Evidence: [compact-head repair and replay](https://github.com/joelsjo01/guffin/blob/e525bca/docs/NEXT_TASK.md#archived-compact-head-result-and-controlled-reopening)
+and the [Stage 5R postmortem](https://github.com/joelsjo01/guffin/blob/063e6f6/docs/STAGE5R_SPECULATIVE_DECODING_POSTMORTEM.md).*
 
 ## Compressing the output head taught a different lesson
 
@@ -260,7 +260,7 @@ lesson was narrower and more useful: raw-logit reconstruction, tiny-cohort
 memorization and on-conversation improvements were inadequate substitutes for
 held-out proposal behavior under the actual sampler.
 
-*Evidence: [the rank-256 history](https://github.com/Coach6/guffin/blob/e525bca/docs/NEXT_TASK.md),
+*Evidence: [the rank-256 history](https://github.com/joelsjo01/guffin/blob/e525bca/docs/NEXT_TASK.md),
 especially the persistent continuation and prior-anchored diagnostic.*
 
 ## Recurrent and parallel drafts had different outcomes
@@ -307,7 +307,7 @@ substitute was used to claim the intended architecture had failed. This was
 unfinished work with a resource obstacle. Most other families in the large
 research registry also remained planned work, rather than completed experiments.
 
-*Evidence: the archived [training and integration record](https://github.com/Coach6/guffin/blob/4579c7f/docs/NEXT_TASK.md),
+*Evidence: the archived [training and integration record](https://github.com/joelsjo01/guffin/blob/4579c7f/docs/NEXT_TASK.md),
 including “Lossless R-chain implementation checkpoint,” “Arm P implementation
 checkpoint” and the earlier H3 live handoff.*
 
@@ -349,10 +349,10 @@ own speculative baseline. We withdrew that pass before establishing promotion
 over default retrieval. Restoring the preserved baseline
 kept that experiment separate from the next target implementation.
 
-*Evidence: archived [Vicuna implementation](https://github.com/Coach6/guffin/blob/4579c7f/docs/NEXT_TASK.md#native-vicunatli-implementation-and-verification),
-[Gemma 3-to-Gemma 2 integration](https://github.com/Coach6/guffin/blob/4579c7f/docs/NEXT_TASK.md#previous-gemma-3-integration-baton-completed),
-[horizon sweep](https://github.com/Coach6/guffin/blob/4579c7f/docs/NEXT_TASK.md#completed-draft-lengthcalibration-screen-2026-09-19),
-and [withdrawn verifier pass](https://github.com/Coach6/guffin/blob/4579c7f/docs/NEXT_TASK.md#withdrawn-verifier-optimization-historical-contract-and-evidence).*
+*Evidence: archived [Vicuna implementation](https://github.com/joelsjo01/guffin/blob/4579c7f/docs/NEXT_TASK.md#native-vicunatli-implementation-and-verification),
+[Gemma 3-to-Gemma 2 integration](https://github.com/joelsjo01/guffin/blob/4579c7f/docs/NEXT_TASK.md#previous-gemma-3-integration-baton-completed),
+[horizon sweep](https://github.com/joelsjo01/guffin/blob/4579c7f/docs/NEXT_TASK.md#completed-draft-lengthcalibration-screen-2026-09-19),
+and [withdrawn verifier pass](https://github.com/joelsjo01/guffin/blob/4579c7f/docs/NEXT_TASK.md#withdrawn-verifier-optimization-historical-contract-and-evidence).*
 
 ## Gemma 3 required explicit architectural differences
 
@@ -893,7 +893,7 @@ that every independent model oracle ran.
 *Evidence: [idle residency](archive/DEVELOPMENT_HISTORY.md#idle-metal-residency-maintenance-2026-09-29),
 [hosted compatibility fix](archive/DEVELOPMENT_HISTORY.md#hosted-ci-residency-compatibility-fix-2026-10-05),
 [command-buffer diagnosis](archive/DEVELOPMENT_HISTORY.md#september-ci-hang-resolved-locally-2026-10-05),
-and [release architecture cleanup](https://github.com/Coach6/guffin/commit/83aa14d).*
+and [release architecture cleanup](https://github.com/joelsjo01/guffin/commit/83aa14d).*
 
 ## The threads that connect the results
 
@@ -1023,9 +1023,9 @@ story here.
 
 | Period / question | Primary record |
 | --- | --- |
-| June–July: parser, layout, Metal and chat correctness | [Repository history](https://github.com/Coach6/guffin/commits/main/) and the pinned correction commits above |
-| August: ordinary-path cost, retrieval and compact-head investigations | [Research program](https://github.com/Coach6/guffin/blob/4579c7f/docs/DECODE_RESEARCH_PROGRAM.md), [August handoff](https://github.com/Coach6/guffin/blob/e525bca/docs/NEXT_TASK.md), [broad-head postmortem](https://github.com/Coach6/guffin/blob/063e6f6/docs/STAGE5R_SPECULATIVE_DECODING_POSTMORTEM.md) |
-| September: trained R, partial P and standalone drafts for Gemma 2 | [Pre-cleanup research snapshot](https://github.com/Coach6/guffin/blob/4579c7f/docs/NEXT_TASK.md) |
+| June–July: parser, layout, Metal and chat correctness | [Repository history](https://github.com/joelsjo01/guffin/commits/main/) and the pinned correction commits above |
+| August: ordinary-path cost, retrieval and compact-head investigations | [Research program](https://github.com/joelsjo01/guffin/blob/4579c7f/docs/DECODE_RESEARCH_PROGRAM.md), [August handoff](https://github.com/joelsjo01/guffin/blob/e525bca/docs/NEXT_TASK.md), [broad-head postmortem](https://github.com/joelsjo01/guffin/blob/063e6f6/docs/STAGE5R_SPECULATIVE_DECODING_POSTMORTEM.md) |
+| September: trained R, partial P and standalone drafts for Gemma 2 | [Pre-cleanup research snapshot](https://github.com/joelsjo01/guffin/blob/4579c7f/docs/NEXT_TASK.md) |
 | September–October: Gemma 3 implementation, H1/H3, F16, attention and Gemma 2 transfer | [Preserved development history](archive/DEVELOPMENT_HISTORY.md) |
 | Selected chat numbers, clocks and external-reference limits | [Performance evidence](PERFORMANCE.md) and [pinned llama.cpp reference](LLAMA_CPP_REFERENCE_BASELINE.md) |
 | Current probability, cache, numerical and ownership checks | [Sampling tests](../tests/engine/lossless_sampling_tests.cpp), [target tests](../tests/engine/gemma3_target_runtime_tests.cpp), [Metal tests](../tests/tensor/gemma3_metal_tests.cpp), [ownership tests](../tests/engine/gemma2_metal_plan_tests.cpp) |

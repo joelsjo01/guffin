@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<svg role="img" aria-labelledby="chart-title chart-description" xmlns:xlink="http://www.w3.org/1999/xlink" width="792pt" height="360pt" viewBox="0 0 792 360" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <title id="chart-title">Generation throughput in default chat on M4</title>
+ <desc id="chart-description">Guffin and llama.cpp core chat throughput with zero-based bars. Gemma 2 default: 16.76 vs 13.63 tokens/s; Gemma 3 ordinary: 12.57 vs 12.40; speculative defaults: 18.43 vs 8.43. One pass, 32 conversations per engine.</desc>
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:title>Generation throughput in default chat on MacBook Air M4</dc:title>
+    <dc:description>Core suite only: 32 conversations and 64 turns per engine. Guffin/llama.cpp generation tokens per second: Gemma 2 default 16.76/13.63; Gemma 3 ordinary 12.57/12.40; Gemma 3 speculative defaults 18.43/8.43. Rates sum N-1 generation steps and first-to-last selection durations. Raw data and settings: benchmarks/results/gemma2-release-v2, gemma3-normal-release-v2, gemma3-speculative-release. Different sampled answers; single pass; no uncertainty estimate.</dc:description>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.11.2, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 360
+L 792 360
+L 792 0
+L 0 0
+z
+" style="fill: #ffffff"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 205.92 277.2
+L 736.56 277.2
+L 736.56 115.2
+L 205.92 115.2
+z
+" style="fill: #ffffff"/>
+   </g>
+   <g id="line2d_1">
+    <path d="M 205.92 277.2
+L 205.92 115.2
+" clip-path="url(#pabfcc16253)" style="fill: none; stroke: #9da9b3; stroke-width: 1.3; stroke-linecap: square"/>
+   </g>
+   <g id="matplotlib.axis_1">
+    <g id="xtick_1">
+     <g id="line2d_2">
+      <path d="M 205.92 277.2
+L 205.92 115.2
+" clip-path="url(#pabfcc16253)" style="fill: none; stroke: #e0e6eb; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_3"/>
+     <g id="text_1">
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #51606e" x="205.92" y="294.076953" transform="rotate(-0 205.92 294.076953)">0</text>
+     </g>
+    </g>
+    <g id="xtick_2">
+     <g id="line2d_4">
+      <path d="M 333.477692 277.2
+L 333.477692 115.2
+" clip-path="url(#pabfcc16253)" style="fill: none; stroke: #e0e6eb; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_5"/>
+     <g id="text_2">
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #51606e" x="333.477692" y="294.076953" transform="rotate(-0 333.477692 294.076953)">5</text>
+     </g>
+    </g>
+    <g id="xtick_3">
+     <g id="line2d_6">
+      <path d="M 461.035385 277.2
+L 461.035385 115.2
+" clip-path="url(#pabfcc16253)" style="fill: none; stroke: #e0e6eb; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_7"/>
+     <g id="text_3">
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #51606e" x="461.035385" y="294.076953" transform="rotate(-0 461.035385 294.076953)">10</text>
+     </g>
+    </g>
+    <g id="xtick_4">
+     <g id="line2d_8">
+      <path d="M 588.593077 277.2
+L 588.593077 115.2
+" clip-path="url(#pabfcc16253)" style="fill: none; stroke: #e0e6eb; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_9"/>
+     <g id="text_4">
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #51606e" x="588.593077" y="294.076953" transform="rotate(-0 588.593077 294.076953)">15</text>
+     </g>
+    </g>
+    <g id="xtick_5">
+     <g id="line2d_10">
+      <path d="M 716.150769 277.2
+L 716.150769 115.2
+" clip-path="url(#pabfcc16253)" style="fill: none; stroke: #e0e6eb; stroke-width: 0.8; stroke-linecap: square"/>
+     </g>
+     <g id="line2d_11"/>
+     <g id="text_5">
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #51606e" x="716.150769" y="294.076953" transform="rotate(-0 716.150769 294.076953)">20</text>
+     </g>
+    </g>
+    <g id="text_6">
+     <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #334452" x="471.24" y="317.077969" transform="rotate(-0 471.24 317.077969)">Generation tokens/s  ·  higher is faster</text>
+    </g>
+   </g>
+   <g id="matplotlib.axis_2">
+    <g id="ytick_1">
+     <g id="line2d_12"/>
+     <g id="text_7">
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; fill: #17212b" transform="translate(105.830938 139.257604)">Gemma 2 9B</text>
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; fill: #17212b" transform="translate(110.84 154.861159)">Default chat</text>
+     </g>
+    </g>
+    <g id="ytick_2">
+     <g id="line2d_13"/>
+     <g id="text_8">
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; fill: #17212b" transform="translate(97.559688 193.987334)">Gemma 3 12B</text>
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; fill: #17212b" transform="translate(134.461406 209.590889)">Ordinary</text>
+     </g>
+    </g>
+    <g id="ytick_3">
+     <g id="line2d_14"/>
+     <g id="text_9">
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; fill: #17212b" transform="translate(42.372656 248.717064)">Gemma 3 12B + 270M</text>
+      <text style="font-size: 13px; font-family: 'DejaVu Sans'; fill: #17212b" transform="translate(58.403281 264.320618)">Speculative defaults</text>
+     </g>
+    </g>
+   </g>
+   <g id="patch_3">
+    <path d="M 205.92 127.514189
+L 633.581302 127.514189
+L 633.581302 140.102027
+L 205.92 140.102027
+z
+" clip-path="url(#pabfcc16253)" style="fill: #087f8c"/>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #17212b" x="638.683609" y="137.185061" transform="rotate(-0 638.683609 137.185061)">16.76</text>
+   </g>
+   <g id="patch_4">
+    <path d="M 205.92 142.838514
+L 553.525189 142.838514
+L 553.525189 155.426351
+L 205.92 155.426351
+z
+" clip-path="url(#pabfcc16253)" style="fill: #ca5d22"/>
+   </g>
+   <g id="text_11">
+    <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #17212b" x="558.627496" y="152.509386" transform="rotate(-0 558.627496 152.509386)">13.63</text>
+   </g>
+   <g id="patch_5">
+    <path d="M 205.92 182.243919
+L 526.69138 182.243919
+L 526.69138 194.831757
+L 205.92 194.831757
+z
+" clip-path="url(#pabfcc16253)" style="fill: #087f8c"/>
+   </g>
+   <g id="text_12">
+    <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #17212b" x="531.793687" y="191.914791" transform="rotate(-0 531.793687 191.914791)">12.57</text>
+   </g>
+   <g id="patch_6">
+    <path d="M 205.92 197.568243
+L 522.253915 197.568243
+L 522.253915 210.156081
+L 205.92 210.156081
+z
+" clip-path="url(#pabfcc16253)" style="fill: #ca5d22"/>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #17212b" x="527.356222" y="207.239115" transform="rotate(-0 527.356222 207.239115)">12.40</text>
+   </g>
+   <g id="patch_7">
+    <path d="M 205.92 236.973649
+L 676.206918 236.973649
+L 676.206918 249.561486
+L 205.92 249.561486
+z
+" clip-path="url(#pabfcc16253)" style="fill: #087f8c"/>
+   </g>
+   <g id="text_14">
+    <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #17212b" x="681.309225" y="246.644521" transform="rotate(-0 681.309225 246.644521)">18.43</text>
+   </g>
+   <g id="patch_8">
+    <path d="M 205.92 252.297973
+L 420.940898 252.297973
+L 420.940898 264.885811
+L 205.92 264.885811
+z
+" clip-path="url(#pabfcc16253)" style="fill: #ca5d22"/>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #17212b" x="426.043206" y="261.968845" transform="rotate(-0 426.043206 261.968845)">8.43</text>
+   </g>
+  </g>
+  <g id="text_16">
+   <text style="font-weight: 700; font-size: 20px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #17212b" x="43.56" y="25.2" transform="rotate(-0 43.56 25.2)">Generation throughput in default chat</text>
+  </g>
+  <g id="text_17">
+   <text style="font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #51606e" x="43.56" y="45" transform="rotate(-0 43.56 45)">MacBook Air M4 · 16 GiB · 32 MT-Bench conversations / 64 turns per engine</text>
+  </g>
+  <g id="text_18">
+   <text style="font-size: 11px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #51606e" x="43.56" y="327.6" transform="rotate(-0 43.56 327.6)">One pass · default inference settings · sampled answers can differ</text>
+  </g>
+  <g id="text_19">
+   <text style="font-size: 10px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #51606e" x="43.56" y="343.8" transform="rotate(-0 43.56 343.8)">Source: the three final release campaigns, October 2026. Full identities and raw receipts: docs/PERFORMANCE.md.</text>
+  </g>
+  <g id="legend_1">
+   <g id="patch_9">
+    <path d="M 209.7 82.777969
+L 227.9 82.777969
+L 227.9 73.677969
+L 209.7 73.677969
+z
+" style="fill: #087f8c"/>
+   </g>
+   <g id="text_20">
+    <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start" x="238.3" y="82.777969" transform="rotate(-0 238.3 82.777969)">Guffin</text>
+   </g>
+   <g id="patch_10">
+    <path d="M 303.419844 82.777969
+L 321.619844 82.777969
+L 321.619844 73.677969
+L 303.419844 73.677969
+z
+" style="fill: #ca5d22"/>
+   </g>
+   <g id="text_21">
+    <text style="font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: start" x="332.019844" y="82.777969" transform="rotate(-0 332.019844 82.777969)">llama.cpp</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="pabfcc16253">
+   <rect x="205.92" y="115.2" width="530.64" height="162"/>
+  </clipPath>
+ </defs>
+</svg>

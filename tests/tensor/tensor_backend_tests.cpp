@@ -2335,10 +2335,11 @@ void test_initializes_final_metal_storage_and_cleans_up_failure_when_available()
     const auto copied = copy_tensor_from_backend(buffer);
     expect(std::equal(source.bytes().begin(), source.bytes().end(), copied.bytes().begin()),
         "final initialized storage must preserve source bytes");
-    const auto before = metal::current_allocated_size_bytes();
     try {
         static_cast<void>(metal::initialize_metal_backend_buffer(source.descriptor(),
             [](std::span<std::uint8_t> destination) {
+                expect(metal::initialized_metal_buffer_is_alive_for_testing(),
+                    "failed initializer allocation must be observed during the callback");
                 destination[0] = 0xA5U;
                 throw std::runtime_error("intentional initializer failure");
             }));
@@ -2346,7 +2347,8 @@ void test_initializes_final_metal_storage_and_cleans_up_failure_when_available()
     } catch (const std::runtime_error& error) {
         expect(std::string_view(error.what()) == "intentional initializer failure", "initializer error was changed");
     }
-    expect(metal::current_allocated_size_bytes() == before, "failed final initializer must release its allocation");
+    expect(!metal::initialized_metal_buffer_is_alive_for_testing(),
+        "failed final initializer must release its allocation");
 }
 
 void test_metal_construction_and_mapping_report_unavailable_device() {
