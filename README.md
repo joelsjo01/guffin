@@ -116,14 +116,20 @@ H1 recorded essentially unchanged Guffin TTFT and a **0.53 GiB higher observed
 peak footprint** than the ordinary campaign. Core memory measurements below
 are **Guffin / llama.cpp**.
 
-| Core measurements | Peak physical footprint |
-| --- | ---: |
-| Gemma 2 default | 9.15 / 2.58 GiB |
-| Gemma 3 ordinary | 8.62 / 5.06 GiB |
-| Gemma 3 speculative | 9.15 / 4.47 GiB |
+| Core measurements | Peak physical footprint | Peak sampled resident memory (RSS) |
+| --- | ---: | ---: |
+| Gemma 2 default | 9.15 / 2.58 GiB | 10.80 / 8.95 GiB |
+| Gemma 3 ordinary | 8.62 / 5.06 GiB | 11.94 / 11.23 GiB |
+| Gemma 3 speculative | 9.15 / 4.47 GiB | 12.33 / 11.32 GiB |
 
-Guffin's physical footprint is higher. macOS accounts for copied and mapped
-weights differently; reports include separate resident-memory measurements.
+**Resident memory (RSS)** includes model-file pages currently in RAM.
+**Physical footprint** counts memory charged to the process; clean mapped
+pages can occupy RAM without counting toward it.
+[Apple explains the accounting](https://developer.apple.com/videos/play/wwdc2022/10106/).
+llama.cpp maps model weights while Guffin owns more copied buffers, so the
+footprint gap does not mean that much extra RAM use. Guffin's resident peaks
+are still higher in all three campaigns. These are separate observed peaks,
+not simultaneous measurements or direct measures of system memory pressure.
 
 ### Reading and reproducing the results
 
