@@ -95,22 +95,35 @@ result measures that complete default path.
 ### Responsiveness and memory
 
 Internal time to first token (TTFT) ends at the first selected token; it
-excludes model loading, tokenization and terminal transport. First replies and
-follow-ups show conversation-cache reuse. Each cell is **Guffin / llama.cpp**
-on the core suite.
+excludes model loading, tokenization and terminal transport. Core medians
+separate first replies from follow-ups, with 32 observations per engine and
+mode in each panel.
 
-| Core measurements | First-reply median TTFT | Follow-up median TTFT | Peak physical footprint |
-| --- | ---: | ---: | ---: |
-| Gemma 2 default | **0.409 / 0.654 s** | **0.255 / 2.529 s** | 9.15 / 2.58 GiB |
-| Gemma 3 ordinary | **0.612 / 0.803 s** | **0.453 / 1.308 s** | 8.62 / 5.06 GiB |
-| Gemma 3 speculative | **0.613 / 0.808 s** | **0.455 / 1.303 s** | 9.15 / 4.47 GiB |
+![Core median internal TTFT, lower is faster. Gemma 2 follow-ups take 0.255 seconds in Guffin versus 2.529 in llama.cpp; Gemma 3 ordinary takes 0.453 versus 1.308, and speculative takes 0.455 versus 1.303.](docs/assets/chat-ttft.svg)
+
+Core follow-up median TTFT was about **90% lower for Gemma 2** and **65% lower
+for both Gemma 3 modes**. Across all 38 conversations, Guffin has lower TTFT on
+**all 42 follow-ups** in each campaign. Different sampled answers and prefix
+reuse affect the follow-up work.
+
+First-reply wins are **36/38 for Gemma 2** and **24/38 for each Gemma 3 mode**.
+**Large first code/document prompts remain weaker:** Guffin takes **3–24%
+longer** in these cases, with matching prompt token counts across engines.
+
+![Large first-prompt TTFT, lower is faster; all six comparisons favor llama.cpp. Guffin code-review times are 13.683, 20.726 and 20.665 seconds, and document-review times are 34.350, 47.687 and 47.696 seconds for Gemma 2, Gemma 3 ordinary and Gemma 3 speculative respectively.](docs/assets/chat-ttft-long-prompts.svg)
 
 H1 recorded essentially unchanged Guffin TTFT and a **0.53 GiB higher observed
-peak footprint** than the ordinary campaign. Across all 38 conversations,
-Guffin has lower internal TTFT on **all 42 follow-ups** in each campaign; large
-first code/document prompts are slower than llama.cpp. Guffin's physical
-footprint is higher. macOS accounts for copied and mapped weights differently;
-reports include separate resident-memory measurements.
+peak footprint** than the ordinary campaign. Core memory measurements below
+are **Guffin / llama.cpp**.
+
+| Core measurements | Peak physical footprint |
+| --- | ---: |
+| Gemma 2 default | 9.15 / 2.58 GiB |
+| Gemma 3 ordinary | 8.62 / 5.06 GiB |
+| Gemma 3 speculative | 9.15 / 4.47 GiB |
+
+Guffin's physical footprint is higher. macOS accounts for copied and mapped
+weights differently; reports include separate resident-memory measurements.
 
 ### Reading and reproducing the results
 

@@ -66,9 +66,9 @@ Gemma 3 and H1 two-turn chat, cache reuse, H1 interruption and continuation,
 piped output, one-shot interruption, model errors and uninstall all pass.
 A prefix containing spaces was exercised; the existing global installation was
 preserved. No performance campaign was rerun for these correctness checks.
-The README now presents the final results with a labelled generation chart,
-separate first/follow-up TTFT, architecture and H1 diagrams, supported usage
-and concise comparison limits. Its figures and claims were checked against
+The README presents the final results with generation and TTFT charts,
+separate first/follow-up medians and large-prompt weaknesses, architecture and
+H1 diagrams, supported usage and concise comparison limits. Its figures and claims were checked against
 raw campaign counts and current execution code. No performance campaign was
 rerun for the documentation refresh.
 
