@@ -1,6 +1,6 @@
 # Current state and next work
 
-*Updated October 15, 2026. This file owns the current handoff; completed
+*Updated October 16, 2026. This file owns the current handoff; completed
 experiments belong in the [retrospective](SPECULATIVE_DECODING_RETROSPECTIVE.md)
 and [performance record](PERFORMANCE.md).*
 
@@ -32,27 +32,33 @@ Installed chat starts with `guffin -m MODEL`. Gemma 4 remains future work.
 
 ## Release evidence and review
 
-The three retained release campaigns are complete: **38 conversations / 80
-turns per engine**, with no failed, interrupted or unattempted cases. They use
-the same frozen user messages, fresh processes, 300-second launch cooldowns,
-120-second inter-turn pauses and each CLI's inference defaults.
+The four retained campaigns are complete: **38 conversations / 80 turns per
+engine**, with no failed, interrupted or unattempted cases. They use the same
+frozen user messages, fresh processes, 300-second launch cooldowns and
+120-second inter-turn pauses. The original three use each CLI's inference
+defaults; the H1 follow-up overrides only llama.cpp's maximum draft length to
+one with `LLAMA_ARG_SPEC_DRAFT_N_MAX=1`. Both engines' logs confirm H1.
 
 | Campaign | Core generation, Guffin / llama.cpp |
 | --- | ---: |
 | Gemma 2 default | 16.76 / 13.63 t/s |
 | Gemma 3 ordinary | 12.57 / 12.40 t/s |
-| Gemma 3 speculative | 18.43 / 8.43 t/s |
+| Gemma 3 speculative defaults (H1 / H3) | 18.43 / 8.43 t/s |
+| Gemma 3 speculative, both H1 | 18.53 / 13.26 t/s |
 
 [Performance evidence](PERFORMANCE.md) links the committed manifests, receipts,
 logs and reports, and records TTFT, memory and interpretation limits. These are
 single-pass performance observations, not answer-quality or numerical
 correctness evaluations. Gemma 2 retains its distinct executed-weight policy;
-the speculative comparison retains each engine's own algorithm and defaults.
+speculative algorithms remain engine-specific. The H1 follow-up records
+39.75% higher core throughput and 31.24% higher supplementary throughput in
+Guffin. Its binaries, models and corpus match the earlier Gemma 3 campaigns;
+an October 16 offline audit checked all 76 receipts / 160 turns and raw metrics.
 
 The source review preserves shader arithmetic, schedules and precision.
-Offline validation checked all **76 receipts / 160 turns per campaign**, answer
-hashes and log references; regenerated JSON/CSV/Markdown/SVG reports were
-byte-identical. October 15 local CI passes **537 registered native cases and
+Offline validation of the original three campaigns checked all **76 receipts /
+160 turns per campaign**, answer hashes and log references; regenerated
+JSON/CSV/Markdown/SVG reports were byte-identical. October 15 local CI passes **537 registered native cases and
 132 Python cases**, with 15 existing Python skips and no compiler warnings.
 Artifact-dependent native reference cases retain their availability gates.
 Metal final-buffer initialization now releases failed allocations and drains
@@ -68,9 +74,11 @@ A prefix containing spaces was exercised; the existing global installation was
 preserved. No performance campaign was rerun for these correctness checks.
 The README presents the final results with generation and TTFT charts,
 separate first/follow-up medians and large-prompt weaknesses, architecture and
-H1 diagrams, supported usage and concise comparison limits. Its figures and claims were checked against
-raw campaign counts and current execution code. No performance campaign was
-rerun for the documentation refresh.
+H1 diagrams, supported usage and concise comparison limits. The H1-versus-H1
+results and their raw evidence are included alongside the original default
+comparison. Figures and claims were checked against raw campaign counts and
+current execution code. No performance campaign was rerun for the
+documentation refresh.
 
 ## Remaining numerical boundary
 
@@ -90,8 +98,9 @@ configured native target law. See [numerical limits](PERFORMANCE.md#numerical-li
 
 **Identity:** the initial release is `v0.1.0` on `main`, with
 [release notes](RELEASE_NOTES.md), an MIT license, the final README and the
-three preserved benchmark campaigns. The repository is `joelsjo01/guffin`;
-its SSH remote and account authentication are verified.
+three original benchmark campaigns. The later H1 comparison is additional
+published evidence on `main`; the release tag is unchanged. The repository is
+`joelsjo01/guffin`; its SSH remote and account authentication are verified.
 
 **Scope:** keep the release limited to the tested M4 Gemma paths and retain
 the documented numerical boundary. Local correctness and installation checks

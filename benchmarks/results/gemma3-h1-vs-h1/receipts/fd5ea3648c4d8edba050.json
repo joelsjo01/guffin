@@ -1,0 +1,650 @@
+{
+  "schema_version": 1,
+  "campaign_id": "b4e116d0-2943-4696-8263-2208d131fe02",
+  "run_id": "fd5ea3648c4d8edba050",
+  "configuration": {
+    "id": "llama-speculative",
+    "engine": "llama",
+    "mode": "speculative",
+    "model_path": "/Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf",
+    "model_sha256": "7bb69bff3f48a7b642355d64a90e481182a7794707b3133890646b1efa778ff5",
+    "draft_sha256": "0ef57d2c838458a1952664260dcba38e5bdda37494f3af732f06e4add24068e3",
+    "executable": {
+      "path": "/opt/homebrew/Cellar/llama.cpp/0.5.0/bin/llama-cli",
+      "sha256": "9765459b6789303e8f2233796df1778adef17a34d5c2396fd3a92e4ae6264757",
+      "size_bytes": 33600,
+      "version": "version: 0.5.0 (build 11146, commit 7fe450e19)\nbuilt with AppleClang 21.0.0.21000334 for Darwin arm64",
+      "help": "----- common params -----\n\n-h,    --help, --usage                  print usage and exit\n--version                               show version and build info\n-cl,   --cache-list                     show list of models in cache\n--completion-bash                       print source-able bash completion script for llama.cpp\n-t,    --threads N                      number of CPU threads to use during generation (default: -1)\n                                        (env: LLAMA_ARG_THREADS)\n-tb,   --threads-batch N                number of threads to use during batch and prompt processing (default:\n                                        same as --threads)\n-C,    --cpu-mask M                     CPU affinity mask: arbitrarily long hex. Complements cpu-range\n                                        (default: \"\")\n-Cr,   --cpu-range lo-hi                range of CPUs for affinity. Complements --cpu-mask\n--cpu-strict <0|1>                      use strict CPU placement (default: 0)\n--prio N                                set process/thread priority : low(-1), normal(0), medium(1), high(2),\n                                        realtime(3) (default: 0)\n--poll <0...100>                        use polling level to wait for work (0 - no polling, default: 50)\n-Cb,   --cpu-mask-batch M               CPU affinity mask: arbitrarily long hex. Complements cpu-range-batch\n                                        (default: same as --cpu-mask)\n-Crb,  --cpu-range-batch lo-hi          ranges of CPUs for affinity. Complements --cpu-mask-batch\n--cpu-strict-batch <0|1>                use strict CPU placement (default: same as --cpu-strict)\n--prio-batch N                          set process/thread priority : 0-normal, 1-medium, 2-high, 3-realtime\n                                        (default: 0)\n--poll-batch <0|1>                      use polling to wait for work (default: same as --poll)\n-c,    --ctx-size N                     size of the prompt context (default: 0, 0 = loaded from model)\n                                        (env: LLAMA_ARG_CTX_SIZE)\n-n,    --predict, --n-predict N         number of tokens to predict (default: -1, -1 = infinity)\n                                        (env: LLAMA_ARG_N_PREDICT)\n-b,    --batch-size N                   logical maximum batch size (default: 2048)\n                                        (env: LLAMA_ARG_BATCH)\n-ub,   --ubatch-size N                  physical maximum batch size (default: 512)\n                                        (env: LLAMA_ARG_UBATCH)\n--keep N                                number of tokens to keep from the initial prompt (default: 0, -1 =\n                                        all)\n--swa-full                              use full-size SWA cache (default: false)\n                                        [(more\n                                        info)](https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)\n                                        (env: LLAMA_ARG_SWA_FULL)\n-fa,   --flash-attn [on|off|auto]       set Flash Attention use ('on', 'off', or 'auto', default: 'auto')\n                                        (env: LLAMA_ARG_FLASH_ATTN)\n-p,    --prompt PROMPT                  prompt to start generation with; for system message, use -sys\n--perf, --no-perf                       whether to enable internal libllama performance timings (default:\n                                        false)\n                                        (env: LLAMA_ARG_PERF)\n-f,    --file FNAME                     a file containing the prompt (default: none)\n-bf,   --binary-file FNAME              binary file containing the prompt (default: none)\n-e,    --escape, --no-escape            whether to process escapes sequences (\\n, \\r, \\t, \\', \\\", \\\\)\n                                        (default: true)\n--rope-scaling {none,linear,yarn}       RoPE frequency scaling method, defaults to linear unless specified by\n                                        the model\n                                        (env: LLAMA_ARG_ROPE_SCALING_TYPE)\n--rope-scale N                          RoPE context scaling factor, expands context by a factor of N\n                                        (env: LLAMA_ARG_ROPE_SCALE)\n--rope-freq-base N                      RoPE base frequency, used by NTK-aware scaling (default: loaded from\n                                        model)\n                                        (env: LLAMA_ARG_ROPE_FREQ_BASE)\n--rope-freq-scale N                     RoPE frequency scaling factor, expands context by a factor of 1/N\n                                        (env: LLAMA_ARG_ROPE_FREQ_SCALE)\n--yarn-orig-ctx N                       YaRN: original context size of model (default: 0 = model training\n                                        context size)\n                                        (env: LLAMA_ARG_YARN_ORIG_CTX)\n--yarn-ext-factor N                     YaRN: extrapolation mix factor (default: -1.00, 0.0 = full\n                                        interpolation)\n                                        (env: LLAMA_ARG_YARN_EXT_FACTOR)\n--yarn-attn-factor N                    YaRN: scale sqrt(t) or attention magnitude (default: -1.00)\n                                        (env: LLAMA_ARG_YARN_ATTN_FACTOR)\n--yarn-beta-slow N                      YaRN: high correction dim or alpha (default: -1.00)\n                                        (env: LLAMA_ARG_YARN_BETA_SLOW)\n--yarn-beta-fast N                      YaRN: low correction dim or beta (default: -1.00)\n                                        (env: LLAMA_ARG_YARN_BETA_FAST)\n-kvo,  --kv-offload, -nkvo, --no-kv-offload\n                                        whether to enable KV cache offloading (default: enabled)\n                                        (env: LLAMA_ARG_KV_OFFLOAD)\n--repack, -nr, --no-repack              whether to enable weight repacking (default: enabled)\n                                        (env: LLAMA_ARG_REPACK)\n--no-host                               bypass host buffer allowing extra buffers to be used\n                                        (env: LLAMA_ARG_NO_HOST)\n-ctk,  --cache-type-k TYPE              KV cache data type for K\n                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1\n                                        (default: f16)\n                                        (env: LLAMA_ARG_CACHE_TYPE_K)\n-ctv,  --cache-type-v TYPE              KV cache data type for V\n                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1\n                                        (default: f16)\n                                        (env: LLAMA_ARG_CACHE_TYPE_V)\n-dt,   --defrag-thold N                 KV cache defragmentation threshold (DEPRECATED)\n                                        (env: LLAMA_ARG_DEFRAG_THOLD)\n-np,   --parallel N                     number of parallel sequences to decode (default: 1)\n                                        (env: LLAMA_ARG_N_PARALLEL)\n-lm,   --load-mode MODE                 model loading mode (default: auto)\n                                        - auto: mmap, unless a device does not support it\n                                        - none: no special loading mode\n                                        - mmap: memory-map model (if mmap disabled, slower load but may reduce\n                                        pageouts if not using mlock)\n                                        - mlock: force system to keep model in RAM rather than swapping or\n                                        compressing\n                                        - mmap+mlock: mmap + force system to keep model in RAM rather than\n                                        swapping or compressing\n                                        - dio: use DirectIO if available\n                                        \n                                        (env: LLAMA_ARG_LOAD_MODE)\n-lzm,  --lazy-mode MODE                 on-demand reading of certain tensors, for example per-layer embeddings\n                                        (default: auto)\n                                        - on: read the rows of such tensors from disk on demand instead of\n                                        keeping them resident (requires mmap)\n                                        - auto: on, but only for tensors larger than 4 GiB\n                                        - off: always keep them resident\n                                        (env: LLAMA_ARG_LAZY_MODE)\n--numa TYPE                             attempt optimizations that help on some NUMA systems\n                                        - distribute: spread execution evenly over all nodes\n                                        - isolate: only spawn threads on CPUs on the node that execution\n                                        started on\n                                        - numactl: use the CPU map provided by numactl\n                                        if run without this previously, it is recommended to drop the system\n                                        page cache before using this\n                                        see https://github.com/ggml-org/llama.cpp/issues/1437\n                                        (env: LLAMA_ARG_NUMA)\n-dev,  --device <dev1,dev2,..>          comma-separated list of devices to use for offloading (none = don't\n                                        offload)\n                                        use --list-devices to see a list of available devices\n                                        (env: LLAMA_ARG_DEVICE)\n--list-devices                          print list of available devices and exit\n-ot,   --override-tensor <tensor name pattern>=<buffer type>,...\n                                        override tensor buffer type\n                                        (env: LLAMA_ARG_OVERRIDE_TENSOR)\n-cmoe, --cpu-moe                        keep all Mixture of Experts (MoE) weights in the CPU\n                                        (env: LLAMA_ARG_CPU_MOE)\n-ncmoe, --n-cpu-moe N                   keep the Mixture of Experts (MoE) weights of the first N layers in the\n                                        CPU\n                                        (env: LLAMA_ARG_N_CPU_MOE)\n-ncffn, --n-cpu-ffn N                   keep the dense FFN weights of the first N layers in the CPU\n                                        (dense models; for MoE expert weights use --n-cpu-moe)\n                                        (env: LLAMA_ARG_N_CPU_FFN)\n-ngl,  --gpu-layers, --n-gpu-layers N   max. number of layers to store in VRAM, either an exact number,\n                                        'auto', or 'all' (default: auto)\n                                        (env: LLAMA_ARG_N_GPU_LAYERS)\n-sm,   --split-mode {none,layer,row,tensor}\n                                        how to split the model across multiple GPUs, one of:\n                                        - none: use one GPU only\n                                        - layer (default): split layers and KV across GPUs (pipelined)\n                                        - row: split weight across GPUs by rows (parallelized)\n                                        - tensor: split weights and KV across GPUs (parallelized,\n                                        EXPERIMENTAL)\n                                        (env: LLAMA_ARG_SPLIT_MODE)\n-ts,   --tensor-split N0,N1,N2,...      fraction of the model to offload to each GPU, comma-separated list of\n                                        proportions, e.g. 3,1\n                                        (env: LLAMA_ARG_TENSOR_SPLIT)\n-mg,   --main-gpu INDEX                 the GPU to use for the model (with split-mode = none), or for\n                                        intermediate results and KV (with split-mode = row) (default: 0)\n                                        (env: LLAMA_ARG_MAIN_GPU)\n-fit,  --fit [on|off]                   whether to adjust unset arguments to fit in device memory ('on' or\n                                        'off', default: 'on')\n                                        (env: LLAMA_ARG_FIT)\n-fitt, --fit-target MiB0,MiB1,MiB2,...\n                                        target margin per device for --fit, comma-separated list of values,\n                                        single value is broadcast across all devices, default: 1024\n                                        (env: LLAMA_ARG_FIT_TARGET)\n-fitc, --fit-ctx N                      minimum ctx size that can be set by --fit option, default: 4096\n                                        (env: LLAMA_ARG_FIT_CTX)\n--check-tensors                         check model tensor data for invalid values (default: false)\n--override-kv KEY=TYPE:VALUE,...        advanced option to override model metadata by key. to specify multiple\n                                        overrides, either use comma-separated values.\n                                        types: int, float, bool, str. example: --override-kv\n                                        tokenizer.ggml.add_bos_token=bool:false,tokenizer.ggml.add_eos_token=bool:false\n--op-offload, --no-op-offload           whether to offload host tensor operations to device (default: true)\n--lora FNAME                            path to LoRA adapter (use comma-separated values to load multiple\n                                        adapters)\n--lora-scaled FNAME:SCALE,...           path to LoRA adapter with user defined scaling (format:\n                                        FNAME:SCALE,...)\n                                        note: use comma-separated values\n--control-vector FNAME                  add a control vector\n                                        note: use comma-separated values to add multiple control vectors\n--control-vector-scaled FNAME:SCALE,...\n                                        add a control vector with user defined scaling SCALE\n                                        note: use comma-separated values (format: FNAME:SCALE,...)\n--control-vector-layer-range START END\n                                        layer range to apply the control vector(s) to, start and end inclusive\n-m,    --model FNAME                    model path to load\n                                        (env: LLAMA_ARG_MODEL)\n-mu,   --model-url MODEL_URL            model download url (default: unused)\n                                        (env: LLAMA_ARG_MODEL_URL)\n-dr,   --docker-repo [<repo>/]<model>[:quant]\n                                        Docker Hub model repository. repo is optional, default to ai/. quant\n                                        is optional, default to :latest.\n                                        example: gemma3\n                                        (default: unused)\n                                        (env: LLAMA_ARG_DOCKER_REPO)\n-hf,   -hfr, --hf-repo <user>/<model>[:quant]\n                                        Hugging Face model repository; quant is optional, case-insensitive,\n                                        default to Q4_K_M, or falls back to the first file in the repo if\n                                        Q4_K_M doesn't exist.\n                                        mmproj is also downloaded automatically if available. to disable, add\n                                        --no-mmproj\n                                        example: ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M\n                                        (default: unused)\n                                        (env: LLAMA_ARG_HF_REPO)\n-hff,  --hf-file FILE                   Hugging Face model file. If specified, it will override the quant in\n                                        --hf-repo (default: unused)\n                                        (env: LLAMA_ARG_HF_FILE)\n-hft,  --hf-token TOKEN                 Hugging Face access token (default: value from HF_TOKEN environment\n                                        variable)\n                                        (env: HF_TOKEN)\n--log-disable                           Log disable\n--log-file FNAME                        Log to file\n                                        (env: LLAMA_ARG_LOG_FILE)\n--log-jsonl, --no-log-jsonl             Log as JSONL (one JSON object per line) to stdout, this also disables\n                                        colored logging (default: disabled)\n                                        (env: LLAMA_ARG_LOG_JSONL)\n--log-colors [on|off|auto]              Set colored logging ('on', 'off', or 'auto', default: 'auto')\n                                        'auto' enables colors when output is to a terminal\n                                        (env: LLAMA_ARG_LOG_COLORS)\n-v,    --verbose, --log-verbose         Set verbosity level to infinity (i.e. log all messages, useful for\n                                        debugging)\n--offline                               Offline mode: forces use of cache, prevents network access\n                                        (env: LLAMA_ARG_OFFLINE)\n-lv,   --verbosity, --log-verbosity N   Set the verbosity threshold. Messages with a higher verbosity will be\n                                        ignored. Values:\n                                         - 0: generic output\n                                         - 1: error\n                                         - 2: warning\n                                         - 3: info\n                                         - 4: trace (more info)\n                                         - 5: debug\n                                        (default: 1)\n                                        \n                                        (env: LLAMA_ARG_LOG_VERBOSITY)\n--log-prefix, --no-log-prefix           Enable prefix in log messages\n                                        (env: LLAMA_ARG_LOG_PREFIX)\n--log-timestamps, --no-log-timestamps   Enable timestamps in log messages\n                                        (env: LLAMA_ARG_LOG_TIMESTAMPS)\n--spec-draft-type-k, -ctkd, --cache-type-k-draft TYPE\n                                        KV cache data type for K for the draft model\n                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1\n                                        (default: f16)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K)\n--spec-draft-type-v, -ctvd, --cache-type-v-draft TYPE\n                                        KV cache data type for V for the draft model\n                                        allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1\n                                        (default: f16)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V)\n\n\n----- sampling params -----\n\n--samplers SAMPLERS                     samplers that will be used for generation in the order, separated by\n                                        ';'\n                                        (default:\n                                        penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature)\n-s,    --seed SEED                      RNG seed (default: -1, use random seed for -1)\n--sampler-seq, --sampling-seq SEQUENCE\n                                        simplified sequence for samplers that will be used (default:\n                                        edskypmxt)\n--ignore-eos                            ignore end of stream token and continue generating (implies\n                                        --logit-bias EOS-inf)\n--temp, --temperature N                 temperature (default: 0.80)\n                                        (env: LLAMA_ARG_TEMPERATURE)\n--top-k N                               top-k sampling (default: 40, 0 = disabled)\n                                        (env: LLAMA_ARG_TOP_K)\n--top-p N                               top-p sampling (default: 0.95, 1.0 = disabled)\n                                        (env: LLAMA_ARG_TOP_P)\n--min-p N                               min-p sampling (default: 0.05, 0.0 = disabled)\n                                        (env: LLAMA_ARG_MIN_P)\n--top-nsigma, --top-n-sigma N           top-n-sigma sampling (default: -1.00, -1.0 = disabled)\n--xtc-probability N                     xtc probability (default: 0.00, 0.0 = disabled)\n--xtc-threshold N                       xtc threshold (default: 0.10, 1.0 = disabled)\n--typical, --typical-p N                locally typical sampling, parameter p (default: 1.00, 1.0 = disabled)\n--repeat-last-n N                       last n tokens to consider for penalize (default: 64, 0 = disabled)\n--repeat-penalty N                      penalize repeat sequence of tokens (default: 1.00, 1.0 = disabled)\n                                        (env: LLAMA_ARG_REPEAT_PENALTY)\n--presence-penalty N                    repeat alpha presence penalty (default: 0.00, 0.0 = disabled)\n                                        (env: LLAMA_ARG_PRESENCE_PENALTY)\n--frequency-penalty N                   repeat alpha frequency penalty (default: 0.00, 0.0 = disabled)\n                                        (env: LLAMA_ARG_FREQUENCY_PENALTY)\n--dry-multiplier N                      set DRY sampling multiplier (default: 0.00, 0.0 = disabled)\n--dry-base N                            set DRY sampling base value (default: 1.75)\n--dry-allowed-length N                  set allowed length for DRY sampling (default: 2)\n--dry-penalty-last-n N                  set DRY penalty for the last n tokens (default: 64, 0 = disable)\n--dry-sequence-breaker STRING           add sequence breaker for DRY sampling, clearing out default breakers\n                                        ('\\n', ':', '\"', '*') in the process; use \"none\" to not use any\n                                        sequence breakers\n--adaptive-target N                     adaptive-p: select tokens near this probability (valid range 0.0 to\n                                        1.0; negative = disabled) (default: -1.00)\n                                        [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)\n--adaptive-decay N                      adaptive-p: decay rate for target adaptation over time. lower values\n                                        are more reactive, higher values are more stable.\n                                        (valid range 0.0 to 0.99) (default: 0.90)\n--dynatemp-range N                      dynamic temperature range (default: 0.00, 0.0 = disabled)\n--dynatemp-exp N                        dynamic temperature exponent (default: 1.00)\n--mirostat N                            use Mirostat sampling.\n                                        Top K, Nucleus and Locally Typical samplers are ignored if used.\n                                        (default: 0, 0 = disabled, 1 = Mirostat, 2 = Mirostat 2.0)\n--mirostat-lr N                         Mirostat learning rate, parameter eta (default: 0.10)\n--mirostat-ent N                        Mirostat target entropy, parameter tau (default: 5.00)\n-l,    --logit-bias TOKEN_ID(+/-)BIAS   modifies the likelihood of token appearing in the completion,\n                                        i.e. `--logit-bias 15043+1` to increase likelihood of token ' Hello',\n                                        or `--logit-bias 15043-1` to decrease likelihood of token ' Hello'\n--grammar GRAMMAR                       BNF-like grammar to constrain generations (see samples in grammars/\n                                        dir)\n--grammar-file FNAME                    file to read grammar from\n-j,    --json-schema SCHEMA             JSON schema to constrain generations (https://json-schema.org/), e.g.\n                                        `{\"type\": \"object\"}` for any JSON object\n-jf,   --json-schema-file FILE          File containing a JSON schema to constrain generations\n                                        (https://json-schema.org/), e.g. `{\"type\": \"object\"}` for any JSON\n                                        object\n-bs,   --backend-sampling               enable backend sampling (experimental) (default: disabled)\n                                        (env: LLAMA_ARG_BACKEND_SAMPLING)\n\n\n----- speculative params -----\n\n--spec-draft-hf, -hfd, -hfrd, --hf-repo-draft <user>/<model>[:quant]\n                                        Same as --hf-repo, but for the draft model (default: unused)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_HF_REPO)\n--spec-draft-threads, -td, --threads-draft N\n                                        number of threads to use during generation (default: same as\n                                        --threads)\n--spec-draft-threads-batch, -tbd, --threads-batch-draft N\n                                        number of threads to use during batch and prompt processing (default:\n                                        same as --threads-draft)\n--spec-draft-cpu-mask, -Cd, --cpu-mask-draft M\n                                        Draft model CPU affinity mask. Complements cpu-range-draft (default:\n                                        same as --cpu-mask)\n--spec-draft-cpu-range, -Crd, --cpu-range-draft lo-hi\n                                        Ranges of CPUs for affinity. Complements --cpu-mask-draft\n--spec-draft-cpu-strict, --cpu-strict-draft <0|1>\n                                        Use strict CPU placement for draft model (default: same as\n                                        --cpu-strict)\n--spec-draft-prio, --prio-draft N       set draft process/thread priority : 0-normal, 1-medium, 2-high,\n                                        3-realtime (default: 0)\n--spec-draft-poll, --poll-draft <0|1>   Use polling to wait for draft model work (default: same as --poll)\n--spec-draft-cpu-mask-batch, -Cbd, --cpu-mask-batch-draft M\n                                        Draft model CPU affinity mask. Complements cpu-range-draft (default:\n                                        same as --cpu-mask)\n--spec-draft-cpu-strict-batch, --cpu-strict-batch-draft <0|1>\n                                        Use strict CPU placement for draft model (default: --cpu-strict-draft)\n--spec-draft-prio-batch, --prio-batch-draft N\n                                        set draft process/thread priority : 0-normal, 1-medium, 2-high,\n                                        3-realtime (default: 0)\n--spec-draft-poll-batch, --poll-batch-draft <0|1>\n                                        Use polling to wait for draft model work (default: --poll-draft)\n--spec-draft-override-tensor, -otd, --override-tensor-draft <tensor name pattern>=<buffer type>,...\n                                        override tensor buffer type for draft model\n--spec-draft-cpu-moe, -cmoed, --cpu-moe-draft\n                                        keep all Mixture of Experts (MoE) weights in the CPU for the draft\n                                        model\n                                        (env: LLAMA_ARG_SPEC_DRAFT_CPU_MOE)\n--spec-draft-n-cpu-moe, --spec-draft-ncmoe, -ncmoed, --n-cpu-moe-draft N\n                                        keep the Mixture of Experts (MoE) weights of the first N layers in the\n                                        CPU for the draft model\n                                        (env: LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE)\n--spec-draft-n-max N                    number of tokens to draft for speculative decoding (default: 3)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_N_MAX)\n--spec-draft-n-min N                    minimum number of draft tokens to use for speculative decoding\n                                        (default: 0)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_N_MIN)\n--spec-synth-len L                      target mean synthetic acceptance length, including the target token\n                                        (benchmarking only)\n                                        (env: LLAMA_ARG_SPEC_SYNTH_LEN)\n--spec-synth-rates P0,P1,...            comma-separated unconditional per-position synthetic acceptance\n                                        probabilities (benchmarking only)\n                                        (env: LLAMA_ARG_SPEC_SYNTH_RATES)\n--spec-draft-p-split, --draft-p-split P\n                                        speculative decoding split probability (default: 0.10)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_P_SPLIT)\n--spec-draft-p-min, --draft-p-min P     minimum speculative decoding probability (greedy) (default: 0.00)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_P_MIN)\n--spec-draft-backend-sampling, --no-spec-draft-backend-sampling\n                                        offload draft sampling to the backend (default: enabled)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING)\n--spec-draft-device, -devd, --device-draft <dev1,dev2,..>\n                                        comma-separated list of devices to use for offloading the draft model\n                                        (none = don't offload, default: follows --device)\n                                        use --list-devices to see a list of available devices\n--spec-draft-ngl, -ngld, --gpu-layers-draft, --n-gpu-layers-draft N\n                                        max. number of draft model layers to store in VRAM, either an exact\n                                        number, 'auto', or 'all' (default: auto)\n                                        (env: LLAMA_ARG_N_GPU_LAYERS_DRAFT)\n--spec-draft-model, -md, --model-draft FNAME\n                                        draft model for speculative decoding (default: unused)\n                                        (env: LLAMA_ARG_SPEC_DRAFT_MODEL)\n--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,draft-dspark,ngram-simple,ngram-map-k,ngram-map-k4v,ngram-mod,ngram-cache\n                                        comma-separated list of types of speculative decoding to use (default:\n                                        none)\n                                        \n                                        (env: LLAMA_ARG_SPEC_TYPE)\n--spec-ngram-mod-n-min N                minimum number of ngram tokens to use for ngram-based speculative\n                                        decoding (default: 48)\n--spec-ngram-mod-n-max N                maximum number of ngram tokens to use for ngram-based speculative\n                                        decoding (default: 64)\n--spec-ngram-mod-n-match N              ngram-mod lookup length (default: 24)\n--spec-ngram-simple-size-n N            ngram size N for ngram-simple speculative decoding, length of lookup\n                                        n-gram (default: 12)\n--spec-ngram-simple-size-m N            ngram size M for ngram-simple speculative decoding, length of draft\n                                        m-gram (default: 48)\n--spec-ngram-simple-min-hits N          minimum hits for ngram-simple speculative decoding (default: 1)\n--spec-ngram-map-k-size-n N             ngram size N for ngram-map-k speculative decoding, length of lookup\n                                        n-gram (default: 12)\n--spec-ngram-map-k-size-m N             ngram size M for ngram-map-k speculative decoding, length of draft\n                                        m-gram (default: 48)\n--spec-ngram-map-k-min-hits N           minimum hits for ngram-map-k speculative decoding (default: 1)\n--spec-ngram-map-k4v-size-n N           ngram size N for ngram-map-k4v speculative decoding, length of lookup\n                                        n-gram (default: 12)\n--spec-ngram-map-k4v-size-m N           ngram size M for ngram-map-k4v speculative decoding, length of draft\n                                        m-gram (default: 48)\n--spec-ngram-map-k4v-min-hits N         minimum hits for ngram-map-k4v speculative decoding (default: 1)\n--draft, --draft-n, --draft-max N       the argument has been removed. use --spec-draft-n-max or\n                                        --spec-ngram-mod-n-max\n                                        (env: LLAMA_ARG_DRAFT_MAX)\n--draft-min, --draft-n-min N            the argument has been removed. use --spec-draft-n-min or\n                                        --spec-ngram-mod-n-min\n                                        (env: LLAMA_ARG_DRAFT_MIN)\n\n\n----- example-specific params -----\n\n--server-base URL                       connect to this server instead of starting a new one, example:\n                                        'http://localhost:8080' (default: none)\n--verbose-prompt                        print a verbose prompt before generation (default: false)\n--display-prompt, --no-display-prompt   whether to print prompt at generation (default: true)\n-co,   --color [on|off|auto]            Colorize output to distinguish prompt and user input from generations\n                                        ('on', 'off', or 'auto', default: 'auto')\n                                        'auto' enables colors when output is to a terminal\n-ctxcp, --ctx-checkpoints, --swa-checkpoints N\n                                        max number of context checkpoints to create per slot (default:\n                                        32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)\n                                        (env: LLAMA_ARG_CTX_CHECKPOINTS)\n-cram, --cache-ram N                    set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 -\n                                        disable)[(more\n                                        info)](https://github.com/ggml-org/llama.cpp/pull/16391)\n                                        (env: LLAMA_ARG_CACHE_RAM)\n--context-shift, --no-context-shift     whether to use context shift on infinite text generation (default:\n                                        disabled)\n                                        (env: LLAMA_ARG_CONTEXT_SHIFT)\n-sys,  --system-prompt PROMPT           system prompt to use with model (if applicable, depending on chat\n                                        template)\n--show-timings, --no-show-timings       whether to show timing information after each response (default: true)\n                                        (env: LLAMA_ARG_SHOW_TIMINGS)\n-sysf, --system-prompt-file FNAME       a file containing the system prompt (default: none)\n-r,    --reverse-prompt PROMPT          halt generation at PROMPT, return control in interactive mode\n-sp,   --special                        special tokens output enabled (default: false)\n-st,   --single-turn                    run conversation for a single turn only, then exit when done\n                                        will not be interactive if first turn is predefined with --prompt\n                                        (default: false)\n-mli,  --multiline-input                allows you to write or paste multiple lines without ending each in '\\'\n--warmup, --no-warmup                   whether to perform warmup with an empty run (default: enabled)\n-mm,   --mmproj FILE                    path to a multimodal projector file. see tools/mtmd/README.md\n                                        note: if -hf is used, this argument can be omitted\n                                        (env: LLAMA_ARG_MMPROJ)\n-mmu,  --mmproj-url URL                 URL to a multimodal projector file. see tools/mtmd/README.md\n                                        (env: LLAMA_ARG_MMPROJ_URL)\n--mmproj-auto, --no-mmproj, --no-mmproj-auto\n                                        whether to use multimodal projector file (if available), useful when\n                                        using -hf (default: enabled)\n                                        (env: LLAMA_ARG_MMPROJ_AUTO)\n--mmproj-offload, --no-mmproj-offload   whether to enable GPU offloading for multimodal projector (default:\n                                        enabled)\n                                        (env: LLAMA_ARG_MMPROJ_OFFLOAD)\n-mmdev, --mmproj-device DEVICE          device to use for multimodal projector (none = don't offload, default:\n                                        follows --device)\n                                        use --list-devices to see a list of available devices\n                                        (env: MTMD_BACKEND_DEVICE)\n--image, --audio, --video FILE          path to an image, audio, or video file. use with multimodal models,\n                                        use comma-separated values for multiple files\n--image-min-tokens N                    minimum number of tokens each image can take, only used by vision\n                                        models with dynamic resolution (default: read from model)\n                                        (env: LLAMA_ARG_IMAGE_MIN_TOKENS)\n--image-max-tokens N                    maximum number of tokens each image can take, only used by vision\n                                        models with dynamic resolution (default: read from model)\n                                        (env: LLAMA_ARG_IMAGE_MAX_TOKENS)\n--video-fps N                           target video frame rate (default: 4.0)\n                                        (env: LLAMA_ARG_VIDEO_FPS)\n--video-timestamp-interval N            interval in milliseconds between text timestamps (default: 5000)\n                                        (env: LLAMA_ARG_VIDEO_TIMESTAMP_INTERVAL)\n--video-ffmpeg-dir DIR                  path to the directory containing ffmpeg and ffprobe (default: search\n                                        in PATH)\n                                        (env: LLAMA_ARG_VIDEO_FFMPEG_DIR)\n-o,    --output, --output-file FNAME    output file (default: '')\n--chat-template-kwargs STRING           sets additional params for the json template parser, must be a valid\n                                        json object string, e.g. '{\"key1\":\"value1\",\"key2\":\"value2\"}'\n                                        (env: LLAMA_ARG_CHAT_TEMPLATE_KWARGS)\n--jinja, --no-jinja                     whether to use jinja template engine for chat (default: enabled)\n                                        (env: LLAMA_ARG_JINJA)\n--reasoning-format FORMAT               controls whether thought tags are allowed and/or extracted from the\n                                        response, and in which format they're returned; one of:\n                                        - none: leaves thoughts unparsed in `message.content`\n                                        - deepseek: puts thoughts in `message.reasoning_content`\n                                        - deepseek-legacy: keeps `<think>` tags in `message.content` while\n                                        also populating `message.reasoning_content`\n                                        (default: auto)\n                                        (env: LLAMA_ARG_THINK)\n-rea,  --reasoning [on|off|auto]        Use reasoning/thinking in the chat ('on', 'off', or 'auto', default:\n                                        'auto' (detect from template))\n                                        (env: LLAMA_ARG_REASONING)\n--reasoning-effort LEVEL                reasoning effort level given to the chat template: 'default' to keep\n                                        the template default,\n                                        or a level such as 'minimal', 'low', 'medium', 'high', 'xhigh' or\n                                        'max' (default: default)\n                                        (env: LLAMA_ARG_REASONING_EFFORT)\n--reasoning-budget N                    token budget for thinking: -1 for unrestricted, 0 for immediate end,\n                                        N>0 for token budget (default: -1)\n                                        (env: LLAMA_ARG_THINK_BUDGET)\n--reasoning-budget-message MESSAGE      message injected before the end-of-thinking tag when reasoning budget\n                                        is exhausted (default: none)\n                                        (env: LLAMA_ARG_THINK_BUDGET_MESSAGE)\n--reasoning-preserve, --no-reasoning-preserve\n                                        preserve reasoning trace in the full history, not just the last\n                                        assistant message (default: enabled)\n                                        compatible with certain templates having 'supports_preserve_reasoning'\n                                        capability\n                                        example:\n                                        https://docs.z.ai/guides/capabilities/thinking-mode#preserved-thinking\n                                        (env: LLAMA_ARG_REASONING_PRESERVE)\n--chat-template JINJA_TEMPLATE          set custom jinja chat template (default: template taken from model's\n                                        metadata)\n                                        if suffix/prefix are specified, template will be disabled\n                                        only commonly used templates are accepted (unless --jinja is set\n                                        before this flag):\n                                        list of built-in templates:\n                                        bailing, bailing-think, bailing2, chatglm3, chatglm4, chatml,\n                                        command-r, deepseek, deepseek-ocr, deepseek2, deepseek3, exaone-moe,\n                                        exaone3, exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite,\n                                        granite-4.0, granite-4.1, grok-2, hunyuan-dense, hunyuan-moe,\n                                        hunyuan-vl, kimi-k2, llama2, llama2-sys, llama2-sys-bos,\n                                        llama2-sys-strip, llama3, llama4, megrez, minicpm, mistral-v1,\n                                        mistral-v3, mistral-v3-tekken, mistral-v7, mistral-v7-tekken, monarch,\n                                        openchat, orion, pangu-embedded, phi3, phi4, rwkv-world, seed_oss,\n                                        smolvlm, solar-open, vicuna, vicuna-orca, yandex, zephyr\n                                        (env: LLAMA_ARG_CHAT_TEMPLATE)\n--chat-template-file JINJA_TEMPLATE_FILE\n                                        set custom jinja chat template file (default: template taken from\n                                        model's metadata)\n                                        if suffix/prefix are specified, template will be disabled\n                                        only commonly used templates are accepted (unless --jinja is set\n                                        before this flag):\n                                        list of built-in templates:\n                                        bailing, bailing-think, bailing2, chatglm3, chatglm4, chatml,\n                                        command-r, deepseek, deepseek-ocr, deepseek2, deepseek3, exaone-moe,\n                                        exaone3, exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite,\n                                        granite-4.0, granite-4.1, grok-2, hunyuan-dense, hunyuan-moe,\n                                        hunyuan-vl, kimi-k2, llama2, llama2-sys, llama2-sys-bos,\n                                        llama2-sys-strip, llama3, llama4, megrez, minicpm, mistral-v1,\n                                        mistral-v3, mistral-v3-tekken, mistral-v7, mistral-v7-tekken, monarch,\n                                        openchat, orion, pangu-embedded, phi3, phi4, rwkv-world, seed_oss,\n                                        smolvlm, solar-open, vicuna, vicuna-orca, yandex, zephyr\n                                        (env: LLAMA_ARG_CHAT_TEMPLATE_FILE)\n--skip-chat-parsing, --no-skip-chat-parsing\n                                        force a pure content parser, even if a Jinja template is specified;\n                                        model will output everything in the content section, including any\n                                        reasoning and/or tool calls (default: disabled)\n                                        (env: LLAMA_ARG_SKIP_CHAT_PARSING)\n--simple-io                             use basic IO for better compatibility in subprocesses and limited\n                                        consoles\n--log-prompts-dir PATH                  Log prompts to directory (auto-created if not present; only used for\n                                        debugging, default: disabled)\n--gpt-oss-20b-default                   use gpt-oss-20b (note: can download weights from the internet)\n--gpt-oss-120b-default                  use gpt-oss-120b (note: can download weights from the internet)\n--vision-gemma-4b-default               use Gemma 3 4B QAT (note: can download weights from the internet)\n--vision-gemma-12b-default              use Gemma 3 12B QAT (note: can download weights from the internet)\n--spec-default                          enable default speculative decoding config",
+      "linked_libraries": "/opt/homebrew/bin/llama-cli:\n\t@rpath/libllama-cli-impl.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t@rpath/libllama-server-impl.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t@rpath/libmtmd.0.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib (compatibility version 3.0.0, current version 3.0.0)\n\t/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib (compatibility version 3.0.0, current version 3.0.0)\n\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 5026.5.4)\n\t/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61901.120.67)\n\t@rpath/libllama-common.0.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t@rpath/libllama.0.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/ggml/lib/libggml.0.dylib (compatibility version 0.0.0, current version 0.25.3)\n\t/opt/homebrew/opt/ggml/lib/libggml-base.0.dylib (compatibility version 0.0.0, current version 0.25.3)\n\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2100.43.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)",
+      "homebrew_versions": "ggml 0.25.3\nllama.cpp 0.5.0"
+    },
+    "command": [
+      "/opt/homebrew/Cellar/llama.cpp/0.5.0/bin/llama-cli",
+      "-m",
+      "/Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf",
+      "--model-draft",
+      "/Users/joel/Desktop/guffin/models/gemma-3-270m-it-Q8_0.gguf",
+      "--spec-type",
+      "draft-simple",
+      "--log-verbosity",
+      "4"
+    ],
+    "measurement_options": [
+      "--log-verbosity",
+      "4"
+    ]
+  },
+  "case": {
+    "id": "guffin-sustained-design",
+    "category": "planning",
+    "groups": [
+      "sustained"
+    ],
+    "turns": [
+      "Help me design a small offline note-search application in Python using only the standard library. Notes are UTF-8 Markdown files in one folder. Explain a simple architecture for importing files, indexing words, and searching. Keep the answer under 200 words.",
+      "Extend that design to handle changed and deleted notes without rebuilding everything. Explain how you would identify changes and update the index. Keep it under 200 words.",
+      "Now account for a failed import and cancellation halfway through an update. Describe what remains committed and how the next attempt can recover. Keep it under 200 words.",
+      "Write a compact Python function that reads one note as UTF-8 and returns a count of normalized words. Explain its treatment of punctuation and Unicode in at most 100 words.",
+      "Review your function for empty files, repeated words, mixed case, and non-ASCII text. Revise it if needed and show three small input/output examples.",
+      "Create a practical implementation checklist for the full design. Include the three most important correctness tests and one useful performance measurement. Keep it under 200 words."
+    ],
+    "suite": "supplementary",
+    "source_id": "guffin-original",
+    "turns_sha256": "57e135bdc781a0e8513e999db3907f261cb0c2c5b12e8ad69733dee7a0ec7be5"
+  },
+  "status": "complete",
+  "turns": [
+    {
+      "index": 0,
+      "prompt": "Help me design a small offline note-search application in Python using only the standard library. Notes are UTF-8 Markdown files in one folder. Explain a simple architecture for importing files, indexing words, and searching. Keep the answer under 200 words.",
+      "answer": "Okay, here's a design for a simple offline note-search app using Python's standard library:\n\n**Architecture:**\n\n1.  **Import (file_importer.py):**  Reads Markdown files from a designated folder.  Uses `os.listdir()` to get files, `os.path.isfile()` to filter, and opens each with `open(..., 'r', encoding='utf-8')`. Extracts text using a basic Markdown parser (e.g., stripping headers, lists - minimal parsing is fine for simplicity).\n\n2.  **Indexer (indexer.py):** Takes text from `file_importer`.  Splits the text into words using `string.split()`.  Creates an inverted index: a dictionary where keys are words and values are lists of file names containing that word.\n\n3.  **Search (search.py):**  Takes a search query, splits it into words.  Looks up each word in the inverted index.  Returns a list of files containing *all* search terms (intersection of results).\n\n4.  **Main (main.py):**  Loads the inverted index (saved to a file using `pickle` for persistence), handles user input, and uses `search.py`.\n\n\n\n**Standard Library Modules:** `os`, `string`, `open`, `pickle` (for saving the index).  Minimal Markdown parsing can be done with string manipulation.  A simple `set` can be used to remove duplicates from file lists in search results.\n",
+      "answer_sha256": "768384f4889cb5389fcb8b28e183d65f3cd74c5d2711f2783ccaadf7e08e093e",
+      "metrics": {
+        "prompt_tokens": 62,
+        "cached_tokens": 0,
+        "selected_tokens": 316,
+        "generation_steps": 315,
+        "prompt_ns": 815740000,
+        "generation_ns": 24670910000,
+        "internal_ttft_ns": 815740000,
+        "engine_turn_ns": 25486650000,
+        "prompt_tps": 76.00460931179052,
+        "generation_tps": 12.768073816490757,
+        "native_prompt_tps": 76.0,
+        "native_generation_tps": 12.8,
+        "stop_reason": null,
+        "engine": "llama",
+        "native_generation_count_basis": "generation_steps",
+        "native_total_ns": 25486650000,
+        "slot_id": 0,
+        "task_id": 0,
+        "generation_completion_ns": null,
+        "full_turn_ns": null,
+        "first_text_ns": null,
+        "timing_resolution_ns": {
+          "prompt": 10000,
+          "generation": 10000
+        },
+        "total_prompt_tokens": 62,
+        "context_capacity": 43008,
+        "raw_metrics": {
+          "slot_task": [
+            0,
+            0
+          ],
+          "new_prompt": {
+            "context": "43008",
+            "count": "62"
+          },
+          "prompt": {
+            "phase": "prompt eval",
+            "ms": "815.74",
+            "count": "62",
+            "per_token": "13.16",
+            "rate": "76.00"
+          },
+          "generation": {
+            "phase": "eval",
+            "ms": "24670.91",
+            "count": "316",
+            "per_token": "78.32",
+            "rate": "12.77"
+          },
+          "total": {
+            "ms": "25486.65",
+            "count": "378"
+          },
+          "acceptance": {
+            "ratio": "0.56716",
+            "accepted": "114",
+            "proposed": "201",
+            "mean": "1.57"
+          },
+          "rate": {
+            "prompt": "76.0",
+            "generation": "12.8"
+          }
+        },
+        "draft_proposed_tokens": 201,
+        "draft_accepted_tokens": 114,
+        "draft_acceptance": 0.5671641791044776,
+        "native_mean_accepted_length": 1.57,
+        "wall_turn_ns": 25493826334
+      },
+      "memory": {
+        "physical_footprint_bytes": 3699188520,
+        "resident_bytes": 11281760256,
+        "lifetime_peak_physical_footprint_bytes": 3701007144,
+        "pageins": 3274,
+        "peak_physical_footprint_bytes": 3701007144,
+        "peak_rss_bytes": 11281760256,
+        "sample_count": 28,
+        "rss_basis": "maximum sampled resident size",
+        "footprint_basis": "macOS lifetime maximum physical footprint",
+        "error": null
+      },
+      "started_monotonic_ns": 38958818122916,
+      "completed_monotonic_ns": 38984311949250,
+      "inter_turn_idle_ns": null,
+      "terminal_text": "Help me design a small offline note-search application in Python using only the standard library. Notes are UTF-8 Markdown files in one folder. Explain a simple architecture for importing files, indexing words, and searching. Keep the answer under 200 words.\nOkay, here's a design for a simple offline note-search app using Python's standard library:\n\n**Architecture:**\n\n1.  **Import (file_importer.py):**  Reads Markdown files from a designated folder.  Uses `os.listdir()` to get files, `os.path.isfile()` to filter, and opens each with `open(..., 'r', encoding='utf-8')`. Extracts text using a basic Markdown parser (e.g., stripping headers, lists - minimal parsing is fine for simplicity).\n\n2.  **Indexer (indexer.py):** Takes text from `file_importer`.  Splits the text into words using `string.split()`.  Creates an inverted index: a dictionary where keys are words and values are lists of file names containing that word.\n\n3.  **Search (search.py):**  Takes a search query, splits it into words.  Looks up each word in the inverted index.  Returns a list of files containing *all* search terms (intersection of results).\n\n4.  **Main (main.py):**  Loads the inverted index (saved to a file using `pickle` for persistence), handles user input, and uses `search.py`.\n\n\n\n**Standard Library Modules:** `os`, `string`, `open`, `pickle` (for saving the index).  Minimal Markdown parsing can be done with string manipulation.  A simple `set` can be used to remove duplicates from file lists in search results.\n\n[ Prompt: 76.0 t/s | Generation: 12.8 t/s ]\n\n> "
+    },
+    {
+      "index": 1,
+      "prompt": "Extend that design to handle changed and deleted notes without rebuilding everything. Explain how you would identify changes and update the index. Keep it under 200 words.",
+      "answer": "Okay, let's handle changes and deletions incrementally.\n\n**Change Detection & Index Updates:**\n\n1.  **Metadata:** Each note file gets a modification timestamp (mtime) stored alongside its content in the index. `os.stat()` retrieves this.\n\n2.  **Change Identification:** During index loading or a manual refresh, compare current file mtimes to those in the index.\n\n3.  **Update Strategies:**\n    *   **New File:** Add to index, parsing and indexing.\n    *   **Deleted File:** Remove from index.\n    *   **Modified File:** Re-parse the file. Compare the *new* content to the *old* content (e.g., using a simple diff library like `difflib`).  Remove old word entries, add new ones, and update existing word entries in the index.\n\n4.  **Index Persistence:** Save the updated index (including mtimes) with `pickle`.\n\n**Efficiency:**  Full rebuilding remains slow. Incremental updates are faster, but diffing can still be costly for large changes. Periodic full rebuilds could be a fallback for extreme corruption.\n\n\n\nThis avoids re-indexing the entire corpus for minor modifications.\n",
+      "answer_sha256": "f9cdcf20c2a06a0ec05894134f0f0454d539235b4f886711bad63a37ee501f3a",
+      "metrics": {
+        "prompt_tokens": 363,
+        "cached_tokens": 57,
+        "selected_tokens": 251,
+        "generation_steps": 250,
+        "prompt_ns": 3423880000,
+        "generation_ns": 21309950000,
+        "internal_ttft_ns": 3423880000,
+        "engine_turn_ns": 24733830000,
+        "prompt_tps": 106.02007079687372,
+        "generation_tps": 11.73160894324013,
+        "native_prompt_tps": 106.0,
+        "native_generation_tps": 11.7,
+        "stop_reason": null,
+        "engine": "llama",
+        "native_generation_count_basis": "generation_steps",
+        "native_total_ns": 24733820000,
+        "slot_id": 0,
+        "task_id": 205,
+        "generation_completion_ns": null,
+        "full_turn_ns": null,
+        "first_text_ns": null,
+        "timing_resolution_ns": {
+          "prompt": 10000,
+          "generation": 10000
+        },
+        "total_prompt_tokens": 420,
+        "context_capacity": 43008,
+        "raw_metrics": {
+          "slot_task": [
+            0,
+            205
+          ],
+          "new_prompt": {
+            "context": "43008",
+            "count": "420"
+          },
+          "prompt": {
+            "phase": "prompt eval",
+            "ms": "3423.88",
+            "count": "363",
+            "per_token": "9.43",
+            "rate": "106.02"
+          },
+          "generation": {
+            "phase": "eval",
+            "ms": "21309.95",
+            "count": "251",
+            "per_token": "85.24",
+            "rate": "11.73"
+          },
+          "total": {
+            "ms": "24733.82",
+            "count": "614"
+          },
+          "acceptance": {
+            "ratio": "0.46199",
+            "accepted": "79",
+            "proposed": "171",
+            "mean": "1.46"
+          },
+          "rate": {
+            "prompt": "106.0",
+            "generation": "11.7"
+          }
+        },
+        "draft_proposed_tokens": 171,
+        "draft_accepted_tokens": 79,
+        "draft_acceptance": 0.4619883040935672,
+        "native_mean_accepted_length": 1.46,
+        "wall_turn_ns": 24734185666
+      },
+      "memory": {
+        "physical_footprint_bytes": 3998131200,
+        "resident_bytes": 11580555264,
+        "lifetime_peak_physical_footprint_bytes": 4000179200,
+        "pageins": 3274,
+        "peak_physical_footprint_bytes": 4000179200,
+        "peak_rss_bytes": 11580555264,
+        "sample_count": 169,
+        "rss_basis": "maximum sampled resident size",
+        "footprint_basis": "macOS lifetime maximum physical footprint",
+        "error": null
+      },
+      "started_monotonic_ns": 39104324319250,
+      "completed_monotonic_ns": 39129058504916,
+      "inter_turn_idle_ns": 120012370000,
+      "terminal_text": "Extend that design to handle changed and deleted notes without rebuilding everything. Explain how you would identify changes and update the index. Keep it under 200 words.\nOkay, let's handle changes and deletions incrementally.\n\n**Change Detection & Index Updates:**\n\n1.  **Metadata:** Each note file gets a modification timestamp (mtime) stored alongside its content in the index. `os.stat()` retrieves this.\n\n2.  **Change Identification:** During index loading or a manual refresh, compare current file mtimes to those in the index.\n\n3.  **Update Strategies:**\n    *   **New File:** Add to index, parsing and indexing.\n    *   **Deleted File:** Remove from index.\n    *   **Modified File:** Re-parse the file. Compare the *new* content to the *old* content (e.g., using a simple diff library like `difflib`).  Remove old word entries, add new ones, and update existing word entries in the index.\n\n4.  **Index Persistence:** Save the updated index (including mtimes) with `pickle`.\n\n**Efficiency:**  Full rebuilding remains slow. Incremental updates are faster, but diffing can still be costly for large changes. Periodic full rebuilds could be a fallback for extreme corruption.\n\n\n\nThis avoids re-indexing the entire corpus for minor modifications.\n\n[ Prompt: 106.0 t/s | Generation: 11.7 t/s ]\n\n> "
+    },
+    {
+      "index": 2,
+      "prompt": "Now account for a failed import and cancellation halfway through an update. Describe what remains committed and how the next attempt can recover. Keep it under 200 words.",
+      "answer": "Okay, let's handle import/update failures gracefully.\n\n**Failure Resilience:**\n\n1.  **Temporary Index:** During updates, create a *temporary* index file alongside the main one (e.g., `index.temp`). This stores changes as they're made.\n\n2.  **Atomic Swap:** When the update completes successfully, atomically rename `index.temp` to `index` (using `os.rename()`).  This ensures a complete, consistent index.\n\n3.  **Rollback:** If an import/update fails (e.g., due to a `KeyboardInterrupt` or parsing error):\n    *   Delete the `index.temp` file. The original `index` remains untouched.\n    *   The next run will simply reload the original index.\n\n4.  **Partial Updates:** If `index.temp` exists, the next run detects it. It loads both the original and temporary indices. It merges the temporary index's changes into the original, effectively resuming the interrupted update.  The temporary file is then deleted.\n\n\n\nThis approach minimizes data loss and ensures the app returns to a consistent state after a failure.\n",
+      "answer_sha256": "e42af27d3cf3e7c546f8d6b99fa8fe5df5417e3a87f66939670fa5cfb1ac2bff",
+      "metrics": {
+        "prompt_tokens": 299,
+        "cached_tokens": 415,
+        "selected_tokens": 242,
+        "generation_steps": 241,
+        "prompt_ns": 3016750000,
+        "generation_ns": 18972240000,
+        "internal_ttft_ns": 3016750000,
+        "engine_turn_ns": 21988990000,
+        "prompt_tps": 99.1132841634209,
+        "generation_tps": 12.702769941767551,
+        "native_prompt_tps": 99.1,
+        "native_generation_tps": 12.7,
+        "stop_reason": null,
+        "engine": "llama",
+        "native_generation_count_basis": "generation_steps",
+        "native_total_ns": 21988990000,
+        "slot_id": 0,
+        "task_id": 380,
+        "generation_completion_ns": null,
+        "full_turn_ns": null,
+        "first_text_ns": null,
+        "timing_resolution_ns": {
+          "prompt": 10000,
+          "generation": 10000
+        },
+        "total_prompt_tokens": 714,
+        "context_capacity": 43008,
+        "raw_metrics": {
+          "slot_task": [
+            0,
+            380
+          ],
+          "new_prompt": {
+            "context": "43008",
+            "count": "714"
+          },
+          "prompt": {
+            "phase": "prompt eval",
+            "ms": "3016.75",
+            "count": "299",
+            "per_token": "10.09",
+            "rate": "99.11"
+          },
+          "generation": {
+            "phase": "eval",
+            "ms": "18972.24",
+            "count": "242",
+            "per_token": "78.72",
+            "rate": "12.70"
+          },
+          "total": {
+            "ms": "21988.99",
+            "count": "541"
+          },
+          "acceptance": {
+            "ratio": "0.56129",
+            "accepted": "87",
+            "proposed": "155",
+            "mean": "1.56"
+          },
+          "rate": {
+            "prompt": "99.1",
+            "generation": "12.7"
+          }
+        },
+        "draft_proposed_tokens": 155,
+        "draft_accepted_tokens": 87,
+        "draft_acceptance": 0.5612903225806452,
+        "native_mean_accepted_length": 1.56,
+        "wall_turn_ns": 22001343084
+      },
+      "memory": {
+        "physical_footprint_bytes": 4610418120,
+        "resident_bytes": 11578753024,
+        "lifetime_peak_physical_footprint_bytes": 4612466120,
+        "pageins": 3274,
+        "peak_physical_footprint_bytes": 4612466120,
+        "peak_rss_bytes": 11910873088,
+        "sample_count": 307,
+        "rss_basis": "maximum sampled resident size",
+        "footprint_basis": "macOS lifetime maximum physical footprint",
+        "error": null
+      },
+      "started_monotonic_ns": 39249067778541,
+      "completed_monotonic_ns": 39271069121625,
+      "inter_turn_idle_ns": 120009273625,
+      "terminal_text": "Now account for a failed import and cancellation halfway through an update. Describe what remains committed and how the next attempt can recover. Keep it under 200 words.\nOkay, let's handle import/update failures gracefully.\n\n**Failure Resilience:**\n\n1.  **Temporary Index:** During updates, create a *temporary* index file alongside the main one (e.g., `index.temp`). This stores changes as they're made.\n\n2.  **Atomic Swap:** When the update completes successfully, atomically rename `index.temp` to `index` (using `os.rename()`).  This ensures a complete, consistent index.\n\n3.  **Rollback:** If an import/update fails (e.g., due to a `KeyboardInterrupt` or parsing error):\n    *   Delete the `index.temp` file. The original `index` remains untouched.\n    *   The next run will simply reload the original index.\n\n4.  **Partial Updates:** If `index.temp` exists, the next run detects it. It loads both the original and temporary indices. It merges the temporary index's changes into the original, effectively resuming the interrupted update.  The temporary file is then deleted.\n\n\n\nThis approach minimizes data loss and ensures the app returns to a consistent state after a failure.\n\n[ Prompt: 99.1 t/s | Generation: 12.7 t/s ]\n\n> "
+    },
+    {
+      "index": 3,
+      "prompt": "Write a compact Python function that reads one note as UTF-8 and returns a count of normalized words. Explain its treatment of punctuation and Unicode in at most 100 words.",
+      "answer": "```python\nimport string\nimport unicodedata\n\ndef count_normalized_words(filepath):\n    with open(filepath, 'r', encoding='utf-8') as f:\n        text = f.read().lower()\n    text = unicodedata.normalize('NFKD', text)  # Handle Unicode characters\n    text = text.translate(str.maketrans('', '', string.punctuation)) # Remove punctuation\n    words = text.split()\n    return len(words)\n```\n\nThis function reads a UTF-8 file, lowercases it, normalizes Unicode characters for consistent comparison, removes punctuation, splits into words, and returns the word count. Unicode characters are decomposed. Punctuation is stripped using `string.punctuation`.\n",
+      "answer_sha256": "bf406b1517390350f31aa8b7fe8a97fc38c3424be58b29172d2c79dddc79040e",
+      "metrics": {
+        "prompt_tokens": 293,
+        "cached_tokens": 709,
+        "selected_tokens": 159,
+        "generation_steps": 158,
+        "prompt_ns": 3028170000,
+        "generation_ns": 11579860000,
+        "internal_ttft_ns": 3028170000,
+        "engine_turn_ns": 14608030000,
+        "prompt_tps": 96.7581080322439,
+        "generation_tps": 13.644379120300245,
+        "native_prompt_tps": 96.8,
+        "native_generation_tps": 13.6,
+        "stop_reason": null,
+        "engine": "llama",
+        "native_generation_count_basis": "generation_steps",
+        "native_total_ns": 14608040000,
+        "slot_id": 0,
+        "task_id": 539,
+        "generation_completion_ns": null,
+        "full_turn_ns": null,
+        "first_text_ns": null,
+        "timing_resolution_ns": {
+          "prompt": 10000,
+          "generation": 10000
+        },
+        "total_prompt_tokens": 1002,
+        "context_capacity": 43008,
+        "raw_metrics": {
+          "slot_task": [
+            0,
+            539
+          ],
+          "new_prompt": {
+            "context": "43008",
+            "count": "1002"
+          },
+          "prompt": {
+            "phase": "prompt eval",
+            "ms": "3028.17",
+            "count": "293",
+            "per_token": "10.34",
+            "rate": "96.76"
+          },
+          "generation": {
+            "phase": "eval",
+            "ms": "11579.86",
+            "count": "159",
+            "per_token": "73.29",
+            "rate": "13.64"
+          },
+          "total": {
+            "ms": "14608.04",
+            "count": "452"
+          },
+          "acceptance": {
+            "ratio": "0.68085",
+            "accepted": "64",
+            "proposed": "94",
+            "mean": "1.68"
+          },
+          "rate": {
+            "prompt": "96.8",
+            "generation": "13.6"
+          }
+        },
+        "draft_proposed_tokens": 94,
+        "draft_accepted_tokens": 64,
+        "draft_acceptance": 0.6808510638297872,
+        "native_mean_accepted_length": 1.68,
+        "wall_turn_ns": 14626209000
+      },
+      "memory": {
+        "physical_footprint_bytes": 5502625848,
+        "resident_bytes": 11380752384,
+        "lifetime_peak_physical_footprint_bytes": 5510473784,
+        "pageins": 3274,
+        "peak_physical_footprint_bytes": 5510473784,
+        "peak_rss_bytes": 11910873088,
+        "sample_count": 438,
+        "rss_basis": "maximum sampled resident size",
+        "footprint_basis": "macOS lifetime maximum physical footprint",
+        "error": null
+      },
+      "started_monotonic_ns": 39391079383625,
+      "completed_monotonic_ns": 39405705592625,
+      "inter_turn_idle_ns": 120010262000,
+      "terminal_text": "Write a compact Python function that reads one note as UTF-8 and returns a count of normalized words. Explain its treatment of punctuation and Unicode in at most 100 words.\n```python\nimport string\nimport unicodedata\n\ndef count_normalized_words(filepath):\n    with open(filepath, 'r', encoding='utf-8') as f:\n        text = f.read().lower()\n    text = unicodedata.normalize('NFKD', text)  # Handle Unicode characters\n    text = text.translate(str.maketrans('', '', string.punctuation)) # Remove punctuation\n    words = text.split()\n    return len(words)\n```\n\nThis function reads a UTF-8 file, lowercases it, normalizes Unicode characters for consistent comparison, removes punctuation, splits into words, and returns the word count. Unicode characters are decomposed. Punctuation is stripped using `string.punctuation`.\n\n[ Prompt: 96.8 t/s | Generation: 13.6 t/s ]\n\n> "
+    },
+    {
+      "index": 4,
+      "prompt": "Review your function for empty files, repeated words, mixed case, and non-ASCII text. Revise it if needed and show three small input/output examples.",
+      "answer": "Okay, let's review and revise the function, addressing edge cases.\n\n```python\nimport string\nimport unicodedata\nfrom collections import Counter\n\ndef count_normalized_words(filepath):\n    try:\n        with open(filepath, 'r', encoding='utf-8') as f:\n            text = f.read().lower()\n    except FileNotFoundError:\n        return 0  # Handle missing file\n\n    if not text:\n        return 0 #Handle empty file\n\n    text = unicodedata.normalize('NFKD', text)\n    text = text.translate(str.maketrans('', '', string.punctuation))\n    words = text.split()\n    word_counts = Counter(words)  # Count unique words\n    return len(word_counts) #Return count of unique words\n\n```\n\n**Changes:**\n\n*   **File Not Found Handling:** Added a `try...except` block to handle `FileNotFoundError` gracefully.\n*   **Empty File Handling:** Added a check for an empty string after reading.\n*   **Unique Word Counting:** Replaced `len(words)` with `len(Counter(words))` to count *unique* words, addressing repeated words.\n\n**Input/Output Examples:**\n\n1.  **Input:** `test_note.md` (content: \"The quick brown fox. The fox is quick.\")\n    **Output:** 6 (the, quick, brown, fox, is)\n\n2.  **Input:** `empty_note.md` (empty file)\n    **Output:** 0\n\n3.  **Input:** `unicode_note.md` (content: \"你好世界！ Hello World!\")\n    **Output:** 4 (你好, 世界, hello, world)\n\nThe function now correctly handles missing files, empty files, repeated words, mixed case (due to lowercasing), and non-ASCII text (due to UTF-8 encoding and Unicode normalization). It now counts *unique* words.\n",
+      "answer_sha256": "f28883a56f254004caee7822a7ec8d2b08163f9f1517cfc3527c5aa6bfe0d168",
+      "metrics": {
+        "prompt_tokens": 43,
+        "cached_tokens": 1160,
+        "selected_tokens": 426,
+        "generation_steps": 425,
+        "prompt_ns": 1122420000,
+        "generation_ns": 29920130000,
+        "internal_ttft_ns": 1122420000,
+        "engine_turn_ns": 31042550000,
+        "prompt_tps": 38.31008000570196,
+        "generation_tps": 14.204483737203013,
+        "native_prompt_tps": 38.3,
+        "native_generation_tps": 14.2,
+        "stop_reason": null,
+        "engine": "llama",
+        "native_generation_count_basis": "generation_steps",
+        "native_total_ns": 31042540000,
+        "slot_id": 0,
+        "task_id": 637,
+        "generation_completion_ns": null,
+        "full_turn_ns": null,
+        "first_text_ns": null,
+        "timing_resolution_ns": {
+          "prompt": 10000,
+          "generation": 10000
+        },
+        "total_prompt_tokens": 1203,
+        "context_capacity": 43008,
+        "raw_metrics": {
+          "slot_task": [
+            0,
+            637
+          ],
+          "new_prompt": {
+            "context": "43008",
+            "count": "1203"
+          },
+          "prompt": {
+            "phase": "prompt eval",
+            "ms": "1122.42",
+            "count": "43",
+            "per_token": "26.10",
+            "rate": "38.31"
+          },
+          "generation": {
+            "phase": "eval",
+            "ms": "29920.13",
+            "count": "426",
+            "per_token": "70.40",
+            "rate": "14.20"
+          },
+          "total": {
+            "ms": "31042.54",
+            "count": "469"
+          },
+          "acceptance": {
+            "ratio": "0.75620",
+            "accepted": "183",
+            "proposed": "242",
+            "mean": "1.76"
+          },
+          "rate": {
+            "prompt": "38.3",
+            "generation": "14.2"
+          }
+        },
+        "draft_proposed_tokens": 242,
+        "draft_accepted_tokens": 183,
+        "draft_acceptance": 0.756198347107438,
+        "native_mean_accepted_length": 1.76,
+        "wall_turn_ns": 31080320125
+      },
+      "memory": {
+        "physical_footprint_bytes": 6533819192,
+        "resident_bytes": 11498143744,
+        "lifetime_peak_physical_footprint_bytes": 6535736120,
+        "pageins": 3550,
+        "peak_physical_footprint_bytes": 6535736120,
+        "peak_rss_bytes": 11910873088,
+        "sample_count": 585,
+        "rss_basis": "maximum sampled resident size",
+        "footprint_basis": "macOS lifetime maximum physical footprint",
+        "error": null
+      },
+      "started_monotonic_ns": 39525723911375,
+      "completed_monotonic_ns": 39556804231500,
+      "inter_turn_idle_ns": 120018318750,
+      "terminal_text": "Review your function for empty files, repeated words, mixed case, and non-ASCII text. Revise it if needed and show three small input/output examples.\nOkay, let's review and revise the function, addressing edge cases.\n\n```python\nimport string\nimport unicodedata\nfrom collections import Counter\n\ndef count_normalized_words(filepath):\n    try:\n        with open(filepath, 'r', encoding='utf-8') as f:\n            text = f.read().lower()\n    except FileNotFoundError:\n        return 0  # Handle missing file\n\n    if not text:\n        return 0 #Handle empty file\n\n    text = unicodedata.normalize('NFKD', text)\n    text = text.translate(str.maketrans('', '', string.punctuation))\n    words = text.split()\n    word_counts = Counter(words)  # Count unique words\n    return len(word_counts) #Return count of unique words\n\n```\n\n**Changes:**\n\n*   **File Not Found Handling:** Added a `try...except` block to handle `FileNotFoundError` gracefully.\n*   **Empty File Handling:** Added a check for an empty string after reading.\n*   **Unique Word Counting:** Replaced `len(words)` with `len(Counter(words))` to count *unique* words, addressing repeated words.\n\n**Input/Output Examples:**\n\n1.  **Input:** `test_note.md` (content: \"The quick brown fox. The fox is quick.\")\n    **Output:** 6 (the, quick, brown, fox, is)\n\n2.  **Input:** `empty_note.md` (empty file)\n    **Output:** 0\n\n3.  **Input:** `unicode_note.md` (content: \"你好世界！ Hello World!\")\n    **Output:** 4 (你好, 世界, hello, world)\n\nThe function now correctly handles missing files, empty files, repeated words, mixed case (due to lowercasing), and non-ASCII text (due to UTF-8 encoding and Unicode normalization). It now counts *unique* words.\n\n[ Prompt: 38.3 t/s | Generation: 14.2 t/s ]\n\n> "
+    },
+    {
+      "index": 5,
+      "prompt": "Create a practical implementation checklist for the full design. Include the three most important correctness tests and one useful performance measurement. Keep it under 200 words.",
+      "answer": "## Note Search App Implementation Checklist:\n\n**I. Core Functionality:**\n\n*   [ ] File Importer: Reads and extracts text from Markdown files.\n*   [ ] Indexer: Creates an inverted index.\n*   [ ] Search: Retrieves files based on search query.\n*   [ ] Persistence: Loads/saves index using `pickle`.\n*   [ ] Metadata Handling: Tracks file modification times.\n*   [ ] Incremental Updates: Handles changed/deleted notes.\n*   [ ] Failure Resilience: Implements temporary index & atomic swap.\n\n**II. Testing (Crucial):**\n\n1.  **Correctness - Search Accuracy:** Verify search returns correct files for varied queries (positive & negative tests).\n2.  **Correctness - Update Integrity:** Test update/delete/rename scenarios; index reflects changes.\n3.  **Correctness - Unicode Handling:** Ensure non-ASCII characters are indexed and searched correctly.\n\n**III. Performance:**\n\n*   **Measurement:** Measure index creation time for a large (100+) note corpus. Target: < 5 seconds.\n\n\n\n**Notes:** Prioritize correctness tests. Performance is secondary until core functionality is reliable. Consider unit tests for individual modules.\n",
+      "answer_sha256": "736e14a35c63f8ff76965112c42c332fee151850846c10d1a70d65c5bc98b09d",
+      "metrics": {
+        "prompt_tokens": 42,
+        "cached_tokens": 1628,
+        "selected_tokens": 258,
+        "generation_steps": 257,
+        "prompt_ns": 1119650000,
+        "generation_ns": 21673790000,
+        "internal_ttft_ns": 1119650000,
+        "engine_turn_ns": 22793440000,
+        "prompt_tps": 37.51172241325414,
+        "generation_tps": 11.857640034345632,
+        "native_prompt_tps": 37.5,
+        "native_generation_tps": 11.9,
+        "stop_reason": null,
+        "engine": "llama",
+        "native_generation_count_basis": "generation_steps",
+        "native_total_ns": 22793440000,
+        "slot_id": 0,
+        "task_id": 883,
+        "generation_completion_ns": null,
+        "full_turn_ns": null,
+        "first_text_ns": null,
+        "timing_resolution_ns": {
+          "prompt": 10000,
+          "generation": 10000
+        },
+        "total_prompt_tokens": 1670,
+        "context_capacity": 43008,
+        "raw_metrics": {
+          "slot_task": [
+            0,
+            883
+          ],
+          "new_prompt": {
+            "context": "43008",
+            "count": "1670"
+          },
+          "prompt": {
+            "phase": "prompt eval",
+            "ms": "1119.65",
+            "count": "42",
+            "per_token": "26.66",
+            "rate": "37.51"
+          },
+          "generation": {
+            "phase": "eval",
+            "ms": "21673.79",
+            "count": "258",
+            "per_token": "84.33",
+            "rate": "11.86"
+          },
+          "total": {
+            "ms": "22793.44",
+            "count": "300"
+          },
+          "acceptance": {
+            "ratio": "0.46857",
+            "accepted": "82",
+            "proposed": "175",
+            "mean": "1.47"
+          },
+          "rate": {
+            "prompt": "37.5",
+            "generation": "11.9"
+          }
+        },
+        "draft_proposed_tokens": 175,
+        "draft_accepted_tokens": 82,
+        "draft_acceptance": 0.4685714285714286,
+        "native_mean_accepted_length": 1.47,
+        "wall_turn_ns": 22824411083
+      },
+      "memory": {
+        "physical_footprint_bytes": 7565110816,
+        "resident_bytes": 11429298176,
+        "lifetime_peak_physical_footprint_bytes": 7566929440,
+        "pageins": 3554,
+        "peak_physical_footprint_bytes": 7566929440,
+        "peak_rss_bytes": 11910873088,
+        "sample_count": 724,
+        "rss_basis": "maximum sampled resident size",
+        "footprint_basis": "macOS lifetime maximum physical footprint",
+        "error": null
+      },
+      "started_monotonic_ns": 39676821891833,
+      "completed_monotonic_ns": 39699646302916,
+      "inter_turn_idle_ns": 120017660333,
+      "terminal_text": "Create a practical implementation checklist for the full design. Include the three most important correctness tests and one useful performance measurement. Keep it under 200 words.\n## Note Search App Implementation Checklist:\n\n**I. Core Functionality:**\n\n*   [ ] File Importer: Reads and extracts text from Markdown files.\n*   [ ] Indexer: Creates an inverted index.\n*   [ ] Search: Retrieves files based on search query.\n*   [ ] Persistence: Loads/saves index using `pickle`.\n*   [ ] Metadata Handling: Tracks file modification times.\n*   [ ] Incremental Updates: Handles changed/deleted notes.\n*   [ ] Failure Resilience: Implements temporary index & atomic swap.\n\n**II. Testing (Crucial):**\n\n1.  **Correctness - Search Accuracy:** Verify search returns correct files for varied queries (positive & negative tests).\n2.  **Correctness - Update Integrity:** Test update/delete/rename scenarios; index reflects changes.\n3.  **Correctness - Unicode Handling:** Ensure non-ASCII characters are indexed and searched correctly.\n\n**III. Performance:**\n\n*   **Measurement:** Measure index creation time for a large (100+) note corpus. Target: < 5 seconds.\n\n\n\n**Notes:** Prioritize correctness tests. Performance is secondary until core functionality is reliable. Consider unit tests for individual modules.\n\n[ Prompt: 37.5 t/s | Generation: 11.9 t/s ]\n\n> "
+    }
+  ],
+  "started_at": "2026-10-16T05:12:58Z",
+  "logs": {
+    "stdout": "logs/fd5ea3648c4d8edba050.stdout.log",
+    "stderr": "logs/fd5ea3648c4d8edba050.stderr.log"
+  },
+  "system_before": {
+    "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22151267)\t100%; charged; 0:00 remaining present: true",
+    "thermal_report": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+    "swap": "vm.swapusage: total = 3072.00M  used = 2042.00M  free = 1030.00M  (encrypted)",
+    "vm_stat": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                   299126.\nPages active:                                 120286.\nPages inactive:                               447281.\nPages speculative:                             27873.\nPages throttled:                                   0.\nPages wired down:                              99956.\nPages purgeable:                                1363.\n\"Translation faults\":                      101893899.\nPages copy-on-write:                          828062.\nPages zero filled:                          48701980.\nPages reactivated:                          18784516.\nPages purged:                                 638682.\nFile-backed pages:                            518170.\nAnonymous pages:                               77270.\nPages stored in compressor:                   234085.\nPages occupied by compressor:                  14439.\nDecompressions:                              8474523.\nCompressions:                               10639083.\nPageins:                                    20552755.\nPageouts:                                      50561.\nSwapins:                                      171231.\nSwapouts:                                     307424."
+  },
+  "startup_to_ready_ns": 2060771166,
+  "memory": {
+    "peak_physical_footprint_bytes": 7566929440,
+    "peak_rss_bytes": 11910873088,
+    "sample_count": 724,
+    "rss_basis": "maximum sampled resident size",
+    "footprint_basis": "macOS lifetime maximum physical footprint",
+    "error": null
+  },
+  "partial_terminal_text": null,
+  "system_after": {
+    "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22151267)\t100%; charged; 0:00 remaining present: true",
+    "thermal_report": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+    "swap": "vm.swapusage: total = 5120.00M  used = 3867.88M  free = 1252.12M  (encrypted)",
+    "vm_stat": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                   370487.\nPages active:                                  66609.\nPages inactive:                               452857.\nPages speculative:                              6291.\nPages throttled:                                   0.\nPages wired down:                             100091.\nPages purgeable:                                  10.\n\"Translation faults\":                      103571749.\nPages copy-on-write:                          842491.\nPages zero filled:                          49443672.\nPages reactivated:                          19047018.\nPages purged:                                 656418.\nFile-backed pages:                            492754.\nAnonymous pages:                               33003.\nPages stored in compressor:                   252552.\nPages occupied by compressor:                  12593.\nDecompressions:                              8815413.\nCompressions:                               11260854.\nPageins:                                    20662912.\nPageouts:                                      51095.\nSwapins:                                      203889.\nSwapouts:                                     467548."
+  },
+  "finished_at": "2026-10-16T05:25:21Z"
+}

@@ -20,8 +20,9 @@ user messages**. After the final answer, it closes the process before the next
 five-minute wait. These pauses are excluded from native engine timings.
 
 Sampling, seed, context capacity, output limits, GPU placement, draft horizon
-and warmup remain each CLI's defaults. Replies finish under the CLI's own
-stopping policy. Follow-ups include that configuration's preceding answers;
+and warmup remain each CLI's defaults in the default-chat campaigns. The
+separate H1-versus-H1 campaign overrides only llama.cpp's draft horizon.
+Replies finish under the CLI's own stopping policy. Follow-ups include that configuration's preceding answers;
 the user messages match, but generated text, history and token counts can differ.
 This measures ordinary chat experience, not identical token sequences or model
 quality. Gemma 2's default Guffin path includes suffix retrieval and its existing
@@ -75,9 +76,23 @@ Guffin receives `--draft-model FILE`; the release llama-cli receives
 llama.cpp 0.5.0/build 11146 otherwise loads the drafter without activating it.
 Each implementation keeps its own default horizon and speculative algorithm.
 
+To match Guffin's H1, run a separate campaign with llama.cpp's maximum draft
+length set to one:
+
+```sh
+LLAMA_ARG_SPEC_DRAFT_N_MAX=1 caffeinate -i python3 scripts/release_chat_benchmark.py \
+  -m models/gemma-3-12b-it-Q4_K_M.gguf \
+  --draft-model models/gemma-3-270m-it-Q8_0.gguf \
+  -o benchmarks/results/gemma3-h1-local
+```
+
+The manifest records this environment override. Use the same prefix when
+resuming; a changed recorded environment requires a new output directory.
+Horizon matching leaves the algorithms and other inference defaults unchanged.
+
 For Gemma 2, substitute `models/gemma-2-9b-Q4.gguf`, omit the drafter and use
 `benchmarks/results/gemma2-local`. These examples collect new local campaigns
-into ignored directories. The three committed final campaigns are complete;
+into ignored directories. The four committed campaigns are complete;
 preserve their evidence and never use their directories for a fresh run.
 
 Each complete campaign contains two configurations and its waits alone take
@@ -136,8 +151,9 @@ model/binary hashes, CLI versions/help, linked-library identities, corpus and
 measurement-script hashes, hardware, OS, relevant environment and the protocol.
 The reporter writes JSON, CSV, Markdown and standalone SVG charts under
 `report/`. The repository retains exactly the final `gemma2-release-v2`,
-`gemma3-normal-release-v2` and `gemma3-speculative-release` campaign trees,
-including receipts and raw logs. Other generated campaigns remain ignored.
+`gemma3-normal-release-v2`, `gemma3-speculative-release` and `gemma3-h1-vs-h1`
+campaign trees, including receipts and raw logs. Other generated campaigns
+remain ignored.
 
 Headline comparisons and charts use only cases completed by **both** engines
 for the same target, mode and suite. Aggregates sum tokens and durations before
@@ -162,7 +178,7 @@ Reports can also be regenerated offline:
 python3 scripts/release_chat_report.py benchmarks/results/gemma3-normal-release-v2
 ```
 
-The [final results](PERFORMANCE.md#final-release-results) link the three complete
+The [final results](PERFORMANCE.md#final-release-results) link the four complete
 campaigns. Their successful conversations are performance observations, not
 independent numerical or answer-quality qualification. Earlier
 [development findings](PERFORMANCE.md#historical-development-evidence) and the

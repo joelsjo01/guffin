@@ -1,0 +1,61 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Evaluate the following movie reviews on a scale of 1 to 5, with 1 being very negative, 3 being neutral, and 5 being very positive:\\ 
+1. This movie released on Nov. 18, 2019, was phenomenal. The cinematography, the acting, the plot - everything was top-notch.\\ 
+2. Never before have I been so disappointed with a movie. The plot was predictable and the characters were one-dimensional. In my opinion, this movie is the worst one to have been released in 2022.\\ 
+3. The movie was okay. There were some parts I  enjoyed, but there were also parts that felt lackluster. This is a movie that was released in Feb 2018 and seems to be quite ordinary.\\ 
+Return the answer as a JSON array of integers.
+[0m```json
+[5, 1, 3]
+```
+[35m
+[ Prompt: 104.8 t/s | Generation: 16.2 t/s ]
+[0m[1m[32m
+> Update your previous reply by including the release date as part of the JSON content.
+[0m```json
+[
+  {
+    "review": 1,
+    "release_date": "2019-11-18"
+  },
+  {
+    "review": 1,
+    "release_date": "2022"
+  },
+  {
+    "review": 3,
+    "release_date": "2018-02"
+  }
+]
+```
+[35m
+[ Prompt: 55.2 t/s | Generation: 15.6 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

@@ -1,0 +1,56 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> ... Here's the edited paragraph with grammatical corrections:
+
+She didn't remember where her purse was, so I think it's in the car. He says it's on the kitchen table, but he's not sure. Then they asked me to look for it. She said, "Can you?" and I responded with, "Maybe, but I'm not sure." He didn't hear me, and, "What?" he asked, "Did you find it?"
+
+Here's a breakdown of the changes:
+
+*   **"remembre" changed to "remember"**: Corrected the spelling.
+*   **"where is her purse" changed to "where her purse was"**: Corrected verb tense and word order to be grammatically correct.
+*   **"I thinks" changed to "I think"**: Corrected subject-verb agreement.
+*   **"its" changed to "it's"**: Corrected the possessive "its" to the contraction "it is."
+*   **"he's say" changed to "He says"**: Corrected subject-verb agreement and used the present tense.
+*   **"he are not sure" changed to "he's not sure"**: Corrected subject-verb agreement and used the contraction "he is."
+*   **"looking for it" changed to "look for it"**: Corrected the infinitive form.
+*   **"she's say" changed to "She said"**: Corrected subject-verb agreement and changed to past tense.
+*   **"I responds" changed to "I responded"**: Corrected verb tense to past tense to match the narrative.
+*   **"ain't no sure" changed to "I'm not sure"**:  Replaced the informal and grammatically incorrect "ain't" with a more standard phrasing.
+*   **"he not heard me" changed to "He didn't hear me"**: Corrected subject-verb agreement and added the missing auxiliary verb "did."
+*   **Added punctuation**: Added a comma after "and" in the sentence "He didn't hear me, and, 'What?'..."
+*   **"Did you found it?" changed to "Did you find it?"**: Corrected the past participle "found" to the simple past "find".
+
+
+
+The edited paragraph flows more smoothly and adheres to standard grammatical rules.
+[ Prompt: 90.4 t/s | Generation: 20.0 t/s | TTFT: 1.205731 s ]
+[ Detail: Evaluated: 109 | Cached: 0 | Decoded: 513 | Prompt: 1.205731 s | Generation: 25.711850 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":513,"stop_reason":"stop_token","selected_token_hash":"56cdf9267261690e","decoded_tokens":513,"initial_cache_position":0,"final_cache_position":622,"evaluated_prompt_tokens":109,"reused_cache_tokens":0,"decode_wall_ns":25711736872,"gpu_ns":25235641259,"selection_ns":224424,"proposer_ns":0,"generation_completion_ns":25713431666,"full_turn_ns":26919486291,"first_text_ns":1281808166,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":289,"learned_accepted_edges":223,"learned_proposed_edges":289,"learned_numeric_refusals":0,"learned_draft_ns":2454428694,"learned_draft_gpu_ns":2294934756,"learned_target_gpu_ns":22713670796,"learned_cycle_ns":25483103380,"standalone_prefill_ns":152911375,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":115784,"standalone_draft_readback_bytes":65332,"standalone_draft_wall_ns":2607350145,"standalone_draft_gpu_ns":2447039630,"standalone_draft_command_buffer_count":580,"standalone_draft_compute_dispatch_count":110410,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,289,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[289,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[66,223,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[66,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":223,"learned_horizon_limited_cycle_count":222,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":476095613,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1159,"commits":1159,"waits":1159,"compute_encoders":1159,"compute_dispatches":389416,"blit_encoders":0,"barriers":266122,"transient_allocations":0,"selector_dispatches":3190,"max_candidates":40,"compact_readback_bytes":185280,"q4_decode":288,"q8_decode":0,"q8_width_two":0,"q4_small_batch":83232,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":48,"q6_small_batch":14162,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":0,"output_elided_weight_bytes":0,"attention_dispatches":27792,"attention_partitions":59856,"attention_tokens":10227120,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":3815211869262} ]
+> Here's the edited paragraph with grammatical corrections, eliminating gendered pronouns:
+
+They didn't remember where their purse was, so I think it's in the car. They say it's on the kitchen table, but they're not sure. Then they asked me to look for it. They said, "Can you?" and I responded with, "Maybe, but I'm not sure." They didn't hear me, and, "What?" they asked, "Did you find it?"
+
+Here's a breakdown of the changes:
+
+*   **"She didn't remember where is her purse" changed to "They didn't remember where their purse was"**: Replaced "she" and "her" with "they" and "their" to avoid gendered language.
+*   **"I thinks" changed to "I think"**: Corrected subject-verb agreement.
+*   **"its" changed to "it's"**: Corrected the possessive "its" to the contraction "it is."
+*   **"he says" changed to "They say"**: Replaced "he" with "they" to avoid gendered language.
+*   **"he are not sure" changed to "they're not sure"**: Corrected subject-verb agreement and used the contraction "they are."
+*   **"looking for it" changed to "look for it"**: Corrected the infinitive form.
+*   **"she's say" changed to "They said"**: Replaced "she" with "they" and changed to past tense.
+*   **"I responds" changed to "I responded"**: Corrected verb tense to past tense to match the narrative.
+*   **"ain't no sure" changed to "I'm not sure"**: Replaced the informal and grammatically incorrect "ain't" with a more standard phrasing.
+*   **"he not heard me" changed to "They didn't hear me"**: Corrected subject-verb agreement and added the missing auxiliary verb "did."
+*   **Added punctuation**: Added a comma after "and" in the sentence "They didn't hear me, and, 'What?'..."
+*   **"Did you found it?" changed to "Did you find it?"**: Corrected the past participle "found" to the simple past "find".
+
+
+
+The edited paragraph flows more smoothly, adheres to standard grammatical rules, and avoids gendered pronouns.
+[ Prompt: 49.7 t/s | Generation: 20.7 t/s | TTFT: 0.442690 s ]
+[ Detail: Evaluated: 22 | Cached: 622 | Decoded: 528 | Prompt: 0.442690 s | Generation: 25.508113 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":528,"stop_reason":"stop_token","selected_token_hash":"1876792a8b5d64bc","decoded_tokens":528,"initial_cache_position":622,"final_cache_position":1172,"evaluated_prompt_tokens":22,"reused_cache_tokens":622,"decode_wall_ns":25587743461,"gpu_ns":25124337083,"selection_ns":228625,"proposer_ns":0,"generation_completion_ns":25589300583,"full_turn_ns":26035614083,"first_text_ns":524034708,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":280,"learned_accepted_edges":246,"learned_proposed_edges":280,"learned_numeric_refusals":0,"learned_draft_ns":2474950212,"learned_draft_gpu_ns":2319871021,"learned_target_gpu_ns":22609978397,"learned_cycle_ns":25390779665,"standalone_prefill_ns":39325000,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":111976,"standalone_draft_readback_bytes":61864,"standalone_draft_wall_ns":2524000216,"standalone_draft_gpu_ns":2367970271,"standalone_draft_command_buffer_count":562,"standalone_draft_compute_dispatch_count":108352,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,280,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[280,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[34,246,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":246,"learned_horizon_limited_cycle_count":246,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":463406378,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1124,"commits":1124,"waits":1124,"compute_encoders":1124,"compute_dispatches":383471,"blit_encoders":0,"barriers":263534,"transient_allocations":0,"selector_dispatches":3091,"max_candidates":40,"compact_readback_bytes":179520,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":80640,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":13721,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":26976,"attention_partitions":112960,"attention_tokens":24053320,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":3925942002912} ]
+> 

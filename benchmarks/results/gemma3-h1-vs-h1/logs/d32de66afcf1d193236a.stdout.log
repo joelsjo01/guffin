@@ -1,0 +1,48 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> Let $x$ and $y$ be two variables such that
+$x+y = 4z$
+$x \cdot y = 4z^2$
+
+We want to express $x-y$ in terms of $z$.
+We have $(x-y)^2 = (x+y)^2 - 4xy$.
+Substituting the given equations into this expression, we get
+$(x-y)^2 = (4z)^2 - 4(4z^2) = 16z^2 - 16z^2 = 0$.
+Thus, $(x-y)^2 = 0$.
+Taking the square root of both sides, we get $x-y = 0$.
+Therefore, $x-y = 0$.
+
+Alternatively, we can consider $x$ and $y$ as roots of the quadratic equation
+$t^2 - (x+y)t + xy = 0$
+$t^2 - 4zt + 4z^2 = 0$
+The discriminant of this equation is
+$D = (-4z)^2 - 4(1)(4z^2) = 16z^2 - 16z^2 = 0$.
+Since the discriminant is 0, the equation has one real root, which is
+$t = \frac{-(-4z) \pm \sqrt{0}}{2(1)} = \frac{4z}{2} = 2z$.
+Thus, $x = 2z$ and $y = 2z$.
+Therefore, $x-y = 2z - 2z = 0$.
+
+Final Answer: The final answer is $\boxed{0}$
+[ Prompt: 56.3 t/s | Generation: 22.0 t/s | TTFT: 0.585866 s ]
+[ Detail: Evaluated: 33 | Cached: 0 | Decoded: 372 | Prompt: 0.585866 s | Generation: 16.884039 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":372,"stop_reason":"stop_token","selected_token_hash":"f89f7c57f1ac9c3b","decoded_tokens":372,"initial_cache_position":0,"final_cache_position":405,"evaluated_prompt_tokens":33,"reused_cache_tokens":0,"decode_wall_ns":16884053420,"gpu_ns":16543275384,"selection_ns":170003,"proposer_ns":0,"generation_completion_ns":16885544916,"full_turn_ns":17471534791,"first_text_ns":659029166,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":197,"learned_accepted_edges":174,"learned_proposed_edges":197,"learned_numeric_refusals":0,"learned_draft_ns":1632459367,"learned_draft_gpu_ns":1518101622,"learned_target_gpu_ns":14907417638,"learned_cycle_ns":16765228338,"standalone_prefill_ns":45798542,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":78848,"standalone_draft_readback_bytes":44432,"standalone_draft_wall_ns":1678265324,"standalone_draft_gpu_ns":1563549330,"standalone_draft_command_buffer_count":395,"standalone_draft_compute_dispatch_count":75008,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,197,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[197,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[23,174,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[23,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":174,"learned_horizon_limited_cycle_count":173,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":340778036,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":790,"commits":790,"waits":790,"compute_encoders":790,"compute_dispatches":262542,"blit_encoders":0,"barriers":178438,"transient_allocations":0,"selector_dispatches":2178,"max_candidates":40,"compact_readback_bytes":126400,"q4_decode":288,"q8_decode":0,"q8_width_two":0,"q4_small_batch":56736,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":48,"q6_small_batch":9654,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":0,"output_elided_weight_bytes":0,"attention_dispatches":18960,"attention_partitions":26592,"attention_tokens":4159344,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":2766586384728} ]
+> We are given $x+y = 4z$ and $xy = 4z^2$. We have found that $x = 2z$ and $y = 2z$.
+We want to express $z-x$ in terms of $y$.
+Since $x = 2z$ and $y = 2z$, we have $z = \frac{x}{2} = \frac{y}{2}$.
+Then $z-x = \frac{y}{2} - x$.
+Since $x = 2z$, we have $z-x = \frac{y}{2} - 2z$.
+We have $y = 2z$, so $z = \frac{y}{2}$. Then
+$z-x = \frac{y}{2} - 2(\frac{y}{2}) = \frac{y}{2} - y = -\frac{y}{2}$.
+Therefore, $z-x = -\frac{y}{2}$.
+
+Alternatively, we have $z-x = z-2z = -z$.
+Since $y = 2z$, we have $z = \frac{y}{2}$.
+Thus, $z-x = -z = -\frac{y}{2}$.
+
+Final Answer: The final answer is $\boxed{-y/2}$
+[ Prompt: 49.0 t/s | Generation: 21.5 t/s | TTFT: 0.305905 s ]
+[ Detail: Evaluated: 15 | Cached: 405 | Decoded: 290 | Prompt: 0.305905 s | Generation: 13.519625 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":290,"stop_reason":"stop_token","selected_token_hash":"596ea73bdcbd1dcc","decoded_tokens":290,"initial_cache_position":405,"final_cache_position":710,"evaluated_prompt_tokens":15,"reused_cache_tokens":405,"decode_wall_ns":13519647384,"gpu_ns":13250531553,"selection_ns":133999,"proposer_ns":0,"generation_completion_ns":13521109917,"full_turn_ns":13829304875,"first_text_ns":382867500,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":155,"learned_accepted_edges":134,"learned_proposed_edges":155,"learned_numeric_refusals":0,"learned_draft_ns":1340199128,"learned_draft_gpu_ns":1251443710,"learned_target_gpu_ns":11898544136,"learned_cycle_ns":13417625421,"standalone_prefill_ns":27375917,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":61988,"standalone_draft_readback_bytes":34968,"standalone_draft_wall_ns":1367583549,"standalone_draft_gpu_ns":1278353834,"standalone_draft_command_buffer_count":311,"standalone_draft_compute_dispatch_count":59756,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,155,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[155,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[21,134,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[21,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":134,"learned_horizon_limited_cycle_count":133,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":269115831,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":622,"commits":622,"waits":622,"compute_encoders":622,"compute_dispatches":211962,"blit_encoders":0,"barriers":145618,"transient_allocations":0,"selector_dispatches":1716,"max_candidates":40,"compact_readback_bytes":99520,"q4_decode":288,"q8_decode":0,"q8_width_two":0,"q4_small_batch":44640,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":48,"q6_small_batch":7596,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":0,"output_elided_weight_bytes":0,"attention_dispatches":14928,"attention_partitions":50400,"attention_tokens":8450976,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":2156747450460} ]
+> 

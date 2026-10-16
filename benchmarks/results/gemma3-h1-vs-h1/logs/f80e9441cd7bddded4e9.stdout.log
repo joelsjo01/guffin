@@ -1,0 +1,136 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Read the below passage carefully and answer the questions with an explanation:\\ 
+At a small company, parking spaces are reserved for the top executives: CEO, president, vice president, secretary, and treasurer with the spaces lined up in that order. The parking lot guard can tell at a glance if the cars are parked correctly by looking at the color of the cars. The cars are yellow, green, purple, red, and blue, and the executives' names are Alice, Bert, Cheryl, David, and Enid.\\ 
+* The car in the first space is red.\\ 
+* A blue car is parked between the red car and the green car.\\ 
+* The car in the last space is purple.\\ 
+* The secretary drives a yellow car.\\ 
+* Alice's car is parked next to David's.\\ 
+* Enid drives a green car.\\ 
+* Bert's car is parked between Cheryl's and Enid's.\\ 
+* David's car is parked in the last space.\\ 
+Question: What is the name of the secretary?
+[0mOkay, let's break down this logic puzzle step-by-step to determine the name of the secretary. Here's the solution with explanations:
+
+**1. Setting up the Framework**
+
+First, let's create a table representing the parking spaces and the information we have:
+
+| Space | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| Car Color |  |  |  |  |  |
+| Executive Name |  |  |  |  |  |
+| Title | CEO | President | VP | Secretary | Treasurer |
+
+**2. Using the Direct Clues**
+
+*   **Clue 1: The car in the first space is red.**
+    *   We fill that in:
+        | Space | 1 | 2 | 3 | 4 | 5 |
+        |---|---|---|---|---|---|
+        | Car Color | Red |  |  |  |  |
+        | Executive Name |  |  |  |  |  |
+        | Title | CEO | President | VP | Secretary | Treasurer |
+*   **Clue 3: The car in the last space is purple.**
+    *   We fill that in:
+        | Space | 1 | 2 | 3 | 4 | 5 |
+        |---|---|---|---|---|---|
+        | Car Color | Red |  |  |  | Purple |
+        | Executive Name |  |  |  |  |  |
+        | Title | CEO | President | VP | Secretary | Treasurer |
+*   **Clue 6: Enid drives a green car.**
+    *   We don't know *where* the green car is yet, but we know Enid is associated with it.
+*   **Clue 7: Bert's car is parked between Cheryl's and Enid's.**
+    *   This is a critical clue. It means the order *must* be Cheryl - Bert - Enid (or Enid - Bert - Cheryl, but we'll see why that doesn't work later).
+*   **Clue 8: David's car is parked in the last space.**
+    *   This means David is the Treasurer.
+        | Space | 1 | 2 | 3 | 4 | 5 |
+        |---|---|---|---|---|---|
+        | Car Color | Red |  |  |  | Purple |
+        | Executive Name |  |  |  |  | David |
+        | Title | CEO | President | VP | Secretary | Treasurer |
+
+**3. Combining Clues**
+
+*   **Clue 2: A blue car is parked between the red car and the green car.**
+    *   This tells us the order is Red - Blue - Green.  Since the red car is in space 1, the blue car must be in space 2, and the green car in space 3.
+        | Space | 1 | 2 | 3 | 4 | 5 |
+        |---|---|---|---|---|---|
+        | Car Color | Red | Blue | Green |  | Purple |
+        | Executive Name |  |  |  |  | David |
+        | Title | CEO | President | VP | Secretary | Treasurer |
+*   **Clue 6: Enid drives a green car.**
+    *   Since the green car is in space 3, Enid must be in space 3.
+        | Space | 1 | 2 | 3 | 4 | 5 |
+        |---|---|---|---|---|---|
+        | Car Color | Red | Blue | Green |  | Purple |
+        | Executive Name |  |  | Enid |  | David |
+        | Title | CEO | President | VP | Secretary | Treasurer |
+*   **Clue 7: Bert's car is parked between Cheryl's and Enid's.**
+    *   Since Enid is in space 3, and Bert's car is between Cheryl's and Enid's, the order must be Cheryl - Bert - Enid. This means Cheryl is in space 2 and Bert is in space 1.
+        | Space | 1 | 2 | 3 | 4 | 5 |
+        |---|---|---|---|---|---|
+        | Car Color | Red | Blue | Green |  | Purple |
+        | Executive Name | Bert | Cheryl | Enid |  | David |
+        | Title | CEO | President | VP | Secretary | Treasurer |
+*   **Clue 4: The secretary drives a yellow car.**
+    *   Since the only remaining car color is yellow, and space is 4, the secretary must be in space 4, and drive the yellow car.
+        | Space | 1 | 2 | 3 | 4 | 5 |
+        |---|---|---|---|---|---|
+        | Car Color | Red | Blue | Green | Yellow | Purple |
+        | Executive Name | Bert | Cheryl | Enid |  | David |
+        | Title | CEO | President | VP | Secretary | Treasurer |
+*   **Clue 5: Alice's car is parked next to David's.**
+    *   Since David's car is in space 5, Alice's car must be in space 4.
+        | Space | 1 | 2 | 3 | 4 | 5 |
+        |---|---|---|---|---|---|
+        | Car Color | Red | Blue | Green | Yellow | Purple |
+        | Executive Name | Bert | Cheryl | Enid | Alice | David |
+        | Title | CEO | President | VP | Secretary | Treasurer |
+
+**4. Final Answer**
+
+Since the person in space 4 is the Secretary, and Alice is in space 4, **Alice is the secretary.**
+[35m
+[ Prompt: 111.2 t/s | Generation: 15.1 t/s ]
+[0m[1m[32m
+> List car colors in order from last to first.
+[0mOkay, based on the solved puzzle, here's the list of car colors in order from last to first:
+
+1.  Purple
+2.  Yellow
+3.  Green
+4.  Blue
+5.  Red
+[35m
+[ Prompt: 23.9 t/s | Generation: 14.4 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

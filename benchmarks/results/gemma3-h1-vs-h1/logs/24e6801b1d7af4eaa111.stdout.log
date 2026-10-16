@@ -1,0 +1,85 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/- 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Could you write a captivating short story beginning with the sentence: The old abandoned house at the end of the street held a secret that no one had ever discovered.
+[0mThe old abandoned house at the end of the street held a secret that no one had ever discovered. It wasn't a secret of murder or madness, though those rumors had swirled for generations. It was something quieter, something woven into the very fabric of the peeling wallpaper and the overgrown rose bushes that clawed at the porch. Everyone in Willow Creek knew the Blackwood house was cursed, left to rot after old Silas Blackwood vanished without a trace a century ago. But the curse wasn't a malevolent one; it was a stillness, a suspension of time.
+
+Elara, a budding historian with a penchant for forgotten things, didn’t believe in curses. She believed in dust, in faded photographs, in the echoes of lives lived. She’d inherited her grandmother’s fascination with the Blackwood house and, against the stern warnings of her parents, had begun to research its history. 
+
+One rainy afternoon, armed with a crowbar and a flashlight, Elara slipped past the rusted gate. The air inside felt thick, heavy with the scent of damp earth and something else… lavender? She cautiously navigated the shadowed rooms, each one frozen in a moment of a life interrupted. A half-finished game of chess sat on a table, a needle still threaded on a sewing machine, a plate with a single, dried plum on the kitchen counter.
+
+Then, in the back parlor, she found it. 
+
+Behind a loose section of wallpaper, nestled within a hidden alcove, was a greenhouse. Not a crumbling, dilapidated one, but a vibrant, flourishing paradise. Orchids bloomed in impossible colors, roses dripped with dew, and the air hummed with the buzz of bees. Sunlight, impossibly, streamed through the glass roof, illuminating a woman tending to a delicate vine.
+
+The woman turned, her face young, vibrant, and utterly shocked to see Elara. “You… you shouldn't be here,” she whispered, her voice like the chime of distant bells.
+
+Elara, speechless, could only point. "How… how is this possible?"
+
+The woman smiled sadly. “Silas… he was a botanist, a dreamer. He discovered a way to manipulate time within this greenhouse, to create a pocket of perpetual spring. He wanted to share beauty with the world, but… fear, gossip… they drove him away. He stepped into the greenhouse, intending to return, but the magic… it bound him. He’s still here, you see, tending to his flowers, unaware of the century that’s passed."
+
+Elara’s mind reeled. Silas wasn't missing; he was trapped in a beautiful, botanical prison.
+
+"But why didn't anyone notice?" Elara asked.
+
+"The magic extends beyond the greenhouse," the woman explained, gesturing to the house. “It suspends time, slows it down. To those outside, the Blackwood house simply appears abandoned, cursed. No one suspects the truth.”
+
+Elara understood then. The curse wasn't meant to keep people away; it was meant to protect Silas and his sanctuary. It was a veil of stillness, a silent agreement.
+
+"Can I… can I see him?" Elara asked, her voice trembling with awe.
+
+The woman nodded, leading her deeper into the greenhouse. And there, amongst the riot of color and fragrance, Elara saw him. An older man, with kind eyes and the gentle hands of a gardener, humming softly as he pruned a rosebush. He didn't notice her, lost in the timeless beauty of his creation. 
+
+Elara left the Blackwood house that day, not with a tale of ghosts or curses, but with the knowledge of a secret far more extraordinary. She vowed to protect it, to preserve the stillness, the silence, the beauty. Because sometimes, the greatest secrets aren't meant to be unearthed, but cherished, guarded, and left to bloom in their own timeless sanctuary. And the old abandoned house at the end of the street continued to hold its secret, safe within its walls, a pocket of perpetual spring, waiting for the world to forget it existed.
+
+
+
+[35m
+[ Prompt: 51.4 t/s | Generation: 12.9 t/s ]
+[0m[1m[32m
+> Now, do the same task again but only use four-word sentences.
+[0mThe old house held secrets. No one ever found them. Rumors whispered of curses. Willow Creek feared the Blackwood house.
+
+Elara loved forgotten things. She researched Blackwood history. Parents warned her strongly. She ignored their cautions.
+
+Rain fell that afternoon. She pried open the gate. The air felt heavy now. Lavender lingered faintly. Rooms froze moments lost. Chess game, unfinished still. Sewing needle, thread remained. A single plum dried.
+
+She found a hidden alcove. A vibrant greenhouse bloomed. Orchids glowed with color. Bees buzzed softly there. Sunlight streamed brightly in. A woman tended vines.
+
+She looked at Elara shocked. “You shouldn’t be here.” Her voice chimed sweetly. Silas dreamed of beauty. He built a time pocket. Fear drove him away. He stepped inside, lost.
+
+"How is this possible?" Elara asked softly. The magic bound him fast. It slowed all outside time. They thought the house cursed. No one suspected truth.
+
+"Can I see him now?" Elara’s voice shook gently. She nodded, leading onward. He tended roses calmly. He hummed a quiet tune. He didn’t see her then. 
+
+Elara left quietly that day. She knew a secret now. She would protect it well. The house held stillness still. A timeless spring bloomed there. The house held its secret.
+[35m
+[ Prompt: 116.2 t/s | Generation: 12.2 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

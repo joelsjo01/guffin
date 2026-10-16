@@ -1,8 +1,9 @@
 # Performance evidence
 
-The final release record consists of three default-chat campaigns on a
-**16 GiB MacBook Air M4** (`Mac16,12`), macOS **26.6.2 (25G83)**. Each completed
-38 conversations / 80 turns per engine with no failures, interruptions,
+The record contains three original default-chat campaigns and a later Gemma 3
+H1-versus-H1 comparison on a **16 GiB MacBook Air M4** (`Mac16,12`), macOS
+**26.6.2 (25G83)**. Each completed 38 conversations / 80 turns per engine with
+no failures, interruptions,
 unattempted cases or reported memory-collection errors. The retained evidence
 includes manifests, atomic receipts, raw logs, reports and standalone charts.
 
@@ -20,20 +21,32 @@ and sustained discussion; their 16 turns remain a separate suite.
 | --- | ---: | ---: | ---: | ---: |
 | Gemma 2 9B default | 16.76 / 13.63 t/s | 1.23× | 15.40 / 12.64 t/s | 1.22× |
 | Gemma 3 12B ordinary | 12.57 / 12.40 t/s | 1.01× | 12.62 / 12.51 t/s | 1.01× |
-| Gemma 3 12B speculative | 18.43 / 8.43 t/s | 2.19× | 16.63 / 7.81 t/s | 2.13× |
+| Gemma 3 12B speculative defaults (H1 / H3) | 18.43 / 8.43 t/s | 2.19× | 16.63 / 7.81 t/s | 2.13× |
+| Gemma 3 12B speculative, both H1 | 18.53 / 13.26 t/s | 1.40× | 16.99 / 12.94 t/s | 1.31× |
 
 Rates are summed generation steps divided by summed generation durations over
 jointly complete cases. All planned cases qualify in these campaigns. The
 ordinary Gemma 3 difference is small (**1.40%** on the core); one pass does not
-demonstrate a stable lead. The speculative comparison uses the same 270M
-drafter checkpoint but each engine's own speculative algorithm and defaults.
-Guffin's H1 lossless path is compared with llama.cpp's `draft-simple` path.
+demonstrate a stable lead. The speculative comparisons use the same 270M
+drafter checkpoint. Guffin's H1 lossless path is compared with llama.cpp's
+`draft-simple` path, first at default horizons, then with both using H1.
 
-The same Guffin binary appears in both Gemma 3 campaigns. Its core speculative
-rate is 46.61% higher than its ordinary rate; llama.cpp's speculative rate is
+The same Guffin binary appears in all three Gemma 3 campaigns. In the original
+default campaigns, its core speculative rate is 46.61% higher than its ordinary rate; llama.cpp's speculative rate is
 32.03% lower than its ordinary rate. Those are cross-campaign observations on
 different natural responses and histories, not identical-work speedups or a
 general finding about the engines' other speculative configurations.
+
+The H1 follow-up sets `LLAMA_ARG_SPEC_DRAFT_N_MAX=1` for llama.cpp; Guffin
+already defaults to H1. All 38 llama.cpp logs confirm `n_max=1`, and all 80
+Guffin turn diagnostics confirm horizon 1, full verification and lossless
+sampling. Core generation is **39.75% higher in Guffin**, supplementary
+**31.24% higher**, with conversation-level throughput wins in all 38 cases.
+llama.cpp's core rate is **57.34% higher** than in its H3 default campaign;
+Guffin's differs by **+0.53%** from its earlier H1 campaign. The binaries,
+models and corpus match the earlier campaigns. Horizon is matched, while
+algorithms and other defaults remain engine-specific: context allocations
+are 16,384 tokens for Guffin and 43,008 for llama.cpp.
 
 ### Latency and memory
 
@@ -41,13 +54,18 @@ general finding about the engines' other speculative configurations.
 | --- | ---: | ---: | ---: |
 | Gemma 2 default | 399.82 / 1,179.89 ms | 9.15 / 2.58 GiB | 9.17 / 5.49 GiB |
 | Gemma 3 ordinary | 597.63 / 966.35 ms | 8.62 / 5.06 GiB | 8.62 / 7.26 GiB |
-| Gemma 3 speculative | 597.94 / 1,020.54 ms | 9.15 / 4.47 GiB | 9.16 / 7.10 GiB |
+| Gemma 3 speculative defaults (H1 / H3) | 597.94 / 1,020.54 ms | 9.15 / 4.47 GiB | 9.16 / 7.10 GiB |
+| Gemma 3 speculative, both H1 | 592.95 / 931.52 ms | 9.15 / 4.47 GiB | 9.15 / 7.05 GiB |
 
 Guffin has lower internal TTFT on all 42 follow-ups in each campaign. The
 engines reuse different amounts of prefix work and generate different first
 answers, so those wins do not isolate a prompt-kernel advantage. All 38 first
 prompt token counts match within each campaign. Guffin wins first-turn TTFT on
-36/38 Gemma 2 cases and 24/38 cases in each Gemma 3 mode.
+36/38 Gemma 2 cases, 24/38 in the original Gemma 3 campaigns and 25/38 in
+the H1-versus-H1 campaign. In that last campaign, core first-reply medians
+are 0.613 / 0.811 seconds and follow-up medians are 0.454 / 1.304 seconds
+(Guffin / llama.cpp; 32 observations per median). Core peak sampled RSS is
+12.29 / 11.30 GiB.
 
 Large first prompts remain slower in Guffin:
 
@@ -55,7 +73,8 @@ Large first prompts remain slower in Guffin:
 | --- | ---: | ---: |
 | Gemma 2 default | 13.683 / 13.295 s | 34.350 / 31.953 s |
 | Gemma 3 ordinary | 20.726 / 17.092 s | 47.687 / 38.603 s |
-| Gemma 3 speculative | 20.665 / 17.805 s | 47.696 / 39.124 s |
+| Gemma 3 speculative defaults (H1 / H3) | 20.665 / 17.805 s | 47.696 / 39.124 s |
+| Gemma 3 speculative, both H1 | 20.676 / 17.134 s | 47.319 / 38.310 s |
 
 Internal TTFT excludes model loading, terminal transport and tokenization.
 Memory is the native process physical-footprint lifetime maximum observed
@@ -72,11 +91,14 @@ system swap counters cannot attribute pages to an individual engine.
 | --- | --- | --- |
 | Gemma 2 default | [gemma2-release-v2](../benchmarks/results/gemma2-release-v2/manifest.json) | [Results and charts](../benchmarks/results/gemma2-release-v2/report/summary.md) |
 | Gemma 3 ordinary | [gemma3-normal-release-v2](../benchmarks/results/gemma3-normal-release-v2/manifest.json) | [Results and charts](../benchmarks/results/gemma3-normal-release-v2/report/summary.md) |
-| Gemma 3 speculative | [gemma3-speculative-release](../benchmarks/results/gemma3-speculative-release/manifest.json) | [Results and charts](../benchmarks/results/gemma3-speculative-release/report/summary.md) |
+| Gemma 3 speculative defaults | [gemma3-speculative-release](../benchmarks/results/gemma3-speculative-release/manifest.json) | [Results and charts](../benchmarks/results/gemma3-speculative-release/report/summary.md) |
+| Gemma 3 H1 versus H1 | [gemma3-h1-vs-h1](../benchmarks/results/gemma3-h1-vs-h1/manifest.json) | [Results and charts](../benchmarks/results/gemma3-h1-vs-h1/report/summary.md) |
 
-An October 14 offline audit checked all 76 receipts / 160 turns per campaign,
-answer hashes and log references. Regenerating each report produced identical
-JSON, CSV, Markdown and SVG bytes; no inference was rerun.
+An October 14 offline audit of the original three campaigns checked all
+76 receipts / 160 turns per campaign, answer hashes and log references. Regenerating each report produced identical
+JSON, CSV, Markdown and SVG bytes; no inference was rerun. An October 16 audit
+checked the H1 campaign's 76 receipts / 160 turns, answer hashes, log references,
+raw metrics and draft horizons; its aggregates match the retained report.
 
 Each report links its JSON, turn-level CSV and SVG charts. The adjacent
 `receipts/` and `logs/` directories retain answers, clocks, counts, stop
@@ -90,10 +112,10 @@ linked-library identities; it is the authority for recreating the configuration.
 | Gemma 3 target GGUF | `7bb69bff3f48a7b642355d64a90e481182a7794707b3133890646b1efa778ff5` |
 | Gemma 3 drafter GGUF | `0ef57d2c838458a1952664260dcba38e5bdda37494f3af732f06e4add24068e3` |
 | Guffin, Gemma 2 campaign | `aaf1adbcd672a59679f24cd69327fec023525d8f96876e1ce7b47a1875adb595` |
-| Guffin, both Gemma 3 campaigns | `dd18c4f5213bd9b6d3de877b165e4462972aafdfdad975b02955bd59a1f3440b` |
+| Guffin, all Gemma 3 campaigns | `dd18c4f5213bd9b6d3de877b165e4462972aafdfdad975b02955bd59a1f3440b` |
 | llama-cli, all campaigns | `9765459b6789303e8f2233796df1778adef17a34d5c2396fd3a92e4ae6264757` |
 
-The campaigns were created on October 7, 12 and 13 UTC respectively. Guffin's
+The campaigns were created on October 7, 12, 13 and 15 UTC respectively. Guffin's
 reported source identity is `644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty`;
 the different binary hashes identify the measured builds. llama.cpp is
 0.5.0, build 11146, commit `7fe450e19`. Later source fixes or documentation
@@ -109,7 +131,9 @@ Cooling reduces heat accumulation on this fanless machine but does not prove
 equal GPU clocks, temperature, VM state or background activity.
 
 The CLI inference defaults remain intact: no benchmark seed, context,
-sampler, output-cap, GPU-placement, warmup or horizon override. Measurement
+sampler, output-cap, GPU-placement or warmup override. The original three
+campaigns also keep default horizons; the H1 follow-up overrides only
+llama.cpp's maximum draft length through the recorded environment. Measurement
 logging adds Guffin `--decode-diagnostics` and llama-cli `--log-verbosity 4`;
 that instrumentation has overhead, especially during prefill. Follow-ups use
 each engine's own preceding answers. Equal user messages do not imply equal

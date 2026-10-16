@@ -1,0 +1,74 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... ... Okay, let's break down the `options.hpp` and `options.cpp` excerpt, focusing on defaults and validation.
+
+**Defaults & Validation Overview:**
+
+The `CommandOptions` struct defines the command-line options for the program.  Many options have default values. `std::optional` types are used where a value is not strictly required.  `parse_command` is responsible for parsing command-line arguments and populating these options.  Several helper functions (`parse_positive_size`, `parse_u64`, `parse_float`, `parse_backend_kind`) are used to validate and convert string arguments to their appropriate types.
+
+*   **Numeric Validation:**  The `parse_positive_size`, `parse_u64`, and `parse_float` functions provide basic validation. `parse_positive_size` ensures the input consists of digits and is positive. `parse_u64` checks if the input is a valid unsigned 64-bit integer. `parse_float` verifies that the input is a valid, finite floating-point number.  The `parse_u64` function uses `std::from_chars` for conversion and validation, catching non-numeric characters and overflow. `parse_float` uses `std::isfinite` to avoid `NaN` or infinite values.
+*   **Backend Kind Validation:** The `parse_backend_kind` function ensures that the provided backend is either "cpu" or "metal".
+*   **GemmaChatSessionOptions:** The `session` member within `CommandOptions` has several defaults for sampler parameters (temperature, top\_k, top\_p, min\_p, repetition\_penalty, seed, repetition\_window).  The seed defaults to `engine::TokenSamplerOptions::random_seed`.
+
+**Boundary Case Analysis:**
+
+Let's consider two boundary cases and how the helper functions behave:
+
+1.  **`parse_positive_size` with an empty string:**
+
+    *   **Input:** `""`
+    *   **`value`:** Unchanged.
+    *   **Return Value:** `false` (because the function explicitly checks for an empty string).
+
+2.  **`parse_u64` with a string exceeding the maximum value:**
+
+    *   **Input:** `"18446744073709551616"` (maximum `std::uint64_t`)
+    *   **`value`:** Set to `18446744073709551616`.
+    *   **Return Value:** `true` (Successful conversion).
+    *   **Input:** `"18446744073709551617"` (one greater than maximum)
+    *   **`value`:** Undefined behavior (likely will not change but is not guaranteed).
+    *   **Return Value:** `false` (Due to `std::from_chars` failing).
+
+In essence, the validation is simple but effective for catching common errors. The `parse_u64` function provides reasonable protection against overflow, and `parse_float` guards against invalid floating-point values.
+
+[ Prompt: 99.6 t/s | Generation: 16.4 t/s | TTFT: 20.676417 s ]
+[ Detail: Evaluated: 2060 | Cached: 0 | Decoded: 695 | Prompt: 20.676417 s | Generation: 42.461547 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":695,"stop_reason":"stop_token","selected_token_hash":"ff538474fadfded2","decoded_tokens":695,"initial_cache_position":0,"final_cache_position":2755,"evaluated_prompt_tokens":2060,"reused_cache_tokens":0,"decode_wall_ns":42461387449,"gpu_ns":41751474013,"selection_ns":277751,"proposer_ns":0,"generation_completion_ns":42462692458,"full_turn_ns":63141085250,"first_text_ns":20758305958,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":422,"learned_accepted_edges":272,"learned_proposed_edges":422,"learned_numeric_refusals":0,"learned_draft_ns":3643067747,"learned_draft_gpu_ns":3409927268,"learned_target_gpu_ns":35176189761,"learned_cycle_ns":39281416254,"standalone_prefill_ns":3100081750,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":176576,"standalone_draft_readback_bytes":103276,"standalone_draft_wall_ns":6743175025,"standalone_draft_gpu_ns":6496200502,"standalone_draft_command_buffer_count":877,"standalone_draft_compute_dispatch_count":172664,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,422,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[422,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[150,272,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[150,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":272,"learned_horizon_limited_cycle_count":271,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":709913436,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1722,"commits":1722,"waits":1722,"compute_encoders":1722,"compute_dispatches":585462,"blit_encoders":0,"barriers":402853,"transient_allocations":0,"selector_dispatches":4653,"max_candidates":40,"compact_readback_bytes":270400,"q4_decode":288,"q8_decode":0,"q8_width_two":0,"q4_small_batch":121536,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":48,"q6_small_batch":20679,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":0,"output_elided_weight_bytes":0,"attention_dispatches":40560,"attention_partitions":243360,"attention_tokens":50906568,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":5168756820930} ]
+> Okay, here's a focused test plan for the numeric helper functions, grounded in the provided code, and adhering to the constraints. I'll outline the tests and expected outcomes.  Assume a testing framework like Google Test.
+
+**Test Plan:**
+
+1.  **`parse_positive_size`:**
+    *   `""`: `false`, `value` unchanged.
+    *   `"-1"`: `false`, `value` unchanged.
+    *   `"123 "`: `false`, `value` unchanged.
+    *   `" 123"`: `false`, `value` unchanged.
+    *   `"abc"`: `false`, `value` unchanged.
+    *   `"12a3"`: `false`, `value` unchanged.
+    *   `"999999999999999"`: `false`, `value` unchanged (overflow).
+
+2.  **`parse_u64`:**
+    *   `""`: `false`, `value` unchanged.
+    *   `"-1"`: `false`, `value` unchanged.
+    *   `"abc"`: `false`, `value` unchanged.
+    *   `"18446744073709551615"`: `true`, `value` updated.
+    *   `"18446744073709551616"`: `true`, `value` updated (max value).
+    *   `"18446744073709551617"`: `false`, `value` unchanged (overflow).
+
+3.  **`parse_float`:**
+    *   `""`: `false`, `value` unchanged.
+    *   `"-1.0"`: `true`, `value` updated.
+    *   `"inf"`: `false`, `value` unchanged.
+    *   `"nan"`: `false`, `value` unchanged.
+    *   `"1.23abc"`: `false`, `value` unchanged.
+    *   `"  1.23"`: `false`, `value` unchanged.
+
+
+
+**Rationale:** These tests cover edge cases related to invalid input types and boundary values, ensuring the helpers behave as expected according to their design. The 'value' change notes indicate if the output parameter is modified.
+[ Prompt: 72.7 t/s | Generation: 19.3 t/s | TTFT: 0.976149 s ]
+[ Detail: Evaluated: 71 | Cached: 2755 | Decoded: 545 | Prompt: 0.976149 s | Generation: 28.220742 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":545,"stop_reason":"stop_token","selected_token_hash":"6cd61bf9f3697f8b","decoded_tokens":545,"initial_cache_position":2755,"final_cache_position":3371,"evaluated_prompt_tokens":71,"reused_cache_tokens":2755,"decode_wall_ns":28301457713,"gpu_ns":27807693936,"selection_ns":233044,"proposer_ns":0,"generation_completion_ns":28302686208,"full_turn_ns":29287227833,"first_text_ns":1064994708,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":299,"learned_accepted_edges":244,"learned_proposed_edges":299,"learned_numeric_refusals":0,"learned_draft_ns":2650983572,"learned_draft_gpu_ns":2486113531,"learned_target_gpu_ns":25044596406,"learned_cycle_ns":28021590131,"standalone_prefill_ns":118392791,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":119692,"standalone_draft_readback_bytes":68592,"standalone_draft_wall_ns":2778548488,"standalone_draft_gpu_ns":2612350489,"standalone_draft_command_buffer_count":601,"standalone_draft_compute_dispatch_count":115958,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,299,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[299,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[55,244,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[55,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":244,"learned_horizon_limited_cycle_count":244,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":493763777,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1201,"commits":1201,"waits":1201,"compute_encoders":1201,"compute_dispatches":409621,"blit_encoders":0,"barriers":281519,"transient_allocations":0,"selector_dispatches":3300,"max_candidates":40,"compact_readback_bytes":191680,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":86112,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":14652,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":28800,"attention_partitions":172800,"attention_tokens":39445368,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":4052372025870} ]
+> 

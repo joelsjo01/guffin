@@ -1,0 +1,69 @@
+Guffin
+Speculative decoding: gemma-3-270m-it-Q8_0.gguf
+/help for commands, /exit to quit.
+
+> ... ... ... ... ... ... ... ... ... ... Okay, let's break down this logic puzzle step-by-step to determine the name of the secretary.
+
+**1. Setting up the Framework**
+
+First, let's create a table to represent the parking spaces and keep track of the information:
+
+| Space | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| Car Color |  |  |  |  |  |
+| Executive Name |  |  |  |  |  |
+| Title | CEO | President | VP | Secretary | Treasurer |
+
+**2. Incorporating the Clues**
+
+Now, let's use the clues to fill in as much as we can:
+
+*   **Clue 1: The car in the first space is red.**
+    *   Car Color: Red
+*   **Clue 2: A blue car is parked between the red car and the green car.**
+    *   Car Color: Red, Blue, Green
+*   **Clue 3: The car in the last space is purple.**
+    *   Car Color: Red, Blue, Green, _, Purple
+*   **Clue 6: Enid drives a green car.**
+    *   Since the green car is in the 3rd space, Enid is in the 3rd space.
+    *   Executive Name: _, _, Enid
+*   **Clue 4: The secretary drives a yellow car.**
+    *  We need to find the secretary's spot.
+*   **Clue 8: David's car is parked in the last space.**
+    *   Executive Name: _, _, Enid, _, David
+*   **Clue 5: Alice's car is parked next to David's.**
+    *  Since David is in the last space, Alice must be in the 4th space.
+*   **Clue 7: Bert's car is parked between Cheryl's and Enid's.**
+    *   This means Cheryl, Bert, and Enid must be in consecutive spaces. Given what we have so far, this means Cheryl is in the 1st space, Bert in the 2nd, and Enid in the 3rd.
+
+**3. Filling in the Gaps**
+
+Now we have:
+
+| Space | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| Car Color | Red | Blue | Green |  | Purple |
+| Executive Name | Cheryl | Bert | Enid | Alice | David |
+| Title | CEO | President | VP | Secretary | Treasurer |
+
+*   We know that the secretary drives a yellow car. The only spot left for the secretary is the 4th space.
+*   Therefore, the secretary is Alice.
+
+**Answer:** The name of the secretary is Alice.
+
+
+
+**Explanation:**  We used a combination of direct clues (like "the car in the first space is red") and relational clues (like "Bert's car is parked between Cheryl's and Enid's") to deduce the order of the cars, executives, and their titles. By systematically eliminating possibilities, we were able to pinpoint Alice as the secretary.
+[ Prompt: 95.6 t/s | Generation: 20.3 t/s | TTFT: 2.352563 s ]
+[ Detail: Evaluated: 225 | Cached: 0 | Decoded: 696 | Prompt: 2.352563 s | Generation: 34.299277 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":696,"stop_reason":"stop_token","selected_token_hash":"837d0fcc25031ec2","decoded_tokens":696,"initial_cache_position":0,"final_cache_position":921,"evaluated_prompt_tokens":225,"reused_cache_tokens":0,"decode_wall_ns":34375657950,"gpu_ns":33690136535,"selection_ns":304544,"proposer_ns":0,"generation_completion_ns":34377338875,"full_turn_ns":36730348917,"first_text_ns":2427427917,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":392,"learned_accepted_edges":302,"learned_proposed_edges":392,"learned_numeric_refusals":0,"learned_draft_ns":3321916199,"learned_draft_gpu_ns":3095804304,"learned_target_gpu_ns":30135729152,"learned_cycle_ns":33913252283,"standalone_prefill_ns":311179916,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":157372,"standalone_draft_readback_bytes":89972,"standalone_draft_wall_ns":3642104240,"standalone_draft_gpu_ns":3413891259,"standalone_draft_command_buffer_count":789,"standalone_draft_compute_dispatch_count":151340,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,392,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[392,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[90,302,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[90,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":302,"learned_horizon_limited_cycle_count":302,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":685521415,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":1575,"commits":1575,"waits":1575,"compute_encoders":1575,"compute_dispatches":534859,"blit_encoders":0,"barriers":367142,"transient_allocations":0,"selector_dispatches":4323,"max_candidates":40,"compact_readback_bytes":251200,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":112896,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":19209,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":37728,"attention_partitions":118272,"attention_tokens":21781008,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":5175368112144} ]
+> Okay, based on the solution we derived, here are the car colors in order from last to first:
+
+1.  Purple
+2.  Blue
+3.  Green
+4.  Red
+[ Prompt: 42.7 t/s | Generation: 18.3 t/s | TTFT: 0.444942 s ]
+[ Detail: Evaluated: 19 | Cached: 921 | Decoded: 42 | Prompt: 0.444942 s | Generation: 2.300864 s ]
+[ Decode: {"schema_version":6,"engine_build":"644312e18197379cb5e6d3ef25f1e90dd3ed5553-dirty","model_architecture":"gemma3","retrieval_decode":false,"context_capacity":16384,"kv_cache_dtype":"f16","selected_tokens":42,"stop_reason":"stop_token","selected_token_hash":"2e87a2126081be29","decoded_tokens":42,"initial_cache_position":921,"final_cache_position":982,"evaluated_prompt_tokens":19,"reused_cache_tokens":921,"decode_wall_ns":2301088086,"gpu_ns":2256526534,"selection_ns":34250,"proposer_ns":0,"generation_completion_ns":2302360000,"full_turn_ns":2751858292,"first_text_ns":525929917,"learned_owned_bytes":520353704,"learned_horizon":1,"speculative_draft_model":"standalone_gemma3_tli","speculative_sampling":"lossless","learned_verification_schedule":"full","learned_draft_head":"q8_0","scheduled_bytes_basis":"one_row_equivalent_not_physical_bandwidth","learned_cycles":24,"learned_accepted_edges":16,"learned_proposed_edges":24,"learned_numeric_refusals":0,"learned_draft_ns":208059966,"learned_draft_gpu_ns":193525644,"learned_target_gpu_ns":1890583517,"learned_cycle_ns":2195093960,"standalone_prefill_ns":29589958,"standalone_rebuild_ns":0,"standalone_draft_uploaded_bytes":9664,"standalone_draft_readback_bytes":5352,"standalone_draft_wall_ns":237657384,"standalone_draft_gpu_ns":222726685,"standalone_draft_command_buffer_count":50,"standalone_draft_compute_dispatch_count":9845,"standalone_draft_sampler":"explicit_or_target_scalars_target_window_v2","standalone_repetition_window":64,"standalone_effective_sampler":{"temperature":0.800000012,"top_k":40,"top_p":0.949999988,"min_p":0.0500000007,"repetition_penalty":1},"learned_horizon_histogram":[0,24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_reached_depth_histogram":[24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_accepted_prefix_histogram":[8,16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_rejection_depth_histogram":[8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"learned_censored_cycle_count":0,"learned_full_accept_count":16,"learned_horizon_limited_cycle_count":16,"speculative_cycles":0,"speculative_matches":0,"speculative_misses":0,"speculative_fallbacks":0,"speculative_rollbacks":0,"proposal_buckets":[],"wall_minus_gpu_ns":44561552,"resident_weights_bytes":7437057024,"output_head_policy":"q6_k","resident_kv_bytes":1409286144,"resident_scratch_bytes":233284832,"warmup_kv_clear_passes":0,"warmup_host_cleared_kv_bytes":0,"command_buffers":100,"commits":100,"waits":100,"compute_encoders":100,"compute_dispatches":35108,"blit_encoders":0,"barriers":24169,"transient_allocations":0,"selector_dispatches":275,"max_candidates":40,"compact_readback_bytes":15680,"q4_decode":576,"q8_decode":0,"q8_width_two":0,"q4_small_batch":6912,"q4_width_two":0,"q4_exact_16":0,"q4_generic_tiled":0,"q6_decode":96,"q6_small_batch":1177,"q6_width_two":0,"q6_exact_16":0,"q6_generic_tiled":0,"f16":0,"output_head_elisions":1,"output_elided_weight_bytes":825768960,"attention_dispatches":2400,"attention_partitions":9600,"attention_tokens":2305776,"fused_embedding_norm":0,"direct_qkv_cache":0,"dual_norm_bridge":0,"fused_gate_up_gelu":0,"scheduled_bytes_per_token":{"embedding":3150,"attention_projections":1355120640,"ffn_gate_up":3273523200,"ffn_down":1979596800,"output_head":825753600,"norms":3062784,"total":7437060174},"scheduled_bytes_total":311530758348} ]
+> 

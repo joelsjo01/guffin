@@ -1,0 +1,54 @@
+
+
+Loading model... |-\|/-\|/-\|/-\| 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Jag studerar datavetenskap och vill förklara för en vän hur en lokal språkmodell fungerar utan att använda internet. Svara på svenska med en enkel förklaring och ett konkret exempel. Håll svaret under 200 ord.
+[0mOkej, tänk dig en språkmodell som en superavancerad ordförrådsbok med en "känsla" för hur ord brukar användas tillsammans. En *lokal* språkmodell, som fungerar offline, har lärt sig det här genom att studera en stor mängd text *innan* den installeras på din dator.
+
+Den "lär sig" genom att räkna hur ofta ord förekommer tillsammans. Till exempel, efter att ha läst massor av text, kanske modellen "vet" att ordet "katt" ofta följs av ord som "sitter", "mjauar" eller "leker".
+
+När du skriver något, gissar modellen vilket ord som är mest troligt att komma härnäst, baserat på vad du redan skrivit och vad den lärt sig.
+
+**Exempel:** Du skriver "Jag har en". Modellen, baserat på sin träning, kanske föreslår "katt" eller "hund" som nästa ord, eftersom de ofta följer "Jag har en".
+
+Det är alltså en gissningslek baserad på tidigare text, utan att kolla något online! Ju mer text modellen har lärt sig, desto bättre gissningar gör den.
+[35m
+[ Prompt: 77.2 t/s | Generation: 12.2 t/s ]
+[0m[1m[32m
+> Gör nu förklaringen begriplig för ett barn på tio år och förklara varför modellen ibland ger fel svar. Använd samma exempel och högst 150 ord.
+[0mTänk dig att du ska gissa vilket ord som kommer härnäst i en mening. En språkmodell gör samma sak, fast den är jättebra på att gissa! Den har läst jättemycket böcker och vet hur ord brukar passa ihop.
+
+Om du skriver "Jag har en", så kanske modellen gissar "katt" eller "hund". Den har sett det många gånger förut! 
+
+Men ibland kan den gissa fel! Det är för att den bara gissar baserat på det den redan läst. Om du skriver något ovanligt, som "Jag har en bananrobot", så kanske den inte vet vad som ska komma härnäst och gissar något konstigt. 
+
+Modellen är smart, men den är inte perfekt! Den lär sig hela tiden av mer text, så den blir bättre och bättre på att gissa rätt.
+[35m
+[ Prompt: 111.4 t/s | Generation: 13.0 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

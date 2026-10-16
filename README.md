@@ -9,9 +9,9 @@ native **Gemma 3 270M** drafter; **Gemma 2 9B** is also supported. Inference
 needs no other runtime or network.
 
 The engineering question: **how much useful chat can we get from one pass
-through the weights?** On the balanced chat benchmark, H1 recorded **47% higher
-Gemma 3 generation throughput** than Guffin's ordinary campaign. Default Gemma 2
-generation was **23% faster than llama.cpp**. The
+through the weights?** On the balanced chat benchmark, Guffin recorded **40%
+higher Gemma 3 generation throughput than llama.cpp with both drafting one
+token (H1)**. Default Gemma 2 generation was **23% faster than llama.cpp**. The
 [retrospective](docs/SPECULATIVE_DECODING_RETROSPECTIVE.md) explains the experiments.
 
 [Run](#quick-start) · [Results](#measured-chat-performance) · [Architecture](#inside-the-engine) ·
@@ -72,21 +72,31 @@ Memory bandwidth is the manufacturer's specification, not a measured result.
 
 The balanced core contains **32 MT-Bench conversations / 64 turns per engine**,
 spanning eight categories. Both engines use
-the same user messages and GGUF downloads, with their own inference defaults.
+the same user messages and GGUF downloads. Three campaigns use each engine's
+inference defaults; a fourth sets llama.cpp's maximum draft length to one,
+matching Guffin's H1 while leaving other defaults unchanged.
 
-![A zero-based bar chart comparing core chat throughput. Gemma 3 speculation reaches 18.43 tokens/s in Guffin versus 8.43 in llama.cpp.](docs/assets/chat-throughput.svg)
+![Core generation throughput, higher is faster. Gemma 3 H1 versus H1 reaches 18.53 tokens/s in Guffin versus 13.26 in llama.cpp; speculative defaults reach 18.43 versus 8.43.](docs/assets/chat-throughput.svg)
 
 | Core generation | Guffin | llama.cpp | Guffin / llama.cpp |
 | --- | ---: | ---: | ---: |
 | Gemma 2 9B default chat | **16.76 t/s** | 13.63 t/s | **1.23×** |
 | Gemma 3 12B ordinary | **12.57 t/s** | 12.40 t/s | 1.01× |
-| Gemma 3 12B + 270M speculative | **18.43 t/s** | 8.43 t/s | **2.19×** |
+| Gemma 3 12B speculative defaults (H1 / H3) | **18.43 t/s** | 8.43 t/s | **2.19×** |
+| Gemma 3 12B speculative, both H1 | **18.53 t/s** | 13.26 t/s | **1.40×** |
 
-Gemma 3 ordinary throughput is essentially level here. H1 recorded
-**47% higher generation throughput than Guffin's ordinary campaign** and **49%
-higher than llama.cpp ordinary**. The **2.19×** ratio compares speculative
-defaults: one-token H1 versus llama.cpp `draft-simple`, maximum three tokens,
-which was slower than ordinary here. Other settings can change results.
+**With both engines using H1, Guffin has 40% higher core generation throughput**
+and wins conversation-level throughput in **all 38 cases**, including the
+supplementary suite. Setting llama.cpp to H1 raises its core rate **57%** over
+its default maximum-three-token (H3) campaign; Guffin's rate stays close to
+its earlier H1 result.
+The earlier **2.19×** comparison therefore includes a substantial effect from
+the draft horizon. Both use the same 270M drafter checkpoint; their speculative
+algorithms and other defaults still differ. Other settings can change results.
+
+Gemma 3 ordinary throughput is essentially level here. In the original default
+campaigns, H1 recorded **47% higher generation throughput than Guffin's ordinary
+campaign** and **49% higher than llama.cpp ordinary**.
 
 Gemma 2's result includes Guffin's default suffix retrieval and Q6-down → Q4 /
 F16-head → Q8 conversions. These conversions change the executed weights; the
@@ -99,18 +109,19 @@ excludes model loading, tokenization and terminal transport. Core medians
 separate first replies from follow-ups, with 32 observations per engine and
 mode in each panel.
 
-![Core median internal TTFT, lower is faster. Gemma 2 follow-ups take 0.255 seconds in Guffin versus 2.529 in llama.cpp; Gemma 3 ordinary takes 0.453 versus 1.308, and speculative takes 0.455 versus 1.303.](docs/assets/chat-ttft.svg)
+![Core median internal TTFT, lower is faster. Gemma 2 follow-ups take 0.255 seconds in Guffin versus 2.529 in llama.cpp. The Gemma 3 H1-versus-H1 comparison takes 0.613 versus 0.811 seconds for first replies and 0.454 versus 1.304 for follow-ups.](docs/assets/chat-ttft.svg)
 
 Core follow-up median TTFT was about **90% lower for Gemma 2** and **65% lower
-for both Gemma 3 modes**. Across all 38 conversations, Guffin has lower TTFT on
-**all 42 follow-ups** in each campaign. Different sampled answers and prefix
+for all Gemma 3 comparisons**. Across all 38 conversations, Guffin has lower
+TTFT on **all 42 follow-ups** in each campaign. Different sampled answers and prefix
 reuse affect the follow-up work.
 
-First-reply wins are **36/38 for Gemma 2** and **24/38 for each Gemma 3 mode**.
+First-reply wins are **36/38 for Gemma 2**, **24/38 in the original Gemma 3
+campaigns** and **25/38 with both engines using H1**.
 **Large first code/document prompts remain weaker:** Guffin takes **3–24%
 longer** in these cases, with matching prompt token counts across engines.
 
-![Large first-prompt TTFT, lower is faster; all six comparisons favor llama.cpp. Guffin code-review times are 13.683, 20.726 and 20.665 seconds, and document-review times are 34.350, 47.687 and 47.696 seconds for Gemma 2, Gemma 3 ordinary and Gemma 3 speculative respectively.](docs/assets/chat-ttft-long-prompts.svg)
+![Large first-prompt TTFT, lower is faster; all eight comparisons favor llama.cpp. With both engines using H1, code review takes 20.676 versus 17.134 seconds and document review takes 47.319 versus 38.310 seconds in Guffin and llama.cpp respectively.](docs/assets/chat-ttft-long-prompts.svg)
 
 H1 recorded essentially unchanged Guffin TTFT and a **0.53 GiB higher observed
 peak footprint** than the ordinary campaign. Core memory measurements below
@@ -120,7 +131,8 @@ are **Guffin / llama.cpp**.
 | --- | ---: | ---: |
 | Gemma 2 default | 9.15 / 2.58 GiB | 10.80 / 8.95 GiB |
 | Gemma 3 ordinary | 8.62 / 5.06 GiB | 11.94 / 11.23 GiB |
-| Gemma 3 speculative | 9.15 / 4.47 GiB | 12.33 / 11.32 GiB |
+| Gemma 3 speculative defaults (H1 / H3) | 9.15 / 4.47 GiB | 12.33 / 11.32 GiB |
+| Gemma 3 speculative, both H1 | 9.15 / 4.47 GiB | 12.29 / 11.30 GiB |
 
 **Resident memory (RSS)** includes model-file pages currently in RAM.
 **Physical footprint** counts memory charged to the process; clean mapped
@@ -128,7 +140,7 @@ pages can occupy RAM without counting toward it.
 [Apple explains the accounting](https://developer.apple.com/videos/play/wwdc2022/10106/).
 llama.cpp maps model weights while Guffin owns more copied buffers, so the
 footprint gap does not mean that much extra RAM use. Guffin's resident peaks
-are still higher in all three campaigns. These are separate observed peaks,
+are still higher in all four campaigns. These are separate observed peaks,
 not simultaneous measurements or direct measures of system memory pressure.
 
 ### Reading and reproducing the results
@@ -136,11 +148,14 @@ not simultaneous measurements or direct measures of system memory pressure.
 Each campaign includes **38 conversations / 80 turns per engine**. Six
 supplementary conversations cover short chat, multilingual input,
 code/document review and sustained discussion. Their separate throughput
-ratios are **1.22× / 1.01× / 2.13×**, respectively.
+ratios are **1.22× / 1.01× / 2.13× / 1.31×** in table order. With both engines
+using H1, supplementary generation is **16.99 t/s versus 12.94 t/s**, or **31%
+higher** in Guffin.
 
 The harness runs installed chat CLIs in a fresh process per conversation, with
 five-minute cooldowns and two-minute message pauses. It adds diagnostic logging
-to inference defaults. Generation rate is
+to inference defaults, with the explicit H1 horizon override in the fourth
+campaign. Generation rate is
 `sum(max(selected tokens − 1, 0)) / sum(first-to-last selection time)`; rejected draft
 tokens are excluded. Each case runs once; answers and follow-up histories can
 differ. These are performance measurements, with no answer-quality evaluation.
@@ -152,7 +167,8 @@ CSV/JSON and charts:
 
 [Gemma 2 default](benchmarks/results/gemma2-release-v2/report/summary.md) ·
 [Gemma 3 ordinary](benchmarks/results/gemma3-normal-release-v2/report/summary.md) ·
-[Gemma 3 speculative](benchmarks/results/gemma3-speculative-release/report/summary.md)
+[Gemma 3 speculative defaults](benchmarks/results/gemma3-speculative-release/report/summary.md) ·
+[Gemma 3 H1 versus H1](benchmarks/results/gemma3-h1-vs-h1/report/summary.md)
 
 ## Inside the engine
 

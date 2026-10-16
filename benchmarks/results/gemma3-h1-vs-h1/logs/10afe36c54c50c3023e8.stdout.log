@@ -1,0 +1,272 @@
+
+
+Loading model... |-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/ 
+
+▄▄ ▄▄
+██ ██
+██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
+██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
+██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
+                                    ██    ██
+                                    ▀▀    ▀▀
+
+build      : b11146-7fe450e19
+model      : /Users/joel/Desktop/guffin/models/gemma-3-12b-it-Q4_K_M.gguf
+ftype      : Q4_K - Medium
+modalities : text
+
+available commands:
+  /exit or Ctrl+C     stop or exit
+  /regen              regenerate the last response
+  /clear              clear the chat history
+  /read <file>        add a text file
+  /glob <pattern>     add text files using globbing pattern
+
+
+[1m[32m
+> Review the options declaration and the following contiguous C++ source excerpt containing complete helper and help-text functions. Explain the defaults and numeric validation behaviors visible here. For two concrete boundary cases, state each helper's return value and what happens to its output argument. Keep your answer under 300 words.\\ 
+\\ 
+<options.hpp>\\ 
+#pragma once\\ 
+\\ 
+#include "local_gguf_engine///engine///gemma_chat_session.hpp"\\ 
+\\ 
+#include <filesystem>\\ 
+#include <iosfwd>\\ 
+#include <optional>\\ 
+#include <string>\\ 
+\\ 
+namespace local_gguf_engine::frontends::cli {\\ 
+\\ 
+struct CommandOptions {\\ 
+    std::optional<std::filesystem::path> model_path;\\ 
+    std::optional<std::string> prompt;\\ 
+    bool interactive = false;\\ 
+    bool stats = false;\\ 
+    bool help = false;\\ 
+    bool help_all = false;\\ 
+    bool version = false;\\ 
+    bool decode_diagnostics = false;\\ 
+    std::optional<std::string> metal_capture_path;\\ 
+    engine::GemmaChatSessionOptions session {\\ 
+        .sampler = {\\ 
+            .temperature = 0.8F,\\ 
+            .top_k = 40U,\\ 
+            .top_p = 0.95F,\\ 
+            .min_p = 0.05F,\\ 
+            .repetition_penalty = 1.0F,\\ 
+            .seed = engine::TokenSamplerOptions::random_seed,\\ 
+            .repetition_window = 64U,\\ 
+        },\\ 
+    };\\ 
+};\\ 
+\\ 
+void write_help(std::ostream& output, bool advanced);\\ 
+[[nodiscard]] bool parse_command(int argc, const char* const* argv,\\ 
+    CommandOptions& command, std::ostream& error);\\ 
+\\ 
+} ////// namespace local_gguf_engine::frontends::cli\\ 
+\\ 
+<///options.hpp>\\ 
+\\ 
+<options.cpp lines 1-130>\\ 
+#include "options.hpp"\\ 
+\\ 
+#include <charconv>\\ 
+#include <cmath>\\ 
+#include <cstddef>\\ 
+#include <cstdint>\\ 
+#include <limits>\\ 
+#include <ostream>\\ 
+#include <string_view>\\ 
+\\ 
+namespace local_gguf_engine::frontends::cli {\\ 
+namespace {\\ 
+using runtime::BackendKind;\\ 
+\\ 
+void write_usage(std::ostream& error) {\\ 
+    error << "usage: guffin -m MODEL [options]\\\n"\\ 
+          << "Run 'guffin --help' for examples and options.\\\n";\\ 
+}\\ 
+\\ 
+[[nodiscard]] bool parse_positive_size(std::string_view text, std::size_t& value) noexcept {\\ 
+    if (text.empty()) {\\ 
+        return false;\\ 
+    }\\ 
+\\ 
+    std::size_t parsed = 0;\\ 
+    for (const auto character : text) {\\ 
+        if (character < '0' || character > '9') {\\ 
+            return false;\\ 
+        }\\ 
+\\ 
+        const auto digit = static_cast<std::size_t>(character - '0');\\ 
+        if (parsed > (std::numeric_limits<std::size_t>::max() - digit) /// 10U) {\\ 
+            return false;\\ 
+        }\\ 
+        parsed = parsed * 10U + digit;\\ 
+    }\\ 
+\\ 
+    if (parsed == 0) {\\ 
+        return false;\\ 
+    }\\ 
+\\ 
+    value = parsed;\\ 
+    return true;\\ 
+}\\ 
+\\ 
+[[nodiscard]] bool parse_u64(std::string_view text, std::uint64_t& value) noexcept {\\ 
+    if (text.empty()) {\\ 
+        return false;\\ 
+    }\\ 
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);\\ 
+    return result.ec == std::errc {} && result.ptr == text.data() + text.size();\\ 
+}\\ 
+\\ 
+[[nodiscard]] bool parse_float(std::string_view text, float& value) noexcept {\\ 
+    if (text.empty()) {\\ 
+        return false;\\ 
+    }\\ 
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);\\ 
+    return result.ec == std::errc {} && result.ptr == text.data() + text.size()\\ 
+        && std::isfinite(value);\\ 
+}\\ 
+\\ 
+[[nodiscard]] bool parse_backend_kind(std::string_view text, BackendKind& backend) noexcept {\\ 
+    if (text == "cpu") {\\ 
+        backend = BackendKind::cpu;\\ 
+        return true;\\ 
+    }\\ 
+\\ 
+    if (text == "metal") {\\ 
+        backend = BackendKind::metal;\\ 
+        return true;\\ 
+    }\\ 
+\\ 
+    return false;\\ 
+}\\ 
+\\ 
+} ////// namespace\\ 
+\\ 
+void write_help(std::ostream& output, bool advanced) {\\ 
+    output << "Guffin - native GGUF chat on Metal\\\n\\\n"\\ 
+           << "Usage: guffin -m MODEL [options]\\\n"\\ 
+           << "       guffin inspect MODEL\\\n\\\n"\\ 
+           << "Chat is the default. Give a prompt for one answer and exit.\\\n"\\ 
+           << "Chat shows prompt///generation rates and internal TTFT after each reply.\\\n\\\n"\\ 
+           << "  -m, --model FILE          Model GGUF (or use positional MODEL)\\\n"\\ 
+           << "  -p, --prompt TEXT         Answer TEXT once, then exit\\\n"\\ 
+           << "  -n, --max-new-tokens N    Optional reply token limit\\\n"\\ 
+           << "  -c, --context-size N      Context capacity in tokens\\\n"\\ 
+           << "      --draft-model FILE    Enable lossless speculative decoding\\\n"\\ 
+           << "      --temperature T       Sampling temperature (default: 0.8)\\\n"\\ 
+           << "      --greedy              Select the most likely token\\\n"\\ 
+           << "      --seed N              Sampling seed (default: random)\\\n"\\ 
+           << "      --stats               Also show timing for one-shot///piped output\\\n"\\ 
+           << "  -h, --help                Show this help\\\n"\\ 
+           << "      --help-all            Include advanced options\\\n"\\ 
+           << "      --version             Show build identity\\\n\\\n"\\ 
+           << "Examples:\\\n"\\ 
+           << "  guffin -m models///gemma-3-12b-it-Q4_K_M.gguf\\\n"\\ 
+           << "  guffin -m MODEL --draft-model DRAFT\\\n"\\ 
+           << "  guffin -m MODEL -p \\\"Explain unified memory\\\" -n 128\\\n";\\ 
+    if (!advanced) return;\\ 
+    output << "\\\nSampling:\\\n"\\ 
+           << "  --top-k N                 Candidate limit (default: 40)\\\n"\\ 
+           << "  --top-p P                 Nucleus threshold (default: 0.95)\\\n"\\ 
+           << "  --min-p P                 Relative threshold (default: 0.05)\\\n"\\ 
+           << "  --repeat-penalty R        Repetition penalty (default: 1.0)\\\n"\\ 
+           << "  --stop TEXT               Stop at TEXT; may be repeated\\\n"\\ 
+           << "\\\nContext and execution:\\\n"\\ 
+           << "  --context-shift           Drop oldest complete turns when full\\\n"\\ 
+           << "  --no-context-shift        Stop when full (default)\\\n"\\ 
+           << "  --kv-cache auto|f16|f32   Target KV storage (auto selects F16)\\\n"\\ 
+           << "  --output-head TYPE        Override the model's head with f16|q8_0|q6_k\\\n"\\ 
+           << "  --no-speculative          Disable all speculation\\\n"\\ 
+           << "  --retrieval               Enable experimental suffix retrieval\\\n"\\ 
+           << "  --no-retrieval            Disable suffix retrieval\\\n"\\ 
+           << "\\\nDraft tuning:\\\n"\\ 
+           << "  --draft-horizon N         Proposed tokens (default: 1, maximum: 23)\\\n"\\ 
+           << "  --draft-temperature T     Override draft temperature\\\n"\\ 
+           << "  --draft-top-k N           Override draft top-k (0 disables it)\\\n"\\ 
+           << "  --draft-top-p P           Override draft nucleus threshold\\\n"\\ 
+           << "  --draft-min-p P           Override draft relative threshold\\\n"\\ 
+           << "  --draft-repeat-penalty R  Override draft repetition penalty\\\n"\\ 
+           << "  --speculative-sampling lossless\\\n"\\ 
+           << "  --speculative-schedule full|conditional  Default: full\\\n"\\ 
+           << "\\\nDiagnostics:\\\n"\\ 
+           << "  --decode-diagnostics      Timings, raw counts and decode attribution\\\n"\\ 
+           << "  --metal-capture PATH      Capture a decode with diagnostics enabled\\\n"\\ 
+           << "  --interactive             Show chat UI with redirected streams\\\n";\\ 
+}\\ 
+\\ 
+\\ 
+<///options.cpp lines 1-130>
+[0mOkay, let's break down the `options.hpp` and `options.cpp` code.
+
+**Defaults & Validation**
+
+The `CommandOptions` struct defines the default values for various command-line arguments.  Key defaults are:
+
+*   `interactive`: `false` (no interactive UI)
+*   `stats`: `false` (no timing statistics displayed)
+*   `sampler.temperature`: `0.8F` (sampling temperature)
+*   `sampler.top_k`: `40U` (candidate limit)
+*   `sampler.top_p`: `0.95F` (nucleus threshold)
+*   `sampler.min_p`: `0.05F` (relative nucleus threshold)
+*   `sampler.repetition_penalty`: `1.0F` (repetition penalty)
+*   `sampler.seed`: `engine::TokenSamplerOptions::random_seed` (random seed)
+*   `sampler.repetition_window`: `64U` (repetition window)
+
+Several helper functions are provided for parsing numeric arguments.  `parse_positive_size` validates that the input is a positive integer. `parse_u64` parses an unsigned 64-bit integer, and `parse_float` parses a floating-point number, ensuring it's finite.  `parse_backend_kind` validates that the input is either "cpu" or "metal".
+
+**Boundary Case Examples**
+
+Let's consider two boundary cases for `parse_positive_size` and `parse_float`:
+
+1.  **`parse_positive_size` with an empty string:**  If `text` is an empty string (`""`), the function returns `false`. The `value` argument (passed by reference) remains unchanged.
+2.  **`parse_float` with the string "inf":** If `text` is "inf", `std::from_chars` will successfully parse it as infinity. `parse_float` will return `false` because the `std::isfinite` check will fail. The `value` argument will be set to infinity, but the return value will be `false`.
+
+
+
+That's a summary of the behavior visible in the provided code.
+[35m
+[ Prompt: 120.2 t/s | Generation: 13.7 t/s ]
+[0m[1m[32m
+> Write focused tests for the numeric helpers using empty input, signs, leading or trailing whitespace, partial numeric strings, overflow, and nonfinite floating-point values. State the expected return value and whether the output argument can change. Ground the plan in the supplied code and keep it under 250 words.
+[0mOkay, here's a test plan for the numeric helpers, grounded in the provided code, with expected outcomes:
+
+**Test Plan: Numeric Helpers**
+
+We'll focus on `parse_positive_size`, `parse_u64`, and `parse_float`.
+
+1.  **`parse_positive_size`:**
+    *   Empty string: `""` - Expected: `false`, `value` unchanged.
+    *   Leading whitespace: `"  123"` - Expected: `false`, `value` unchanged.
+    *   Trailing whitespace: `"123  "` - Expected: `false`, `value` unchanged.
+    *   Partial string: `"123a"` - Expected: `false`, `value` unchanged.
+    *   Overflow: `"9999999999999999999"` - Expected: `false`, `value` unchanged.
+    *   Valid: `"123"` - Expected: `true`, `value` = `123`.
+
+2.  **`parse_u64`:**
+    *   Empty string: `""` - Expected: `false`, `value` unchanged.
+    *   Overflow: `"18446744073709551616"` - Expected: `false`, `value` unchanged.
+    *   Valid: `"1234567890"` - Expected: `true`, `value` = `1234567890`.
+
+3.  **`parse_float`:**
+    *   Empty string: `""` - Expected: `false`, `value` unchanged.
+    *   Positive infinity: `"+inf"` - Expected: `false`, `value` = infinity.
+    *   Negative infinity: `"-inf"` - Expected: `false`, `value` = -infinity.
+    *   NaN: `"nan"` - Expected: `false`, `value` = NaN.
+    *   Valid: `"3.14159"` - Expected: `true`, `value` = `3.14159`.
+
+
+
+These tests cover edge cases and boundary conditions, ensuring the helpers behave as expected.  The `noexcept` guarantee means we don't need to test for exceptions.
+[35m
+[ Prompt: 52.6 t/s | Generation: 14.2 t/s ]
+[0m[1m[32m
+> ///exit
+[0m
+
+Exiting...

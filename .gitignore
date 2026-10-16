@@ -47,3 +47,5 @@ traces/learned_speculation/*
 !benchmarks/results/gemma3-normal-release-v2/**
 !benchmarks/results/gemma3-speculative-release/
 !benchmarks/results/gemma3-speculative-release/**
+!benchmarks/results/gemma3-h1-vs-h1/
+!benchmarks/results/gemma3-h1-vs-h1/**

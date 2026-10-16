@@ -96,7 +96,8 @@ engine/gemma_chat_session
 | `benchmarks/chat` | Frozen workload and source snapshots |
 | `benchmarks/results/gemma2-release-v2` | Final Gemma 2 campaign |
 | `benchmarks/results/gemma3-normal-release-v2` | Final ordinary Gemma 3 campaign |
-| `benchmarks/results/gemma3-speculative-release` | Final speculative Gemma 3 campaign |
+| `benchmarks/results/gemma3-speculative-release` | Final speculative Gemma 3 default campaign |
+| `benchmarks/results/gemma3-h1-vs-h1` | Gemma 3 speculative H1-versus-H1 campaign |
 | `scripts/memory_benchmark.py` | Startup and process-memory probe |
 | `scripts/output_head_benchmark.py`, `storage_policy_benchmark.py` | Head/storage developer probes |
 | `scripts/capture_decode_gpu_trace.py`, [trace guide](METAL_GPU_TRACE.md) | Decode Metal trace capture |

@@ -25,9 +25,10 @@ helped establish where those opportunities ended.
 This is an account of those decisions, including mistakes and unfinished work.
 The measurements below are historical development evidence. A cooled comparison
 means fresh processes with at least four minutes idle before each run, unless
-the section says otherwise. The three final release campaigns are now complete;
-[performance evidence](PERFORMANCE.md) records their results, clocks and limits
-separately from these development snapshots.
+the section says otherwise. The three original release campaigns and a later
+H1-versus-H1 follow-up are complete; [performance evidence](PERFORMANCE.md)
+records their results, clocks and limits separately from these development
+snapshots.
 
 Follow the story through the [foundations](#first-make-the-model-mean-what-it-should),
 [Gemma 2 experiments](#retrieval-was-a-small-win-worth-keeping),
@@ -1030,7 +1031,7 @@ story here.
 | Selected chat numbers, clocks and external-reference limits | [Performance evidence](PERFORMANCE.md) and [pinned llama.cpp reference](LLAMA_CPP_REFERENCE_BASELINE.md) |
 | Current probability, cache, numerical and ownership checks | [Sampling tests](../tests/engine/lossless_sampling_tests.cpp), [target tests](../tests/engine/gemma3_target_runtime_tests.cpp), [Metal tests](../tests/tensor/gemma3_metal_tests.cpp), [ownership tests](../tests/engine/gemma2_metal_plan_tests.cpp) |
 
-The repository retains the [three final release campaigns](PERFORMANCE.md#retained-evidence-and-identities),
+The repository retains the [release campaigns and H1 follow-up](PERFORMANCE.md#retained-evidence-and-identities),
 including raw answers and logs. Earlier local benchmark outputs were removed;
 the historical records preserve their findings and limitations without making
 every old result reproducible from today's checkout. No inference, training or
